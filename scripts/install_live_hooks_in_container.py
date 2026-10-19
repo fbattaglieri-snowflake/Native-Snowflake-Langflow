@@ -110,17 +110,121 @@ def install_all() -> None:
         print("[install_live_hooks] Patched langflow/main.py with register_snowflake_fastapi_routes(app)")
 
     # 5. Patch compiled React bundle in langflow/frontend/assets/*.js (100% React Virtual-DOM safe!)
-    light_svg_uri = _svg_data_uri("#000000")
-    dark_svg_uri = _svg_data_uri("#ffffff")
-    native_rki_fn = (
-        'function rki(){return v.jsx("span",{className:"inline-flex items-center pl-1",'
-        'children:v.jsx("svg",{xmlns:"http://www.w3.org/2000/svg",width:20,height:20,viewBox:"0 0 64 64",fill:"currentColor",'
-        'children:v.jsx("path",{d:"' + OFFICIAL_SNOWFLAKE_PATH + '"})})})}'
+    sf_svg_inline_sm = (
+        'v.jsx("svg",{xmlns:"http://www.w3.org/2000/svg",width:20,height:20,viewBox:"0 0 64 64",fill:"currentColor",'
+        'className:"h-5 w-5 shrink-0 text-foreground","aria-hidden":"true",'
+        'children:v.jsx("path",{d:"' + OFFICIAL_SNOWFLAKE_PATH + '"})})'
+    )
+    sf_svg_inline_color = (
+        'v.jsx("svg",{xmlns:"http://www.w3.org/2000/svg",width:15,height:15,viewBox:"0 0 64 64",fill:"#29B5E8",'
+        'className:"h-4 w-4 shrink-0","aria-hidden":"true",'
+        'children:v.jsx("path",{d:"' + OFFICIAL_SNOWFLAKE_PATH + '"})})'
+    )
+    sf_svg_inline_lg = (
+        'v.jsx("svg",{xmlns:"http://www.w3.org/2000/svg",width:40,height:40,viewBox:"0 0 64 64",fill:"currentColor",'
+        'className:"h-10 w-10 shrink-0 text-foreground","aria-hidden":"true",'
+        'children:v.jsx("path",{d:"' + OFFICIAL_SNOWFLAKE_PATH + '"})})'
+    )
+
+    s1_orig = (
+        'v.jsxs("div",{className:"z-30 flex shrink-0 items-center gap-2","data-testid":"header_left_section_wrapper",'
+        'children:[v.jsx(qt,{unstyled:!0,onClick:()=>n("/"),className:"mr-1 flex h-8 w-8 items-center",'
+        '"data-testid":"icon-ChevronLeft","aria-label":e("header.home"),'
+        'children:v.jsx(c6e,{className:"h-5 w-5","aria-hidden":"true"})}),v.jsx(rki,{})]})'
+    )
+    s1_new = (
+        'v.jsxs("div",{className:"z-30 flex shrink-0 items-center gap-2","data-testid":"header_left_section_wrapper",'
+        'children:[v.jsx(qt,{unstyled:!0,onClick:()=>n("/"),className:"mr-1 flex h-8 items-center gap-2 px-1 cursor-pointer",'
+        '"data-testid":"icon-ChevronLeft","aria-label":e("header.home"),'
+        'children:v.jsxs("span",{className:"inline-flex items-center gap-2",children:['
+        + sf_svg_inline_sm
+        + ',v.jsx(c6e,{className:"h-5 w-5 shrink-0 text-foreground","aria-hidden":"true"}),'
+        'v.jsx("span",{className:"text-sm font-semibold tracking-tight text-foreground whitespace-nowrap",children:"Snowflake Langflow"})]})}),v.jsx(rki,{})]})'
+    )
+
+    s2_orig = (
+        'v.jsx(cs,{content:e("header.goToDiscord"),side:"bottom",styleClasses:"z-10",ariaDescribedBy:void 0,'
+        'children:v.jsxs(qt,{unstyled:!0,onClick:()=>window.open(N6e,"_blank"),'
+        'className:"hit-area-hover flex items-center gap-2 rounded-md p-1 text-muted-foreground",'
+        'children:[v.jsx("span",{className:"sr-only",children:e("header.goToDiscord")}),'
+        'v.jsxs("div",{className:"relative items-center rounded-md px-2 py-1 flex",'
+        'children:[v.jsx(Ise,{"aria-hidden":"true",className:"h-4 w-4"}),'
+        'v.jsx(hk,{condition:!!s&&s!=="0",children:v.jsx("span",{className:"text-xs font-semibold pl-2","aria-hidden":"true",children:s})})]})]})})'
+    )
+    s2_new = (
+        'v.jsx(cs,{content:"Snowflake Docs",side:"bottom",styleClasses:"z-10",ariaDescribedBy:void 0,'
+        'children:v.jsxs(qt,{unstyled:!0,onClick:()=>window.open("https://docs.snowflake.com/","_blank"),'
+        'className:"hit-area-hover flex items-center gap-1.5 rounded-md p-1 text-muted-foreground",'
+        'children:[v.jsx("span",{className:"sr-only",children:"Snowflake Docs"}),'
+        'v.jsxs("div",{className:"relative items-center rounded-md px-2 py-1 flex gap-1.5",'
+        'children:[' + sf_svg_inline_color + ',v.jsx("span",{className:"text-xs font-semibold text-[#0284c7]",children:"Docs"})]})]})})'
+    )
+
+    s3_orig = (
+        'v.jsx(QTi,{position:"right",classNameSize:"w-[272px]",children:v.jsxs("div",{className:"divide-y divide-foreground/10",'
+        'children:[v.jsx(HRi,{}),v.jsx("div",{children:v.jsx("div",{className:"h-[44px] items-center px-4 pt-3",'
+        'children:v.jsxs("div",{className:"flex items-center justify-between",'
+        'children:[v.jsx("span",{"data-testid":"menu_version_button",id:"menu_version_button",className:"text-sm",children:e("account.version")}),'
+        'v.jsxs("div",{className:Ve("float-right text-xs",h&&"text-accent-emerald-foreground",!h&&"text-accent-amber-foreground"),'
+        'children:[t," ",e(h?"account.latest":"account.updateAvailable")]})]})})}),'
+        'v.jsxs("div",{children:[v.jsx(DAn,{onClick:()=>{o("/settings")},children:v.jsx("span",{"data-testid":"menu_settings_button",id:"menu_settings_button",children:e("account.settings")})}),'
+        'v.jsx($Ri,{onNavigate:f=>o(f)}),'
+        'v.jsx(Tke,{newPage:!0,href:xNn,children:v.jsx("span",{"data-testid":"menu_docs_button",id:"menu_docs_button",children:e("account.docs")})})]}),'
+        'v.jsxs("div",{children:[v.jsx(Tke,{newPage:!0,href:D6e,children:v.jsxs("span",{"data-testid":"menu_github_button",id:"menu_github_button",className:"flex items-center gap-2",children:[v.jsx(Lse,{className:"h-4 w-4","aria-hidden":"true"}),e("account.github")]})}),'
+        'v.jsx(Tke,{newPage:!0,href:N6e,children:v.jsxs("span",{"data-testid":"menu_discord_button",id:"menu_discord_button",className:"flex items-center gap-2",children:[v.jsx(Ise,{className:"h-4 w-4 text-[#5865F2]","aria-hidden":"true"}),e("account.discord")]})}),'
+        'v.jsx(Tke,{newPage:!0,href:D7r,children:v.jsxs("span",{"data-testid":"menu_twitter_button",id:"menu_twitter_button",className:"flex items-center gap-2",children:[v.jsx(qe,{strokeWidth:2,name:"TwitterX",className:"h-4 w-4"}),e("account.twitter")]})})]})'
+    )
+    s3_new = (
+        'v.jsx(QTi,{position:"right",classNameSize:"w-[208px] text-xs",children:v.jsxs("div",{className:"divide-y divide-foreground/10",'
+        'children:[v.jsx(HRi,{}),v.jsx("div",{children:v.jsx("div",{className:"h-[32px] items-center px-3 pt-1.5",'
+        'children:v.jsxs("div",{className:"flex items-center justify-between",'
+        'children:[v.jsx("span",{"data-testid":"menu_version_button",id:"menu_version_button",className:"text-xs",children:e("account.version")}),'
+        'v.jsxs("div",{className:Ve("float-right text-[11px]",h&&"text-accent-emerald-foreground",!h&&"text-accent-amber-foreground"),'
+        'children:[t," ",e(h?"account.latest":"account.updateAvailable")]})]})})}),'
+        'v.jsxs("div",{children:[v.jsx(DAn,{onClick:()=>{o("/settings")},children:v.jsx("span",{"data-testid":"menu_settings_button",id:"menu_settings_button",className:"text-xs",children:e("account.settings")})}),'
+        'v.jsx($Ri,{onNavigate:f=>o(f)}),'
+        'v.jsx(Tke,{newPage:!0,href:xNn,children:v.jsxs("span",{"data-testid":"menu_docs_button",id:"menu_docs_button",className:"flex items-center gap-2 text-xs",children:[' + sf_svg_inline_color + ',e("account.docs")]})})]}),'
+        'v.jsxs("div",{children:[v.jsx(Tke,{newPage:!0,href:D6e,children:v.jsxs("span",{"data-testid":"menu_github_button",id:"menu_github_button",className:"flex items-center gap-2 text-xs",children:[v.jsx(Lse,{className:"h-3.5 w-3.5","aria-hidden":"true"}),e("account.github")]})})]})'
+    )
+
+    s4_orig = (
+        'v.jsx("div",{className:"z-50 dark:hidden",children:v.jsx("img",{src:Uvo,alt:t("common.langflowLogoLight"),"data-testid":"empty_page_logo_light",className:"relative top-8 h-40 pointer-events-none select-none"})}),'
+        'v.jsx("div",{className:"z-50 hidden dark:block",children:v.jsx("img",{src:Vvo,alt:t("common.langflowLogoDark"),"data-testid":"empty_page_logo_dark",className:"relative top-8 h-40 pointer-events-none select-none"})})'
+    )
+    s4_new = (
+        'v.jsxs("div",{className:"z-50 mb-3 flex items-center justify-center gap-3 pointer-events-none select-none","data-testid":"empty_page_logo_light",'
+        'children:[' + sf_svg_inline_lg + ',v.jsx(c6e,{className:"h-9 w-9 shrink-0 text-foreground","aria-hidden":"true"})]})'
+    )
+
+    s5_orig = (
+        ',v.jsx(qt,{unstyled:!0,className:"group mx-3 min-h-[84px] sm:mx-0",onClick:()=>{p("discord_clicked")(),window.open(N6e,"_blank","noopener,noreferrer")},"data-testid":"empty_page_discord_button",'
+        'children:v.jsxs("div",{className:"relative flex flex-col rounded-lg border-[1px] bg-background p-4 transition-all duration-300 hover:border-discord-color",'
+        'children:[v.jsxs("div",{className:"grid w-full items-center justify-between gap-2",'
+        'children:[v.jsxs("div",{className:"flex gap-3",children:[v.jsx(Ise,{className:"h-6 w-6 text-discord-color","aria-hidden":"true"}),'
+        'v.jsxs("div",{children:[v.jsx("span",{className:"font-semibold",children:"Discord"}),v.jsx("span",{className:"ml-2 font-mono text-muted-foreground",children:K5e(c)})]})]}),'
+        'v.jsx("div",{children:v.jsx("span",{className:"line-clamp-2 text-left text-base text-secondary-foreground",children:t("page.discordDescription")})})]}),v.jsx(V5e,{className:hRn})]})})'
     )
 
     for js_asset in (LANGFLOW_FRONTEND / "assets").glob("*.js"):
         txt = js_asset.read_text(encoding="utf-8", errors="ignore")
         orig = txt
+        txt = txt.replace(s1_orig, s1_new)
+        txt = txt.replace(s2_orig, s2_new)
+        txt = txt.replace(s3_orig, s3_new)
+        txt = txt.replace(s4_orig, s4_new)
+        txt = txt.replace(s5_orig, "")
+        txt = txt.replace(
+            'Tke=({href:e="#",children:t,newPage:n=!1,icon:o="external-link"})=>v.jsx(au,{className:"cursor-pointer rounded-none p-3 px-4"',
+            'Tke=({href:e="#",children:t,newPage:n=!1,icon:o="external-link"})=>v.jsx(au,{className:"cursor-pointer rounded-none py-1.5 px-3 text-xs"',
+        )
+        txt = txt.replace(
+            'DAn=({icon:e="",onClick:t,children:n})=>v.jsxs(au,{className:"group flex cursor-pointer items-center justify-between p-3 px-4"',
+            'DAn=({icon:e="",onClick:t,children:n})=>v.jsxs(au,{className:"group flex cursor-pointer items-center justify-between py-1.5 px-3 text-xs"',
+        )
+        txt = txt.replace(
+            'v.jsxs("div",{className:"flex items-center justify-between px-4 py-[6.5px] text-sm",children:[v.jsx("span",{className:"",children:e("account.theme")})',
+            'v.jsxs("div",{className:"flex items-center justify-between px-3 py-1.5 text-xs",children:[v.jsx("span",{className:"",children:e("account.theme")})',
+        )
         txt = txt.replace(
             "https://github.com/langflow-ai/langflow",
             "https://github.com/fbattaglieri-snowflake/SnowflakeLangflow",
@@ -134,20 +238,24 @@ def install_all() -> None:
             '"account.docs":"Snowflake Docs"',
         )
         txt = txt.replace(
-            'function rki(){return v.jsx(v.Fragment,{})}',
-            native_rki_fn,
-        )
-        txt = txt.replace(
-            'Vvo=""+new URL("logo_dark-DEVbuISE.png",import.meta.url).href,Uvo=""+new URL("logo_light-CIlityAH.png",import.meta.url).href',
-            f'Vvo="{dark_svg_uri}",Uvo="{light_svg_uri}"',
-        )
-        txt = txt.replace(
             '"page.githubDescription":"Follow development, star the repo, and shape the future."',
             '"page.githubDescription":"Unofficial personal fork by Francesco Battaglieri (fbattaglieri-snowflake/SnowflakeLangflow) — Under Active Testing."',
         )
         txt = txt.replace(
             '"page.welcomeTitle":"Welcome to Langflow"',
-            '"page.welcomeTitle":"Welcome to SnowflakeLangflow"',
+            '"page.welcomeTitle":"Welcome to Snowflake Langflow"',
+        )
+        txt = txt.replace(
+            '"flowBuilderWelcome.configureModelProviders":"Configure Model Providers"',
+            '"flowBuilderWelcome.configureModelProviders":"Configure Other Model Provider"',
+        )
+        txt = txt.replace(
+            '"assistant.configureModels":"Configure Model Providers"',
+            '"assistant.configureModels":"Configure Other Model Provider"',
+        )
+        txt = txt.replace(
+            '"modelInput.manageProviders":"Manage Model Providers"',
+            '"modelInput.manageProviders":"Configure Other Model Provider"',
         )
         txt = txt.replace(
             '"settings.nav.modelProviders":"Model Providers"',
@@ -184,10 +292,10 @@ def install_all() -> None:
 
     index_html = LANGFLOW_FRONTEND / "index.html"
     html_text = index_html.read_text(encoding="utf-8")
-    html_text = html_text.replace("<title>Langflow</title>", "<title>SnowflakeLangflow</title>")
+    html_text = html_text.replace("<title>Langflow</title>", "<title>Snowflake Langflow</title>")
     html_text = re.sub(
         r'src="(\./assets/index-[^"?]+\.js)(?:\?[^"]*)?"',
-        r'src="\1?v=sflf033"',
+        r'src="\1?v=sflf034"',
         html_text,
     )
     inject_block = (
@@ -197,7 +305,7 @@ def install_all() -> None:
         '      [data-testid="menu_twitter_button"],\n'
         '      [data-testid="header_right_section_wrapper"] [data-testid="icon-Discord"] { display: none !important; }\n'
         "    </style>\n"
-        '    <script defer src="./snowflake-ui-integration.js?v=sflf033"></script>\n'
+        '    <script defer src="./snowflake-ui-integration.js?v=sflf034"></script>\n'
         "  </head>"
     )
     if "snowflake-ui-integration.js" not in html_text:

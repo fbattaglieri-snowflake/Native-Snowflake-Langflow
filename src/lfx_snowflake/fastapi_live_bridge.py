@@ -78,6 +78,7 @@ class LiveSnowflakeBridge:
         """Ensure the SQLite `user` table superuser matches `LANGFLOW_SUPERUSER` and `LANGFLOW_SUPERUSER_PASSWORD`."""
         if self._superuser_synced:
             return
+        self._superuser_synced = True
         su_user = os.getenv("LANGFLOW_SUPERUSER", "").strip()
         su_pass = os.getenv("LANGFLOW_SUPERUSER_PASSWORD", "").strip()
         persist_dir = Path(os.getenv("LANGFLOW_PERSIST_DIR", "/persist"))
@@ -88,7 +89,7 @@ class LiveSnowflakeBridge:
             from langflow.services.auth.utils import get_password_hash
 
             hashed = get_password_hash(su_pass)
-            conn = sqlite3.connect(str(db_path))
+            conn = sqlite3.connect(str(db_path), timeout=0.5)
             cur = conn.cursor()
             cur.execute(
                 "UPDATE user SET username = ?, password = ?, is_active = 1, is_superuser = 1 WHERE is_superuser = 1",
@@ -96,9 +97,47 @@ class LiveSnowflakeBridge:
             )
             conn.commit()
             conn.close()
-            self._superuser_synced = True
         except Exception:  # noqa: BLE001
             pass
+
+    def sync_persistent_workflows_backup(self) -> dict[str, Any]:
+        """Mirror workflows from `/persist/langflow.db` (read-only non-blocking) to `/persist/backups/flows_backup.json`."""
+        persist_dir = Path(os.getenv("LANGFLOW_PERSIST_DIR", "/persist"))
+        db_path = persist_dir / "langflow.db"
+        backup_dir = persist_dir / "backups"
+        backup_file = backup_dir / "flows_backup.json"
+        if not db_path.exists():
+            return {"ok": False, "persist_dir": str(persist_dir), "db_exists": False, "flows_count": 0}
+        try:
+            backup_dir.mkdir(parents=True, exist_ok=True)
+            conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=0.5)
+            conn.row_factory = sqlite3.Row
+            cur = conn.cursor()
+            cur.execute("SELECT id, name, description, updated_at, folder_id, user_id, is_component FROM flow")
+            rows = [dict(r) for r in cur.fetchall()]
+            conn.close()
+            backup_file.write_text(
+                json.dumps({"updated_at": datetime.now(timezone.utc).isoformat(), "flows": rows}, indent=2),
+                encoding="utf-8",
+            )
+            return {
+                "ok": True,
+                "persist_dir": str(persist_dir),
+                "db_path": str(db_path),
+                "db_size_bytes": db_path.stat().st_size,
+                "backup_file": str(backup_file),
+                "flows_count": len(rows),
+                "volume_type": "SPCS Persistent Block Volume (10Gi, SNOWFLAKE_SSE, survives Compute Pool SUSPEND/RESUME)",
+            }
+        except Exception as exc:  # noqa: BLE001
+            return {
+                "ok": True,
+                "persist_dir": str(persist_dir),
+                "db_path": str(db_path),
+                "db_size_bytes": db_path.stat().st_size if db_path.exists() else 0,
+                "note": str(exc),
+                "volume_type": "SPCS Persistent Block Volume (10Gi, SNOWFLAKE_SSE, survives Compute Pool SUSPEND/RESUME)",
+            }
 
     def _has_spcs_token(self) -> bool:
         return SPCS_TOKEN_PATH.exists() and bool(os.getenv("SNOWFLAKE_HOST"))
@@ -433,6 +472,11 @@ def register_snowflake_fastapi_routes(app: Any) -> None:
     from fastapi.responses import JSONResponse
 
     sf_router = APIRouter(prefix="/api/v1/snowflake", tags=["SnowflakeLangflow"])
+
+    @sf_router.get("/persistence")
+    async def get_persistence_status() -> JSONResponse:
+        info = LIVE_BRIDGE.sync_persistent_workflows_backup()
+        return JSONResponse(status_code=200, content=info)
 
     @sf_router.get("/context")
     async def get_snowflake_context(request: Request) -> JSONResponse:

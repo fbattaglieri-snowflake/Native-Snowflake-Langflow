@@ -151,16 +151,12 @@
     const ctrl = document.createElement("div");
     ctrl.id = "sflf-body-topbar-controls";
     ctrl.style.cssText =
-      "position:fixed;top:9px;right:126px;z-index:9990;display:inline-flex;align-items:center;gap:6px;background:transparent;color:#09090b;padding:2px 6px;font-family:Inter,sans-serif;font-size:12px;";
+      "position:fixed;top:10px;right:192px;z-index:25;display:inline-flex;align-items:center;gap:5px;background:transparent;color:#09090b;padding:1px 4px;font-family:Inter,sans-serif;font-size:11px;height:28px;";
     ctrl.innerHTML = `
-      <span style="display:inline-flex;align-items:center;">${SNOWFLAKE_SVG_BLACK}</span>
-      <label style="font-weight:600;color:#18181b;">Role:</label>
-      <select id="sflf-role-select" style="background:#ffffff;color:#09090b;border:1px solid #d4d4d8;border-radius:5px;padding:2px 6px;font-size:11px;font-weight:600;cursor:pointer;"></select>
-      <span id="sflf-epoch-badge" style="background:#f4f4f5;color:#18181b;padding:1px 5px;border-radius:4px;font-size:10px;font-family:monospace;">epoch #${sfState.context_epoch}</span>
-      <button id="sflf-open-hub-btn" style="background:#09090b;color:#ffffff;border:none;border-radius:5px;padding:3px 8px;font-size:11px;font-weight:600;cursor:pointer;">Snowflake Hub</button>
-      <a href="${SNOWFLAKE_DOCS_URL}" target="_blank" rel="noopener noreferrer" title="Snowflake Documentation" style="display:inline-flex;align-items:center;gap:4px;color:#0284c7;text-decoration:none;font-weight:600;font-size:11px;padding-left:2px;">
-        ${SNOWFLAKE_SVG_COLOR} Docs
-      </a>
+      <span style="display:inline-flex;align-items:center;">${buildOfficialSnowflakeSvg("#000000", 14)}</span>
+      <label style="font-weight:600;color:#18181b;font-size:11px;">Role:</label>
+      <select id="sflf-role-select" style="background:#ffffff;color:#09090b;border:1px solid #d4d4d8;border-radius:5px;padding:1px 6px;font-size:11px;font-weight:600;cursor:pointer;max-width:142px;height:24px;text-overflow:ellipsis;"></select>
+      <button id="sflf-open-hub-btn" style="background:#09090b;color:#ffffff;border:none;border-radius:5px;padding:2px 8px;height:24px;font-size:11px;font-weight:600;cursor:pointer;white-space:nowrap;">Snowflake Hub</button>
     `;
     document.body.appendChild(ctrl);
 
@@ -209,18 +205,18 @@
     modal.style.cssText =
       "position:fixed;inset:0;background:rgba(0,0,0,0.68);z-index:99998;display:flex;align-items:center;justify-content:center;font-family:Inter,sans-serif;";
     modal.innerHTML = `
-      <div style="background:#18181b;color:#f4f4f5;border:1px solid #3f3f46;border-radius:12px;width:860px;max-width:95vw;max-height:88vh;overflow:auto;padding:20px;box-shadow:0 20px 50px rgba(0,0,0,0.6);">
-        <div style="display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid #27272a;padding-bottom:12px;margin-bottom:16px;">
-          <div style="display:flex;align-items:center;gap:10px;">
-            <span style="display:inline-flex;">${buildOfficialSnowflakeSvg("#29b5e8", 22)}</span>
-            <strong style="font-size:16px;">SnowflakeLangflow Control Hub (Role: <span id="sflf-modal-role">${sfState.active_role}</span>)</strong>
+      <div style="background:#18181b;color:#f4f4f5;border:1px solid #3f3f46;border-radius:10px;width:580px;max-width:90vw;max-height:76vh;overflow:auto;padding:14px 16px;box-shadow:0 20px 50px rgba(0,0,0,0.6);font-size:12px;">
+        <div style="display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid #27272a;padding-bottom:10px;margin-bottom:12px;">
+          <div style="display:flex;align-items:center;gap:8px;">
+            <span style="display:inline-flex;">${buildOfficialSnowflakeSvg("#29b5e8", 18)}</span>
+            <strong style="font-size:13px;">Snowflake Langflow Hub (Role: <span id="sflf-modal-role">${sfState.active_role}</span> · <span id="sflf-epoch-badge">epoch #${sfState.context_epoch}</span>)</strong>
           </div>
-          <div style="display:flex;align-items:center;gap:12px;">
-            <a href="${FORK_GITHUB_URL}" target="_blank" rel="noopener noreferrer" style="color:#a1a1aa;text-decoration:none;font-size:12px;">Fork: fbattaglieri-snowflake/SnowflakeLangflow</a>
-            <a href="${SNOWFLAKE_DOCS_URL}" target="_blank" rel="noopener noreferrer" style="display:inline-flex;align-items:center;gap:6px;color:#29B5E8;text-decoration:none;font-size:13px;font-weight:600;">
-              ${SNOWFLAKE_SVG_COLOR} Snowflake Documentation
+          <div style="display:flex;align-items:center;gap:10px;">
+            <a href="${FORK_GITHUB_URL}" target="_blank" rel="noopener noreferrer" style="color:#a1a1aa;text-decoration:none;font-size:11px;">Fork GitHub</a>
+            <a href="${SNOWFLAKE_DOCS_URL}" target="_blank" rel="noopener noreferrer" style="display:inline-flex;align-items:center;gap:4px;color:#29B5E8;text-decoration:none;font-size:11px;font-weight:600;">
+              ${SNOWFLAKE_SVG_COLOR} Docs
             </a>
-            <button id="sflf-modal-close" style="background:#27272a;border:1px solid #3f3f46;color:#fff;padding:4px 10px;border-radius:6px;cursor:pointer;">Close</button>
+            <button id="sflf-modal-close" style="background:#27272a;border:1px solid #3f3f46;color:#fff;padding:3px 8px;border-radius:5px;font-size:11px;cursor:pointer;">Close</button>
           </div>
         </div>
 
