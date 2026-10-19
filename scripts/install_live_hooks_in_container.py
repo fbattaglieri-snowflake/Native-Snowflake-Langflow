@@ -315,7 +315,7 @@ def install_all() -> None:
     html_text = html_text.replace("<title>Langflow</title>", "<title>Snowflake Langflow</title>")
     html_text = re.sub(
         r'src="(\./assets/index-[^"?]+\.js)(?:\?[^"]*)?"',
-        r'src="\1?v=sflf036"',
+        r'src="\1?v=sflf037"',
         html_text,
     )
     inject_block = (
@@ -327,7 +327,7 @@ def install_all() -> None:
         '      [data-testid="menu_twitter_button"],\n'
         '      [data-testid="header_right_section_wrapper"] [data-testid="icon-Discord"] { display: none !important; }\n'
         "    </style>\n"
-        '    <script defer src="./snowflake-ui-integration.js?v=sflf036"></script>\n'
+        '    <script defer src="./snowflake-ui-integration.js?v=sflf037"></script>\n'
         "  </head>"
     )
     if "snowflake-ui-integration.js" not in html_text:

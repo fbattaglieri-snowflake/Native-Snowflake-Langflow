@@ -226,65 +226,73 @@
     modal = document.createElement("div");
     modal.id = "sflf-hub-modal";
     modal.style.cssText =
-      "position:fixed;inset:0;background:rgba(0,0,0,0.68);z-index:99998;display:flex;align-items:center;justify-content:center;font-family:Inter,sans-serif;";
+      "position:fixed;inset:0;background:rgba(0,0,0,0.68);z-index:99998;display:flex;align-items:center;justify-content:center;padding:16px;box-sizing:border-box;font-family:Inter,sans-serif;";
+    const codeBoxStyle =
+      "margin-top:10px;background-color:#09090b !important;color:#e4e4e7 !important;border:1px solid #3f3f46;padding:10px 12px;border-radius:6px;font-family:'JetBrains Mono',monospace;font-size:11px;line-height:1.45;white-space:pre-wrap;word-break:break-word;max-height:130px;overflow-y:auto;overflow-x:hidden;box-sizing:border-box;";
     modal.innerHTML = `
-      <div style="background:#18181b;color:#f4f4f5;border:1px solid #3f3f46;border-radius:10px;width:580px;max-width:90vw;max-height:76vh;overflow:auto;padding:14px 16px;box-shadow:0 20px 50px rgba(0,0,0,0.6);font-size:12px;">
-        <div style="display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid #27272a;padding-bottom:10px;margin-bottom:12px;">
-          <div style="display:flex;align-items:center;gap:8px;">
-            <span style="display:inline-flex;">${buildOfficialSnowflakeSvg("#29b5e8", 18)}</span>
-            <strong style="font-size:13px;">Snowflake Langflow Hub (Role: <span id="sflf-modal-role">${sfState.active_role}</span> · <span id="sflf-epoch-badge">epoch #${sfState.context_epoch}</span>)</strong>
+      <div style="background:#18181b;color:#f4f4f5;border:1px solid #3f3f46;border-radius:12px;width:min(860px,94vw);max-height:86vh;overflow-y:auto;overflow-x:hidden;padding:18px 20px;box-shadow:0 20px 50px rgba(0,0,0,0.6);font-size:12px;box-sizing:border-box;">
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;border-bottom:1px solid #27272a;padding-bottom:12px;margin-bottom:14px;">
+          <div style="display:flex;align-items:center;gap:8px;min-width:0;">
+            <span style="display:inline-flex;flex-shrink:0;">${buildOfficialSnowflakeSvg("#29b5e8", 20)}</span>
+            <strong style="font-size:14px;color:#ffffff;white-space:nowrap;">Snowflake Langflow Hub</strong>
+            <span style="background:#27272a;color:#38bdf8;border:1px solid #3f3f46;border-radius:5px;padding:2px 8px;font-size:11px;font-weight:600;white-space:nowrap;">Role: <span id="sflf-modal-role">${sfState.active_role}</span> · <span id="sflf-epoch-badge">epoch #${sfState.context_epoch}</span></span>
           </div>
-          <div style="display:flex;align-items:center;gap:10px;">
-            <a href="${FORK_GITHUB_URL}" target="_blank" rel="noopener noreferrer" style="color:#a1a1aa;text-decoration:none;font-size:11px;">Fork GitHub</a>
+          <div style="display:flex;align-items:center;gap:12px;flex-shrink:0;white-space:nowrap;">
+            <a href="${FORK_GITHUB_URL}" target="_blank" rel="noopener noreferrer" style="color:#a1a1aa;text-decoration:none;font-size:11px;font-weight:500;">Fork GitHub</a>
             <a href="${SNOWFLAKE_DOCS_URL}" target="_blank" rel="noopener noreferrer" style="display:inline-flex;align-items:center;gap:4px;color:#29B5E8;text-decoration:none;font-size:11px;font-weight:600;">
               ${SNOWFLAKE_SVG_COLOR} Docs
             </a>
-            <button id="sflf-modal-close" style="background:#27272a;border:1px solid #3f3f46;color:#fff;padding:3px 8px;border-radius:5px;font-size:11px;cursor:pointer;">Close</button>
+            <button id="sflf-modal-close" style="background:#27272a;border:1px solid #3f3f46;color:#fff;padding:4px 10px;border-radius:6px;font-size:11px;font-weight:600;cursor:pointer;">Close</button>
           </div>
         </div>
 
-        <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:16px;">
-          <div style="background:#27272a;padding:14px;border-radius:8px;">
-            <h4 style="margin:0 0 8px 0;font-size:14px;color:#29B5E8;">1. Governed Object Provisioning (REQ-16)</h4>
-            <div style="display:flex;gap:6px;margin-bottom:8px;">
-              <select id="sflf-prov-kind" style="background:#18181b;color:#fff;border:1px solid #3f3f46;padding:6px;border-radius:6px;flex:1;">
+        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(340px,1fr));gap:14px;margin-bottom:14px;">
+          <div style="background:#27272a;padding:14px;border-radius:8px;min-width:0;box-sizing:border-box;">
+            <h4 style="margin:0 0 4px 0;font-size:13px;color:#38bdf8;">1. Governed Object Provisioning (REQ-16)</h4>
+            <p style="margin:0 0 10px 0;font-size:11px;color:#a1a1aa;">Crea oggetti Snowflake (Tabelle VECTOR/Hybrid, Stage SSE, Schemi, Database, Snowflake Postgres) con il ruolo attivo e registra l'operazione in <code>LANGFLOW_AUDIT_LOG</code>.</p>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:8px;">
+              <select id="sflf-prov-kind" style="background:#18181b;color:#fff;border:1px solid #3f3f46;padding:6px 8px;border-radius:6px;width:100%;min-width:0;box-sizing:border-box;font-size:11px;">
                 <option value="table">Standard / Hybrid Table (VECTOR)</option>
                 <option value="stage">Internal Stage (SNOWFLAKE_SSE)</option>
                 <option value="schema">Schema</option>
                 <option value="database">Database</option>
                 <option value="postgres">Snowflake Postgres Instance</option>
               </select>
-              <input id="sflf-prov-name" placeholder="Object Name (e.g. DEMO_VECTORS)" value="DEMO_VECTORS" style="background:#18181b;color:#fff;border:1px solid #3f3f46;padding:6px;border-radius:6px;flex:1;" />
+              <input id="sflf-prov-name" placeholder="Object Name (e.g. DEMO_VECTORS)" value="DEMO_VECTORS" style="background:#18181b;color:#fff;border:1px solid #3f3f46;padding:6px 8px;border-radius:6px;width:100%;min-width:0;box-sizing:border-box;font-size:11px;" />
             </div>
-            <div style="display:flex;gap:8px;">
-              <button id="sflf-btn-dryrun" style="background:#3f3f46;color:#fff;border:none;padding:6px 10px;border-radius:6px;cursor:pointer;font-size:12px;">Dry-Run DDL Preview</button>
-              <button id="sflf-btn-provision" style="background:#0284c7;color:#fff;border:none;padding:6px 10px;border-radius:6px;cursor:pointer;font-size:12px;font-weight:600;">Execute on Snowflake</button>
+            <div style="display:flex;gap:8px;flex-wrap:wrap;">
+              <button id="sflf-btn-dryrun" style="background:#3f3f46;color:#fff;border:none;padding:6px 10px;border-radius:6px;cursor:pointer;font-size:11px;font-weight:500;">Dry-Run DDL Preview</button>
+              <button id="sflf-btn-provision" style="background:#0284c7;color:#fff;border:none;padding:6px 10px;border-radius:6px;cursor:pointer;font-size:11px;font-weight:600;">Execute on Snowflake</button>
             </div>
-            <pre id="sflf-prov-out" style="margin-top:8px;background:#09090b;padding:8px;border-radius:6px;font-size:11px;white-space:pre-wrap;max-height:100px;overflow:auto;">Click Dry-Run DDL Preview or Execute.</pre>
+            <div id="sflf-prov-out" style="${codeBoxStyle}">Click "Dry-Run DDL Preview" to inspect the SQL DDL or "Execute on Snowflake" to provision with active role.</div>
           </div>
 
-          <div style="background:#27272a;padding:14px;border-radius:8px;">
-            <h4 style="margin:0 0 8px 0;font-size:14px;color:#29B5E8;">2. Create Memory & Vector Store (REQ-10)</h4>
-            <div style="display:flex;gap:6px;margin-bottom:8px;">
-              <input id="sflf-mem-name" placeholder="Memory Name" value="SNOWFLAKE_KB_MEM" style="background:#18181b;color:#fff;border:1px solid #3f3f46;padding:6px;border-radius:6px;flex:1;" />
-              <select id="sflf-mem-backend" style="background:#18181b;color:#fff;border:1px solid #3f3f46;padding:6px;border-radius:6px;flex:1;">
+          <div style="background:#27272a;padding:14px;border-radius:8px;min-width:0;box-sizing:border-box;">
+            <h4 style="margin:0 0 4px 0;font-size:13px;color:#38bdf8;">2. Create Memory & Vector Store (REQ-10)</h4>
+            <p style="margin:0 0 10px 0;font-size:11px;color:#a1a1aa;">Inizializza una memoria vettoriale governata su Snowflake (Standard/Hybrid Table <code>VECTOR(FLOAT, 768)</code>, Cortex Search o Snowflake Postgres <code>pgvector</code>).</p>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:8px;">
+              <input id="sflf-mem-name" placeholder="Memory Name" value="SNOWFLAKE_KB_MEM" style="background:#18181b;color:#fff;border:1px solid #3f3f46;padding:6px 8px;border-radius:6px;width:100%;min-width:0;box-sizing:border-box;font-size:11px;" />
+              <select id="sflf-mem-backend" style="background:#18181b;color:#fff;border:1px solid #3f3f46;padding:6px 8px;border-radius:6px;width:100%;min-width:0;box-sizing:border-box;font-size:11px;">
                 <option value="Standard Table (VECTOR)">Standard Table (VECTOR)</option>
                 <option value="Hybrid Table (VECTOR)">Hybrid Table (VECTOR)</option>
                 <option value="Cortex Search">Cortex Search</option>
                 <option value="Snowflake Postgres (pgvector)">Snowflake Postgres (pgvector)</option>
               </select>
             </div>
-            <button id="sflf-btn-create-mem" style="background:#0284c7;color:#fff;border:none;padding:6px 10px;border-radius:6px;cursor:pointer;font-size:12px;font-weight:600;">Create Governed Memory</button>
-            <pre id="sflf-mem-out" style="margin-top:8px;background:#09090b;padding:8px;border-radius:6px;font-size:11px;white-space:pre-wrap;max-height:100px;overflow:auto;">Ready to create Snowflake vector memory.</pre>
+            <button id="sflf-btn-create-mem" style="background:#0284c7;color:#fff;border:none;padding:6px 10px;border-radius:6px;cursor:pointer;font-size:11px;font-weight:600;">Create Governed Memory</button>
+            <div id="sflf-mem-out" style="${codeBoxStyle}">Ready to create governed Snowflake vector memory under active role.</div>
           </div>
         </div>
 
-        <div style="background:#27272a;padding:14px;border-radius:8px;">
-          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;">
-            <h4 style="margin:0;font-size:14px;color:#29B5E8;">3. Replicated Flow Activity & Governance Audit Log in Snowflake SQL (REQ-15)</h4>
-            <button id="sflf-btn-sync-traces" style="background:#10b981;color:#fff;border:none;padding:6px 12px;border-radius:6px;cursor:pointer;font-size:12px;font-weight:600;">Sync Flow Activity to Snowflake SQL</button>
+        <div style="background:#27272a;padding:14px;border-radius:8px;min-width:0;box-sizing:border-box;">
+          <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;margin-bottom:6px;">
+            <div>
+              <h4 style="margin:0 0 2px 0;font-size:13px;color:#38bdf8;">3. Replicated Flow Activity & Governance Audit Log in Snowflake SQL (REQ-15)</h4>
+              <p style="margin:0;font-size:11px;color:#a1a1aa;">Sincronizza le esecuzioni di Langflow verso <code>LANGFLOW_FLOW_RUNS</code>, <code>LANGFLOW_FLOW_SPANS</code> e <code>LANGFLOW_AUDIT_LOG</code> (protette da Row Access Policy <code>LANGFLOW_TRACE_RAP</code>).</p>
+            </div>
+            <button id="sflf-btn-sync-traces" style="background:#10b981;color:#fff;border:none;padding:6px 12px;border-radius:6px;cursor:pointer;font-size:11px;font-weight:600;white-space:nowrap;">Sync Flow Activity to Snowflake SQL</button>
           </div>
-          <pre id="sflf-traces-out" style="background:#09090b;padding:10px;border-radius:6px;font-size:11px;white-space:pre-wrap;max-height:200px;overflow:auto;">Loading Snowflake SQL traces...</pre>
+          <div id="sflf-traces-out" style="${codeBoxStyle};max-height:170px;">Loading Snowflake SQL traces...</div>
         </div>
       </div>
     `;
