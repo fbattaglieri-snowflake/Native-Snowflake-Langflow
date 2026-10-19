@@ -421,3 +421,41 @@ def test_spcs_dockerfile_service_spec_sql_ddl_and_backup_restore(tmp_path: Path)
     diff_ok = verify_preserved_services_fingerprint(before_services, list(before_services))
     assert diff_ok["passed"] is True
     assert diff_ok["protected_service_count"] == 2
+
+
+def test_live_fastapi_bridge_and_ui_integration_bundle() -> None:
+    """Verify LiveSnowflakeBridge role switching, explicit viewer denial, UI script, and custom component files."""
+    from lfx_snowflake.fastapi_live_bridge import LiveSnowflakeBridge
+
+    bridge = LiveSnowflakeBridge()
+    sw_ok = bridge.switch_role("SNOWFLAKE_LANGFLOW_VIEWER_ROLE")
+    assert sw_ok["ok"] is True
+    assert sw_ok["active_role"] == "SNOWFLAKE_LANGFLOW_VIEWER_ROLE"
+    assert sw_ok["context_epoch"] == 2
+
+    # Viewer role is explicitly denied write/provision operations
+    denied = bridge.check_write_privilege_or_deny("PROVISION_TABLE", "DEMO_TABLE")
+    assert denied is not None
+    assert denied["status_code"] == 403
+    assert denied["error_code"] == "AUTHZ_ROLE_DENIED"
+    assert "Il ruolo attivo (SNOWFLAKE_LANGFLOW_VIEWER_ROLE) non consente questa operazione" in denied["message"]
+
+    # Unauthorized role switch is explicitly denied
+    sw_bad = bridge.switch_role("NON_EXISTENT_ROLE_XYZ")
+    assert sw_bad["ok"] is False
+    assert sw_bad["status_code"] == 403
+    assert sw_bad["error_code"] == "AUTHZ_ROLE_DENIED"
+
+    # Verify UI integration script and custom component files exist
+    ui_js = (REPO_ROOT / "frontend_patches" / "snowflake-ui-integration.js").read_text(encoding="utf-8")
+    assert "/api/v1/snowflake/context" in ui_js
+    assert "/api/v1/snowflake/role" in ui_js
+    assert "https://docs.snowflake.com/" in ui_js
+    assert "SNOWFLAKE_SVG_BLACK" in ui_js
+    assert "SNOWFLAKE_SVG_COLOR" in ui_js
+
+    comp_dir = REPO_ROOT / "src" / "lfx_snowflake" / "langflow_custom_components"
+    assert (comp_dir / "snowflake_data_sources" / "data_sources_and_analyst.py").exists()
+    assert (comp_dir / "snowflake_llm_operations" / "ai_function_and_ops.py").exists()
+    assert (comp_dir / "snowflake_files_and_knowledge" / "stage_and_memories.py").exists()
+    assert (comp_dir / "snowflake_agents_and_governance" / "agents_and_governance.py").exists()
