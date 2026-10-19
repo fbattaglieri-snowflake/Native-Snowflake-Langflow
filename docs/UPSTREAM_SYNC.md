@@ -1,8 +1,24 @@
 # Upstream Synchronization & Fork Maintenance Guide (`ADR-001`)
 
+> **Disclaimer & Ownership:** This repository is a personal, independent fork developed by **Francesco Battaglieri** ([@fbattaglieri-snowflake](https://github.com/fbattaglieri-snowflake)) based on the upstream open-source project [langflow-ai/langflow](https://github.com/langflow-ai/langflow) (`v1.12.5`, MIT License). **It is NOT an official project or product of Snowflake Inc. nor of Langflow / DataStax**, and it is **currently under active testing and validation (ancora oggetto di test)**.
+
 **Upstream Repository:** `https://github.com/langflow-ai/langflow.git` (Read-Only Remote `upstream`)  
 **Baseline Tag:** `v1.12.5` (MIT License)  
 **Protected Primary Branch:** `snowflake/main`
+
+---
+
+## 0. Mandatory Upstream Update Rules (`RULE-SYNC-01` .. `RULE-SYNC-07`)
+
+| Rule ID | Rule Name | Enforcement |
+|---|---|---|
+| `RULE-SYNC-01` | **Read-Only Upstream Remote** | `upstream` (`https://github.com/langflow-ai/langflow.git`) is read-only. Never push branches or tags to `upstream`. |
+| `RULE-SYNC-02` | **Stable Release Tag Pinning** | Synchronize only against official release tags (e.g., `v1.12.5`), never untagged `main` commits. |
+| `RULE-SYNC-03` | **Dedicated Staging Branch** | Run every upstream merge on `sync/upstream-<version>` before merging into `snowflake/main`. |
+| `RULE-SYNC-04` | **Bundle Isolation & 6 Hook Points** | Keep Snowflake code inside `src/lfx_snowflake/` and the 6 tracked core hooks; keep invariant categories untouched. |
+| `RULE-SYNC-05` | **Blocking Sanitization Gate** | `python3 scripts/verify_public_repo_sanitization.py` must report 0 secrets and 0 denylist matches before commit/merge. |
+| `RULE-SYNC-06` | **Full Test & Protocol Qualification** | `pytest` must pass 100% across all governance, observability, 3 Proxy protocols (`Chat`, `Responses`, `Messages`), Ollama, and component tests. |
+| `RULE-SYNC-07` | **Quiesced Backup & Atomic Rollback** | Run `python3 scripts/backup_restore_lifecycle.py` (or `<POSTGRES_INSTANCE>` point-in-time fork) before promoting to `<COMPUTE_POOL>`. |
 
 ---
 

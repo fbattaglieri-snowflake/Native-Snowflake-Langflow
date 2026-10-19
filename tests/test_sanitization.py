@@ -114,6 +114,29 @@ def test_required_docs_and_adrs_exist_and_are_clean() -> None:
         assert scan_file(path, repo_root=REPO_ROOT) == []
 
 
+def test_fork_disclaimer_author_and_upstream_update_rules_present() -> None:
+    """Verify personal development disclaimer (Francesco Battaglieri), unofficial status, fork explanation, testing status, and update rules."""
+    readme_text = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+    sync_text = (REPO_ROOT / "docs" / "UPSTREAM_SYNC.md").read_text(encoding="utf-8")
+    license_text = (REPO_ROOT / "LICENSE").read_text(encoding="utf-8")
+
+    for doc_text in (readme_text, sync_text, license_text):
+        assert "Francesco Battaglieri" in doc_text
+        assert "fbattaglieri-snowflake" in doc_text
+
+    assert "NON è un prodotto, rilascio o repository ufficiale di Snowflake Inc." in readme_text
+    assert "né tantomeno è un progetto ufficiale di Langflow" in readme_text
+    assert "fork pubblico" in readme_text.lower()
+    assert "langflow-ai/langflow" in readme_text
+    assert "oggetto di test" in readme_text.lower()
+    assert "active testing" in readme_text.lower()
+
+    for rule_num in range(1, 8):
+        rule_id = f"RULE-SYNC-0{rule_num}"
+        assert rule_id in readme_text
+        assert rule_id in sync_text
+
+
 def test_full_repository_passes_sanitization_gate() -> None:
     """Run full sanitization gate on the live snowflake-langflow repository."""
     report = scan_repository(REPO_ROOT, require_aws_attestation=True)

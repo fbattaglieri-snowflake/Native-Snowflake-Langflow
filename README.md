@@ -1,5 +1,16 @@
 # SnowflakeLangflow (`lfx_snowflake`)
 
+> ### ⚠️ Disclaimer Importante / Important Notice (Unofficial Personal Fork — Active Testing)
+>
+> - **Sviluppo Personale / Personal Development:** Questo repository è uno sviluppo personale e indipendente di **Francesco Battaglieri** ([@fbattaglieri-snowflake](https://github.com/fbattaglieri-snowflake)).  
+>   *This repository is an independent personal development project by **Francesco Battaglieri** ([@fbattaglieri-snowflake](https://github.com/fbattaglieri-snowflake)).*
+> - **Non Ufficiale / Not Official:** Questo progetto **NON è un prodotto, rilascio o repository ufficiale di Snowflake Inc.**, **né tantomeno è un progetto ufficiale di Langflow / DataStax**. Le opinioni, scelte architetturali e modifiche qui contenute appartengono esclusivamente all'autore e non impegnano né rappresentano Snowflake Inc. o Langflow.  
+>   *This project is **NOT an official product, release, or repository of Snowflake Inc.**, **nor is it an official project of Langflow / DataStax**. It is not officially supported, endorsed, or warranted by Snowflake Inc. or Langflow.*
+> - **Natura di Fork / Open-Source Fork:** Questo repository è un **fork pubblico** del progetto open-source upstream [langflow-ai/langflow](https://github.com/langflow-ai/langflow) (`v1.12.5` baseline, licenza MIT), esteso con il pacchetto isolato `lfx_snowflake` per sperimentare l'esecuzione nativa in Snowpark Container Services (SPCS) e l'integrazione con i servizi Snowflake.  
+>   *This repository is a **public fork** of the upstream open-source project [langflow-ai/langflow](https://github.com/langflow-ai/langflow) (`v1.12.5` baseline, MIT License).*
+> - **Stato del Progetto — Ancora Oggetto di Test / Under Active Testing:** Questa soluzione è **attualmente oggetto di test, qualifica e validazione attiva (Work in Progress / Experimental Testing)**. API, componenti, schemi SQL e configurazioni possono subire modifiche senza preavviso; non utilizzare in ambienti di produzione senza una propria validazione indipendente.  
+>   *This solution is **currently under active testing and validation (Work in Progress / Experimental)**. Do not deploy to production environments without independent qualification and security review.*
+
 Snowflake-native extension bundle, governance layer, and Snowpark Container Services (SPCS) runtime integration for [Langflow](https://github.com/langflow-ai/langflow) (`v1.12.5` baseline, MIT License).
 
 SnowflakeLangflow preserves the exact Langflow user interface, component layout, typography, themes, and developer ergonomics while adding native Snowflake authentication, real-time active role switching (`CURRENT_ROLE()`), fail-closed backend authorization (`AUTHZ_ROLE_DENIED`), governed Snowflake object provisioning, synchronized `Flow Activity` SQL trace replication, and multi-protocol LLM execution.
@@ -70,6 +81,20 @@ All configuration files, SQL scripts, and container specifications in this repos
 
 ---
 
+## Upstream Update & Synchronization Rules (`langflow-ai/langflow`)
+
+Because this repository is a fork of [`langflow-ai/langflow`](https://github.com/langflow-ai/langflow), all updates from upstream must follow the mandatory governance rules documented in [`docs/UPSTREAM_SYNC.md`](docs/UPSTREAM_SYNC.md) and enforced by [`scripts/sync_upstream.sh`](scripts/sync_upstream.sh):
+
+1. **`RULE-SYNC-01` — Read-Only Upstream Remote:** `upstream` (`https://github.com/langflow-ai/langflow.git`) is strictly read-only; all fork commits and tags are pushed exclusively to `origin` (`snowflake/main` or scoped `feat/*` / `sync/upstream-*` branches).
+2. **`RULE-SYNC-02` — Stable Release Tag Pinning Only:** Never merge arbitrary untagged commits from upstream `main`. Always synchronize against an explicit upstream release tag (e.g., `v1.12.5` → next stable tag).
+3. **`RULE-SYNC-03` — Dedicated Staging Branch (`sync/upstream-<tag>`):** Every upstream update is staged on `sync/upstream-<tag>` via `bash scripts/sync_upstream.sh <tag>` before any fast-forward/merge into `snowflake/main`.
+4. **`RULE-SYNC-04` — Strict `lfx_snowflake` Bundle Isolation & 6 Tracked Hook Points:** Keep 95%+ of Snowflake logic inside `src/lfx_snowflake/`, `frontend_patches/`, `sql/`, and `docs/`. Verify that the 6 tracked core hook points and invariant categories (`Input & Output`, `Prompt Template`, `Processing`, `Flow Control`, `LLM Selector`, `Calculator`, `Current Date`) remain intact.
+5. **`RULE-SYNC-05` — Mandatory Pre-Commit & CI Sanitization Gate:** `python3 scripts/verify_public_repo_sanitization.py` must pass with **0 secrets** and **0 denylist matches** across all working-tree files and Git commit history before pushing.
+6. **`RULE-SYNC-06` — Full Regression & Multi-Protocol Qualification Gate:** The full `pytest` suite (`tests/`) covering RBAC role switching, 3 Proxy Standard protocols (`Chat`, `Responses`, `Messages`), Ollama, AI Functions, and SQL trace replication must pass 100%.
+7. **`RULE-SYNC-07` — Pre-Upgrade Quiesced Backup & Atomic Rollback:** Before deploying an updated image to `<COMPUTE_POOL>`, run `python3 scripts/backup_restore_lifecycle.py` (or create a point-in-time fork of `<POSTGRES_INSTANCE>`) so both container image and ORM schema can be rolled back atomically.
+
+---
+
 ## Verification & Sanitization Gate
 
 Run the automated sanitization gate and test suite before any commit or push:
@@ -78,3 +103,4 @@ Run the automated sanitization gate and test suite before any commit or push:
 python3 scripts/verify_public_repo_sanitization.py
 pytest
 ```
+
