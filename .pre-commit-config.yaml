@@ -1,0 +1,10 @@
+repos:
+  - repo: local
+    hooks:
+      - id: verify-public-repo-sanitization
+        name: Verify 100% Account-Agnostic Public Repo Sanitization (Zero Secrets & Denylist)
+        entry: python3 scripts/verify_public_repo_sanitization.py
+        language: system
+        pass_filenames: false
+        always_run: true
+        stages: [pre-commit, pre-push]

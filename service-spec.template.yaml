@@ -1,0 +1,51 @@
+spec:
+  containers:
+    - name: snowflake-langflow
+      image: /<DATABASE>/<SCHEMA>/<IMAGE_REPOSITORY>/snowflake-langflow:v0.1.0
+      uid: 1000
+      gid: 1000
+      env:
+        SNOWFLAKE_ACCOUNT: "<SNOWFLAKE_ACCOUNT>"
+        SNOWFLAKE_DATABASE: "<DATABASE>"
+        SNOWFLAKE_SCHEMA: "<SCHEMA>"
+        SNOWFLAKE_STAGE_NAME: "<STAGE_NAME>"
+        SNOWFLAKE_POSTGRES_INSTANCE: "<POSTGRES_INSTANCE>"
+        LLM_PROXY_BASE_URL: "<LLM_PROXY_BASE_URL>"
+        OLLAMA_BASE_URL: "<OLLAMA_BASE_URL>"
+        LANGFLOW_HOST: "0.0.0.0"
+        LANGFLOW_PORT: "7860"
+        LANGFLOW_BUNDLE_PACKAGES: "lfx_snowflake"
+        LANGFLOW_TRACES_RUNS_TABLE: "<DATABASE>.<SCHEMA>.LANGFLOW_FLOW_RUNS"
+        LANGFLOW_TRACES_SPANS_TABLE: "<DATABASE>.<SCHEMA>.LANGFLOW_FLOW_SPANS"
+        LANGFLOW_AUDIT_LOG_TABLE: "<DATABASE>.<SCHEMA>.LANGFLOW_AUDIT_LOG"
+        LANGFLOW_SECONDARY_ROLES_MODE: "NONE"
+        LANGFLOW_ALLOW_SERVICE_ROLE_FALLBACK: "false"
+      resources:
+        requests:
+          cpu: 2
+          memory: 4Gi
+        limits:
+          cpu: 4
+          memory: 8Gi
+      volumeMounts:
+        - name: langflow-transactional-block
+          mountPath: /var/lib/langflow/data
+      readinessProbe:
+        port: 7860
+        path: /api/v1/snowflake/context
+  endpoints:
+    - name: langflow-ui
+      port: 7860
+      public: true
+    - name: langflow-a2a
+      port: 7860
+      public: false
+  volumes:
+    - name: langflow-transactional-block
+      source: block
+      size: 10Gi
+      uid: 1000
+      gid: 1000
+capabilities:
+  securityContext:
+    executeAsCaller: true

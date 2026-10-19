@@ -1,0 +1,102 @@
+{
+  "upstream_baseline_tag": "v1.12.5",
+  "ui_style_policy": "PRESERVE_LANGFLOW_NATIVE_COMPONENTS_TYPOGRAPHY_SPACING_THEMES",
+  "invariant_categories": {
+    "Input & Output": {
+      "invariant": true,
+      "visual_or_functional_changes_allowed": false,
+      "components": [
+        "Chat Input",
+        "Chat Output",
+        "Text Input",
+        "Text Output",
+        "Webhook"
+      ]
+    },
+    "Prompt Template": {
+      "invariant": true,
+      "visual_or_functional_changes_allowed": false,
+      "components": [
+        "Prompt",
+        "Prompt Template"
+      ]
+    },
+    "Processing": {
+      "invariant": true,
+      "visual_or_functional_changes_allowed": false,
+      "components": [
+        "Data Operations",
+        "Dynamic Create Data",
+        "Parser",
+        "Split Text",
+        "Type Convert"
+      ]
+    },
+    "Flow Control": {
+      "invariant": true,
+      "visual_or_functional_changes_allowed": false,
+      "preserve_beta_badges": [
+        "Listen",
+        "Notify",
+        "Run Flow"
+      ],
+      "components": [
+        {
+          "name": "Human Input",
+          "beta_badge": false
+        },
+        {
+          "name": "If-Else",
+          "beta_badge": false
+        },
+        {
+          "name": "Listen",
+          "beta_badge": true
+        },
+        {
+          "name": "Loop",
+          "beta_badge": false
+        },
+        {
+          "name": "Notify",
+          "beta_badge": true
+        },
+        {
+          "name": "Run Flow",
+          "beta_badge": true
+        }
+      ]
+    }
+  },
+  "standalone_invariant_components": {
+    "LLM Selector": {
+      "category": "LLM Operations",
+      "invariant": true,
+      "visual_or_functional_changes_allowed": false
+    },
+    "Calculator": {
+      "category": "Utilities",
+      "invariant": true,
+      "visual_or_functional_changes_allowed": false
+    },
+    "Current Date": {
+      "category": "Utilities",
+      "invariant": true,
+      "visual_or_functional_changes_allowed": false
+    }
+  },
+  "invariant_settings_tabs": [
+    "General",
+    "MCP Servers",
+    "Langflow API Keys",
+    "Langflow MCP Client",
+    "Shortcuts"
+  ],
+  "discover_more_components_policy": {
+    "modified_bundles": [
+      "ToolGuard / Policies (ALTK)"
+    ],
+    "other_bundles_invariant": true,
+    "preserve_beta_badge_on_policies": true
+  }
+}

@@ -1,0 +1,45 @@
+# Private context, plans, and handover files (NEVER commit to public repo)
+*2026*.md
+plan-*.md
+handover-*.md
+.cortex/
+.snowflake/
+build/
+dist/
+*.egg-info/
+
+# Credentials, keys, certificates, and environment files
+*.pem
+*.key
+*.p8
+*.pfx
+*.crt
+.env
+.env.*
+!.env.example
+*secret*
+*credentials*
+connections.toml
+.pgpass
+
+# Local databases and state
+*.sqlite
+*.sqlite3
+*.sqlite*
+*.db
+*.wal
+*.shm
+preserved-before.json
+preserved-after.json
+
+# Python / Node / OS artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.venv/
+venv/
+node_modules/
+.DS_Store
