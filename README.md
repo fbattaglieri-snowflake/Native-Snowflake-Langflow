@@ -1,15 +1,11 @@
 # SnowflakeLangflow (`lfx_snowflake`)
 
-> ### ⚠️ Disclaimer Importante / Important Notice (Unofficial Personal Fork — Active Testing)
+> ### ⚠️ Important Notice (Unofficial Personal Fork — Active Testing)
 >
-> - **Sviluppo Personale / Personal Development:** Questo repository è uno sviluppo personale e indipendente di **Francesco Battaglieri** ([@fbattaglieri-snowflake](https://github.com/fbattaglieri-snowflake)).  
->   *This repository is an independent personal development project by **Francesco Battaglieri** ([@fbattaglieri-snowflake](https://github.com/fbattaglieri-snowflake)).*
-> - **Non Ufficiale / Not Official:** Questo progetto **NON è un prodotto, rilascio o repository ufficiale di Snowflake Inc.**, **né tantomeno è un progetto ufficiale di Langflow / DataStax**. Le opinioni, scelte architetturali e modifiche qui contenute appartengono esclusivamente all'autore e non impegnano né rappresentano Snowflake Inc. o Langflow.  
->   *This project is **NOT an official product, release, or repository of Snowflake Inc.**, **nor is it an official project of Langflow / DataStax**. It is not officially supported, endorsed, or warranted by Snowflake Inc. or Langflow.*
-> - **Natura di Fork / Open-Source Fork:** Questo repository è un **fork pubblico** del progetto open-source upstream [langflow-ai/langflow](https://github.com/langflow-ai/langflow) (`v1.12.5` baseline, licenza MIT), esteso con il pacchetto isolato `lfx_snowflake` per sperimentare l'esecuzione nativa in Snowpark Container Services (SPCS) e l'integrazione con i servizi Snowflake.  
->   *This repository is a **public fork** of the upstream open-source project [langflow-ai/langflow](https://github.com/langflow-ai/langflow) (`v1.12.5` baseline, MIT License).*
-> - **Stato del Progetto — Ancora Oggetto di Test / Under Active Testing:** Questa soluzione è **attualmente oggetto di test, qualifica e validazione attiva (Work in Progress / Experimental Testing)**. API, componenti, schemi SQL e configurazioni possono subire modifiche senza preavviso; non utilizzare in ambienti di produzione senza una propria validazione indipendente.  
->   *This solution is **currently under active testing and validation (Work in Progress / Experimental)**. Do not deploy to production environments without independent qualification and security review.*
+> - **Personal Development:** This repository is an independent personal development project by **Francesco Battaglieri** ([@fbattaglieri-snowflake](https://github.com/fbattaglieri-snowflake)).
+> - **Not Official:** This project is **NOT an official product, release, or repository of Snowflake Inc.**, **nor is it an official project of Langflow / DataStax**. All views, architectural choices, and modifications contained herein belong solely to the author and are not officially supported, endorsed, or warranted by Snowflake Inc. or Langflow.
+> - **Open-Source Fork:** This repository is a **public fork** of the upstream open-source project [langflow-ai/langflow](https://github.com/langflow-ai/langflow) (`v1.12.5` baseline, MIT License), extended with the isolated `lfx_snowflake` package to experiment with native execution in Snowpark Container Services (SPCS) and integration with Snowflake services.
+> - **Under Active Testing:** This solution is **currently under active testing, qualification, and validation (Work in Progress / Experimental Testing)**. APIs, components, SQL schemas, and configurations may change without notice; do not deploy to production environments without independent qualification and security review.
 
 Snowflake-native extension bundle, governance layer, and Snowpark Container Services (SPCS) runtime integration for [Langflow](https://github.com/langflow-ai/langflow) (`v1.12.5` baseline, MIT License).
 

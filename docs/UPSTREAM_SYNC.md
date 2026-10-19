@@ -1,6 +1,6 @@
 # Upstream Synchronization & Fork Maintenance Guide (`ADR-001`)
 
-> **Disclaimer & Ownership:** This repository is a personal, independent fork developed by **Francesco Battaglieri** ([@fbattaglieri-snowflake](https://github.com/fbattaglieri-snowflake)) based on the upstream open-source project [langflow-ai/langflow](https://github.com/langflow-ai/langflow) (`v1.12.5`, MIT License). **It is NOT an official project or product of Snowflake Inc. nor of Langflow / DataStax**, and it is **currently under active testing and validation (ancora oggetto di test)**.
+> **Disclaimer & Ownership:** This repository is a personal, independent fork developed by **Francesco Battaglieri** ([@fbattaglieri-snowflake](https://github.com/fbattaglieri-snowflake)) based on the upstream open-source project [langflow-ai/langflow](https://github.com/langflow-ai/langflow) (`v1.12.5`, MIT License). **It is NOT an official project or product of Snowflake Inc. nor of Langflow / DataStax**, and it is **currently under active testing and validation (Work in Progress / Experimental Testing)**.
 
 **Upstream Repository:** `https://github.com/langflow-ai/langflow.git` (Read-Only Remote `upstream`)  
 **Baseline Tag:** `v1.12.5` (MIT License)  

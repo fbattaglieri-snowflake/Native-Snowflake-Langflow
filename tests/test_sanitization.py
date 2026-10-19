@@ -124,11 +124,10 @@ def test_fork_disclaimer_author_and_upstream_update_rules_present() -> None:
         assert "Francesco Battaglieri" in doc_text
         assert "fbattaglieri-snowflake" in doc_text
 
-    assert "NON è un prodotto, rilascio o repository ufficiale di Snowflake Inc." in readme_text
-    assert "né tantomeno è un progetto ufficiale di Langflow" in readme_text
-    assert "fork pubblico" in readme_text.lower()
+    assert "NOT an official product, release, or repository of Snowflake Inc." in readme_text
+    assert "nor is it an official project of Langflow" in readme_text
+    assert "public fork" in readme_text.lower()
     assert "langflow-ai/langflow" in readme_text
-    assert "oggetto di test" in readme_text.lower()
     assert "active testing" in readme_text.lower()
 
     for rule_num in range(1, 8):

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import re
 import shutil
 from pathlib import Path
 
@@ -82,18 +83,13 @@ def install_all() -> None:
         LANGFLOW_MAIN.write_text(main_text, encoding="utf-8")
         print("[install_live_hooks] Patched langflow/main.py with register_snowflake_fastapi_routes(app)")
 
-    # 5. Patch compiled React bundle in langflow/frontend/assets/index-*.js
-    for js_asset in (LANGFLOW_FRONTEND / "assets").glob("index-*.js"):
+    # 5. Patch compiled React bundle in langflow/frontend/assets/*.js
+    for js_asset in (LANGFLOW_FRONTEND / "assets").glob("*.js"):
         txt = js_asset.read_text(encoding="utf-8", errors="ignore")
-        if "https://github.com/langflow-ai/langflow" not in txt:
-            continue
+        orig = txt
         txt = txt.replace(
-            'D6e="https://github.com/langflow-ai/langflow"',
-            'D6e="https://github.com/fbattaglieri-snowflake/SnowflakeLangflow"',
-        )
-        txt = txt.replace(
-            'I7r="https://github.com/langflow-ai/langflow/issues"',
-            'I7r="https://github.com/fbattaglieri-snowflake/SnowflakeLangflow/issues"',
+            "https://github.com/langflow-ai/langflow",
+            "https://github.com/fbattaglieri-snowflake/SnowflakeLangflow",
         )
         txt = txt.replace(
             'xNn="https://docs.langflow.org"',
@@ -107,10 +103,35 @@ def install_all() -> None:
             '"page.welcomeTitle":"Welcome to Langflow"',
             '"page.welcomeTitle":"Welcome to SnowflakeLangflow"',
         )
-        js_asset.write_text(txt, encoding="utf-8")
-        print(f"[install_live_hooks] Patched React bundle {js_asset.name}")
+        txt = txt.replace(
+            '"settings.nav.modelProviders":"Model Providers"',
+            '"settings.nav.modelProviders":"Additional Model Providers"',
+        )
+        txt = txt.replace(
+            '"modelProviders.pageTitle":"Model Providers"',
+            '"modelProviders.pageTitle":"Additional Model Providers"',
+        )
+        txt = txt.replace(
+            '"modelProviders.pageDescription":"Configure AI model providers and manage their API keys."',
+            '"modelProviders.pageDescription":"Snowflake Proxy (Chat /chat/v1, Responses /responses/v1, Messages /messages) and Snowflake-hosted Ollama are pre-configured in Models & Agents. Configure any additional external model providers below."',
+        )
+        txt = txt.replace(
+            '"settings.nav.dbProviders":"DB Providers"',
+            '"settings.nav.dbProviders":"Additional DB Providers"',
+        )
+        txt = txt.replace(
+            '"settings.dbProviders.title":"DB Providers"',
+            '"settings.dbProviders.title":"Additional DB Providers"',
+        )
+        txt = txt.replace(
+            '"settings.dbProviders.description":"Configure vector-store providers for Knowledge Bases."',
+            '"settings.dbProviders.description":"Snowflake Vector Stores (Standard Table VECTOR, Hybrid Table VECTOR, Cortex Search, Snowflake Postgres pgvector) are pre-configured in Files & Knowledge. Configure any additional DB providers below."',
+        )
+        if txt != orig:
+            js_asset.write_text(txt, encoding="utf-8")
+            print(f"[install_live_hooks] Patched React bundle {js_asset.name}")
 
-    # 6. Copy snowflake-ui-integration.js into Langflow static frontend and link in index.html + CSS rules
+    # 6. Copy snowflake-ui-integration.js into Langflow static frontend and link in index.html + cache-busting query param
     ui_js_src = SOURCE_ROOT / "frontend_patches" / "snowflake-ui-integration.js"
     ui_js_dest = LANGFLOW_FRONTEND / "snowflake-ui-integration.js"
     shutil.copyfile(ui_js_src, ui_js_dest)
@@ -118,6 +139,11 @@ def install_all() -> None:
     index_html = LANGFLOW_FRONTEND / "index.html"
     html_text = index_html.read_text(encoding="utf-8")
     html_text = html_text.replace("<title>Langflow</title>", "<title>SnowflakeLangflow</title>")
+    html_text = re.sub(
+        r'src="(\./assets/index-[^"?]+\.js)(?:\?[^"]*)?"',
+        r'src="\1?v=sflf031"',
+        html_text,
+    )
     inject_block = (
         "    <style>\n"
         '      [data-testid="empty_page_discord_button"],\n'
@@ -126,13 +152,19 @@ def install_all() -> None:
         '      [data-testid="empty_page_logo_light"],\n'
         '      [data-testid="empty_page_logo_dark"] { display: none !important; }\n'
         "    </style>\n"
-        '    <script defer src="./snowflake-ui-integration.js"></script>\n'
+        '    <script defer src="./snowflake-ui-integration.js?v=sflf031"></script>\n'
         "  </head>"
     )
     if "snowflake-ui-integration.js" not in html_text:
         html_text = html_text.replace("  </head>", inject_block, 1)
-        index_html.write_text(html_text, encoding="utf-8")
-        print("[install_live_hooks] Injected CSS rules and snowflake-ui-integration.js into index.html")
+    else:
+        html_text = re.sub(
+            r'src="\./snowflake-ui-integration\.js(?:\?[^"]*)?"',
+            'src="./snowflake-ui-integration.js?v=sflf031"',
+            html_text,
+        )
+    index_html.write_text(html_text, encoding="utf-8")
+    print("[install_live_hooks] Updated index.html with cache-busted bundle and snowflake-ui-integration.js?v=sflf031")
 
     # 7. Verify component_index.json integrity and FastAPI routes
     from langflow.main import create_app

@@ -17,6 +17,14 @@ try:
 except ImportError:  # pragma: no cover
     httpx = None  # type: ignore[assignment]
 
+try:
+    from fastapi import APIRouter, Request
+    from fastapi.responses import JSONResponse
+except ImportError:  # pragma: no cover
+    APIRouter = Any  # type: ignore[assignment,misc]
+    Request = Any  # type: ignore[assignment,misc]
+    JSONResponse = Any  # type: ignore[assignment,misc]
+
 from .bundle_manifest import (
     ERROR_TAXONOMY_CONTRACT,
     INVARIANT_CATEGORIES_MANIFEST,
@@ -656,5 +664,132 @@ def register_snowflake_fastapi_routes(app: Any) -> None:
             details=entry,
         )
         return JSONResponse(status_code=201, content={"ok": True, "memory": entry, "ddl": ddl})
+
+    @sf_router.post("/mcp/streamable")
+    async def post_mcp_streamable(request: Request) -> JSONResponse:
+        """Native MCP Streamable HTTP JSON-RPC endpoint for Cortex Code CLI & Cortex Code Desktop."""
+        LIVE_BRIDGE.sync_superuser_credentials()
+        msg = await request.json()
+        method = str(msg.get("method") or "")
+        msg_id = msg.get("id")
+
+        if method.startswith("notifications/"):
+            return JSONResponse(status_code=202, content={"ok": True})
+
+        if method == "initialize":
+            return JSONResponse(
+                status_code=200,
+                content={
+                    "jsonrpc": "2.0",
+                    "id": msg_id,
+                    "result": {
+                        "protocolVersion": "2024-11-05",
+                        "capabilities": {
+                            "tools": {"listChanged": False},
+                            "resources": {"listChanged": False, "subscribe": False},
+                            "prompts": {"listChanged": False},
+                        },
+                        "serverInfo": {
+                            "name": "snowflake-langflow",
+                            "version": "0.3.1",
+                        },
+                    },
+                },
+            )
+
+        if method == "ping":
+            return JSONResponse(status_code=200, content={"jsonrpc": "2.0", "id": msg_id, "result": {}})
+
+        if method == "tools/list":
+            tools = [
+                {
+                    "name": "snowflake_get_context",
+                    "description": "Get active Snowflake role, context_epoch, database, schema, and replicated trace tables in SnowflakeLangflow.",
+                    "inputSchema": {"type": "object", "properties": {}},
+                },
+                {
+                    "name": "snowflake_switch_role",
+                    "description": "Switch the active Snowflake role in SnowflakeLangflow and increment context_epoch.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {"target_role": {"type": "string", "description": "Target Snowflake role"}},
+                        "required": ["target_role"],
+                    },
+                },
+                {
+                    "name": "snowflake_query_sql",
+                    "description": "Execute a governed SQL statement in SnowflakeLangflow under the active Snowflake role.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {"statement": {"type": "string", "description": "SQL query to execute"}},
+                        "required": ["statement"],
+                    },
+                },
+                {
+                    "name": "snowflake_sync_traces",
+                    "description": "Synchronize Langflow Flow Activity runs and spans into Snowflake SQL tables (LANGFLOW_FLOW_RUNS, LANGFLOW_FLOW_SPANS, LANGFLOW_AUDIT_LOG).",
+                    "inputSchema": {"type": "object", "properties": {"limit": {"type": "integer", "default": 20}}},
+                },
+            ]
+            return JSONResponse(
+                status_code=200,
+                content={"jsonrpc": "2.0", "id": msg_id, "result": {"tools": tools}},
+            )
+
+        if method == "tools/call":
+            params = msg.get("params") or {}
+            tool_name = str(params.get("name") or "")
+            args = params.get("arguments") or {}
+
+            if tool_name == "snowflake_get_context":
+                LIVE_BRIDGE.refresh_roles_from_snowflake()
+                payload = {
+                    "active_role": LIVE_BRIDGE.active_role,
+                    "available_roles": LIVE_BRIDGE.available_roles,
+                    "context_epoch": LIVE_BRIDGE.context_epoch,
+                    "database": LIVE_BRIDGE.database,
+                    "schema": LIVE_BRIDGE.schema,
+                    "traces_tables": {
+                        "runs": LIVE_BRIDGE.runs_table,
+                        "spans": LIVE_BRIDGE.spans_table,
+                        "audit": LIVE_BRIDGE.audit_table,
+                    },
+                }
+            elif tool_name == "snowflake_switch_role":
+                payload = LIVE_BRIDGE.switch_role(str(args.get("target_role") or "ACCOUNTADMIN"))
+            elif tool_name == "snowflake_query_sql":
+                payload = LIVE_BRIDGE.execute_sql(str(args.get("statement") or "SELECT CURRENT_ROLE()"))
+            elif tool_name == "snowflake_sync_traces":
+                payload = LIVE_BRIDGE.sync_langflow_traces_to_snowflake(limit=int(args.get("limit") or 20))
+            else:
+                return JSONResponse(
+                    status_code=200,
+                    content={
+                        "jsonrpc": "2.0",
+                        "id": msg_id,
+                        "error": {"code": -32601, "message": f"Unknown tool: {tool_name}"},
+                    },
+                )
+
+            return JSONResponse(
+                status_code=200,
+                content={
+                    "jsonrpc": "2.0",
+                    "id": msg_id,
+                    "result": {
+                        "content": [{"type": "text", "text": json.dumps(payload, indent=2)}],
+                        "isError": False,
+                    },
+                },
+            )
+
+        if method in ("resources/list", "resources/templates/list", "prompts/list"):
+            key = "prompts" if "prompts" in method else ("resourceTemplates" if "templates" in method else "resources")
+            return JSONResponse(status_code=200, content={"jsonrpc": "2.0", "id": msg_id, "result": {key: []}})
+
+        return JSONResponse(
+            status_code=200,
+            content={"jsonrpc": "2.0", "id": msg_id, "error": {"code": -32601, "message": f"Unsupported method {method}"}},
+        )
 
     app.include_router(sf_router)
