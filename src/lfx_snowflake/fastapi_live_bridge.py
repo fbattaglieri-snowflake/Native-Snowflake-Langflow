@@ -64,6 +64,33 @@ class LiveSnowflakeBridge:
         self.secondary_roles_mode: str = "NONE"
         self.memories_registry: list[dict[str, Any]] = []
         self._roles_discovered: bool = False
+        self._superuser_synced: bool = False
+
+    def sync_superuser_credentials(self) -> None:
+        """Ensure the SQLite `user` table superuser matches `LANGFLOW_SUPERUSER` and `LANGFLOW_SUPERUSER_PASSWORD`."""
+        if self._superuser_synced:
+            return
+        su_user = os.getenv("LANGFLOW_SUPERUSER", "").strip()
+        su_pass = os.getenv("LANGFLOW_SUPERUSER_PASSWORD", "").strip()
+        persist_dir = Path(os.getenv("LANGFLOW_PERSIST_DIR", "/persist"))
+        db_path = persist_dir / "langflow.db"
+        if not su_user or not su_pass or not db_path.exists():
+            return
+        try:
+            from langflow.services.auth.utils import get_password_hash
+
+            hashed = get_password_hash(su_pass)
+            conn = sqlite3.connect(str(db_path))
+            cur = conn.cursor()
+            cur.execute(
+                "UPDATE user SET username = ?, password = ?, is_active = 1, is_superuser = 1 WHERE is_superuser = 1",
+                (su_user, hashed),
+            )
+            conn.commit()
+            conn.close()
+            self._superuser_synced = True
+        except Exception:  # noqa: BLE001
+            pass
 
     def _has_spcs_token(self) -> bool:
         return SPCS_TOKEN_PATH.exists() and bool(os.getenv("SNOWFLAKE_HOST"))
@@ -400,8 +427,12 @@ def register_snowflake_fastapi_routes(app: Any) -> None:
     sf_router = APIRouter(prefix="/api/v1/snowflake", tags=["SnowflakeLangflow"])
 
     @sf_router.get("/context")
-    async def get_snowflake_context() -> JSONResponse:
+    async def get_snowflake_context(request: Request) -> JSONResponse:
+        LIVE_BRIDGE.sync_superuser_credentials()
         LIVE_BRIDGE.refresh_roles_from_snowflake()
+        sf_header_user = request.headers.get("Sf-Context-Current-User")
+        if sf_header_user:
+            LIVE_BRIDGE.authenticated_user = sf_header_user
         return JSONResponse(
             status_code=200,
             content={
