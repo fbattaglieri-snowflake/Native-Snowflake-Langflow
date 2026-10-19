@@ -24,7 +24,7 @@ def test_denylist_contains_all_14_mandatory_identifiers() -> None:
     expected = {
         "JK01" + "775",
         "sfsenorth" + "america",
-        "fbattaglieri_" + "aws_fra",
+        "fbatt" + "aglieri_" + "aws_fra",
         "aws:" + "frankfurt",
         "bv" + "dx",
         "Snow" + "house",
