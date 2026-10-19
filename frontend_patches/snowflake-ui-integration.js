@@ -1,13 +1,12 @@
 /**
- * SnowflakeLangflow Live UI Integration Script (v0.3.1)
+ * SnowflakeLangflow Live UI Integration Script (v0.3.3 — 100% React 18 Virtual-DOM Safe)
  *
- * - Official black Snowflake vector mark in top-left header with NO border/rectangle wrapper.
- * - Does not touch `[data-testid="mainpage_title"]` on Settings pages (`< Settings` remains clean).
- * - Intercepts `window.open` and all GitHub buttons/links so every GitHub click opens
- *   `https://github.com/fbattaglieri-snowflake/SnowflakeLangflow`.
- * - Removes all Discord and X/Twitter buttons and cards everywhere.
- * - Enhances `Additional Model Providers` and `Additional DB Providers` in Settings with a summary
- *   banner of the built-in Snowflake Proxy (Chat, Responses, Messages) + Ollama and Snowflake DB backends.
+ * CRITICAL INVARIANT:
+ * Never call `appendChild`, `insertBefore`, `removeChild`, or mutate `innerHTML` on ANY node
+ * inside `<div id="root">`. React 18 owns `#root` exclusively. All native logos, links, and
+ * i18n labels inside `#root` are compiled into `assets/index-*.js` at build time, while the
+ * interactive Role Selector bar and Snowflake Hub modal are mounted directly on `document.body`
+ * outside `#root`.
  */
 (function () {
   "use strict";
@@ -30,6 +29,27 @@
     return _origWindowOpen.call(window, url, target, features);
   };
 
+  // Capture-phase click listener on document (never mutates React DOM nodes)
+  document.addEventListener(
+    "click",
+    function (ev) {
+      const target = ev.target && ev.target.closest ? ev.target.closest("a, button") : null;
+      if (!target) return;
+      const testId = target.getAttribute("data-testid") || "";
+      const href = target.getAttribute("href") || "";
+      if (
+        testId === "empty_page_github_button" ||
+        testId === "menu_github_button" ||
+        href.includes("github.com/langflow-ai/langflow")
+      ) {
+        ev.preventDefault();
+        ev.stopPropagation();
+        _origWindowOpen.call(window, FORK_GITHUB_URL, "_blank", "noopener,noreferrer");
+      }
+    },
+    true
+  );
+
   const OFFICIAL_SNOWFLAKE_PATH =
     "M9.86 15.298l13.008 7.8a3.72 3.72 0 0 0 4.589-.601 4.01 4.01 0 0 0 1.227-2.908V3.956a3.81 3.81 0 0 0-1.861-3.42 3.81 3.81 0 0 0-3.893 0 3.81 3.81 0 0 0-1.861 3.42v8.896l-7.387-4.43a3.79 3.79 0 0 0-2.922-.4c-.986.265-1.818.94-2.3 1.844-1.057 1.9-.44 4.28 1.4 5.422m31.27 7.8l13.008-7.8c1.84-1.143 2.458-3.533 1.4-5.424a3.75 3.75 0 0 0-5.22-1.452l-7.3 4.37v-8.84a3.81 3.81 0 1 0-7.615 0v15.323a4.08 4.08 0 0 0 .494 2.367c.482.903 1.314 1.57 2.3 1.844a3.71 3.71 0 0 0 2.922-.4M29.552 31.97c.013-.25.108-.5.272-.68l1.52-1.58a1.06 1.06 0 0 1 .658-.282h.057a1.05 1.05 0 0 1 .656.282l1.52 1.58a1.12 1.12 0 0 1 .272.681v.06a1.13 1.13 0 0 1-.272.683l-1.52 1.58a1.04 1.04 0 0 1-.656.284h-.057c-.246-.014-.48-.115-.658-.284l-1.52-1.58a1.13 1.13 0 0 1-.272-.683zm-4.604-.65v1.364a1.54 1.54 0 0 0 .372.93l5.16 5.357a1.42 1.42 0 0 0 .895.386h1.312a1.42 1.42 0 0 0 .895-.386l5.16-5.357a1.54 1.54 0 0 0 .372-.93V31.32a1.54 1.54 0 0 0-.372-.93l-5.16-5.357a1.42 1.42 0 0 0-.895-.386h-1.312a1.42 1.42 0 0 0-.895.386L25.32 30.4a1.55 1.55 0 0 0-.372.93M3.13 27.62l7.365 4.417L3.13 36.45a4.06 4.06 0 0 0-1.399 5.424 3.75 3.75 0 0 0 2.3 1.844c.986.274 2.042.133 2.922-.392l13.008-7.8c1.2-.762 1.9-2.078 1.9-3.492a4.16 4.16 0 0 0-1.9-3.492l-13.008-7.8a3.79 3.79 0 0 0-2.922-.4c-.986.265-1.818.94-2.3 1.844-1.057 1.9-.44 4.278 1.4 5.422m38.995 4.442a4 4 0 0 0 1.91 3.477l13 7.8c.88.524 1.934.666 2.92.392s1.817-.94 2.3-1.843a4.05 4.05 0 0 0-1.4-5.424L53.5 32.038l7.365-4.417c1.84-1.143 2.457-3.53 1.4-5.422a3.74 3.74 0 0 0-2.3-1.844c-.987-.274-2.042-.134-2.92.4l-13 7.8a4 4 0 0 0-1.91 3.507M25.48 40.508a3.7 3.7 0 0 0-2.611.464l-13.008 7.8c-1.84 1.143-2.456 3.53-1.4 5.422.483.903 1.314 1.57 2.3 1.843a3.75 3.75 0 0 0 2.922-.392l7.387-4.43v8.83a3.81 3.81 0 1 0 7.614 0V44.4a3.91 3.91 0 0 0-3.205-3.903m28.66 8.276l-13.008-7.8a3.75 3.75 0 0 0-2.922-.392 3.74 3.74 0 0 0-2.3 1.843 4.09 4.09 0 0 0-.494 2.37v15.25a3.81 3.81 0 1 0 7.614 0V51.28l7.287 4.37a3.79 3.79 0 0 0 2.922.4c.986-.265 1.818-.94 2.3-1.844 1.057-1.9.44-4.28-1.4-5.422";
 
@@ -38,8 +58,8 @@
     return `<svg xmlns="http://www.w3.org/2000/svg" width="${sz}" height="${sz}" viewBox="0 0 64 64" fill="${fill}" style="display:inline-block;vertical-align:middle;flex-shrink:0;"><path d="${OFFICIAL_SNOWFLAKE_PATH}"/></svg>`;
   }
 
-  const SNOWFLAKE_SVG_BLACK = buildOfficialSnowflakeSvg("#000000", 22);
-  const SNOWFLAKE_SVG_COLOR = buildOfficialSnowflakeSvg("#29b5e8", 16);
+  const SNOWFLAKE_SVG_BLACK = buildOfficialSnowflakeSvg("#000000", 16);
+  const SNOWFLAKE_SVG_COLOR = buildOfficialSnowflakeSvg("#29b5e8", 15);
 
   let sfState = {
     active_role: "ACCOUNTADMIN",
@@ -124,131 +144,39 @@
     }
   }
 
-  function applyDomCustomizations() {
-    // 1. Top-left header: Official Black Snowflake Logo WITHOUT any border or rounded rectangle
-    const headerLeft = document.querySelector('[data-testid="header_left_section_wrapper"]');
-    if (headerLeft && !document.getElementById("sflf-header-left-logo")) {
-      const badge = document.createElement("div");
-      badge.id = "sflf-header-left-logo";
-      badge.style.cssText =
-        "display:inline-flex;align-items:center;gap:6px;padding:0 4px;background:transparent;border:none;box-shadow:none;";
-      badge.innerHTML = `${SNOWFLAKE_SVG_BLACK}`;
-      headerLeft.appendChild(badge);
-    }
+  // Mount Role Selector bar directly on document.body (OUTSIDE #root) so React's Virtual DOM reconciler
+  // never encounters foreign child nodes during route transitions!
+  function mountFixedTopbarControls() {
+    if (document.getElementById("sflf-body-topbar-controls")) return;
+    const ctrl = document.createElement("div");
+    ctrl.id = "sflf-body-topbar-controls";
+    ctrl.style.cssText =
+      "position:fixed;top:9px;right:126px;z-index:9990;display:inline-flex;align-items:center;gap:6px;background:transparent;color:#09090b;padding:2px 6px;font-family:Inter,sans-serif;font-size:12px;";
+    ctrl.innerHTML = `
+      <span style="display:inline-flex;align-items:center;">${SNOWFLAKE_SVG_BLACK}</span>
+      <label style="font-weight:600;color:#18181b;">Role:</label>
+      <select id="sflf-role-select" style="background:#ffffff;color:#09090b;border:1px solid #d4d4d8;border-radius:5px;padding:2px 6px;font-size:11px;font-weight:600;cursor:pointer;"></select>
+      <span id="sflf-epoch-badge" style="background:#f4f4f5;color:#18181b;padding:1px 5px;border-radius:4px;font-size:10px;font-family:monospace;">epoch #${sfState.context_epoch}</span>
+      <button id="sflf-open-hub-btn" style="background:#09090b;color:#ffffff;border:none;border-radius:5px;padding:3px 8px;font-size:11px;font-weight:600;cursor:pointer;">Snowflake Hub</button>
+      <a href="${SNOWFLAKE_DOCS_URL}" target="_blank" rel="noopener noreferrer" title="Snowflake Documentation" style="display:inline-flex;align-items:center;gap:4px;color:#0284c7;text-decoration:none;font-weight:600;font-size:11px;padding-left:2px;">
+        ${SNOWFLAKE_SVG_COLOR} Docs
+      </a>
+    `;
+    document.body.appendChild(ctrl);
 
-    // 2. Top-right header: mount Role Selector & Snowflake Hub next to notifications/profile
-    const headerRight = document.querySelector('[data-testid="header_right_section_wrapper"]');
-    if (headerRight && !document.getElementById("sflf-header-right-controls")) {
-      const ctrl = document.createElement("div");
-      ctrl.id = "sflf-header-right-controls";
-      ctrl.style.cssText =
-        "display:inline-flex;align-items:center;gap:6px;color:#09090b;padding:2px 6px;font-size:12px;";
-      ctrl.innerHTML = `
-        <span style="display:inline-flex;align-items:center;">${buildOfficialSnowflakeSvg("#000000", 16)}</span>
-        <label style="font-weight:600;color:inherit;">Role:</label>
-        <select id="sflf-role-select" style="background:#ffffff;color:#09090b;border:1px solid #d4d4d8;border-radius:5px;padding:2px 6px;font-size:11px;font-weight:600;cursor:pointer;"></select>
-        <span id="sflf-epoch-badge" style="background:#f4f4f5;color:#18181b;padding:1px 5px;border-radius:4px;font-size:10px;font-family:monospace;">epoch #${sfState.context_epoch}</span>
-        <button id="sflf-open-hub-btn" style="background:#09090b;color:#ffffff;border:none;border-radius:5px;padding:3px 8px;font-size:11px;font-weight:600;cursor:pointer;">Snowflake Hub</button>
-        <a href="${SNOWFLAKE_DOCS_URL}" target="_blank" rel="noopener noreferrer" title="Snowflake Documentation" style="display:inline-flex;align-items:center;gap:4px;color:#0284c7;text-decoration:none;font-weight:600;font-size:11px;padding-left:2px;">
-          ${SNOWFLAKE_SVG_COLOR} Docs
-        </a>
-      `;
-      headerRight.insertBefore(ctrl, headerRight.firstChild);
-
-      const sel = document.getElementById("sflf-role-select");
-      if (sel) {
-        sel.onchange = function (ev) {
-          switchSnowflakeRole(ev.target.value);
-        };
-      }
-      const hubBtn = document.getElementById("sflf-open-hub-btn");
-      if (hubBtn) {
-        hubBtn.onclick = function () {
-          openSnowflakeHubModal();
-        };
-      }
-      updateTopbarWidgets();
-    }
-
-    // 3. Remove ALL Discord & X/Twitter buttons/cards everywhere
-    const discordSelectors = [
-      '[data-testid="empty_page_discord_button"]',
-      '[data-testid="menu_discord_button"]',
-      '[data-testid="menu_twitter_button"]',
-      'a[href*="discord.com"]',
-      'a[href*="discord.gg"]',
-      'a[href*="x.com"]',
-      'a[href*="twitter.com"]',
-    ];
-    discordSelectors.forEach(function (sel) {
-      document.querySelectorAll(sel).forEach(function (el) {
-        const wrapper = el.closest("a") || el;
-        wrapper.style.display = "none";
-      });
-    });
-
-    document.querySelectorAll("button").forEach(function (btn) {
-      const txt = (btn.textContent || "").trim().toLowerCase();
-      if (txt === "discord" || txt.includes("go to discord") || txt.includes("join builders, ask questions")) {
-        btn.style.display = "none";
-      }
-      if (txt.includes("go to github")) {
-        btn.onclick = function (ev) {
-          ev.preventDefault();
-          ev.stopPropagation();
-          _origWindowOpen.call(window, FORK_GITHUB_URL, "_blank", "noopener,noreferrer");
-        };
-      }
-    });
-
-    // 4. Update Welcome page GitHub card & topbar GitHub links to point to fbattaglieri-snowflake/SnowflakeLangflow
-    const ghCard = document.querySelector('[data-testid="empty_page_github_button"]');
-    if (ghCard && !ghCard.getAttribute("data-sflf-patched")) {
-      ghCard.setAttribute("data-sflf-patched", "true");
-      const titleSpans = ghCard.querySelectorAll("span");
-      titleSpans.forEach(function (sp) {
-        if (sp.textContent === "GitHub") {
-          sp.textContent = "GitHub Fork — fbattaglieri-snowflake/SnowflakeLangflow";
-        } else if (sp.classList.contains("font-mono")) {
-          sp.textContent = "";
-        } else if (sp.textContent && sp.textContent.includes("Follow development")) {
-          sp.textContent =
-            "Unofficial personal fork by Francesco Battaglieri (not official Snowflake or Langflow) — Under Active Testing.";
-        }
-      });
-      ghCard.onclick = function (ev) {
-        ev.preventDefault();
-        ev.stopPropagation();
-        _origWindowOpen.call(window, FORK_GITHUB_URL, "_blank", "noopener,noreferrer");
+    const sel = document.getElementById("sflf-role-select");
+    if (sel) {
+      sel.onchange = function (ev) {
+        switchSnowflakeRole(ev.target.value);
       };
     }
-
-    document.querySelectorAll('a[href*="github.com/langflow-ai"]').forEach(function (a) {
-      a.setAttribute("href", FORK_GITHUB_URL);
-    });
-
-    // 5. Welcome page center logo: ONLY on the actual Welcome screen (when empty_page_github_button exists),
-    // and WITHOUT any rounded rectangle border! Never touch `[data-testid="mainpage_title"]` on Settings!
-    const welcomeTitle = document.querySelector('[data-testid="mainpage_title"]');
-    if (welcomeTitle && ghCard && !document.getElementById("sflf-welcome-snowflake-logo")) {
-      const logoHolder = document.createElement("div");
-      logoHolder.id = "sflf-welcome-snowflake-logo";
-      logoHolder.style.cssText =
-        "display:inline-flex;align-items:center;justify-content:center;padding:4px;background:transparent;border:none;box-shadow:none;margin-bottom:4px;";
-      logoHolder.innerHTML = `${buildOfficialSnowflakeSvg("#000000", 48)}`;
-      welcomeTitle.parentNode.insertBefore(logoHolder, welcomeTitle);
+    const hubBtn = document.getElementById("sflf-open-hub-btn");
+    if (hubBtn) {
+      hubBtn.onclick = function () {
+        openSnowflakeHubModal();
+      };
     }
-
-    // 6. Profile menu Docs entry -> Snowflake Documentation with official color Snowflake icon
-    const menuDocs = document.getElementById("menu_docs_button");
-    if (menuDocs && !menuDocs.getAttribute("data-sflf-docs")) {
-      menuDocs.setAttribute("data-sflf-docs", "true");
-      menuDocs.innerHTML = `<span style="display:inline-flex;align-items:center;gap:8px;">${SNOWFLAKE_SVG_COLOR}<span>Snowflake Documentation</span></span>`;
-      const anchor = menuDocs.closest("a");
-      if (anchor) {
-        anchor.setAttribute("href", SNOWFLAKE_DOCS_URL);
-      }
-    }
+    updateTopbarWidgets();
   }
 
   function updateTopbarWidgets() {
@@ -414,12 +342,8 @@
   }
 
   function bootSnowflakeUI() {
-    applyDomCustomizations();
+    mountFixedTopbarControls();
     fetchSnowflakeContext();
-    const obs = new MutationObserver(function () {
-      applyDomCustomizations();
-    });
-    obs.observe(document.body, { childList: true, subtree: true });
   }
 
   if (document.readyState === "loading") {

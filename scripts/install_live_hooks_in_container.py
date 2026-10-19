@@ -1,10 +1,11 @@
-"""Build-time installer that wires SnowflakeLangflow components into native built-in categories, patches the React bundle, and mounts `/api/v1/snowflake/*`."""
+"""Build-time installer that wires SnowflakeLangflow components into native built-in categories, patches the React bundle safely, and mounts `/api/v1/snowflake/*`."""
 
 from __future__ import annotations
 
 import hashlib
 import re
 import shutil
+import urllib.parse
 from pathlib import Path
 
 import orjson
@@ -16,6 +17,31 @@ LFX_COMPONENTS_DIR = SITE_PACKAGES / "lfx" / "components"
 LFX_INDEX_JSON = SITE_PACKAGES / "lfx" / "_assets" / "component_index.json"
 COMPONENTS_ROOT = Path("/opt/standard-components")
 SOURCE_ROOT = Path("/opt/snowflake-langflow")
+
+OFFICIAL_SNOWFLAKE_PATH = (
+    "M9.86 15.298l13.008 7.8a3.72 3.72 0 0 0 4.589-.601 4.01 4.01 0 0 0 1.227-2.908V3.956a3.81 3.81 0 0 0-1.861-3.42 "
+    "3.81 3.81 0 0 0-3.893 0 3.81 3.81 0 0 0-1.861 3.42v8.896l-7.387-4.43a3.79 3.79 0 0 0-2.922-.4c-.986.265-1.818.94-2.3 "
+    "1.844-1.057 1.9-.44 4.28 1.4 5.422m31.27 7.8l13.008-7.8c1.84-1.143 2.458-3.533 1.4-5.424a3.75 3.75 0 0 0-5.22-1.452l-7.3 "
+    "4.37v-8.84a3.81 3.81 0 1 0-7.615 0v15.323a4.08 4.08 0 0 0 .494 2.367c.482.903 1.314 1.57 2.3 1.844a3.71 3.71 0 0 0 "
+    "2.922-.4M29.552 31.97c.013-.25.108-.5.272-.68l1.52-1.58a1.06 1.06 0 0 1 .658-.282h.057a1.05 1.05 0 0 1 .656.282l1.52 "
+    "1.58a1.12 1.12 0 0 1 .272.681v.06a1.13 1.13 0 0 1-.272.683l-1.52 1.58a1.04 1.04 0 0 1-.656.284h-.057c-.246-.014-.48-.115-.658-.284l-1.52-1.58a1.13 "
+    "1.13 0 0 1-.272-.683zm-4.604-.65v1.364a1.54 1.54 0 0 0 .372.93l5.16 5.357a1.42 1.42 0 0 0 .895.386h1.312a1.42 1.42 0 0 0 "
+    ".895-.386l5.16-5.357a1.54 1.54 0 0 0 .372-.93V31.32a1.54 1.54 0 0 0-.372-.93l-5.16-5.357a1.42 1.42 0 0 0-.895-.386h-1.312a1.42 "
+    "1.42 0 0 0-.895.386L25.32 30.4a1.55 1.55 0 0 0-.372.93M3.13 27.62l7.365 4.417L3.13 36.45a4.06 4.06 0 0 0-1.399 5.424 3.75 "
+    "3.75 0 0 0 2.3 1.844c.986.274 2.042.133 2.922-.392l13.008-7.8c1.2-.762 1.9-2.078 1.9-3.492a4.16 4.16 0 0 0-1.9-3.492l-13.008-7.8a3.79 "
+    "3.79 0 0 0-2.922-.4c-.986.265-1.818.94-2.3 1.844-1.057 1.9-.44 4.278 1.4 5.422m38.995 4.442a4 4 0 0 0 1.91 3.477l13 7.8c.88.524 "
+    "1.934.666 2.92.392s1.817-.94 2.3-1.843a4.05 4.05 0 0 0-1.4-5.424L53.5 32.038l7.365-4.417c1.84-1.143 2.457-3.53 1.4-5.422a3.74 "
+    "3.74 0 0 0-2.3-1.844c-.987-.274-2.042-.134-2.92.4l-13 7.8a4 4 0 0 0-1.91 3.507M25.48 40.508a3.7 3.7 0 0 0-2.611.464l-13.008 "
+    "7.8c-1.84 1.143-2.456 3.53-1.4 5.422.483.903 1.314 1.57 2.3 1.843a3.75 3.75 0 0 0 2.922-.392l7.387-4.43v8.83a3.81 3.81 0 1 0 "
+    "7.614 0V44.4a3.91 3.91 0 0 0-3.205-3.903m28.66 8.276l-13.008-7.8a3.75 3.75 0 0 0-2.922-.392 3.74 3.74 0 0 0-2.3 1.843 4.09 "
+    "4.09 0 0 0-.494 2.37v15.25a3.81 3.81 0 1 0 7.614 0V51.28l7.287 4.37a3.79 3.79 0 0 0 2.922.4c.986-.265 1.818-.94 2.3-1.844 "
+    "1.057-1.9.44-4.28-1.4-5.422"
+)
+
+
+def _svg_data_uri(fill: str) -> str:
+    raw = f'<svg xmlns="http://www.w3.org/2000/svg" width="96" height="96" viewBox="0 0 64 64" fill="{fill}"><path d="{OFFICIAL_SNOWFLAKE_PATH}"/></svg>'
+    return "data:image/svg+xml;utf8," + urllib.parse.quote(raw)
 
 
 def install_all() -> None:
@@ -83,7 +109,15 @@ def install_all() -> None:
         LANGFLOW_MAIN.write_text(main_text, encoding="utf-8")
         print("[install_live_hooks] Patched langflow/main.py with register_snowflake_fastapi_routes(app)")
 
-    # 5. Patch compiled React bundle in langflow/frontend/assets/*.js
+    # 5. Patch compiled React bundle in langflow/frontend/assets/*.js (100% React Virtual-DOM safe!)
+    light_svg_uri = _svg_data_uri("#000000")
+    dark_svg_uri = _svg_data_uri("#ffffff")
+    native_rki_fn = (
+        'function rki(){return v.jsx("span",{className:"inline-flex items-center pl-1",'
+        'children:v.jsx("svg",{xmlns:"http://www.w3.org/2000/svg",width:20,height:20,viewBox:"0 0 64 64",fill:"currentColor",'
+        'children:v.jsx("path",{d:"' + OFFICIAL_SNOWFLAKE_PATH + '"})})})}'
+    )
+
     for js_asset in (LANGFLOW_FRONTEND / "assets").glob("*.js"):
         txt = js_asset.read_text(encoding="utf-8", errors="ignore")
         orig = txt
@@ -94,6 +128,18 @@ def install_all() -> None:
         txt = txt.replace(
             'xNn="https://docs.langflow.org"',
             'xNn="https://docs.snowflake.com/"',
+        )
+        txt = txt.replace(
+            '"account.docs":"Docs"',
+            '"account.docs":"Snowflake Docs"',
+        )
+        txt = txt.replace(
+            'function rki(){return v.jsx(v.Fragment,{})}',
+            native_rki_fn,
+        )
+        txt = txt.replace(
+            'Vvo=""+new URL("logo_dark-DEVbuISE.png",import.meta.url).href,Uvo=""+new URL("logo_light-CIlityAH.png",import.meta.url).href',
+            f'Vvo="{dark_svg_uri}",Uvo="{light_svg_uri}"',
         )
         txt = txt.replace(
             '"page.githubDescription":"Follow development, star the repo, and shape the future."',
@@ -141,7 +187,7 @@ def install_all() -> None:
     html_text = html_text.replace("<title>Langflow</title>", "<title>SnowflakeLangflow</title>")
     html_text = re.sub(
         r'src="(\./assets/index-[^"?]+\.js)(?:\?[^"]*)?"',
-        r'src="\1?v=sflf031"',
+        r'src="\1?v=sflf033"',
         html_text,
     )
     inject_block = (
@@ -149,22 +195,21 @@ def install_all() -> None:
         '      [data-testid="empty_page_discord_button"],\n'
         '      [data-testid="menu_discord_button"],\n'
         '      [data-testid="menu_twitter_button"],\n'
-        '      [data-testid="empty_page_logo_light"],\n'
-        '      [data-testid="empty_page_logo_dark"] { display: none !important; }\n'
+        '      [data-testid="header_right_section_wrapper"] [data-testid="icon-Discord"] { display: none !important; }\n'
         "    </style>\n"
-        '    <script defer src="./snowflake-ui-integration.js?v=sflf031"></script>\n'
+        '    <script defer src="./snowflake-ui-integration.js?v=sflf033"></script>\n'
         "  </head>"
     )
     if "snowflake-ui-integration.js" not in html_text:
         html_text = html_text.replace("  </head>", inject_block, 1)
     else:
         html_text = re.sub(
-            r'src="\./snowflake-ui-integration\.js(?:\?[^"]*)?"',
-            'src="./snowflake-ui-integration.js?v=sflf031"',
+            r"<style>[\s\S]*?</style>\s*<script defer src=\"\./snowflake-ui-integration\.js[^\"]*\"></script>\s*</head>",
+            inject_block,
             html_text,
         )
     index_html.write_text(html_text, encoding="utf-8")
-    print("[install_live_hooks] Updated index.html with cache-busted bundle and snowflake-ui-integration.js?v=sflf031")
+    print("[install_live_hooks] Updated index.html with cache-busted bundle and snowflake-ui-integration.js?v=sflf033")
 
     # 7. Verify component_index.json integrity and FastAPI routes
     from langflow.main import create_app
