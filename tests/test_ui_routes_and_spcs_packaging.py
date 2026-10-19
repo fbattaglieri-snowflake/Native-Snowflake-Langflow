@@ -454,8 +454,18 @@ def test_live_fastapi_bridge_and_ui_integration_bundle() -> None:
     assert "SNOWFLAKE_SVG_BLACK" in ui_js
     assert "SNOWFLAKE_SVG_COLOR" in ui_js
 
-    comp_dir = REPO_ROOT / "src" / "lfx_snowflake" / "langflow_custom_components"
-    assert (comp_dir / "snowflake_data_sources" / "data_sources_and_analyst.py").exists()
-    assert (comp_dir / "snowflake_llm_operations" / "ai_function_and_ops.py").exists()
-    assert (comp_dir / "snowflake_files_and_knowledge" / "stage_and_memories.py").exists()
-    assert (comp_dir / "snowflake_agents_and_governance" / "agents_and_governance.py").exists()
+    comp_dir = REPO_ROOT / "src" / "lfx_snowflake" / "native_category_components"
+    assert (comp_dir / "data_source" / "snowflake_data_source.py").exists()
+    assert (comp_dir / "data_source" / "snowflake_cortex_analyst.py").exists()
+    assert (comp_dir / "data_source" / "snowflake_object_provisioner.py").exists()
+    assert (comp_dir / "models_and_agents" / "snowflake_standard_chat.py").exists()
+    assert (comp_dir / "models_and_agents" / "snowflake_standard_responses.py").exists()
+    assert (comp_dir / "models_and_agents" / "snowflake_standard_messages.py").exists()
+    assert (comp_dir / "models_and_agents" / "snowflake_standard_ollama.py").exists()
+    assert (comp_dir / "models_and_agents" / "snowflake_cortex_agent.py").exists()
+    assert (comp_dir / "llm_operations" / "snowflake_ai_function.py").exists()
+    assert (comp_dir / "llm_operations" / "snowflake_smart_router.py").exists()
+    assert (comp_dir / "files_and_knowledge" / "snowflake_stage_files.py").exists()
+    assert (comp_dir / "files_and_knowledge" / "snowflake_knowledge_memory.py").exists()
+    assert (comp_dir / "utilities" / "snowflake_python_pypi.py").exists()
+    assert (comp_dir / "utilities" / "snowflake_toolguard.py").exists()
