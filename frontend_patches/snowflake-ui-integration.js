@@ -34,7 +34,7 @@
     Node.prototype.__sflfPatched = true;
   }
 
-  const FORK_GITHUB_URL = "https://github.com/fbattaglieri-snowflake/SnowflakeLangflow";
+  const FORK_GITHUB_URL = "https://github.com/fbattaglieri-snowflake/Native-Snowflake-Langflow";
   const SNOWFLAKE_DOCS_URL = "https://docs.snowflake.com/";
 
   // Intercept window.open globally so any React button calling window.open("https://github.com/langflow-ai/...")

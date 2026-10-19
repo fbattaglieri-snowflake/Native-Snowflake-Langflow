@@ -244,7 +244,7 @@ def install_all() -> None:
         )
         txt = txt.replace(
             "https://github.com/langflow-ai/langflow",
-            "https://github.com/fbattaglieri-snowflake/SnowflakeLangflow",
+            "https://github.com/fbattaglieri-snowflake/Native-Snowflake-Langflow",
         )
         txt = txt.replace(
             'xNn="https://docs.langflow.org"',
@@ -256,7 +256,7 @@ def install_all() -> None:
         )
         txt = txt.replace(
             '"page.githubDescription":"Follow development, star the repo, and shape the future."',
-            '"page.githubDescription":"Unofficial personal fork by Francesco Battaglieri (fbattaglieri-snowflake/SnowflakeLangflow) — Under Active Testing."',
+            '"page.githubDescription":"Unofficial personal fork by Francesco Battaglieri (fbattaglieri-snowflake/Native-Snowflake-Langflow) — Under Active Testing."',
         )
         txt = txt.replace(
             '"page.welcomeTitle":"Welcome to Langflow"',

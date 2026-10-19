@@ -1,8 +1,8 @@
-# SnowflakeLangflow (`lfx_snowflake`)
+# Native-Snowflake-Langflow (`lfx_snowflake`)
 
 > ### ⚠️ Important Notice (Unofficial Personal Fork — Active Testing)
 >
-> - **Personal Development:** This repository is an independent personal development project by **Francesco Battaglieri** ([@fbattaglieri-snowflake](https://github.com/fbattaglieri-snowflake)).
+> - **Personal Development:** This repository ([`fbattaglieri-snowflake/Native-Snowflake-Langflow`](https://github.com/fbattaglieri-snowflake/Native-Snowflake-Langflow)) is an independent personal development project by **Francesco Battaglieri** ([@fbattaglieri-snowflake](https://github.com/fbattaglieri-snowflake)).
 > - **Not Official:** This project is **NOT an official product, release, or repository of Snowflake Inc.**, **nor is it an official project of Langflow / DataStax**. All views, architectural choices, and modifications contained herein belong solely to the author and are not officially supported, endorsed, or warranted by Snowflake Inc. or Langflow.
 > - **Open-Source Fork:** This repository is a **public fork** of the upstream open-source project [langflow-ai/langflow](https://github.com/langflow-ai/langflow) (`v1.12.5` baseline, MIT License), extended with the isolated `lfx_snowflake` package to experiment with native execution in Snowpark Container Services (SPCS) and integration with Snowflake services.
 > - **Under Active Testing:** This solution is **currently under active testing, qualification, and validation (Work in Progress / Experimental Testing)**. APIs, components, SQL schemas, and configurations may change without notice; do not deploy to production environments without independent qualification and security review.
