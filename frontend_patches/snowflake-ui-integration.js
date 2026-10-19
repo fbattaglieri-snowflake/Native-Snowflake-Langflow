@@ -11,6 +11,29 @@
 (function () {
   "use strict";
 
+  // Guard Node.prototype.removeChild and Node.prototype.insertBefore so browser extensions,
+  // page translators, or portal transitions can never trigger React 18 NotFoundError crashes.
+  if (typeof Node === "function" && Node.prototype && !Node.prototype.__sflfPatched) {
+    const _origRemoveChild = Node.prototype.removeChild;
+    Node.prototype.removeChild = function (child) {
+      if (child && child.parentNode !== this) {
+        if (child.parentNode) {
+          return _origRemoveChild.call(child.parentNode, child);
+        }
+        return child;
+      }
+      return _origRemoveChild.apply(this, arguments);
+    };
+    const _origInsertBefore = Node.prototype.insertBefore;
+    Node.prototype.insertBefore = function (newNode, referenceNode) {
+      if (referenceNode && referenceNode.parentNode !== this) {
+        return this.appendChild(newNode);
+      }
+      return _origInsertBefore.apply(this, arguments);
+    };
+    Node.prototype.__sflfPatched = true;
+  }
+
   const FORK_GITHUB_URL = "https://github.com/fbattaglieri-snowflake/SnowflakeLangflow";
   const SNOWFLAKE_DOCS_URL = "https://docs.snowflake.com/";
 

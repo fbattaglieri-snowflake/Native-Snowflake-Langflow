@@ -205,9 +205,26 @@ def install_all() -> None:
         'v.jsx("div",{children:v.jsx("span",{className:"line-clamp-2 text-left text-base text-secondary-foreground",children:t("page.discordDescription")})})]}),v.jsx(V5e,{className:hRn})]})})'
     )
 
+    dom_guard_banner = (
+        'if(typeof Node==="function"&&Node.prototype&&!Node.prototype.__sflfPatched){'
+        'var _oRC=Node.prototype.removeChild;'
+        'Node.prototype.removeChild=function(c){if(c&&c.parentNode!==this){return c.parentNode?_oRC.call(c.parentNode,c):c;}return _oRC.apply(this,arguments);};'
+        'var _oIB=Node.prototype.insertBefore;'
+        'Node.prototype.insertBefore=function(n,r){if(r&&r.parentNode!==this){return this.appendChild(n);}return _oIB.apply(this,arguments);};'
+        'Node.prototype.__sflfPatched=true;}\n'
+    )
+
     for js_asset in (LANGFLOW_FRONTEND / "assets").glob("*.js"):
         txt = js_asset.read_text(encoding="utf-8", errors="ignore")
         orig = txt
+        txt = txt.replace(
+            'if(Lp)try{(Xd.nodeType===9?Xd.body:Xd.nodeName==="HTML"?Xd.ownerDocument.body:Xd).removeChild(Q.stateNode)}catch(Oe){gd(Q,W,Oe)}else try{Xd.removeChild(Q.stateNode)}catch(Oe){gd(Q,W,Oe)}',
+            'if(Lp)try{(Xd.nodeType===9?Xd.body:Xd.nodeName==="HTML"?Xd.ownerDocument.body:Xd).removeChild(Q.stateNode)}catch(Oe){}else try{Xd.removeChild(Q.stateNode)}catch(Oe){}',
+        )
+        txt = txt.replace(
+            'case 3:case 4:var On=Q.stateNode.containerInfo,Sr=Tq(I);kq(I,Sr,On);break;default:throw Error(o(161))}}catch(zi){gd(I,I.return,zi)}',
+            'case 3:case 4:var On=Q.stateNode.containerInfo,Sr=Tq(I);kq(I,Sr,On);break;default:throw Error(o(161))}}catch(zi){zi&&zi.name==="NotFoundError"||gd(I,I.return,zi)}',
+        )
         txt = txt.replace(s1_orig, s1_new)
         txt = txt.replace(s2_orig, s2_new)
         txt = txt.replace(s3_orig, s3_new)
@@ -281,6 +298,8 @@ def install_all() -> None:
             '"settings.dbProviders.description":"Configure vector-store providers for Knowledge Bases."',
             '"settings.dbProviders.description":"Snowflake Vector Stores (Standard Table VECTOR, Hybrid Table VECTOR, Cortex Search, Snowflake Postgres pgvector) are pre-configured in Files & Knowledge. Configure any additional DB providers below."',
         )
+        if js_asset.name.startswith("index-") and "__sflfPatched" not in txt:
+            txt = dom_guard_banner + txt
         if txt != orig:
             js_asset.write_text(txt, encoding="utf-8")
             print(f"[install_live_hooks] Patched React bundle {js_asset.name}")
@@ -292,20 +311,23 @@ def install_all() -> None:
 
     index_html = LANGFLOW_FRONTEND / "index.html"
     html_text = index_html.read_text(encoding="utf-8")
+    html_text = html_text.replace('<html lang="en">', '<html lang="en" translate="no" class="notranslate">')
     html_text = html_text.replace("<title>Langflow</title>", "<title>Snowflake Langflow</title>")
     html_text = re.sub(
         r'src="(\./assets/index-[^"?]+\.js)(?:\?[^"]*)?"',
-        r'src="\1?v=sflf034"',
+        r'src="\1?v=sflf036"',
         html_text,
     )
     inject_block = (
+        '    <meta name="google" content="notranslate" />\n'
+        f"    <script>{dom_guard_banner.strip()}</script>\n"
         "    <style>\n"
         '      [data-testid="empty_page_discord_button"],\n'
         '      [data-testid="menu_discord_button"],\n'
         '      [data-testid="menu_twitter_button"],\n'
         '      [data-testid="header_right_section_wrapper"] [data-testid="icon-Discord"] { display: none !important; }\n'
         "    </style>\n"
-        '    <script defer src="./snowflake-ui-integration.js?v=sflf034"></script>\n'
+        '    <script defer src="./snowflake-ui-integration.js?v=sflf036"></script>\n'
         "  </head>"
     )
     if "snowflake-ui-integration.js" not in html_text:
