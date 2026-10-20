@@ -167,6 +167,21 @@
     }
   }
 
+  function alignTopbarControls() {
+    const ctrl = document.getElementById("sflf-body-topbar-controls");
+    if (!ctrl) return;
+    const rightWrapper = document.querySelector('[data-testid="header_right_section_wrapper"]');
+    if (rightWrapper) {
+      const rect = rightWrapper.getBoundingClientRect();
+      if (rect && rect.left > 0) {
+        const rightPx = Math.max(224, Math.round(window.innerWidth - rect.left + 14));
+        ctrl.style.right = rightPx + "px";
+        return;
+      }
+    }
+    ctrl.style.right = "228px";
+  }
+
   // Mount Role Selector bar directly on document.body (OUTSIDE #root) so React's Virtual DOM reconciler
   // never encounters foreign child nodes during route transitions!
   function mountFixedTopbarControls() {
@@ -174,7 +189,7 @@
     const ctrl = document.createElement("div");
     ctrl.id = "sflf-body-topbar-controls";
     ctrl.style.cssText =
-      "position:fixed;top:10px;right:192px;z-index:25;display:inline-flex;align-items:center;gap:5px;background:transparent;color:#09090b;padding:1px 4px;font-family:Inter,sans-serif;font-size:11px;height:28px;";
+      "position:fixed;top:10px;right:228px;z-index:25;display:inline-flex;align-items:center;gap:6px;background:transparent;color:#09090b;padding:1px 4px;font-family:Inter,sans-serif;font-size:11px;height:28px;";
     ctrl.innerHTML = `
       <span style="display:inline-flex;align-items:center;">${buildOfficialSnowflakeSvg("#000000", 14)}</span>
       <label style="font-weight:600;color:#18181b;font-size:11px;">Role:</label>
@@ -182,6 +197,9 @@
       <button id="sflf-open-hub-btn" style="background:#09090b;color:#ffffff;border:none;border-radius:5px;padding:2px 8px;height:24px;font-size:11px;font-weight:600;cursor:pointer;white-space:nowrap;">Snowflake Hub</button>
     `;
     document.body.appendChild(ctrl);
+    alignTopbarControls();
+    window.addEventListener("resize", alignTopbarControls);
+    setInterval(alignTopbarControls, 800);
 
     const sel = document.getElementById("sflf-role-select");
     if (sel) {
@@ -360,7 +378,11 @@
     if (roleSpan) roleSpan.textContent = sfState.active_role;
     if (!out) return;
     try {
-      const resp = await fetch("/api/v1/snowflake/traces/sync", { method: "POST" });
+      const resp = await fetch("/api/v1/snowflake/traces/sync", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: "{}",
+      });
       const data = await resp.json();
       out.textContent = JSON.stringify(data, null, 2);
     } catch (e) {
