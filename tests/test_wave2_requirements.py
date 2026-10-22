@@ -430,3 +430,28 @@ def test_fk_w2_01_to_04_files_and_knowledge_and_4_tab_cortex_search_pipeline() -
                 assert comp_name not in seen_names, f"Duplicate component name {comp_name} in {py_path} and {seen_names[comp_name]}"
                 seen_names[comp_name] = str(py_path)
     assert len(seen_names) == 28
+
+
+def test_wave2_undefined_headers_fetch_intercept_guard() -> None:
+    """Verify P3-I5b regression guard against 'Cannot read properties of undefined (reading headers)'."""
+    hooks_py = (REPO_ROOT / "scripts" / "install_live_hooks_in_container.py").read_text(encoding="utf-8")
+    ui_js = (REPO_ROOT / "frontend_patches" / "snowflake-ui-integration.js").read_text(encoding="utf-8")
+
+    # 1. install_live_hooks_in_container.py patches oXr's hKr.register and Ur.interceptors.request.use
+    assert "fetch_intercept_orig" in hooks_py
+    assert "fetch_intercept_new" in hooks_py
+    assert 'T=T&&typeof T=="object"?{...T}:{};' in hooks_py
+    assert 'T.headers={...(T.headers||{})};' in hooks_py
+    assert "axios_req_intercept_orig" in hooks_py
+    assert "z.headers=z.headers||{};" in hooks_py
+    assert "agui_hzr_orig" in hooks_py
+    assert 'n?.headers?.get?.("content-type")' in hooks_py
+    assert "agui_gzr_orig" in hooks_py
+    assert 'c?.headers?.get?.("content-type")' in hooks_py
+    assert "__sflfHeadersGuarded" in hooks_py
+
+    # 2. snowflake-ui-integration.js guards window.fetch and passes explicit headers on all fetch calls
+    assert "__sflfHeadersGuarded" in ui_js
+    assert 'fetch("/api/v1/snowflake/context", {' in ui_js
+    assert 'fetch(`/api/v1/snowflake/catalog?database=${dbParam}&schema=${schParam}`, {' in ui_js
+

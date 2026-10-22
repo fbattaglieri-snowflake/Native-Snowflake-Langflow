@@ -34,6 +34,24 @@
     Node.prototype.__sflfPatched = true;
   }
 
+  // Guard window.fetch so any 1-argument fetch(url) or init without .headers never trips
+  // Langflow's fetch-intercept hook (Cannot read properties of undefined (reading 'headers')).
+  if (typeof window !== "undefined" && typeof window.fetch === "function" && !window.fetch.__sflfHeadersGuarded) {
+    const _prevFetch = window.fetch;
+    const _guardedFetch = function (input, init) {
+      if (typeof input === "string" || (typeof URL === "function" && input instanceof URL)) {
+        const safeInit = init && typeof init === "object" ? Object.assign({}, init) : {};
+        if (!safeInit.headers) {
+          safeInit.headers = {};
+        }
+        return _prevFetch.call(this, input, safeInit);
+      }
+      return _prevFetch.apply(this, arguments);
+    };
+    _guardedFetch.__sflfHeadersGuarded = true;
+    window.fetch = _guardedFetch;
+  }
+
   const FORK_GITHUB_URL = "https://github.com/fbattaglieri-snowflake/Native-Snowflake-Langflow";
   const SNOWFLAKE_DOCS_URL = "https://docs.snowflake.com/";
   const BROWSER_TAB_TITLE = "Snowflake Langflow";
@@ -333,7 +351,9 @@
 
   async function fetchSnowflakeContext() {
     try {
-      const resp = await fetch("/api/v1/snowflake/context");
+      const resp = await fetch("/api/v1/snowflake/context", {
+        headers: { Accept: "application/json" },
+      });
       if (!resp.ok) return;
       const data = await resp.json();
       sfState = Object.assign(sfState, data);
@@ -350,7 +370,9 @@
     try {
       const dbParam = encodeURIComponent(database || sfState.database || "SNOWFLAKE_LANGFLOW");
       const schParam = encodeURIComponent(schema || sfState.schema || "CORE");
-      const resp = await fetch(`/api/v1/snowflake/catalog?database=${dbParam}&schema=${schParam}`);
+      const resp = await fetch(`/api/v1/snowflake/catalog?database=${dbParam}&schema=${schParam}`, {
+        headers: { Accept: "application/json" },
+      });
       if (!resp.ok) return null;
       const data = await resp.json();
       sfState.catalog = Object.assign({}, sfState.catalog || {}, data);

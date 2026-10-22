@@ -223,12 +223,56 @@ def install_all() -> None:
         'Node.prototype.removeChild=function(c){if(c&&c.parentNode!==this){return c.parentNode?_oRC.call(c.parentNode,c):c;}return _oRC.apply(this,arguments);};'
         'var _oIB=Node.prototype.insertBefore;'
         'Node.prototype.insertBefore=function(n,r){if(r&&r.parentNode!==this){return this.appendChild(n);}return _oIB.apply(this,arguments);};'
-        'Node.prototype.__sflfPatched=true;}\n'
+        'Node.prototype.__sflfPatched=true;}'
+        'if(typeof window!=="undefined"&&typeof window.fetch==="function"&&!window.fetch.__sflfHeadersGuarded){'
+        'var _pF=window.fetch;'
+        'var _gF=function(u,o){if(typeof u==="string"||(typeof URL==="function"&&u instanceof URL)){'
+        'var s=o&&typeof o==="object"?Object.assign({},o):{};if(!s.headers){s.headers={};}return _pF.call(this,u,s);}'
+        'return _pF.apply(this,arguments);};'
+        '_gF.__sflfHeadersGuarded=true;window.fetch=_gF;}\n'
     )
+
+    fetch_intercept_orig = (
+        'const y=hKr.register({request:(z,T)=>{if(!x(z)){for(const[k,D]of Object.entries(h))T.headers[k]=D;'
+        'T.headers["x-langflow-client"]="playground"}return[z,T]}})'
+    )
+    fetch_intercept_new = (
+        'const y=hKr.register({request:(z,T)=>{try{if(!x(z)){'
+        'if(z&&typeof z=="object"&&z.headers&&typeof z.headers.set=="function"&&!T){'
+        'for(const[k,D]of Object.entries(h||{}))z.headers.set(k,D);'
+        'z.headers.set("x-langflow-client","playground");return[z]}'
+        'T=T&&typeof T=="object"?{...T}:{};'
+        'if(T.headers&&typeof T.headers.set=="function"){'
+        'for(const[k,D]of Object.entries(h||{}))T.headers.set(k,D);'
+        'T.headers.set("x-langflow-client","playground")'
+        '}else{T.headers={...(T.headers||{})};'
+        'for(const[k,D]of Object.entries(h||{}))T.headers[k]=D;'
+        'T.headers["x-langflow-client"]="playground"}}'
+        '}catch(_e){}return T===void 0?[z]:[z,T]}})'
+    )
+
+    axios_req_intercept_orig = (
+        'if(new URL(z?.url,k).origin===k){for(const[j,q]of Object.entries(h))z.headers[j]=q;'
+        'z.headers["x-langflow-client"]="playground"}'
+    )
+    axios_req_intercept_new = (
+        'if(new URL(z?.url,k).origin===k){z.headers=z.headers||{};for(const[j,q]of Object.entries(h||{}))z.headers[j]=q;'
+        'z.headers["x-langflow-client"]="playground"}'
+    )
+
+    agui_hzr_orig = 'const hZr=(e,t)=>JLn(()=>zLe(fetch(e,t))).pipe($Qr(n=>{if(!n.ok){let a=n.headers.get("content-type")||"";'
+    agui_hzr_new = 'const hZr=(e,t)=>JLn(()=>zLe(fetch(e,t))).pipe($Qr(n=>{if(!n?.ok){let a=n?.headers?.get?.("content-type")||"";'
+
+    agui_gzr_orig = 'if(s.next(c),c.type===ZY.HEADERS&&!a){a=!0;let u=c.headers.get("content-type");'
+    agui_gzr_new = 'if(s.next(c),c?.type===ZY.HEADERS&&!a){a=!0;let u=c?.headers?.get?.("content-type")||"";'
 
     for js_asset in (LANGFLOW_FRONTEND / "assets").glob("*.js"):
         txt = js_asset.read_text(encoding="utf-8", errors="ignore")
         orig = txt
+        txt = txt.replace(fetch_intercept_orig, fetch_intercept_new)
+        txt = txt.replace(axios_req_intercept_orig, axios_req_intercept_new)
+        txt = txt.replace(agui_hzr_orig, agui_hzr_new)
+        txt = txt.replace(agui_gzr_orig, agui_gzr_new)
         txt = txt.replace(
             'if(Lp)try{(Xd.nodeType===9?Xd.body:Xd.nodeName==="HTML"?Xd.ownerDocument.body:Xd).removeChild(Q.stateNode)}catch(Oe){gd(Q,W,Oe)}else try{Xd.removeChild(Q.stateNode)}catch(Oe){gd(Q,W,Oe)}',
             'if(Lp)try{(Xd.nodeType===9?Xd.body:Xd.nodeName==="HTML"?Xd.ownerDocument.body:Xd).removeChild(Q.stateNode)}catch(Oe){}else try{Xd.removeChild(Q.stateNode)}catch(Oe){}',
@@ -342,7 +386,7 @@ def install_all() -> None:
         )
     html_text = re.sub(
         r'src="(\./assets/index-[^"?]+\.js)(?:\?[^"]*)?"',
-        r'src="\1?v=sflf040"',
+        r'src="\1?v=sflf041"',
         html_text,
     )
     inject_block = (
@@ -354,7 +398,7 @@ def install_all() -> None:
         '      [data-testid="menu_twitter_button"],\n'
         '      [data-testid="header_right_section_wrapper"] [data-testid="icon-Discord"] { display: none !important; }\n'
         "    </style>\n"
-        '    <script defer src="./snowflake-ui-integration.js?v=sflf040"></script>\n'
+        '    <script defer src="./snowflake-ui-integration.js?v=sflf041"></script>\n'
         "  </head>"
     )
     if "snowflake-ui-integration.js" not in html_text:
@@ -366,7 +410,7 @@ def install_all() -> None:
             html_text,
         )
     index_html.write_text(html_text, encoding="utf-8")
-    print("[install_live_hooks] Updated index.html with Snowflake SVG favicon, title, and snowflake-ui-integration.js?v=sflf040")
+    print("[install_live_hooks] Updated index.html with Snowflake SVG favicon, title, and snowflake-ui-integration.js?v=sflf041")
 
     # 7. Verify component_index.json integrity and FastAPI routes
     from langflow.main import create_app
