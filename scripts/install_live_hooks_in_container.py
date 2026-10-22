@@ -45,6 +45,15 @@ def _svg_data_uri(fill: str) -> str:
 
 
 def install_all() -> None:
+    # 0. Install lfx_snowflake package into site-packages so all runtime/live bridge imports resolve
+    pkg_src = SOURCE_ROOT / "src" / "lfx_snowflake"
+    pkg_dst = SITE_PACKAGES / "lfx_snowflake"
+    if pkg_src.exists():
+        if pkg_dst.exists():
+            shutil.rmtree(pkg_dst)
+        shutil.copytree(pkg_src, pkg_dst)
+        print(f"[install_live_hooks] Installed lfx_snowflake package into {pkg_dst}")
+
     # 1. Empty /opt/standard-components so NO pink-cube external bundle tabs appear at the bottom of the sidebar
     if COMPONENTS_ROOT.exists():
         for child in COMPONENTS_ROOT.iterdir():
