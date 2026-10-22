@@ -28,6 +28,30 @@ AGGREGATE_AI_FUNCTIONS: tuple[str, ...] = (
 
 ALL_SUPPORTED_AI_FUNCTIONS: tuple[str, ...] = SCALAR_AI_FUNCTIONS + AGGREGATE_AI_FUNCTIONS
 
+# Wave 2 (LLM-W2-02): Task-specific AI_* functions (excluding AI_COMPLETE, which has a dedicated component)
+TASK_SPECIFIC_AI_FUNCTIONS: tuple[str, ...] = (
+    "AI_CLASSIFY",
+    "AI_EXTRACT",
+    "AI_FILTER",
+    "AI_SENTIMENT",
+    "AI_SUMMARIZE_AGG",
+    "AI_TRANSLATE",
+    "AI_REDACT",
+    "AI_SIMILARITY",
+    "AI_COUNT_TOKENS",
+    "AI_TRANSCRIBE",
+)
+
+SUPPORTED_AI_COMPLETE_MODELS: tuple[str, ...] = (
+    "claude-4-sonnet",
+    "claude-3-7-sonnet",
+    "mistral-large2",
+    "llama3.3-70b",
+    "openai-gpt-4.1",
+    "snowflake-arctic",
+    "llama3.1-8b",
+)
+
 FUNCTIONS_ACCEPTING_INSTRUCTIONS: frozenset[str] = frozenset(
     {
         "AI_CLASSIFY",  # optional task_description
@@ -412,3 +436,153 @@ class SnowflakeAIFunctionComponent:
         if ai_function == "AI_REDACT":
             response["disclaimer"] = AI_REDACT_LIMITATIONS_DISCLAIMER
         return response
+
+    @staticmethod
+    def build_task_specific_sql(
+        *,
+        ai_function: str,
+        input_text: str = "",
+        categories_or_schema: str = "",
+        source_lang: str = "",
+        target_lang: str = "it",
+        pii_categories: str = "",
+        second_text_or_stage_file: str = "",
+        model_for_count_tokens: str = "llama3.1-8b",
+        return_as_json: bool = False,
+    ) -> str:
+        fn = (ai_function or "AI_REDACT").strip().upper()
+        if fn == "AI_COMPLETE":
+            raise SnowflakeProviderError(
+                ERROR_UNSUPPORTED_CAPABILITY,
+                "AI_COMPLETE is separated into SnowflakeAICompleteComponent (LLM-W2-02).",
+                active_role="PUBLIC",
+                operation="build_task_specific_sql",
+            )
+        if fn not in TASK_SPECIFIC_AI_FUNCTIONS and fn not in ALL_SUPPORTED_AI_FUNCTIONS:
+            raise SnowflakeProviderError(
+                ERROR_UNSUPPORTED_CAPABILITY,
+                f"Unsupported task-specific AI function: {fn}",
+                active_role="PUBLIC",
+                operation="build_task_specific_sql",
+            )
+
+        safe_txt = (input_text or "").replace("'", "''")
+        if fn == "AI_CLASSIFY":
+            cats = [c.strip().replace("'", "''") for c in (categories_or_schema or "general").split(",") if c.strip()]
+            arr_sql = ", ".join(f"'{c}'" for c in cats) or "'general'"
+            expr = f"AI_CLASSIFY('{safe_txt}', ARRAY_CONSTRUCT({arr_sql}))"
+        elif fn == "AI_EXTRACT":
+            fields = [c.strip().replace("'", "''") for c in (categories_or_schema or "summary").split(",") if c.strip()]
+            arr_sql = ", ".join(f"'{c}'" for c in fields) or "'summary'"
+            expr = f"AI_EXTRACT(text => '{safe_txt}', responseFormat => ARRAY_CONSTRUCT({arr_sql}))"
+        elif fn == "AI_FILTER":
+            pred = (categories_or_schema or safe_txt).replace("'", "''")
+            expr = f"AI_FILTER(PROMPT('{pred}: {{0}}', '{safe_txt}'))"
+        elif fn == "AI_SENTIMENT":
+            expr = f"AI_SENTIMENT('{safe_txt}')"
+        elif fn == "AI_SUMMARIZE_AGG":
+            expr = f"AI_SUMMARIZE_AGG(column1) FROM (VALUES ('{safe_txt}'))"
+            if return_as_json:
+                return (
+                    f"SELECT OBJECT_CONSTRUCT('function', '{fn}', 'result', AI_SUMMARIZE_AGG(column1)) AS RESULT "
+                    f"FROM (VALUES ('{safe_txt}'))"
+                )
+            return f"SELECT {expr} AS RESULT"
+        elif fn == "AI_TRANSLATE":
+            src_l = (source_lang or "").strip().replace("'", "''")
+            tgt_l = (target_lang or "it").strip().replace("'", "''") or "it"
+            expr = f"AI_TRANSLATE('{safe_txt}', '{src_l}', '{tgt_l}')"
+        elif fn == "AI_REDACT":
+            cats = [c.strip().replace("'", "''") for c in (pii_categories or "").split(",") if c.strip()]
+            if cats:
+                arr_sql = ", ".join(f"'{c}'" for c in cats)
+                expr = f"AI_REDACT(input => '{safe_txt}', categories => ARRAY_CONSTRUCT({arr_sql}))"
+            else:
+                expr = f"AI_REDACT('{safe_txt}')"
+        elif fn == "AI_SIMILARITY":
+            second_safe = (second_text_or_stage_file or "").replace("'", "''")
+            expr = f"AI_SIMILARITY('{safe_txt}', '{second_safe}')"
+        elif fn == "AI_COUNT_TOKENS":
+            mdl = (model_for_count_tokens or "llama3.1-8b").strip().replace("'", "''")
+            expr = f"AI_COUNT_TOKENS('{mdl}', '{safe_txt}')"
+        elif fn == "AI_TRANSCRIBE":
+            stage_ref = (second_text_or_stage_file or input_text or "@SNOWFLAKE_LANGFLOW.CORE.SNOWFLAKE_LANGFLOW_STAGE/audio.wav").strip()
+            if "/" in stage_ref and stage_ref.startswith("@"):
+                stg, rel = stage_ref.split("/", 1)
+                expr = f"AI_TRANSCRIBE(TO_FILE('{stg}', '{rel}'))"
+            else:
+                expr = f"AI_TRANSCRIBE(TO_FILE('@SNOWFLAKE_LANGFLOW.CORE.SNOWFLAKE_LANGFLOW_STAGE', '{stage_ref.lstrip('@')}'))"
+        else:
+            expr = f"{fn}('{safe_txt}')"
+
+        if return_as_json:
+            return f"SELECT OBJECT_CONSTRUCT('function', '{fn}', 'result', {expr}) AS RESULT"
+        return f"SELECT {expr} AS RESULT"
+
+
+class SnowflakeAICompleteEngine:
+    """
+    Dedicated engine for `Snowflake AI Complete` (`LLM-W2-02`) using official `AI_COMPLETE` signature:
+    `AI_COMPLETE(model => '<model>', prompt => '<prompt>', model_parameters => {...}, response_format => {...}, show_details => TRUE|FALSE)`
+    plus optional `TO_FILE('@db.schema.stage', 'path')` multimodal input.
+    """
+
+    supported_models = SUPPORTED_AI_COMPLETE_MODELS
+
+    @staticmethod
+    def build_sql(
+        *,
+        model: str = "claude-4-sonnet",
+        prompt: str = "",
+        stage_file_path: str = "",
+        temperature: float = 0.0,
+        top_p: float = 1.0,
+        max_tokens: int = 1024,
+        guardrails: bool = False,
+        response_format_mode: str = "None (Text)",
+        response_json_schema: str = "",
+        show_details: bool = False,
+        return_error_details: bool = False,
+    ) -> str:
+        mdl = (model or "claude-4-sonnet").strip().replace("'", "''")
+        safe_prompt = (prompt or "").replace("'", "''")
+        params_sql = (
+            f"OBJECT_CONSTRUCT('temperature', {float(temperature)}, "
+            f"'top_p', {float(top_p)}, 'max_tokens', {int(max_tokens)}, "
+            f"'guardrails', {'TRUE' if guardrails else 'FALSE'})"
+        )
+
+        args: list[str] = [f"model => '{mdl}'"]
+        stg_ref = (stage_file_path or "").strip()
+        if stg_ref:
+            if "/" in stg_ref and stg_ref.startswith("@"):
+                stg_name, rel_path = stg_ref.split("/", 1)
+            else:
+                stg_name, rel_path = "@SNOWFLAKE_LANGFLOW.CORE.SNOWFLAKE_LANGFLOW_STAGE", stg_ref.lstrip("@")
+            args.append(f"prompt => PROMPT('{safe_prompt} {{0}}', TO_FILE('{stg_name}', '{rel_path}'))")
+        else:
+            args.append(f"prompt => '{safe_prompt}'")
+
+        args.append(f"model_parameters => {params_sql}")
+
+        if response_format_mode in ("JSON Schema Object", "Structured Decision Schema"):
+            if response_format_mode == "Structured Decision Schema" and not (response_json_schema or "").strip():
+                schema_literal = (
+                    '{"type":"object","properties":{"decision":{"type":"string"},'
+                    '"confidence":{"type":"number"},"reasoning":{"type":"string"},'
+                    '"selected_branch":{"type":"string"},"policy_action":{"type":"string"}},'
+                    '"required":["decision","confidence","reasoning","selected_branch","policy_action"]}'
+                )
+            else:
+                schema_literal = (response_json_schema or '{"type":"object"}').strip().replace("'", "''")
+            args.append(
+                f"response_format => OBJECT_CONSTRUCT('type', 'json', 'schema', PARSE_JSON('{schema_literal}'))"
+            )
+
+        if show_details:
+            args.append("show_details => TRUE")
+        if return_error_details:
+            args.append("return_error_details => TRUE")
+
+        return f"SELECT AI_COMPLETE({', '.join(args)}) AS RESULT"
+

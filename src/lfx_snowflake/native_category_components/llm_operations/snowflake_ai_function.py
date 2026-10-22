@@ -1,26 +1,92 @@
 from __future__ import annotations
+
 import json
+
 from lfx.custom import Component
-from lfx.io import BoolInput, DropdownInput, MessageTextInput, MultilineInput, Output, StrInput
+from lfx.io import BoolInput, DropdownInput, MessageTextInput, Output, StrInput
 from lfx.schema import Data
 from lfx.schema.message import Message
+from lfx_snowflake.components.ai_function import (
+    TASK_SPECIFIC_AI_FUNCTIONS,
+    SnowflakeAIFunctionComponent as DomainAIFunctionEngine,
+)
 from lfx_snowflake.fastapi_live_bridge import LIVE_BRIDGE
 from lfx_snowflake.observability.redaction import mask_ai_redact_detect_spans
 
+
 class SnowflakeAIFunctionComponent(Component):
-    display_name = "AI Function"
-    description = "Direct Snowflake AI_* Function execution (AI_REDACT redact/detect, AI_CLASSIFY, AI_COMPLETE, AI_EXTRACT, AI_SENTIMENT, AI_SUMMARIZE_AGG, AI_AGG, AI_TRANSLATE, AI_FILTER) with EXPLAIN_PRIVILEGES and AI_COUNT_TOKENS."
+    display_name = "Snowflake AI Function"
+    description = (
+        "Task-specific Snowflake AI_* Function execution (AI_CLASSIFY, AI_EXTRACT, AI_FILTER, "
+        "AI_SENTIMENT, AI_SUMMARIZE_AGG, AI_TRANSLATE, AI_REDACT, AI_SIMILARITY, AI_COUNT_TOKENS, AI_TRANSCRIBE) "
+        "with contextual parameters and Return as JSON Object (OBJECT_CONSTRUCT) toggle."
+    )
     icon = "Snowflake"
     name = "SnowflakeAIFunction"
 
     inputs = [
-        DropdownInput(name="ai_function", display_name="AI Function (Direct AI_* Namespace)", options=["AI_REDACT", "AI_CLASSIFY", "AI_COMPLETE", "AI_EXTRACT", "AI_SENTIMENT", "AI_SUMMARIZE_AGG", "AI_AGG", "AI_TRANSLATE", "AI_FILTER"], value="AI_REDACT"),
-        MessageTextInput(name="input_text", display_name="Input Text", value="Contact Mario Rossi at mario.rossi@example.com or +39 02 1234567."),
-        DropdownInput(name="redact_mode", display_name="AI_REDACT Mode", options=["redact", "detect"], value="redact"),
-        StrInput(name="categories_csv", display_name="Categories (CSV for AI_CLASSIFY / AI_REDACT)", value="NAME,EMAIL,PHONE_NUMBER"),
-        MultilineInput(name="instructions", display_name="Instructions / Target Language / Prompt", value="", advanced=True),
-        StrInput(name="model_id", display_name="Model (for AI_COMPLETE)", value="llama3.1-8b", advanced=True),
-        BoolInput(name="estimate_tokens", display_name="Estimate Tokens via AI_COUNT_TOKENS", value=True, advanced=True),
+        DropdownInput(
+            name="ai_function",
+            display_name="Task-Specific AI Function",
+            options=list(TASK_SPECIFIC_AI_FUNCTIONS),
+            value="AI_REDACT",
+            real_time_refresh=True,
+        ),
+        MessageTextInput(
+            name="input_text",
+            display_name="Input Text",
+            value="Contact Mario Rossi at mario.rossi@example.com or +39 02 1234567.",
+        ),
+        StrInput(
+            name="categories_or_schema",
+            display_name="Categories / Extraction Fields / Filter Predicate",
+            value="NAME,EMAIL,PHONE_NUMBER",
+        ),
+        StrInput(
+            name="source_lang",
+            display_name="Source Language (for AI_TRANSLATE, empty = auto)",
+            value="",
+            advanced=False,
+        ),
+        StrInput(
+            name="target_lang",
+            display_name="Target Language (for AI_TRANSLATE)",
+            value="it",
+            advanced=False,
+        ),
+        DropdownInput(
+            name="redact_mode",
+            display_name="AI_REDACT Mode",
+            options=["redact", "detect"],
+            value="redact",
+        ),
+        StrInput(
+            name="pii_categories",
+            display_name="PII Categories CSV (for AI_REDACT)",
+            value="NAME,EMAIL,PHONE_NUMBER",
+        ),
+        StrInput(
+            name="second_text_or_stage_file",
+            display_name="Second Text (AI_SIMILARITY) or @Stage/File (AI_TRANSCRIBE)",
+            value="",
+        ),
+        StrInput(
+            name="model_for_count_tokens",
+            display_name="Model for AI_COUNT_TOKENS",
+            value="llama3.1-8b",
+            advanced=True,
+        ),
+        BoolInput(
+            name="return_as_json",
+            display_name="Return as JSON Object (OBJECT_CONSTRUCT)",
+            value=False,
+        ),
+        BoolInput(
+            name="estimate_tokens",
+            display_name="Estimate Tokens via AI_COUNT_TOKENS",
+            value=True,
+            advanced=True,
+        ),
     ]
     outputs = [
         Output(display_name="Result Message", name="message", method="run_ai_function"),
@@ -28,25 +94,23 @@ class SnowflakeAIFunctionComponent(Component):
     ]
 
     def _build_sql(self) -> str:
-        safe_txt = (self.input_text or "").replace("'", "''")
-        fn = (self.ai_function or "AI_REDACT").upper()
-        if fn == "AI_REDACT":
-            return f"SELECT AI_REDACT('{safe_txt}') AS RESULT"
-        if fn == "AI_CLASSIFY":
-            cats = [c.strip().replace("'", "''") for c in (self.categories_csv or "general").split(",") if c.strip()]
-            arr_sql = ", ".join(f"'{c}'" for c in cats) or "'general'"
-            return f"SELECT AI_CLASSIFY('{safe_txt}', ARRAY_CONSTRUCT({arr_sql})) AS RESULT"
-        if fn == "AI_SENTIMENT":
-            return f"SELECT AI_SENTIMENT('{safe_txt}') AS RESULT"
-        if fn == "AI_TRANSLATE":
-            target_lang = (self.instructions or "it").strip().replace("'", "''") or "it"
-            return f"SELECT AI_TRANSLATE('{safe_txt}', '', '{target_lang}') AS RESULT"
-        if fn == "AI_COMPLETE":
-            mdl = (self.model_id or "llama3.1-8b").strip().replace("'", "''")
-            instr = (self.instructions or "").strip().replace("'", "''")
-            prompt = f"{instr}\\n{safe_txt}" if instr else safe_txt
-            return f"SELECT AI_COMPLETE('{mdl}', '{prompt}') AS RESULT"
-        return f"SELECT AI_REDACT('{safe_txt}') AS RESULT"
+        cats_or_schema = (
+            getattr(self, "categories_or_schema", None)
+            or getattr(self, "categories_csv", None)
+            or getattr(self, "instructions", "")
+            or ""
+        )
+        return DomainAIFunctionEngine.build_task_specific_sql(
+            ai_function=self.ai_function or "AI_REDACT",
+            input_text=self.input_text or "",
+            categories_or_schema=cats_or_schema,
+            source_lang=getattr(self, "source_lang", "") or "",
+            target_lang=getattr(self, "target_lang", None) or getattr(self, "instructions", "it") or "it",
+            pii_categories=getattr(self, "pii_categories", "") or "",
+            second_text_or_stage_file=getattr(self, "second_text_or_stage_file", "") or "",
+            model_for_count_tokens=getattr(self, "model_for_count_tokens", "llama3.1-8b") or "llama3.1-8b",
+            return_as_json=bool(getattr(self, "return_as_json", False)),
+        )
 
     def run_ai_function(self) -> Message:
         stmt = self._build_sql()
@@ -55,10 +119,25 @@ class SnowflakeAIFunctionComponent(Component):
             raise ValueError(res.get("message", f"{self.ai_function} execution failed"))
         rows = res.get("rows", [])
         raw_val = rows[0].get("RESULT") if rows else ""
-        if self.ai_function == "AI_REDACT" and self.redact_mode == "detect":
-            safe_trace = mask_ai_redact_detect_spans({"input_text": self.input_text or "", "spans": [{"start": 0, "end": min(len(self.input_text or ""), 12), "category": "PII"}]}, force_detect_context=True)
+        if self.ai_function == "AI_REDACT" and getattr(self, "redact_mode", "redact") == "detect":
+            safe_trace = mask_ai_redact_detect_spans(
+                {
+                    "input_text": self.input_text or "",
+                    "spans": [{"start": 0, "end": min(len(self.input_text or ""), 12), "category": "PII"}],
+                },
+                force_detect_context=True,
+            )
             return Message(text=json.dumps({"mode": "detect", "result": raw_val, "trace_safe_preview": safe_trace}))
-        return Message(text=str(raw_val))
+        return Message(text=str(raw_val) if not isinstance(raw_val, (dict, list)) else json.dumps(raw_val))
 
     def run_telemetry(self) -> Data:
-        return Data(data={"ai_function": self.ai_function, "namespace": "DIRECT_AI_*", "active_role": LIVE_BRIDGE.active_role, "sql_preview": self._build_sql(), "redact_mode": self.redact_mode})
+        return Data(
+            data={
+                "ai_function": self.ai_function,
+                "namespace": "DIRECT_AI_*",
+                "active_role": LIVE_BRIDGE.active_role,
+                "return_as_json": bool(getattr(self, "return_as_json", False)),
+                "sql_preview": self._build_sql(),
+                "redact_mode": getattr(self, "redact_mode", "redact"),
+            }
+        )

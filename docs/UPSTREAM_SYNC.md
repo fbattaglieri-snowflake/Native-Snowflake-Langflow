@@ -39,7 +39,8 @@ To minimize merge conflicts across upstream upgrades, 95%+ of Snowflake-specific
 - `src/lfx_snowflake/governance/` — `SnowflakeAuthzService`, `SnowflakeObjectProvisioner`, role-bound session pool, 4-code error taxonomy, and `EXPLAIN_PRIVILEGES` pre-checks.
 - `src/lfx_snowflake/observability/` — `SnowflakeTraceReplicator` (`<DATABASE>.<SCHEMA>.LANGFLOW_FLOW_RUNS`, `<DATABASE>.<SCHEMA>.LANGFLOW_FLOW_SPANS`), `SnowflakeAuditOutbox` (`<DATABASE>.<SCHEMA>.LANGFLOW_AUDIT_LOG`), deterministic pre-sink secret/PII redactor.
 - `src/lfx_snowflake/providers/` — Native adapters for `Snowflake Proxy - Chat`, `Snowflake Proxy - Responses`, `Snowflake Proxy - Messages`, `Ollama (Snowflake Hosted)`, and Snowflake `Embedding Model`.
-- `src/lfx_snowflake/components/` — `Data Sources` + `Cortex Analyst`, `LLM Operations` + `AI Function`, `Files & Knowledge` + `Create Memory`, `Message History`, `Python Interpreter` (Snowflake PyPI), `ToolGuard / Policies` (ALTK), and `A2A Agent` / `Cortex Agent`.
+- `src/lfx_snowflake/components/` — `Data Sources` + `Cortex Analyst`, `LLM Operations` + `AI Complete` / `AI Function` / `Stored Procedure` / `UDF-UDTF` / `SQL Statement` / `Cortex Search` / `Snowflake Decision`, `Files & Knowledge` + `Create Memory` + 4-stage `Cortex Search` indexing pipeline (`AI_PARSE_DOCUMENT`, `SPLIT_TEXT_RECURSIVE_CHARACTER`, `CREATE CORTEX SEARCH SERVICE`, `Stream + Task`), `Message History`, `Python Interpreter` (Snowflake PyPI), `ToolGuard / Policies` (ALTK), and `A2A Agent` / `Cortex Agent`.
+- `src/lfx_snowflake/native_category_components/` & `scripts/install_live_hooks_in_container.py` — Native Langflow sidebar component classes and build-time `component_index.json` / `index.html` / `snowflake-ui-integration.js` installer (`UI-W2-01`, `HUB-W2-01..05`, `DS-W2-01`, `PROV-W2-01`, `MA-W2-01`, `LLM-W2-01..06`, `FK-W2-01..04`).
 
 ### Tracked Core Patch Registry (`frontend_patches/`)
 

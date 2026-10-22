@@ -54,7 +54,12 @@ def install_all() -> None:
                 child.unlink()
     print("[install_live_hooks] Cleared /opt/standard-components to eliminate separate bottom bundle tabs.")
 
-    # 2. Copy the 14 single-class component modules directly into lfx/components/<native_category>/
+    # 2. Remove stale data_source/snowflake_object_provisioner.py (PROV-W2-01) and copy all Wave 2 component modules into lfx/components/<native_category>/
+    stale_ds_provisioner = LFX_COMPONENTS_DIR / "data_source" / "snowflake_object_provisioner.py"
+    if stale_ds_provisioner.exists():
+        stale_ds_provisioner.unlink()
+        print("[install_live_hooks] Removed stale data_source/snowflake_object_provisioner.py (PROV-W2-01)")
+
     native_src = SOURCE_ROOT / "src" / "lfx_snowflake" / "native_category_components"
     installed_modules: list[tuple[str, str]] = []
     for cat_dir in sorted(native_src.iterdir()):
@@ -71,11 +76,13 @@ def install_all() -> None:
             installed_modules.append((cat_dir.name, mod_fqn))
             print(f"[install_live_hooks] Installed native component module: {mod_fqn}")
 
-    # 3. Rebuild lfx/_assets/component_index.json with the 14 Snowflake components merged into native categories
+    # 3. Rebuild lfx/_assets/component_index.json with all Snowflake components merged into native categories
     from lfx.interface.components import _process_single_module
 
     blob = orjson.loads(LFX_INDEX_JSON.read_bytes())
     entries_map: dict[str, dict] = {cat: dict(comps) for cat, comps in blob["entries"]}
+    if "data_source" in entries_map:
+        entries_map["data_source"].pop("SnowflakeObjectProvisioner", None)
 
     for cat_name, mod_fqn in installed_modules:
         res = _process_single_module(mod_fqn)
@@ -195,6 +202,11 @@ def install_all() -> None:
         'v.jsxs("div",{className:"z-50 mb-3 flex items-center justify-center gap-3 pointer-events-none select-none","data-testid":"empty_page_logo_light",'
         'children:[' + sf_svg_inline_lg + ',v.jsx(c6e,{className:"h-9 w-9 shrink-0 text-foreground","aria-hidden":"true"})]})'
     )
+    s4_loading_orig = 'v.jsx(c6e,{className:"h-10 w-10"})'
+    s4_loading_new = (
+        'v.jsxs("span",{className:"inline-flex items-center justify-center gap-3","data-testid":"snowflake-langflow-dual-loading-logo",'
+        'children:[' + sf_svg_inline_lg + ',v.jsx(c6e,{className:"h-10 w-10 shrink-0"})]})'
+    )
 
     s5_orig = (
         ',v.jsx(qt,{unstyled:!0,className:"group mx-3 min-h-[84px] sm:mx-0",onClick:()=>{p("discord_clicked")(),window.open(N6e,"_blank","noopener,noreferrer")},"data-testid":"empty_page_discord_button",'
@@ -229,6 +241,7 @@ def install_all() -> None:
         txt = txt.replace(s2_orig, s2_new)
         txt = txt.replace(s3_orig, s3_new)
         txt = txt.replace(s4_orig, s4_new)
+        txt = txt.replace(s4_loading_orig, s4_loading_new)
         txt = txt.replace(s5_orig, "")
         txt = txt.replace(
             'Tke=({href:e="#",children:t,newPage:n=!1,icon:o="external-link"})=>v.jsx(au,{className:"cursor-pointer rounded-none p-3 px-4"',
@@ -309,13 +322,27 @@ def install_all() -> None:
     ui_js_dest = LANGFLOW_FRONTEND / "snowflake-ui-integration.js"
     shutil.copyfile(ui_js_src, ui_js_dest)
 
+    favicon_data_uri = _svg_data_uri("#29B5E8")
     index_html = LANGFLOW_FRONTEND / "index.html"
     html_text = index_html.read_text(encoding="utf-8")
     html_text = html_text.replace('<html lang="en">', '<html lang="en" translate="no" class="notranslate">')
     html_text = html_text.replace("<title>Langflow</title>", "<title>Snowflake Langflow</title>")
+    if re.search(r'<link[^>]+rel=["\'](?:shortcut )?icon["\'][^>]*>', html_text, flags=re.IGNORECASE):
+        html_text = re.sub(
+            r'<link[^>]+rel=["\'](?:shortcut )?icon["\'][^>]*>',
+            f'<link rel="icon" type="image/svg+xml" href="{favicon_data_uri}" />',
+            html_text,
+            flags=re.IGNORECASE,
+        )
+    else:
+        html_text = html_text.replace(
+            "<head>",
+            f'<head>\n    <link rel="icon" type="image/svg+xml" href="{favicon_data_uri}" />',
+            1,
+        )
     html_text = re.sub(
         r'src="(\./assets/index-[^"?]+\.js)(?:\?[^"]*)?"',
-        r'src="\1?v=sflf039"',
+        r'src="\1?v=sflf040"',
         html_text,
     )
     inject_block = (
@@ -327,7 +354,7 @@ def install_all() -> None:
         '      [data-testid="menu_twitter_button"],\n'
         '      [data-testid="header_right_section_wrapper"] [data-testid="icon-Discord"] { display: none !important; }\n'
         "    </style>\n"
-        '    <script defer src="./snowflake-ui-integration.js?v=sflf039"></script>\n'
+        '    <script defer src="./snowflake-ui-integration.js?v=sflf040"></script>\n'
         "  </head>"
     )
     if "snowflake-ui-integration.js" not in html_text:
@@ -339,7 +366,7 @@ def install_all() -> None:
             html_text,
         )
     index_html.write_text(html_text, encoding="utf-8")
-    print("[install_live_hooks] Updated index.html with cache-busted bundle and snowflake-ui-integration.js?v=sflf033")
+    print("[install_live_hooks] Updated index.html with Snowflake SVG favicon, title, and snowflake-ui-integration.js?v=sflf040")
 
     # 7. Verify component_index.json integrity and FastAPI routes
     from langflow.main import create_app
@@ -351,23 +378,54 @@ def install_all() -> None:
     idx_cats = dict(verified_idx["entries"])
     assert "SnowflakeDataSource" in idx_cats["data_source"]
     assert "SnowflakeCortexAnalyst" in idx_cats["data_source"]
-    assert "SnowflakeObjectProvisioner" in idx_cats["data_source"]
+    assert "SnowflakeObjectProvisioner" not in idx_cats["data_source"]
+
     assert "StandardChat" in idx_cats["models_and_agents"]
     assert "StandardResponses" in idx_cats["models_and_agents"]
     assert "StandardMessages" in idx_cats["models_and_agents"]
     assert "PrivateOllama" in idx_cats["models_and_agents"]
     assert "SnowflakeCortexAgentA2A" in idx_cats["models_and_agents"]
-    assert "SnowflakeAIFunction" in idx_cats["llm_operations"]
-    assert "SnowflakeSmartRouter" in idx_cats["llm_operations"]
-    assert "SnowflakeStageFileSystem" in idx_cats["files_and_knowledge"]
-    assert "SnowflakeKnowledgeMemory" in idx_cats["files_and_knowledge"]
+
+    for llm_comp in (
+        "SnowflakeObjectProvisioner",
+        "SnowflakeStoredProcedure",
+        "SnowflakeFunctionUDF",
+        "SnowflakeAIComplete",
+        "SnowflakeAIFunction",
+        "SnowflakeSQLStatement",
+        "SnowflakeCortexSearch",
+        "SnowflakeCortexAnalystLLM",
+        "SnowflakeLLMNode",
+        "SnowflakeDecision",
+        "SnowflakeSmartRouter",
+    ):
+        assert llm_comp in idx_cats["llm_operations"], f"Missing {llm_comp} in llm_operations"
+
+    for fk_comp in (
+        "SnowflakeObjectProvisionerFK",
+        "SnowflakeStageFileSystem",
+        "SnowflakeKnowledgeMemory",
+        "SnowflakeCortexSearchParseDocument",
+        "SnowflakeCortexSearchSplitText",
+        "SnowflakeCortexSearchServiceCreator",
+        "SnowflakeCortexSearchStreamTask",
+        "SnowflakeCortexAnalystDisabledCreator",
+    ):
+        assert fk_comp in idx_cats["files_and_knowledge"], f"Missing {fk_comp} in files_and_knowledge"
+
     assert "SnowflakePythonInterpreterPyPI" in idx_cats["utilities"]
     assert "SnowflakeToolGuardPolicies" in idx_cats["utilities"]
 
     app = create_app()
     sf_paths = sorted({path for path, _m in _get_route_keys(app) if "/api/v1/snowflake" in path})
-    assert "/api/v1/snowflake/context" in sf_paths
-    print("[install_live_hooks] Verification passed: 14 components merged into 5 native categories + 0 bottom bundles.")
+    for req_route in (
+        "/api/v1/snowflake/context",
+        "/api/v1/snowflake/catalog",
+        "/api/v1/snowflake/provision",
+        "/api/v1/snowflake/memories",
+    ):
+        assert req_route in sf_paths, f"Missing route {req_route} in {sf_paths}"
+    print("[install_live_hooks] Verification passed: 28 components merged into 5 native categories + 0 bottom bundles.")
 
 
 if __name__ == "__main__":

@@ -14,10 +14,35 @@ from ..providers.registry import (
 SUPPORTED_SNOWFLAKE_OBJECT_TYPES: tuple[str, ...] = (
     "STANDARD_TABLE",
     "VIEW",
+    "SECURE_VIEW",
+    "MATERIALIZED_VIEW",
     "HYBRID_TABLE",
     "DYNAMIC_TABLE",
     "INTERACTIVE_TABLE",
     "ICEBERG_TABLE",
+    "SNOWFLAKE_POSTGRES_TABLE",
+)
+
+SUPPORTED_SNOWFLAKE_OBJECT_LABELS: tuple[str, ...] = (
+    "Standard Table",
+    "View",
+    "Secure View",
+    "Materialized View",
+    "Hybrid Table",
+    "Dynamic Table",
+    "Interactive Table",
+    "Iceberg Table",
+    "Snowflake Postgres Table",
+)
+
+DATA_SOURCE_HIERARCHY_ORDER: tuple[str, ...] = (
+    "engine",
+    "database",
+    "schema_name",
+    "object_type",
+    "object_name",
+    "sql_filter",
+    "max_rows",
 )
 
 

@@ -51,10 +51,39 @@ class EmbeddingModelSpec:
 
 DEFAULT_CORTEX_EMBEDDING_MODELS: list[EmbeddingModelSpec] = [
     EmbeddingModelSpec.create("snowflake-arctic-embed-l-v2.0", 1024, "cortex_embed"),
+    EmbeddingModelSpec.create("snowflake-arctic-embed-l-v2.0-8k", 1024, "cortex_embed"),
+    EmbeddingModelSpec.create("multilingual-e5-large", 1024, "cortex_embed"),
+    EmbeddingModelSpec.create("voyage-multilingual-2", 1024, "cortex_embed"),
+    EmbeddingModelSpec.create("nv-embed-qa-4", 1024, "cortex_embed"),
+    EmbeddingModelSpec.create("voyage-multimodal-3", 1024, "cortex_embed"),
     EmbeddingModelSpec.create("snowflake-arctic-embed-m-v1.5", 768, "cortex_embed"),
     EmbeddingModelSpec.create("snowflake-arctic-embed-m", 768, "cortex_embed"),
     EmbeddingModelSpec.create("e5-base-v2", 768, "cortex_embed"),
 ]
+
+OFFICIAL_AI_EMBED_MODEL_DIMENSIONS: dict[str, int] = {
+    "snowflake-arctic-embed-m-v1.5": 768,
+    "snowflake-arctic-embed-m": 768,
+    "e5-base-v2": 768,
+    "nomic-embed-text": 768,
+    "nomic-embed-text:latest": 768,
+    "snowflake-arctic-embed-l-v2.0": 1024,
+    "snowflake-arctic-embed-l-v2.0-8k": 1024,
+    "multilingual-e5-large": 1024,
+    "voyage-multilingual-2": 1024,
+    "nv-embed-qa-4": 1024,
+    "voyage-multimodal-3": 1024,
+}
+
+
+def resolve_embedding_dimension(model_id: str, default: int = 768) -> int:
+    """Return the official vector dimension (768 or 1024) for a Snowflake AI_EMBED / Ollama embedding model."""
+    cleaned = (model_id or "").strip().split(" ")[0].replace("ollama/", "")
+    if cleaned in OFFICIAL_AI_EMBED_MODEL_DIMENSIONS:
+        return OFFICIAL_AI_EMBED_MODEL_DIMENSIONS[cleaned]
+    if "1024" in model_id or "l-v2" in cleaned or "large" in cleaned or "voyage" in cleaned or "nv-embed" in cleaned:
+        return 1024
+    return default
 
 
 class EmbeddingSpaceGuard:

@@ -23,19 +23,25 @@ spec:
         LANGFLOW_AUDIT_LOG_TABLE: "<DATABASE>.<SCHEMA>.LANGFLOW_AUDIT_LOG"
         LANGFLOW_SECONDARY_ROLES_MODE: "NONE"
         LANGFLOW_ALLOW_SERVICE_ROLE_FALLBACK: "false"
+        OTEL_SDK_DISABLED: "false"
       resources:
         requests:
-          cpu: 2
-          memory: 4Gi
+          cpu: 0.5
+          memory: 2.5Gi
         limits:
-          cpu: 4
-          memory: 8Gi
+          cpu: 1
+          memory: 4.5Gi
       volumeMounts:
         - name: langflow-transactional-block
-          mountPath: /var/lib/langflow/data
+          mountPath: /persist
       readinessProbe:
         port: 7860
         path: /api/v1/snowflake/context
+      livenessProbe:
+        port: 7860
+        path: /api/v1/snowflake/context
+        periodSeconds: 15
+        failureThreshold: 3
   endpoints:
     - name: langflow-ui
       port: 7860
@@ -49,6 +55,17 @@ spec:
       size: 10Gi
       uid: 1000
       gid: 1000
+  logExporters:
+    eventTableConfig:
+      logLevel: INFO
+  platformMonitor:
+    metricConfig:
+      groups:
+        - system
+        - system_limits
+        - status
+        - network
+        - storage
 capabilities:
   securityContext:
     executeAsCaller: true

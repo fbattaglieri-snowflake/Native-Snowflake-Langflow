@@ -292,6 +292,61 @@ class SnowflakeObjectProvisioner:
             subsystem=SubsystemBoundary.SNOWFLAKE_POSTGRES,
         )
 
+    def preview_postgres_internal_relational_table(
+        self,
+        *,
+        user_principal: str,
+        pg_role: str,
+        instance_name: str,
+        pg_database: str,
+        pg_schema: str,
+        pg_table: str,
+        include_jsonb_payload: bool = True,
+        sslmode: str = "verify-ca",
+        connect_timeout: int = 10,
+    ) -> ProvisioningPreview:
+        """Preview non-pgvector relational / JSONB memory table inside Snowflake Postgres (:5432) (HUB-W2-05)."""
+        self.authz_service.authorize_postgres_operation(
+            user_principal=user_principal,
+            pg_role=pg_role,
+            required_pg_privilege="CREATE",
+            sslmode=sslmode,
+            connect_timeout=connect_timeout,
+            target_ref=f"{instance_name}/{pg_database}.{pg_schema}.{pg_table}",
+        )
+        inst_id = self.validate_identifier(instance_name, "instance_name")
+        db_id = self.validate_pg_identifier(pg_database, "pg_database")
+        sch_id = self.validate_pg_identifier(pg_schema, "pg_schema")
+        tbl_id = self.validate_pg_identifier(pg_table, "pg_table")
+        payload_col = ", payload JSONB DEFAULT '{}'::jsonb" if include_jsonb_payload else ""
+        statements = (
+            f"CREATE SCHEMA IF NOT EXISTS {sch_id}",
+            (
+                f"CREATE TABLE {sch_id}.{tbl_id} ("
+                "id TEXT PRIMARY KEY, "
+                "session_id TEXT, "
+                "user_id TEXT NOT NULL, "
+                "effective_role TEXT NOT NULL, "
+                "content TEXT NOT NULL"
+                f"{payload_col}, "
+                "metadata JSONB DEFAULT '{}'::jsonb, "
+                "created_at TIMESTAMPTZ DEFAULT NOW()"
+                ")"
+            ),
+        )
+        return ProvisioningPreview(
+            object_family=ObjectFamily.POSTGRES_INTERNAL_OBJECT,
+            destination_fqn=f"{inst_id}.{db_id}.{sch_id}.{tbl_id}",
+            hierarchy_path=(inst_id, db_id, sch_id, tbl_id),
+            owner_role=pg_role,
+            required_privileges=(f"PG_ROLE:{pg_role}:CREATE",),
+            ddl_statements=statements,
+            billable_impact="Uses existing Snowflake Postgres instance storage and compute (non-pgvector relational/JSONB).",
+            requires_confirmation=True,
+            warnings=(f"Connected over TLS sslmode={sslmode} with connect_timeout={connect_timeout}s.",),
+            subsystem=SubsystemBoundary.SNOWFLAKE_POSTGRES,
+        )
+
     # ------------------------------------------------------------------
     # 2. Database & Schema
     # ------------------------------------------------------------------
@@ -600,6 +655,7 @@ class SnowflakeObjectProvisioner:
         external_url: str | None = None,
         storage_integration: str | None = None,
         enable_directory: bool = True,
+        auto_refresh: bool = False,
     ) -> ProvisioningPreview:
         """Preview governed creation of an Internal Named Stage or External Stage."""
         db_id = self.validate_identifier(database, "database")
@@ -641,7 +697,10 @@ class SnowflakeObjectProvisioner:
                     reason="Inline cloud credentials in external stage URL are forbidden; use STORAGE_INTEGRATION.",
                 )
             int_id = self.validate_identifier(storage_integration, "storage_integration")
-            dir_clause = " DIRECTORY = (ENABLE = TRUE)" if enable_directory else ""
+            if enable_directory:
+                dir_clause = " DIRECTORY = (ENABLE = TRUE AUTO_REFRESH = TRUE)" if auto_refresh else " DIRECTORY = (ENABLE = TRUE)"
+            else:
+                dir_clause = ""
             ddl = f"CREATE STAGE {fqn} URL = '{clean_url}' STORAGE_INTEGRATION = {int_id}{dir_clause}"
             privs = (
                 "USAGE ON DATABASE",
@@ -667,6 +726,204 @@ class SnowflakeObjectProvisioner:
             required_privileges=privs,
             ddl_statements=(ddl,),
             billable_impact=impact,
+        )
+
+    # ------------------------------------------------------------------
+    # 5. Hierarchical Privilege Prechecks & HUB-W2-04 Exclusion
+    # ------------------------------------------------------------------
+    @staticmethod
+    def enforce_hub_object_exclusion(
+        object_kind: str,
+        *,
+        source: str = "hub",
+        active_role: str = "PUBLIC",
+    ) -> None:
+        """Reject FUNCTION / PROCEDURE creation from Snowflake Langflow Hub (`HUB-W2-04`)."""
+        kind_clean = (object_kind or "").strip().lower()
+        src_clean = (source or "hub").strip().lower()
+        if src_clean == "hub" and kind_clean in {
+            "function",
+            "procedure",
+            "udf",
+            "udtf",
+            "stored_procedure",
+            "stored procedure",
+        }:
+            raise SnowflakeGovernanceError.unsupported_capability(
+                active_role=active_role,
+                operation="HUB_PROVISION_OBJECT",
+                reason=(
+                    f"Creation of '{object_kind}' is strictly excluded from Snowflake Langflow Hub (HUB-W2-04). "
+                    "Use 'LLM Operations -> Stored Procedure / Function' in the sidebar instead."
+                ),
+            )
+
+    def can_create_database(self, *, user_principal: str) -> dict[str, Any]:
+        """Check whether active role can execute CREATE DATABASE ON ACCOUNT."""
+        ctx = self.authz_service.get_session_context(user_principal)
+        try:
+            self.authz_service.check_operation_permission(
+                user_principal=user_principal,
+                operation=OperationType.PROVISION_SNOWFLAKE_OBJECT,
+                target_ref="ACCOUNT.DATABASE._PRECHECK",
+                required_privilege="CREATE DATABASE ON ACCOUNT",
+                disclosable=True,
+            )
+            return {"allowed": True, "active_role": ctx.active_role, "warning": None}
+        except SnowflakeGovernanceError as exc:
+            return {
+                "allowed": False,
+                "active_role": ctx.active_role,
+                "warning": f"Il ruolo attivo ({ctx.active_role}) non dispone dei privilegi per creare un Database sull'Account.",
+                "error_code": exc.error_code.value,
+            }
+
+    def can_create_schema(self, *, user_principal: str, database: str) -> dict[str, Any]:
+        """Check whether active role can execute CREATE SCHEMA in `<database>`."""
+        ctx = self.authz_service.get_session_context(user_principal)
+        db_id = self.validate_identifier(database, "database")
+        try:
+            self.authz_service.check_operation_permission(
+                user_principal=user_principal,
+                operation=OperationType.PROVISION_SNOWFLAKE_OBJECT,
+                target_ref=f"{db_id}._PRECHECK",
+                required_privilege="CREATE SCHEMA ON DATABASE",
+                disclosable=True,
+            )
+            return {"allowed": True, "active_role": ctx.active_role, "database": db_id, "warning": None}
+        except SnowflakeGovernanceError as exc:
+            return {
+                "allowed": False,
+                "active_role": ctx.active_role,
+                "database": db_id,
+                "warning": f"Il ruolo attivo ({ctx.active_role}) non dispone dei privilegi per creare uno Schema in {db_id}.",
+                "error_code": exc.error_code.value,
+            }
+
+    def can_create_object(
+        self,
+        *,
+        user_principal: str,
+        database: str,
+        schema: str,
+        object_kind: str = "table",
+    ) -> dict[str, Any]:
+        """Check whether active role can create an object inside `<database>.<schema>`."""
+        ctx = self.authz_service.get_session_context(user_principal)
+        db_id = self.validate_identifier(database, "database")
+        sch_id = self.validate_identifier(schema, "schema")
+        fqn = f"{db_id}.{sch_id}"
+        try:
+            self.authz_service.check_operation_permission(
+                user_principal=user_principal,
+                operation=OperationType.PROVISION_SNOWFLAKE_OBJECT,
+                target_ref=f"{fqn}._PRECHECK_{object_kind.upper()}",
+                required_privilege=f"CREATE {object_kind.upper()} ON SCHEMA",
+                disclosable=True,
+            )
+            return {"allowed": True, "active_role": ctx.active_role, "schema_fqn": fqn, "warning": None}
+        except SnowflakeGovernanceError as exc:
+            return {
+                "allowed": False,
+                "active_role": ctx.active_role,
+                "schema_fqn": fqn,
+                "warning": f"Il ruolo attivo ({ctx.active_role}) non dispone dei privilegi per creare questo oggetto in {fqn}.",
+                "error_code": exc.error_code.value,
+            }
+
+    def evaluate_hierarchy_privileges(
+        self,
+        *,
+        user_principal: str,
+        database: str,
+        schema: str,
+    ) -> dict[str, Any]:
+        """Return granular per-hierarchy creation privilege flags for Hub Section 1 & Object Provisioner (`HUB-W2-03`)."""
+        db_check = self.can_create_database(user_principal=user_principal)
+        sch_check = self.can_create_schema(user_principal=user_principal, database=database)
+        obj_check = self.can_create_object(user_principal=user_principal, database=database, schema=schema, object_kind="table")
+        stg_check = self.can_create_object(user_principal=user_principal, database=database, schema=schema, object_kind="stage")
+        return {
+            "active_role": db_check["active_role"],
+            "database": database.upper(),
+            "schema": schema.upper(),
+            "can_create_database": db_check["allowed"],
+            "can_create_schema": sch_check["allowed"],
+            "can_create_object": obj_check["allowed"],
+            "can_create_table": obj_check["allowed"],
+            "can_create_stage": stg_check["allowed"],
+            "can_create_view": obj_check["allowed"],
+            "can_create_postgres": db_check["allowed"],
+            "warning_message": obj_check["warning"] or sch_check["warning"] or db_check["warning"],
+        }
+
+    def build_routine_ddl(
+        self,
+        *,
+        routine_kind: str,
+        database: str,
+        schema: str,
+        routine_name: str,
+        signature_args: str = "",
+        return_type: str = "VARIANT",
+        language: str = "SQL",
+        body: str = "SELECT CURRENT_ROLE()",
+        execute_as: str = "CALLER",
+        runtime_version: str = "3.12",
+        packages: tuple[str, ...] = ("snowflake-snowpark-python",),
+        handler: str = "run",
+        stage_imports: tuple[str, ...] = (),
+        child_procedures: tuple[str, ...] = (),
+        source: str = "llm_operations",
+        active_role: str = "ACCOUNTADMIN",
+    ) -> str:
+        """Build governed DDL for Stored Procedure or UDF/UDTF in `LLM Operations` (`LLM-W2-01`)."""
+        self.enforce_hub_object_exclusion(routine_kind, source=source, active_role=active_role)
+        db_id = self.validate_identifier(database, "database")
+        sch_id = self.validate_identifier(schema, "schema")
+        rt_id = self.validate_identifier(routine_name, "routine_name")
+        fqn = f"{db_id}.{sch_id}.{rt_id}"
+        lang = (language or "SQL").strip().upper()
+        kind_upper = (routine_kind or "PROCEDURE").strip().upper()
+        is_proc = "PROC" in kind_upper
+        kw = "PROCEDURE" if is_proc else "FUNCTION"
+        exec_clause = f"\nEXECUTE AS {execute_as.strip().upper().replace('EXECUTE AS ', '')}" if is_proc else ""
+        imports_clause = (
+            f"\nIMPORTS = ({', '.join(repr(imp) for imp in stage_imports)})" if stage_imports else ""
+        )
+
+        child_calls_sql = ""
+        if is_proc and child_procedures:
+            calls = [f"CALL {child.strip()}();" for child in child_procedures if child.strip()]
+            if calls:
+                child_calls_sql = "\n    -- Graphical Child Procedure Chain\n    " + "\n    ".join(calls) + "\n"
+
+        if lang == "PYTHON":
+            pkgs = ", ".join(repr(p) for p in (packages or ("snowflake-snowpark-python",)))
+            return (
+                f"CREATE OR REPLACE {kw} {fqn}({signature_args})\n"
+                f"RETURNS {return_type}\n"
+                f"LANGUAGE PYTHON\n"
+                f"RUNTIME_VERSION = '{runtime_version}'\n"
+                f"PACKAGES = ({pkgs})"
+                f"{imports_clause}\n"
+                f"HANDLER = '{handler}'"
+                f"{exec_clause}\n"
+                f"AS\n$$\n{body}\n$$;"
+            )
+        if is_proc:
+            return (
+                f"CREATE OR REPLACE PROCEDURE {fqn}({signature_args})\n"
+                f"RETURNS {return_type}\n"
+                f"LANGUAGE SQL"
+                f"{exec_clause}\n"
+                f"AS\n$$\nBEGIN{child_calls_sql}\n    {body}\nEND;\n$$;"
+            )
+        return (
+            f"CREATE OR REPLACE FUNCTION {fqn}({signature_args})\n"
+            f"RETURNS {return_type}\n"
+            f"LANGUAGE SQL\n"
+            f"AS\n$$\n    {body}\n$$;"
         )
 
     # ------------------------------------------------------------------

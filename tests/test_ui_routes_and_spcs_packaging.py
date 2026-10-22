@@ -438,7 +438,7 @@ def test_live_fastapi_bridge_and_ui_integration_bundle() -> None:
     assert denied is not None
     assert denied["status_code"] == 403
     assert denied["error_code"] == "AUTHZ_ROLE_DENIED"
-    assert "Il ruolo attivo (SNOWFLAKE_LANGFLOW_VIEWER_ROLE) non consente questa operazione" in denied["message"]
+    assert "Il ruolo attivo (SNOWFLAKE_LANGFLOW_VIEWER_ROLE)" in denied["message"]
 
     # Unauthorized role switch is explicitly denied
     sw_bad = bridge.switch_role("NON_EXISTENT_ROLE_XYZ")
@@ -457,15 +457,30 @@ def test_live_fastapi_bridge_and_ui_integration_bundle() -> None:
     comp_dir = REPO_ROOT / "src" / "lfx_snowflake" / "native_category_components"
     assert (comp_dir / "data_source" / "snowflake_data_source.py").exists()
     assert (comp_dir / "data_source" / "snowflake_cortex_analyst.py").exists()
-    assert (comp_dir / "data_source" / "snowflake_object_provisioner.py").exists()
+    assert not (comp_dir / "data_source" / "snowflake_object_provisioner.py").exists()
     assert (comp_dir / "models_and_agents" / "snowflake_standard_chat.py").exists()
     assert (comp_dir / "models_and_agents" / "snowflake_standard_responses.py").exists()
     assert (comp_dir / "models_and_agents" / "snowflake_standard_messages.py").exists()
     assert (comp_dir / "models_and_agents" / "snowflake_standard_ollama.py").exists()
     assert (comp_dir / "models_and_agents" / "snowflake_cortex_agent.py").exists()
+    assert (comp_dir / "llm_operations" / "snowflake_object_provisioner.py").exists()
+    assert (comp_dir / "llm_operations" / "snowflake_stored_procedure.py").exists()
+    assert (comp_dir / "llm_operations" / "snowflake_function_udf.py").exists()
+    assert (comp_dir / "llm_operations" / "snowflake_ai_complete.py").exists()
     assert (comp_dir / "llm_operations" / "snowflake_ai_function.py").exists()
+    assert (comp_dir / "llm_operations" / "snowflake_sql_statement.py").exists()
+    assert (comp_dir / "llm_operations" / "snowflake_cortex_search.py").exists()
+    assert (comp_dir / "llm_operations" / "snowflake_cortex_analyst_llm.py").exists()
+    assert (comp_dir / "llm_operations" / "snowflake_node.py").exists()
+    assert (comp_dir / "llm_operations" / "snowflake_decision.py").exists()
     assert (comp_dir / "llm_operations" / "snowflake_smart_router.py").exists()
+    assert (comp_dir / "files_and_knowledge" / "snowflake_object_provisioner_fk.py").exists()
     assert (comp_dir / "files_and_knowledge" / "snowflake_stage_files.py").exists()
     assert (comp_dir / "files_and_knowledge" / "snowflake_knowledge_memory.py").exists()
+    assert (comp_dir / "files_and_knowledge" / "snowflake_cortex_search_parse_document.py").exists()
+    assert (comp_dir / "files_and_knowledge" / "snowflake_cortex_search_split_text.py").exists()
+    assert (comp_dir / "files_and_knowledge" / "snowflake_cortex_search_service_creator.py").exists()
+    assert (comp_dir / "files_and_knowledge" / "snowflake_cortex_search_stream_task.py").exists()
+    assert (comp_dir / "files_and_knowledge" / "snowflake_cortex_analyst_disabled.py").exists()
     assert (comp_dir / "utilities" / "snowflake_python_pypi.py").exists()
     assert (comp_dir / "utilities" / "snowflake_toolguard.py").exists()

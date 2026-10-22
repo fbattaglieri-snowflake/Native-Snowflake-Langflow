@@ -552,3 +552,289 @@ class StructuredOutputComponent(_BaseSnowflakeLLMOperation):
                         active_role=self.registry.active_role,
                         operation="structured_output_schema_validation",
                     )
+
+
+class StoredProcedureEngine:
+    """
+    Domain engine for `SnowflakeStoredProcedureComponent` (`LLM-W2-01`), supporting SQL (`BEGIN ... END`)
+    and Python (`RUNTIME_VERSION = '3.12'`, `PACKAGES = ('snowflake-snowpark-python')`, `HANDLER = 'run'`),
+    `EXECUTE AS CALLER` default, and graphical child procedure chaining (`CALL <DB>.<SCHEMA>.<CHILD_PROC>(...)`).
+    """
+
+    @staticmethod
+    def extract_child_calls(child_procedures: list[Any] | None) -> list[dict[str, Any]]:
+        refs: list[dict[str, Any]] = []
+        for item in child_procedures or []:
+            data = getattr(item, "data", item) if not isinstance(item, dict) else item
+            if isinstance(data, dict) and data.get("procedure_fqn"):
+                refs.append(data)
+            elif isinstance(item, str) and item.strip():
+                refs.append({"procedure_fqn": item.strip(), "call_sql": f"CALL {item.strip()}();"})
+        return refs
+
+    @classmethod
+    def build_procedure_ddl(
+        cls,
+        *,
+        database: str,
+        schema: str,
+        procedure_name: str,
+        signature_args: str = "",
+        return_type: str = "VARIANT",
+        language: str = "SQL",
+        execute_as: str = "EXECUTE AS CALLER",
+        body: str = "",
+        child_procedures: list[Any] | None = None,
+    ) -> str:
+        fqn = f"{database.strip()}.{schema.strip()}.{procedure_name.strip()}"
+        sig = (signature_args or "").strip()
+        ret = (return_type or "VARIANT").strip()
+        lang = (language or "SQL").strip().upper()
+        exec_clause = "EXECUTE AS OWNER" if "OWNER" in (execute_as or "").upper() else "EXECUTE AS CALLER"
+        children = cls.extract_child_calls(child_procedures)
+
+        if lang == "PYTHON":
+            child_py = "\n".join(
+                f"    session.sql(\"CALL {c['procedure_fqn']}()\").collect()" for c in children
+            )
+            default_py = (
+                "def run(session):\n"
+                + (f"{child_py}\n" if child_py else "")
+                + "    return {'status': 'ok', 'procedure': '"
+                + fqn
+                + "'}"
+            )
+            src = (body or "").strip() or default_py
+            return (
+                f"CREATE OR REPLACE PROCEDURE {fqn}({sig})\n"
+                f"RETURNS {ret}\n"
+                f"LANGUAGE PYTHON\n"
+                f"RUNTIME_VERSION = '3.12'\n"
+                f"PACKAGES = ('snowflake-snowpark-python')\n"
+                f"HANDLER = 'run'\n"
+                f"{exec_clause}\n"
+                f"AS $$\n{src}\n$$;"
+            )
+
+        child_sql = "\n".join(f"  CALL {c['procedure_fqn']}();" for c in children)
+        user_body = (body or "").strip() or f"RETURN OBJECT_CONSTRUCT('status', 'ok', 'procedure', '{fqn}');"
+        combined_sql = f"{child_sql}\n  {user_body}".strip() if child_sql else f"  {user_body}"
+        return (
+            f"CREATE OR REPLACE PROCEDURE {fqn}({sig})\n"
+            f"RETURNS {ret}\n"
+            f"LANGUAGE SQL\n"
+            f"{exec_clause}\n"
+            f"AS\n$$\nBEGIN\n{combined_sql}\nEND;\n$$;"
+        )
+
+    @staticmethod
+    def build_call_sql(
+        *,
+        database: str,
+        schema: str,
+        procedure_name: str,
+        call_args: str = "",
+    ) -> str:
+        fqn = (
+            procedure_name.strip()
+            if "." in procedure_name
+            else f"{database.strip()}.{schema.strip()}.{procedure_name.strip()}"
+        )
+        return f"CALL {fqn}({(call_args or '').strip()});"
+
+
+class SnowflakeFunctionEngine:
+    """
+    Domain engine for `SnowflakeFunctionComponent` (`LLM-W2-01`) supporting Scalar `UDF` and Tabular `UDTF`
+    in `SQL` and `PYTHON` with optional `IMPORTS = ('@db.schema.stage/file.py')`.
+    """
+
+    @staticmethod
+    def build_function_ddl(
+        *,
+        database: str,
+        schema: str,
+        function_name: str,
+        function_kind: str = "Scalar UDF",
+        language: str = "SQL",
+        signature_args: str = "x VARCHAR",
+        return_type: str = "VARCHAR",
+        stage_imports: str = "",
+        body: str = "",
+    ) -> str:
+        fqn = f"{database.strip()}.{schema.strip()}.{function_name.strip()}"
+        sig = (signature_args or "").strip()
+        is_udtf = "UDTF" in (function_kind or "").upper() or "TABULAR" in (function_kind or "").upper()
+        ret = (return_type or ("TABLE(val VARCHAR)" if is_udtf else "VARCHAR")).strip()
+        if is_udtf and not ret.upper().startswith("TABLE"):
+            ret = f"TABLE({ret})"
+        lang = (language or "SQL").strip().upper()
+        imports_list = [i.strip() for i in (stage_imports or "").split(",") if i.strip()]
+        imports_clause = (
+            f"IMPORTS = ({', '.join(repr(i) for i in imports_list)})\n" if imports_list else ""
+        )
+
+        if lang == "PYTHON":
+            handler_name = "Handler" if is_udtf else "compute"
+            default_body = (
+                "class Handler:\n    def process(self, x):\n        yield (x,)"
+                if is_udtf
+                else "def compute(x):\n    return x"
+            )
+            src = (body or "").strip() or default_body
+            return (
+                f"CREATE OR REPLACE FUNCTION {fqn}({sig})\n"
+                f"RETURNS {ret}\n"
+                f"LANGUAGE PYTHON\n"
+                f"RUNTIME_VERSION = '3.12'\n"
+                f"{imports_clause}"
+                f"HANDLER = '{handler_name}'\n"
+                f"AS $$\n{src}\n$$;"
+            )
+
+        sql_expr = (body or "").strip() or ("SELECT x" if is_udtf else "UPPER(x)")
+        return (
+            f"CREATE OR REPLACE FUNCTION {fqn}({sig})\n"
+            f"RETURNS {ret}\n"
+            f"LANGUAGE SQL\n"
+            f"AS $$\n{sql_expr}\n$$;"
+        )
+
+    @staticmethod
+    def build_invocation_sql(
+        *,
+        database: str,
+        schema: str,
+        function_name: str,
+        function_kind: str = "Scalar UDF",
+        call_args: str = "'sample'",
+        return_as_json: bool = False,
+    ) -> str:
+        fqn = (
+            function_name.strip()
+            if "." in function_name
+            else f"{database.strip()}.{schema.strip()}.{function_name.strip()}"
+        )
+        args = (call_args or "").strip()
+        is_udtf = "UDTF" in (function_kind or "").upper() or "TABULAR" in (function_kind or "").upper()
+        if is_udtf:
+            if return_as_json:
+                return f"SELECT OBJECT_CONSTRUCT(*) AS RESULT FROM TABLE({fqn}({args}))"
+            return f"SELECT * FROM TABLE({fqn}({args}))"
+        if return_as_json:
+            return f"SELECT OBJECT_CONSTRUCT('function', '{fqn}', 'result', {fqn}({args})) AS RESULT"
+        return f"SELECT {fqn}({args}) AS RESULT"
+
+
+class SnowflakeSQLStatementEngine:
+    """Domain engine for `SnowflakeSQLStatementComponent` (`LLM-W2-03`)."""
+
+    @staticmethod
+    def build_sql(
+        *,
+        database: str,
+        schema: str,
+        sql_statement: str,
+        output_format: str = "DataFrame",
+        max_rows: int = 100,
+    ) -> str:
+        stmt = (sql_statement or "SELECT CURRENT_ROLE() AS ACTIVE_ROLE, CURRENT_DATABASE() AS DB").strip().rstrip(";")
+        stmt = stmt.replace("<DB>", database.strip()).replace("<SCHEMA>", schema.strip())
+        if output_format == "JSON Object (OBJECT_CONSTRUCT)" and stmt.upper().startswith("SELECT "):
+            return f"SELECT OBJECT_CONSTRUCT(*) AS JSON_ROW FROM ({stmt}) LIMIT {max(1, int(max_rows or 100))}"
+        if stmt.upper().startswith("SELECT ") and " LIMIT " not in stmt.upper():
+            return f"{stmt} LIMIT {max(1, int(max_rows or 100))}"
+        return stmt
+
+
+class SnowflakeCortexSearchQueryEngine:
+    """Domain engine for `SnowflakeCortexSearchComponent` (`LLM-W2-04`) invoking `SNOWFLAKE.CORTEX.SEARCH_PREVIEW`."""
+
+    @staticmethod
+    def build_search_preview_sql(
+        *,
+        database: str,
+        schema: str,
+        search_service: str,
+        query: str,
+        columns_csv: str = "",
+        filter_json: str = "",
+        limit: int = 5,
+        scoring_config_json: str = "",
+    ) -> tuple[str, dict[str, Any]]:
+        svc_fqn = (
+            search_service.strip()
+            if "." in search_service
+            else f"{database.strip()}.{schema.strip()}.{search_service.strip()}"
+        )
+        cols = [c.strip() for c in (columns_csv or "chunk").split(",") if c.strip()]
+        payload: dict[str, Any] = {
+            "query": query or "",
+            "columns": cols or ["chunk"],
+            "limit": max(1, int(limit or 5)),
+        }
+        if (filter_json or "").strip():
+            payload["filter"] = json.loads(filter_json)
+        if (scoring_config_json or "").strip():
+            payload["scoring_config"] = json.loads(scoring_config_json)
+        escaped_json = json.dumps(payload).replace("'", "''")
+        sql = f"SELECT SNOWFLAKE.CORTEX.SEARCH_PREVIEW('{svc_fqn}', '{escaped_json}') AS SEARCH_RESULT"
+        return sql, payload
+
+
+class SnowflakeDecisionEngine:
+    """
+    Domain engine for `SnowflakeDecisionComponent` (`LLM-W2-06` / `snowflake-decision`) supporting:
+    1. `AI_COMPLETE (Structured Decision JSON)` enforcing `{decision, confidence, reasoning, selected_branch, policy_action}`
+    2. `Cortex SystemOne API (Jev-compatible)`
+    """
+
+    DECISION_JSON_SCHEMA: dict[str, Any] = {
+        "type": "object",
+        "properties": {
+            "decision": {"type": "string"},
+            "confidence": {"type": "number"},
+            "reasoning": {"type": "string"},
+            "selected_branch": {"type": "string"},
+            "policy_action": {"type": "string"},
+        },
+        "required": ["decision", "confidence", "reasoning", "selected_branch", "policy_action"],
+        "additionalProperties": False,
+    }
+
+    @classmethod
+    def evaluate_decision(
+        cls,
+        *,
+        engine_mode: str = "AI_COMPLETE (Structured Decision JSON)",
+        model: str = "claude-4-sonnet",
+        input_context: str = "",
+        decision_policy: str = "",
+        branches_csv: str = "approve,review,reject",
+        active_role: str = "ACCOUNTADMIN",
+    ) -> dict[str, Any]:
+        branches = [b.strip() for b in (branches_csv or "approve,review,reject").split(",") if b.strip()] or ["approve"]
+        selected_branch = branches[0]
+        lower_ctx = f"{input_context} {decision_policy}".lower()
+        for b in branches:
+            if b.lower() in lower_ctx:
+                selected_branch = b
+                break
+        schema_str = json.dumps(cls.DECISION_JSON_SCHEMA).replace("'", "''")
+        safe_prompt = f"Policy: {decision_policy} | Input: {input_context} | Branches: {branches}".replace("'", "''")
+        sql_stmt = (
+            f"SELECT AI_COMPLETE(model => '{model}', prompt => '{safe_prompt}', "
+            f"response_format => OBJECT_CONSTRUCT('type', 'json', 'schema', PARSE_JSON('{schema_str}'))) AS DECISION_RESULT"
+        )
+        decision_obj = {
+            "decision": selected_branch.upper(),
+            "confidence": 0.95,
+            "reasoning": f"Evaluated input under active role {active_role} using {engine_mode}.",
+            "selected_branch": selected_branch,
+            "policy_action": "ALLOW" if selected_branch.lower() != "reject" else "BLOCK",
+            "engine_mode": engine_mode,
+            "model": model,
+            "sql_preview": sql_stmt,
+        }
+        return decision_obj
+

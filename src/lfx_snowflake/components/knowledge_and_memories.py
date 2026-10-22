@@ -60,8 +60,115 @@ ALLOWED_GENERATIVE_PREPROCESSING_PROVIDERS = frozenset(
 class VectorBackendType(str, Enum):
     STANDARD_VECTOR = "STANDARD_VECTOR"
     HYBRID_VECTOR = "HYBRID_VECTOR"
+    INTERACTIVE_VECTOR = "INTERACTIVE_VECTOR"
+    DYNAMIC_VECTOR = "DYNAMIC_VECTOR"
     CORTEX_SEARCH = "CORTEX_SEARCH"
     POSTGRES_PGVECTOR = "POSTGRES_PGVECTOR"
+    STANDARD_RELATIONAL = "STANDARD_RELATIONAL"
+    HYBRID_RELATIONAL = "HYBRID_RELATIONAL"
+    INTERACTIVE_RELATIONAL = "INTERACTIVE_RELATIONAL"
+    DYNAMIC_RELATIONAL = "DYNAMIC_RELATIONAL"
+    SEMI_STRUCTURED_VARIANT = "SEMI_STRUCTURED_VARIANT"
+    SEMI_STRUCTURED_OBJECT = "SEMI_STRUCTURED_OBJECT"
+    SEMI_STRUCTURED_ARRAY = "SEMI_STRUCTURED_ARRAY"
+    POSTGRES_RELATIONAL = "POSTGRES_RELATIONAL"
+    POSTGRES_JSONB = "POSTGRES_JSONB"
+
+
+MemoryBackendType = VectorBackendType
+
+VECTOR_MEMORY_BACKENDS = frozenset(
+    {
+        VectorBackendType.STANDARD_VECTOR,
+        VectorBackendType.HYBRID_VECTOR,
+        VectorBackendType.INTERACTIVE_VECTOR,
+        VectorBackendType.DYNAMIC_VECTOR,
+        VectorBackendType.CORTEX_SEARCH,
+        VectorBackendType.POSTGRES_PGVECTOR,
+    }
+)
+
+NON_VECTOR_MEMORY_BACKENDS = frozenset(
+    {
+        VectorBackendType.STANDARD_RELATIONAL,
+        VectorBackendType.HYBRID_RELATIONAL,
+        VectorBackendType.INTERACTIVE_RELATIONAL,
+        VectorBackendType.DYNAMIC_RELATIONAL,
+        VectorBackendType.SEMI_STRUCTURED_VARIANT,
+        VectorBackendType.SEMI_STRUCTURED_OBJECT,
+        VectorBackendType.SEMI_STRUCTURED_ARRAY,
+        VectorBackendType.POSTGRES_RELATIONAL,
+        VectorBackendType.POSTGRES_JSONB,
+    }
+)
+
+_MEMORY_BACKEND_ALIASES: dict[str, VectorBackendType] = {
+    "STANDARD_VECTOR": VectorBackendType.STANDARD_VECTOR,
+    "STANDARD TABLE (VECTOR)": VectorBackendType.STANDARD_VECTOR,
+    "HYBRID_VECTOR": VectorBackendType.HYBRID_VECTOR,
+    "HYBRID TABLE (VECTOR)": VectorBackendType.HYBRID_VECTOR,
+    "INTERACTIVE_VECTOR": VectorBackendType.INTERACTIVE_VECTOR,
+    "INTERACTIVE TABLE (VECTOR)": VectorBackendType.INTERACTIVE_VECTOR,
+    "DYNAMIC_VECTOR": VectorBackendType.DYNAMIC_VECTOR,
+    "DYNAMIC TABLE (VECTOR)": VectorBackendType.DYNAMIC_VECTOR,
+    "CORTEX_SEARCH": VectorBackendType.CORTEX_SEARCH,
+    "CORTEX SEARCH": VectorBackendType.CORTEX_SEARCH,
+    "CORTEX SEARCH SERVICE": VectorBackendType.CORTEX_SEARCH,
+    "POSTGRES_PGVECTOR": VectorBackendType.POSTGRES_PGVECTOR,
+    "SNOWFLAKE POSTGRES (PGVECTOR)": VectorBackendType.POSTGRES_PGVECTOR,
+    "STANDARD_RELATIONAL": VectorBackendType.STANDARD_RELATIONAL,
+    "STANDARD TABLE": VectorBackendType.STANDARD_RELATIONAL,
+    "STANDARD TABLE (RELATIONAL)": VectorBackendType.STANDARD_RELATIONAL,
+    "STRUCTURED TABLE MEMORY": VectorBackendType.STANDARD_RELATIONAL,
+    "HYBRID_RELATIONAL": VectorBackendType.HYBRID_RELATIONAL,
+    "HYBRID TABLE": VectorBackendType.HYBRID_RELATIONAL,
+    "HYBRID TABLE (RELATIONAL)": VectorBackendType.HYBRID_RELATIONAL,
+    "INTERACTIVE_RELATIONAL": VectorBackendType.INTERACTIVE_RELATIONAL,
+    "INTERACTIVE TABLE": VectorBackendType.INTERACTIVE_RELATIONAL,
+    "INTERACTIVE TABLE (RELATIONAL)": VectorBackendType.INTERACTIVE_RELATIONAL,
+    "DYNAMIC_RELATIONAL": VectorBackendType.DYNAMIC_RELATIONAL,
+    "DYNAMIC TABLE": VectorBackendType.DYNAMIC_RELATIONAL,
+    "DYNAMIC TABLE (RELATIONAL)": VectorBackendType.DYNAMIC_RELATIONAL,
+    "SEMI_STRUCTURED_VARIANT": VectorBackendType.SEMI_STRUCTURED_VARIANT,
+    "SEMI-STRUCTURED (VARIANT)": VectorBackendType.SEMI_STRUCTURED_VARIANT,
+    "SEMI-STRUCTURED (VARIANT/OBJECT/ARRAY)": VectorBackendType.SEMI_STRUCTURED_VARIANT,
+    "VARIANT": VectorBackendType.SEMI_STRUCTURED_VARIANT,
+    "SEMI_STRUCTURED_OBJECT": VectorBackendType.SEMI_STRUCTURED_OBJECT,
+    "SEMI-STRUCTURED (OBJECT)": VectorBackendType.SEMI_STRUCTURED_OBJECT,
+    "OBJECT": VectorBackendType.SEMI_STRUCTURED_OBJECT,
+    "SEMI_STRUCTURED_ARRAY": VectorBackendType.SEMI_STRUCTURED_ARRAY,
+    "SEMI-STRUCTURED (ARRAY)": VectorBackendType.SEMI_STRUCTURED_ARRAY,
+    "ARRAY": VectorBackendType.SEMI_STRUCTURED_ARRAY,
+    "POSTGRES_RELATIONAL": VectorBackendType.POSTGRES_RELATIONAL,
+    "SNOWFLAKE POSTGRES (RELATIONAL)": VectorBackendType.POSTGRES_RELATIONAL,
+    "SNOWFLAKE POSTGRES (RELATIONAL/JSONB)": VectorBackendType.POSTGRES_RELATIONAL,
+    "SNOWFLAKE POSTGRES (RELATIONAL / JSONB)": VectorBackendType.POSTGRES_RELATIONAL,
+    "POSTGRES_JSONB": VectorBackendType.POSTGRES_JSONB,
+    "SNOWFLAKE POSTGRES (JSONB)": VectorBackendType.POSTGRES_JSONB,
+}
+
+
+def normalize_memory_backend_type(val: VectorBackendType | str) -> VectorBackendType:
+    """Resolve enum values or UI display labels into a canonical VectorBackendType."""
+    if isinstance(val, VectorBackendType):
+        return val
+    cleaned = str(val or "").strip().upper()
+    if "ICEBERG" in cleaned and "VECTOR" in cleaned:
+        raise SnowflakeComponentError(
+            ErrorCode.UNSUPPORTED_CAPABILITY,
+            "Native VECTOR columns are not supported on Snowflake Iceberg Tables (HUB-W2-05).",
+            http_status=422,
+        )
+    if cleaned in _MEMORY_BACKEND_ALIASES:
+        return _MEMORY_BACKEND_ALIASES[cleaned]
+    try:
+        return VectorBackendType(cleaned)
+    except ValueError as exc:
+        raise SnowflakeComponentError(
+            ErrorCode.UNSUPPORTED_CAPABILITY,
+            f"Unsupported memory backend '{val}'.",
+            http_status=422,
+        ) from exc
 
 
 class CortexSearchEmbeddingMode(str, Enum):
@@ -113,17 +220,47 @@ DEFAULT_SNOWFLAKE_EMBEDDING_CATALOG: dict[str, EmbeddingModelSpec] = {
         dimension=1024,
         version="2.0",
     ),
-    "snowflake-arctic-embed-m-v1.5": EmbeddingModelSpec(
-        model_id="snowflake-arctic-embed-m-v1.5",
+    "snowflake-arctic-embed-l-v2.0-8k": EmbeddingModelSpec(
+        model_id="snowflake-arctic-embed-l-v2.0-8k",
         provider="Snowflake Cortex Embedding",
-        dimension=768,
-        version="1.5",
+        dimension=1024,
+        version="2.0-8k",
+    ),
+    "multilingual-e5-large": EmbeddingModelSpec(
+        model_id="multilingual-e5-large",
+        provider="Snowflake Cortex Embedding",
+        dimension=1024,
+        version="1.0",
+    ),
+    "voyage-multilingual-2": EmbeddingModelSpec(
+        model_id="voyage-multilingual-2",
+        provider="Snowflake Cortex Embedding",
+        dimension=1024,
+        version="2.0",
     ),
     "nv-embed-qa-4": EmbeddingModelSpec(
         model_id="nv-embed-qa-4",
         provider="Snowflake Cortex Embedding",
         dimension=1024,
         version="4.0",
+    ),
+    "voyage-multimodal-3": EmbeddingModelSpec(
+        model_id="voyage-multimodal-3",
+        provider="Snowflake Cortex Embedding",
+        dimension=1024,
+        version="3.0",
+    ),
+    "snowflake-arctic-embed-m-v1.5": EmbeddingModelSpec(
+        model_id="snowflake-arctic-embed-m-v1.5",
+        provider="Snowflake Cortex Embedding",
+        dimension=768,
+        version="1.5",
+    ),
+    "snowflake-arctic-embed-m": EmbeddingModelSpec(
+        model_id="snowflake-arctic-embed-m",
+        provider="Snowflake Cortex Embedding",
+        dimension=768,
+        version="1.0",
     ),
     "e5-base-v2": EmbeddingModelSpec(
         model_id="e5-base-v2",
@@ -171,26 +308,62 @@ class VectorStoreConfig:
     database: str
     schema: str
     table_name: str
-    embedding_spec: EmbeddingModelSpec
+    embedding_spec: EmbeddingModelSpec = field(
+        default_factory=lambda: DEFAULT_SNOWFLAKE_EMBEDDING_CATALOG["snowflake-arctic-embed-m-v1.5"]
+    )
     batch_size: int = 64
     llm_preprocessing: LLMPreprocessingConfig = field(default_factory=LLMPreprocessingConfig)
     # Hybrid table options
     primary_key_column: str = "RECORD_ID"
     secondary_index_columns: tuple[str, ...] = ("PROJECT_ID", "SESSION_ID")
     vector_column: str = "EMBEDDING_VEC"
+    vector_element_type: str = "FLOAT"
+    vector_dimension_override: int | None = None
+    vector_inside_variant: bool = False
+    # Interactive / Dynamic table options
+    warehouse: str | None = None
+    target_lag: str = "1 minute"
     # Cortex Search options
     cortex_search_service_name: str | None = None
     cortex_embedding_mode: CortexSearchEmbeddingMode = CortexSearchEmbeddingMode.MANAGED
-    # Postgres pgvector options
+    # Postgres options (:5432 relational / JSONB / pgvector)
     postgres_instance: str | None = None
     postgres_role: str | None = None
 
     def __post_init__(self) -> None:
+        self.backend_type = normalize_memory_backend_type(self.backend_type)
         self.database = validate_snowflake_identifier(self.database, "database")
         self.schema = validate_snowflake_identifier(self.schema, "schema")
         self.table_name = validate_snowflake_identifier(self.table_name, "table_name")
         self.primary_key_column = validate_snowflake_identifier(self.primary_key_column, "primary_key_column")
         self.vector_column = validate_snowflake_identifier(self.vector_column, "vector_column")
+        self.vector_element_type = (self.vector_element_type or "FLOAT").strip().upper()
+        if self.vector_element_type not in {"FLOAT", "INT"}:
+            raise SnowflakeComponentError(
+                ErrorCode.UNSUPPORTED_CAPABILITY,
+                f"VECTOR element type must be FLOAT or INT, got '{self.vector_element_type}'.",
+                http_status=422,
+            )
+        if self.vector_inside_variant:
+            raise SnowflakeComponentError(
+                ErrorCode.UNSUPPORTED_CAPABILITY,
+                "Snowflake VECTOR values cannot be nested inside VARIANT columns (HUB-W2-05).",
+                http_status=422,
+            )
+        if self.vector_dimension_override is not None:
+            if self.vector_dimension_override < 1 or self.vector_dimension_override > MAX_SNOWFLAKE_VECTOR_DIMENSION:
+                raise SnowflakeComponentError(
+                    ErrorCode.UNSUPPORTED_CAPABILITY,
+                    f"VECTOR dimension {self.vector_dimension_override} must be between 1 and {MAX_SNOWFLAKE_VECTOR_DIMENSION}.",
+                    http_status=422,
+                )
+            if self.is_vector_memory and self.vector_dimension_override != self.embedding_spec.dimension:
+                raise SnowflakeComponentError(
+                    ErrorCode.UNSUPPORTED_CAPABILITY,
+                    f"VECTOR dimension {self.vector_dimension_override} does not match selected AI_EMBED model "
+                    f"'{self.embedding_spec.model_id}' ({self.embedding_spec.dimension}d).",
+                    http_status=422,
+                )
         if self.batch_size <= 0 or self.batch_size > 2048:
             raise SnowflakeComponentError(
                 ErrorCode.TECHNICAL_EXECUTION_ERROR,
@@ -199,10 +372,11 @@ class VectorStoreConfig:
             )
         self.llm_preprocessing.validate()
 
-        if self.backend_type == VectorBackendType.HYBRID_VECTOR:
-            if self.vector_column.upper() == self.primary_key_column.upper() or self.vector_column.upper() in {
-                c.upper() for c in self.secondary_index_columns
-            }:
+        if self.backend_type in (VectorBackendType.HYBRID_VECTOR, VectorBackendType.HYBRID_RELATIONAL):
+            if self.backend_type == VectorBackendType.HYBRID_VECTOR and (
+                self.vector_column.upper() == self.primary_key_column.upper()
+                or self.vector_column.upper() in {c.upper() for c in self.secondary_index_columns}
+            ):
                 raise SnowflakeComponentError(
                     ErrorCode.UNSUPPORTED_CAPABILITY,
                     "In a Snowflake Hybrid Table, the VECTOR column cannot be a primary key or secondary index column.",
@@ -229,13 +403,21 @@ class VectorStoreConfig:
                     http_status=422,
                 )
 
-        if self.backend_type == VectorBackendType.POSTGRES_PGVECTOR:
+        if self.backend_type in (
+            VectorBackendType.POSTGRES_PGVECTOR,
+            VectorBackendType.POSTGRES_RELATIONAL,
+            VectorBackendType.POSTGRES_JSONB,
+        ):
             if not self.postgres_instance or not self.postgres_role:
                 raise SnowflakeComponentError(
                     ErrorCode.UNSUPPORTED_CAPABILITY,
-                    "POSTGRES_PGVECTOR backend requires both 'postgres_instance' and explicit 'postgres_role'.",
+                    f"{self.backend_type.value} backend requires both 'postgres_instance' and explicit 'postgres_role'.",
                     http_status=422,
                 )
+
+    @property
+    def is_vector_memory(self) -> bool:
+        return self.backend_type in VECTOR_MEMORY_BACKENDS
 
     @property
     def table_fqn(self) -> str:
@@ -294,9 +476,13 @@ class InMemoryVectorStoreEngine:
         return (privilege.upper(), table_fqn.upper()) in allowed or (privilege.upper(), "*") in allowed
 
     def provision_physical_store(self, config: VectorStoreConfig, *, confirmed: bool = True) -> dict[str, Any]:
-        """Provision physical storage (`CREATE TABLE` / `CREATE CORTEX SEARCH SERVICE` / PG `pgvector`)."""
+        """Provision physical storage (`CREATE TABLE` / `CREATE CORTEX SEARCH SERVICE` / PG `pgvector` / structured / semi-structured)."""
         role = self.active_role
         schema_fqn = f"{config.database}.{config.schema}"
+        elem_type = config.vector_element_type
+        dim = config.embedding_spec.dimension
+        wh_name = config.warehouse or "<WAREHOUSE>"
+        lag = config.target_lag or "1 minute"
 
         if config.backend_type == VectorBackendType.STANDARD_VECTOR:
             if not self.has_sf_privilege(role, "CREATE TABLE", schema_fqn):
@@ -307,7 +493,7 @@ class InMemoryVectorStoreEngine:
                 f"USER_ID VARCHAR NOT NULL, PROJECT_ID VARCHAR NOT NULL, SESSION_ID VARCHAR, "
                 f"EFFECTIVE_ROLE VARCHAR NOT NULL, CONTENT VARCHAR, METADATA VARIANT, "
                 f"SPACE_FINGERPRINT VARCHAR NOT NULL, "
-                f"{config.vector_column} VECTOR(FLOAT, {config.embedding_spec.dimension}))"
+                f"{config.vector_column} VECTOR({elem_type}, {dim}))"
             )
         elif config.backend_type == VectorBackendType.HYBRID_VECTOR:
             if not self.has_sf_privilege(role, "CREATE HYBRID TABLE", schema_fqn):
@@ -319,8 +505,38 @@ class InMemoryVectorStoreEngine:
                 f"USER_ID VARCHAR NOT NULL, PROJECT_ID VARCHAR NOT NULL, SESSION_ID VARCHAR, "
                 f"EFFECTIVE_ROLE VARCHAR NOT NULL, CONTENT VARCHAR, METADATA VARIANT, "
                 f"SPACE_FINGERPRINT VARCHAR NOT NULL, "
-                f"{config.vector_column} VECTOR(FLOAT, {config.embedding_spec.dimension}), "
+                f"{config.vector_column} VECTOR({elem_type}, {dim}), "
                 f"INDEX idx_scope ({idx_cols}))"
+            )
+        elif config.backend_type == VectorBackendType.INTERACTIVE_VECTOR:
+            if not (
+                self.has_sf_privilege(role, "CREATE INTERACTIVE TABLE", schema_fqn)
+                or self.has_sf_privilege(role, "CREATE TABLE", schema_fqn)
+            ):
+                raise_role_denied(role, "CREATE INTERACTIVE TABLE", schema_fqn, self.record_audit)
+            ddl = (
+                f"CREATE INTERACTIVE TABLE {config.table_fqn} TARGET_LAG = '{lag}' WAREHOUSE = {wh_name} AS "
+                f"SELECT CAST(NULL AS VARCHAR) AS {config.primary_key_column}, "
+                f"CAST(NULL AS VARCHAR) AS USER_ID, CAST(NULL AS VARCHAR) AS PROJECT_ID, "
+                f"CAST(NULL AS VARCHAR) AS SESSION_ID, CAST(NULL AS VARCHAR) AS EFFECTIVE_ROLE, "
+                f"CAST(NULL AS VARCHAR) AS CONTENT, CAST(NULL AS VARIANT) AS METADATA, "
+                f"CAST(NULL AS VARCHAR) AS SPACE_FINGERPRINT, "
+                f"CAST(NULL AS VECTOR({elem_type}, {dim})) AS {config.vector_column} WHERE 1=0"
+            )
+        elif config.backend_type == VectorBackendType.DYNAMIC_VECTOR:
+            if not (
+                self.has_sf_privilege(role, "CREATE DYNAMIC TABLE", schema_fqn)
+                or self.has_sf_privilege(role, "CREATE TABLE", schema_fqn)
+            ):
+                raise_role_denied(role, "CREATE DYNAMIC TABLE", schema_fqn, self.record_audit)
+            ddl = (
+                f"CREATE DYNAMIC TABLE {config.table_fqn} TARGET_LAG = '{lag}' WAREHOUSE = {wh_name} REFRESH_MODE = AUTO AS "
+                f"SELECT CAST(NULL AS VARCHAR) AS {config.primary_key_column}, "
+                f"CAST(NULL AS VARCHAR) AS USER_ID, CAST(NULL AS VARCHAR) AS PROJECT_ID, "
+                f"CAST(NULL AS VARCHAR) AS SESSION_ID, CAST(NULL AS VARCHAR) AS EFFECTIVE_ROLE, "
+                f"CAST(NULL AS VARCHAR) AS CONTENT, CAST(NULL AS VARIANT) AS METADATA, "
+                f"CAST(NULL AS VARCHAR) AS SPACE_FINGERPRINT, "
+                f"CAST(NULL AS VECTOR({elem_type}, {dim})) AS {config.vector_column} WHERE 1=0"
             )
         elif config.backend_type == VectorBackendType.CORTEX_SEARCH:
             if not self.has_sf_privilege(role, "CREATE TABLE", schema_fqn):
@@ -337,7 +553,6 @@ class InMemoryVectorStoreEngine:
                 f"AS (SELECT * FROM {config.table_fqn})"
             )
         elif config.backend_type == VectorBackendType.POSTGRES_PGVECTOR:
-            # Verify both Snowflake role access to the Postgres integration and PG role privileges
             if not self.has_sf_privilege(role, "USAGE", config.postgres_instance or ""):
                 raise_role_denied(role, "USAGE POSTGRES INSTANCE", config.postgres_instance or "", self.record_audit)
             pg_role = config.postgres_role or ""
@@ -354,12 +569,99 @@ class InMemoryVectorStoreEngine:
                 f"{config.primary_key_column} TEXT PRIMARY KEY, "
                 f"user_id TEXT NOT NULL, project_id TEXT NOT NULL, session_id TEXT, "
                 f"effective_role TEXT NOT NULL, content TEXT, space_fingerprint TEXT NOT NULL, "
-                f"{config.vector_column} vector({config.embedding_spec.dimension}))"
+                f"{config.vector_column} vector({dim}))"
+            )
+        elif config.backend_type == VectorBackendType.STANDARD_RELATIONAL:
+            if not self.has_sf_privilege(role, "CREATE TABLE", schema_fqn):
+                raise_role_denied(role, "CREATE TABLE", schema_fqn, self.record_audit)
+            ddl = (
+                f"CREATE TABLE {config.table_fqn} ("
+                f"{config.primary_key_column} VARCHAR PRIMARY KEY, "
+                f"USER_ID VARCHAR NOT NULL, PROJECT_ID VARCHAR NOT NULL, SESSION_ID VARCHAR, "
+                f"EFFECTIVE_ROLE VARCHAR NOT NULL, CONTENT VARCHAR, METADATA VARIANT, "
+                f"CREATED_AT TIMESTAMP_TZ DEFAULT CURRENT_TIMESTAMP())"
+            )
+        elif config.backend_type == VectorBackendType.HYBRID_RELATIONAL:
+            if not self.has_sf_privilege(role, "CREATE HYBRID TABLE", schema_fqn):
+                raise_role_denied(role, "CREATE HYBRID TABLE", schema_fqn, self.record_audit)
+            idx_cols = ", ".join(config.secondary_index_columns)
+            ddl = (
+                f"CREATE HYBRID TABLE {config.table_fqn} ("
+                f"{config.primary_key_column} VARCHAR PRIMARY KEY, "
+                f"USER_ID VARCHAR NOT NULL, PROJECT_ID VARCHAR NOT NULL, SESSION_ID VARCHAR, "
+                f"EFFECTIVE_ROLE VARCHAR NOT NULL, CONTENT VARCHAR, METADATA VARIANT, "
+                f"CREATED_AT TIMESTAMP_TZ DEFAULT CURRENT_TIMESTAMP(), "
+                f"INDEX idx_scope ({idx_cols}))"
+            )
+        elif config.backend_type == VectorBackendType.INTERACTIVE_RELATIONAL:
+            if not (
+                self.has_sf_privilege(role, "CREATE INTERACTIVE TABLE", schema_fqn)
+                or self.has_sf_privilege(role, "CREATE TABLE", schema_fqn)
+            ):
+                raise_role_denied(role, "CREATE INTERACTIVE TABLE", schema_fqn, self.record_audit)
+            ddl = (
+                f"CREATE INTERACTIVE TABLE {config.table_fqn} TARGET_LAG = '{lag}' WAREHOUSE = {wh_name} AS "
+                f"SELECT CAST(NULL AS VARCHAR) AS {config.primary_key_column}, "
+                f"CAST(NULL AS VARCHAR) AS USER_ID, CAST(NULL AS VARCHAR) AS PROJECT_ID, "
+                f"CAST(NULL AS VARCHAR) AS SESSION_ID, CAST(NULL AS VARCHAR) AS EFFECTIVE_ROLE, "
+                f"CAST(NULL AS VARCHAR) AS CONTENT, CAST(NULL AS VARIANT) AS METADATA WHERE 1=0"
+            )
+        elif config.backend_type == VectorBackendType.DYNAMIC_RELATIONAL:
+            if not (
+                self.has_sf_privilege(role, "CREATE DYNAMIC TABLE", schema_fqn)
+                or self.has_sf_privilege(role, "CREATE TABLE", schema_fqn)
+            ):
+                raise_role_denied(role, "CREATE DYNAMIC TABLE", schema_fqn, self.record_audit)
+            ddl = (
+                f"CREATE DYNAMIC TABLE {config.table_fqn} TARGET_LAG = '{lag}' WAREHOUSE = {wh_name} REFRESH_MODE = AUTO AS "
+                f"SELECT CAST(NULL AS VARCHAR) AS {config.primary_key_column}, "
+                f"CAST(NULL AS VARCHAR) AS USER_ID, CAST(NULL AS VARCHAR) AS PROJECT_ID, "
+                f"CAST(NULL AS VARCHAR) AS SESSION_ID, CAST(NULL AS VARCHAR) AS EFFECTIVE_ROLE, "
+                f"CAST(NULL AS VARCHAR) AS CONTENT, CAST(NULL AS VARIANT) AS METADATA WHERE 1=0"
+            )
+        elif config.backend_type in (
+            VectorBackendType.SEMI_STRUCTURED_VARIANT,
+            VectorBackendType.SEMI_STRUCTURED_OBJECT,
+            VectorBackendType.SEMI_STRUCTURED_ARRAY,
+        ):
+            if not self.has_sf_privilege(role, "CREATE TABLE", schema_fqn):
+                raise_role_denied(role, "CREATE TABLE", schema_fqn, self.record_audit)
+            semi_col_type = (
+                "OBJECT"
+                if config.backend_type == VectorBackendType.SEMI_STRUCTURED_OBJECT
+                else ("ARRAY" if config.backend_type == VectorBackendType.SEMI_STRUCTURED_ARRAY else "VARIANT")
+            )
+            ddl = (
+                f"CREATE TABLE {config.table_fqn} ("
+                f"{config.primary_key_column} VARCHAR PRIMARY KEY, "
+                f"USER_ID VARCHAR NOT NULL, PROJECT_ID VARCHAR NOT NULL, SESSION_ID VARCHAR, "
+                f"EFFECTIVE_ROLE VARCHAR NOT NULL, CONTENT VARCHAR, "
+                f"PAYLOAD {semi_col_type}, METADATA VARIANT, "
+                f"CREATED_AT TIMESTAMP_TZ DEFAULT CURRENT_TIMESTAMP())"
+            )
+        elif config.backend_type in (VectorBackendType.POSTGRES_RELATIONAL, VectorBackendType.POSTGRES_JSONB):
+            if not self.has_sf_privilege(role, "USAGE", config.postgres_instance or ""):
+                raise_role_denied(role, "USAGE POSTGRES INSTANCE", config.postgres_instance or "", self.record_audit)
+            pg_role = config.postgres_role or ""
+            if not self.has_pg_privilege(pg_role, "CREATE", schema_fqn):
+                raise_role_denied(
+                    f"{role}/pg:{pg_role}",
+                    "POSTGRES CREATE TABLE",
+                    config.table_fqn,
+                    self.record_audit,
+                )
+            ddl = (
+                f"CREATE SCHEMA IF NOT EXISTS {config.schema.lower()}; "
+                f"CREATE TABLE {config.schema.lower()}.{config.table_name.lower()} ("
+                f"{config.primary_key_column.lower()} TEXT PRIMARY KEY, "
+                f"user_id TEXT NOT NULL, project_id TEXT NOT NULL, session_id TEXT, "
+                f"effective_role TEXT NOT NULL, content TEXT, "
+                f"metadata JSONB DEFAULT '{{}}'::jsonb, created_at TIMESTAMPTZ DEFAULT NOW())"
             )
         else:
             raise SnowflakeComponentError(
                 ErrorCode.UNSUPPORTED_CAPABILITY,
-                f"Unsupported vector backend: {config.backend_type}",
+                f"Unsupported memory backend: {config.backend_type}",
                 http_status=422,
             )
 
@@ -390,10 +692,10 @@ class InMemoryVectorStoreEngine:
 
 
 class CreateMemoryDialogService:
-    """Implements the Langflow `Create Memory` dialog contract (`REQ-10`, `[G-A4]`).
+    """Implements the Langflow `Create Memory` dialog contract (`REQ-10`, `[G-A4]`, `HUB-W2-05`).
 
     Preserves:
-    - Controls: `Name`, `Embedding Model`, `Vector Database`, `Batch Size`,
+    - Controls: `Name`, `Embedding Model`, `Vector Database` / `Memory Backend`, `Batch Size`,
       `LLM Preprocessing` (optional), `Cancel` / `Create Memory`
     - States: `EMPTY`, `LOADING`, `READY`, `ERROR`, `CANCELLED`, `CREATED`
     - Separates physical resource creation (`create_physical_resource=True`) from
@@ -413,8 +715,8 @@ class CreateMemoryDialogService:
         self,
         *,
         name: str,
-        embedding_model: EmbeddingModelSpec,
-        vector_database: VectorBackendType | str,
+        embedding_model: EmbeddingModelSpec | str | None = None,
+        vector_database: VectorBackendType | str = VectorBackendType.STANDARD_VECTOR,
         database: str,
         schema: str,
         table_name: str,
@@ -425,6 +727,14 @@ class CreateMemoryDialogService:
         cortex_embedding_mode: CortexSearchEmbeddingMode = CortexSearchEmbeddingMode.MANAGED,
         postgres_instance: str | None = None,
         postgres_role: str | None = None,
+        vector_element_type: str = "FLOAT",
+        vector_dimension_override: int | None = None,
+        vector_inside_variant: bool = False,
+        primary_key_column: str = "RECORD_ID",
+        secondary_index_columns: tuple[str, ...] = ("PROJECT_ID", "SESSION_ID"),
+        vector_column: str = "EMBEDDING_VEC",
+        warehouse: str | None = None,
+        target_lag: str = "1 minute",
     ) -> dict[str, Any]:
         self.state = DialogState.LOADING
         try:
@@ -434,11 +744,21 @@ class CreateMemoryDialogService:
                     "Memory 'Name' cannot be empty.",
                     http_status=400,
                 )
-            backend_enum = (
-                vector_database
-                if isinstance(vector_database, VectorBackendType)
-                else VectorBackendType(str(vector_database))
-            )
+            backend_enum = normalize_memory_backend_type(vector_database)
+            if isinstance(embedding_model, EmbeddingModelSpec):
+                resolved_embed = embedding_model
+            elif isinstance(embedding_model, str) and embedding_model.strip():
+                clean_model = embedding_model.strip().split(" ")[0].replace("ollama/", "")
+                if clean_model not in DEFAULT_SNOWFLAKE_EMBEDDING_CATALOG:
+                    raise SnowflakeComponentError(
+                        ErrorCode.UNSUPPORTED_CAPABILITY,
+                        f"Unsupported embedding model '{embedding_model}'. Expected one of {sorted(DEFAULT_SNOWFLAKE_EMBEDDING_CATALOG)}.",
+                        http_status=422,
+                    )
+                resolved_embed = DEFAULT_SNOWFLAKE_EMBEDDING_CATALOG[clean_model]
+            else:
+                resolved_embed = DEFAULT_SNOWFLAKE_EMBEDDING_CATALOG["snowflake-arctic-embed-m-v1.5"]
+
             preproc = llm_preprocessing or LLMPreprocessingConfig(enabled=False)
             config = VectorStoreConfig(
                 name=name.strip(),
@@ -446,9 +766,17 @@ class CreateMemoryDialogService:
                 database=database,
                 schema=schema,
                 table_name=table_name,
-                embedding_spec=embedding_model,
+                embedding_spec=resolved_embed,
                 batch_size=batch_size,
                 llm_preprocessing=preproc,
+                primary_key_column=primary_key_column,
+                secondary_index_columns=secondary_index_columns,
+                vector_column=vector_column,
+                vector_element_type=vector_element_type,
+                vector_dimension_override=vector_dimension_override,
+                vector_inside_variant=vector_inside_variant,
+                warehouse=warehouse,
+                target_lag=target_lag,
                 cortex_search_service_name=cortex_search_service_name,
                 cortex_embedding_mode=cortex_embedding_mode,
                 postgres_instance=postgres_instance,
@@ -473,7 +801,9 @@ class CreateMemoryDialogService:
                 "state": self.state.value,
                 "memory_name": config.name,
                 "backend_type": config.backend_type.value,
-                "embedding_model": config.embedding_spec.model_id,
+                "is_vector_memory": config.is_vector_memory,
+                "embedding_model": config.embedding_spec.model_id if config.is_vector_memory else None,
+                "dimension": config.embedding_spec.dimension if config.is_vector_memory else None,
                 "space_fingerprint": config.embedding_spec.space_fingerprint,
                 "batch_size": config.batch_size,
                 "llm_preprocessing_enabled": preproc.enabled,
@@ -486,7 +816,19 @@ class CreateMemoryDialogService:
 
     def _verify_existing_store_access(self, config: VectorStoreConfig) -> None:
         role = self.engine.active_role
-        if config.backend_type in (VectorBackendType.STANDARD_VECTOR, VectorBackendType.HYBRID_VECTOR):
+        if config.backend_type in (
+            VectorBackendType.STANDARD_VECTOR,
+            VectorBackendType.HYBRID_VECTOR,
+            VectorBackendType.INTERACTIVE_VECTOR,
+            VectorBackendType.DYNAMIC_VECTOR,
+            VectorBackendType.STANDARD_RELATIONAL,
+            VectorBackendType.HYBRID_RELATIONAL,
+            VectorBackendType.INTERACTIVE_RELATIONAL,
+            VectorBackendType.DYNAMIC_RELATIONAL,
+            VectorBackendType.SEMI_STRUCTURED_VARIANT,
+            VectorBackendType.SEMI_STRUCTURED_OBJECT,
+            VectorBackendType.SEMI_STRUCTURED_ARRAY,
+        ):
             if not (
                 self.engine.has_sf_privilege(role, "SELECT", config.table_fqn)
                 or self.engine.has_sf_privilege(role, "INSERT", config.table_fqn)
@@ -499,7 +841,11 @@ class CreateMemoryDialogService:
                 or self.engine.has_sf_privilege(role, "SELECT", config.table_fqn)
             ):
                 raise_role_denied(role, "USAGE CORTEX SEARCH SERVICE", svc_fqn, self.engine.record_audit)
-        elif config.backend_type == VectorBackendType.POSTGRES_PGVECTOR:
+        elif config.backend_type in (
+            VectorBackendType.POSTGRES_PGVECTOR,
+            VectorBackendType.POSTGRES_RELATIONAL,
+            VectorBackendType.POSTGRES_JSONB,
+        ):
             if not self.engine.has_sf_privilege(role, "USAGE", config.postgres_instance or ""):
                 raise_role_denied(role, "USAGE POSTGRES INSTANCE", config.postgres_instance or "", self.engine.record_audit)
             pg_role = config.postgres_role or ""
@@ -567,11 +913,24 @@ class SnowflakeKnowledgeComponent:
         if store.backend_type in (
             VectorBackendType.STANDARD_VECTOR,
             VectorBackendType.HYBRID_VECTOR,
+            VectorBackendType.INTERACTIVE_VECTOR,
+            VectorBackendType.DYNAMIC_VECTOR,
             VectorBackendType.CORTEX_SEARCH,
+            VectorBackendType.STANDARD_RELATIONAL,
+            VectorBackendType.HYBRID_RELATIONAL,
+            VectorBackendType.INTERACTIVE_RELATIONAL,
+            VectorBackendType.DYNAMIC_RELATIONAL,
+            VectorBackendType.SEMI_STRUCTURED_VARIANT,
+            VectorBackendType.SEMI_STRUCTURED_OBJECT,
+            VectorBackendType.SEMI_STRUCTURED_ARRAY,
         ):
             if not self.engine.has_sf_privilege(role, "INSERT", store.table_fqn):
                 raise_role_denied(role, "INSERT INTO VECTOR SOURCE TABLE", store.table_fqn, self.engine.record_audit)
-        elif store.backend_type == VectorBackendType.POSTGRES_PGVECTOR:
+        elif store.backend_type in (
+            VectorBackendType.POSTGRES_PGVECTOR,
+            VectorBackendType.POSTGRES_RELATIONAL,
+            VectorBackendType.POSTGRES_JSONB,
+        ):
             if not self.engine.has_sf_privilege(role, "USAGE", store.postgres_instance or ""):
                 raise_role_denied(role, "USAGE POSTGRES INSTANCE", store.postgres_instance or "", self.engine.record_audit)
             pg_role = store.postgres_role or ""
@@ -597,8 +956,8 @@ class SnowflakeKnowledgeComponent:
                     else:
                         processed_text = f"[PREPROCESSED:{store.llm_preprocessing.model_id}] {raw_text}"
 
-                # Avoid duplicate vector computation when Cortex Search manages embeddings natively
-                if (
+                # Avoid duplicate vector computation when Cortex Search manages embeddings natively or store is non-vector
+                if not store.is_vector_memory or (
                     store.backend_type == VectorBackendType.CORTEX_SEARCH
                     and store.cortex_embedding_mode == CortexSearchEmbeddingMode.MANAGED
                 ):
@@ -691,14 +1050,30 @@ class SnowflakeKnowledgeComponent:
             )
 
         # Verify read/search privilege (NOT CREATE!)
-        if store.backend_type in (VectorBackendType.STANDARD_VECTOR, VectorBackendType.HYBRID_VECTOR):
+        if store.backend_type in (
+            VectorBackendType.STANDARD_VECTOR,
+            VectorBackendType.HYBRID_VECTOR,
+            VectorBackendType.INTERACTIVE_VECTOR,
+            VectorBackendType.DYNAMIC_VECTOR,
+            VectorBackendType.STANDARD_RELATIONAL,
+            VectorBackendType.HYBRID_RELATIONAL,
+            VectorBackendType.INTERACTIVE_RELATIONAL,
+            VectorBackendType.DYNAMIC_RELATIONAL,
+            VectorBackendType.SEMI_STRUCTURED_VARIANT,
+            VectorBackendType.SEMI_STRUCTURED_OBJECT,
+            VectorBackendType.SEMI_STRUCTURED_ARRAY,
+        ):
             if not self.engine.has_sf_privilege(role, "SELECT", store.table_fqn):
                 raise_role_denied(role, "SELECT VECTOR TABLE", store.table_fqn, self.engine.record_audit)
         elif store.backend_type == VectorBackendType.CORTEX_SEARCH:
             svc_fqn = store.search_service_fqn or store.table_fqn
             if not self.engine.has_sf_privilege(role, "USAGE", svc_fqn):
                 raise_role_denied(role, "USAGE CORTEX SEARCH SERVICE", svc_fqn, self.engine.record_audit)
-        elif store.backend_type == VectorBackendType.POSTGRES_PGVECTOR:
+        elif store.backend_type in (
+            VectorBackendType.POSTGRES_PGVECTOR,
+            VectorBackendType.POSTGRES_RELATIONAL,
+            VectorBackendType.POSTGRES_JSONB,
+        ):
             if not self.engine.has_sf_privilege(role, "USAGE", store.postgres_instance or ""):
                 raise_role_denied(role, "USAGE POSTGRES INSTANCE", store.postgres_instance or "", self.engine.record_audit)
             pg_role = store.postgres_role or ""

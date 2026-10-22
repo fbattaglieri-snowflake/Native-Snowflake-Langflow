@@ -319,13 +319,17 @@ class InMemoryStageBackend:
             )
 
         if location.stage_type == StageType.INTERNAL:
-            ddl = f"CREATE STAGE {location.fqn} DIRECTORY = (ENABLE = TRUE)"
+            ddl = (
+                f"CREATE STAGE {location.fqn} "
+                f"ENCRYPTION = (TYPE = 'SNOWFLAKE_SSE') "
+                f"DIRECTORY = (ENABLE = TRUE)"
+            )
         else:
             ddl = (
                 f"CREATE STAGE {location.fqn} "
                 f"URL = '{location.external_url}' "
                 f"STORAGE_INTEGRATION = {location.storage_integration} "
-                f"DIRECTORY = (ENABLE = TRUE)"
+                f"DIRECTORY = (ENABLE = TRUE AUTO_REFRESH = TRUE)"
             )
 
         if not confirmed:
@@ -974,3 +978,553 @@ class SnowflakeWriteFileComponent:
                 http_status=502,
                 role=role,
             )
+
+
+AI_PARSE_DOCUMENT_BILLING_NOTICE = (
+    "Nota costi: AI_PARSE_DOCUMENT viene tariffata per pagina elaborata (modalità LAYOUT o OCR). "
+    "Usa 'Testa su 1 file' (LIMIT 1) per verificare il markdown estratto e la colonna "
+    "parsed:errorInformation prima di eseguire il parsing massivo sullo stage."
+)
+
+CORTEX_SEARCH_CHUNK_SIZE_NOTICE = (
+    "Best Practice Cortex Search: mantenere i chunk sotto ~512 token (~375 parole, ~1800 caratteri "
+    "con overlap 300) per massimizzare la qualità del retrieval semantico e lessicale."
+)
+
+CORTEX_ANALYST_SNOWSIGHT_CREATION_MESSAGE = (
+    "La creazione e la rifinitura di Semantic Views e modelli YAML per Cortex Analyst sono disabilitate "
+    "in Langflow. Crea, valida e rifinisci la Semantic View o il modello YAML direttamente in Snowsight "
+    "(AI & ML -> Cortex Analyst), quindi selezionalo nei componenti 'Cortex Analyst' sotto "
+    "Data Sources o LLM Operations."
+)
+
+SUPPORTED_EXTERNAL_STAGE_SCHEMES = ("s3://", "gcs://", "azure://")
+
+
+def build_stage_creation_ddl(
+    *,
+    database: str,
+    schema: str,
+    stage_name: str,
+    stage_type: str = "INTERNAL",
+    external_url: str = "",
+    storage_integration: str = "",
+) -> str:
+    """Build governed DDL for Internal (`SNOWFLAKE_SSE`) or External (`S3`/`GCS`/`Azure`) Stage (`FK-W2-02`)."""
+    db = validate_snowflake_identifier(database, "database")
+    sch = validate_snowflake_identifier(schema, "schema")
+    stg = validate_snowflake_identifier(stage_name, "stage_name")
+    stype = (stage_type or "INTERNAL").strip().upper()
+    if stype == "INTERNAL":
+        return (
+            f"CREATE STAGE IF NOT EXISTS {db}.{sch}.{stg} "
+            f"ENCRYPTION = (TYPE = 'SNOWFLAKE_SSE') "
+            f"DIRECTORY = (ENABLE = TRUE)"
+        )
+    if stype == "EXTERNAL":
+        clean_url = (external_url or "").strip()
+        if not any(clean_url.lower().startswith(scheme) for scheme in SUPPORTED_EXTERNAL_STAGE_SCHEMES):
+            raise SnowflakeComponentError(
+                ErrorCode.UNSUPPORTED_CAPABILITY,
+                f"External stage URL must start with one of {SUPPORTED_EXTERNAL_STAGE_SCHEMES}; got {clean_url!r}.",
+                http_status=400,
+            )
+        integ = validate_snowflake_identifier(storage_integration, "storage_integration")
+        safe_url = clean_url.replace("'", "''")
+        return (
+            f"CREATE STAGE IF NOT EXISTS {db}.{sch}.{stg} "
+            f"URL = '{safe_url}' "
+            f"STORAGE_INTEGRATION = {integ} "
+            f"DIRECTORY = (ENABLE = TRUE AUTO_REFRESH = TRUE)"
+        )
+    raise SnowflakeComponentError(
+        ErrorCode.UNSUPPORTED_CAPABILITY,
+        f"Unsupported stage_type {stage_type!r}. Expected 'INTERNAL' or 'EXTERNAL'.",
+        http_status=400,
+    )
+
+
+@dataclass(frozen=True)
+class CortexSearchParseDocumentSpec:
+    """Tab 1 (`FK-W2-03` i): Parse Documents on Stage exclusively via `AI_PARSE_DOCUMENT`."""
+
+    database: str
+    schema: str
+    stage_name: str
+    target_table: str = "PARSED_DOCS"
+    parse_mode: str = "LAYOUT"
+    page_split: bool = True
+    file_extensions_filter: tuple[str, ...] = (".pdf", ".docx", ".pptx", ".html", ".txt", ".md")
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "database", validate_snowflake_identifier(self.database, "database"))
+        object.__setattr__(self, "schema", validate_snowflake_identifier(self.schema, "schema"))
+        object.__setattr__(self, "stage_name", validate_snowflake_identifier(self.stage_name, "stage_name"))
+        object.__setattr__(self, "target_table", validate_snowflake_identifier(self.target_table, "target_table"))
+        mode_up = (self.parse_mode or "LAYOUT").strip().upper()
+        if mode_up not in ("LAYOUT", "OCR"):
+            raise SnowflakeComponentError(
+                ErrorCode.UNSUPPORTED_CAPABILITY,
+                f"AI_PARSE_DOCUMENT mode must be 'LAYOUT' or 'OCR', got {self.parse_mode!r}.",
+                http_status=400,
+            )
+        object.__setattr__(self, "parse_mode", mode_up)
+
+    @property
+    def stage_fqn(self) -> str:
+        return f"{self.database}.{self.schema}.{self.stage_name}"
+
+    @property
+    def target_table_fqn(self) -> str:
+        return f"{self.database}.{self.schema}.{self.target_table}"
+
+
+class CortexSearchParseDocumentBuilder:
+    """SQL/DDL builder for Tab 1 (`Cortex Search 1: Parse Document`) using exclusively `AI_PARSE_DOCUMENT`."""
+
+    sql_function = "AI_PARSE_DOCUMENT"
+
+    def __init__(self, spec: CortexSearchParseDocumentSpec) -> None:
+        self.spec = spec
+
+    def build_target_table_ddl(self) -> str:
+        return (
+            f"CREATE TABLE IF NOT EXISTS {self.spec.target_table_fqn} ("
+            f"relative_path VARCHAR, "
+            f"file_url VARCHAR, "
+            f"last_modified TIMESTAMP_TZ, "
+            f"page_index NUMBER, "
+            f"page_content VARCHAR, "
+            f"parsed VARIANT, "
+            f"error_information VARIANT, "
+            f"parsed_at TIMESTAMP_TZ DEFAULT CURRENT_TIMESTAMP()"
+            f")"
+        )
+
+    def _extension_where_clause(self) -> str:
+        exts = [e.strip().lower() for e in self.spec.file_extensions_filter if e and e.strip()]
+        if not exts:
+            return ""
+        checks = [
+            f"LOWER(RELATIVE_PATH) LIKE '%{e if e.startswith('.') else '.' + e}'"
+            for e in exts
+        ]
+        return " WHERE (" + " OR ".join(checks) + ")"
+
+    def build_parse_sql(self, *, test_single_file: bool = False) -> str:
+        page_split_bool = "TRUE" if self.spec.page_split else "FALSE"
+        where_clause = self._extension_where_clause()
+        limit_clause = " LIMIT 1" if test_single_file else ""
+        base_cte = (
+            f"WITH raw_docs AS ("
+            f"SELECT RELATIVE_PATH AS relative_path, FILE_URL AS file_url, LAST_MODIFIED AS last_modified, "
+            f"AI_PARSE_DOCUMENT("
+            f"TO_FILE('@{self.spec.stage_fqn}', RELATIVE_PATH), "
+            f"{{'mode': '{self.spec.parse_mode}', 'page_split': {page_split_bool}}}"
+            f") AS parsed "
+            f"FROM DIRECTORY(@{self.spec.stage_fqn}){where_clause}{limit_clause}"
+            f") "
+        )
+        if self.spec.page_split:
+            select_body = (
+                f"{base_cte}"
+                f"SELECT d.relative_path, d.file_url, d.last_modified, "
+                f"f.value:index::INT AS page_index, "
+                f"f.value:content::VARCHAR AS page_content, "
+                f"d.parsed, "
+                f"d.parsed:errorInformation AS error_information, "
+                f"CURRENT_TIMESTAMP() AS parsed_at "
+                f"FROM raw_docs d, LATERAL FLATTEN(INPUT => d.parsed:pages, OUTER => TRUE) f"
+            )
+        else:
+            select_body = (
+                f"{base_cte}"
+                f"SELECT d.relative_path, d.file_url, d.last_modified, "
+                f"0 AS page_index, "
+                f"d.parsed:content::VARCHAR AS page_content, "
+                f"d.parsed, "
+                f"d.parsed:errorInformation AS error_information, "
+                f"CURRENT_TIMESTAMP() AS parsed_at "
+                f"FROM raw_docs d"
+            )
+        if test_single_file:
+            return select_body
+        return f"INSERT INTO {self.spec.target_table_fqn} {select_body}"
+
+
+@dataclass(frozen=True)
+class CortexSearchSplitTextSpec:
+    """Tab 2 (`FK-W2-03` ii): Split parsed documents into `<512` token chunks (`DOC_CHUNKS`)."""
+
+    database: str
+    schema: str
+    source_table: str = "PARSED_DOCS"
+    target_table: str = "DOC_CHUNKS"
+    splitter_mode: str = "SNOWFLAKE.CORTEX.SPLIT_TEXT_RECURSIVE_CHARACTER"
+    split_format: str = "markdown"
+    chunk_size: int = 1800
+    chunk_overlap: int = 300
+    language: str = "it"
+    preview_limit: int = 5
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "database", validate_snowflake_identifier(self.database, "database"))
+        object.__setattr__(self, "schema", validate_snowflake_identifier(self.schema, "schema"))
+        object.__setattr__(self, "source_table", validate_snowflake_identifier(self.source_table, "source_table"))
+        object.__setattr__(self, "target_table", validate_snowflake_identifier(self.target_table, "target_table"))
+        fmt = (self.split_format or "markdown").strip().lower()
+        if fmt not in ("markdown", "none"):
+            raise SnowflakeComponentError(
+                ErrorCode.UNSUPPORTED_CAPABILITY,
+                f"split_format must be 'markdown' or 'none', got {self.split_format!r}.",
+                http_status=400,
+            )
+        object.__setattr__(self, "split_format", fmt)
+        if int(self.chunk_size) < 100 or int(self.chunk_overlap) < 0 or int(self.chunk_overlap) >= int(self.chunk_size):
+            raise SnowflakeComponentError(
+                ErrorCode.UNSUPPORTED_CAPABILITY,
+                "Invalid chunk_size / chunk_overlap configuration (require chunk_size >= 100 and 0 <= chunk_overlap < chunk_size).",
+                http_status=400,
+            )
+
+    @property
+    def source_table_fqn(self) -> str:
+        return f"{self.database}.{self.schema}.{self.source_table}"
+
+    @property
+    def target_table_fqn(self) -> str:
+        return f"{self.database}.{self.schema}.{self.target_table}"
+
+
+class CortexSearchSplitTextBuilder:
+    """SQL/DDL builder for Tab 2 (`Cortex Search 2: Split Text`)."""
+
+    def __init__(self, spec: CortexSearchSplitTextSpec) -> None:
+        self.spec = spec
+
+    def build_target_table_ddl(self) -> str:
+        return (
+            f"CREATE TABLE IF NOT EXISTS {self.spec.target_table_fqn} ("
+            f"chunk_id VARCHAR, "
+            f"relative_path VARCHAR, "
+            f"file_url VARCHAR, "
+            f"page_index NUMBER, "
+            f"chunk_index NUMBER, "
+            f"chunk VARCHAR, "
+            f"chunk_length NUMBER, "
+            f"language VARCHAR, "
+            f"created_at TIMESTAMP_TZ DEFAULT CURRENT_TIMESTAMP()"
+            f")"
+        )
+
+    def build_langchain_python_udf_ddl(self) -> str:
+        udf_fqn = f"{self.spec.database}.{self.spec.schema}.LANGCHAIN_SPLIT_TEXT_UDF"
+        return (
+            f"CREATE OR REPLACE FUNCTION {udf_fqn}(text_val VARCHAR, chunk_sz INT, chunk_ovlp INT)\n"
+            f"RETURNS ARRAY\n"
+            f"LANGUAGE PYTHON\n"
+            f"RUNTIME_VERSION = '3.12'\n"
+            f"PACKAGES = ('langchain-text-splitters')\n"
+            f"HANDLER = 'split_fn'\n"
+            f"AS $$\n"
+            f"from langchain_text_splitters import RecursiveCharacterTextSplitter\n"
+            f"def split_fn(text_val: str, chunk_sz: int, chunk_ovlp: int):\n"
+            f"    if not text_val:\n"
+            f"        return []\n"
+            f"    splitter = RecursiveCharacterTextSplitter(chunk_size=chunk_sz, chunk_overlap=chunk_ovlp)\n"
+            f"    return splitter.split_text(text_val)\n"
+            f"$$"
+        )
+
+    def build_split_insert_sql(self) -> str:
+        lang = (self.spec.language or "it").replace("'", "''")
+        if self.spec.splitter_mode == "PYTHON_UDF_LANGCHAIN":
+            udf_fqn = f"{self.spec.database}.{self.spec.schema}.LANGCHAIN_SPLIT_TEXT_UDF"
+            split_expr = f"{udf_fqn}(p.page_content, {int(self.spec.chunk_size)}, {int(self.spec.chunk_overlap)})"
+        else:
+            split_expr = (
+                f"SNOWFLAKE.CORTEX.SPLIT_TEXT_RECURSIVE_CHARACTER("
+                f"p.page_content, '{self.spec.split_format}', {int(self.spec.chunk_size)}, {int(self.spec.chunk_overlap)}"
+                f")"
+            )
+        return (
+            f"INSERT INTO {self.spec.target_table_fqn} "
+            f"(chunk_id, relative_path, file_url, page_index, chunk_index, chunk, chunk_length, language, created_at) "
+            f"SELECT "
+            f"CONCAT(p.relative_path, '#p', COALESCE(TO_VARCHAR(p.page_index), '0'), '#c', TO_VARCHAR(c.index)) AS chunk_id, "
+            f"p.relative_path, p.file_url, p.page_index, c.index AS chunk_index, "
+            f"c.value::VARCHAR AS chunk, LENGTH(c.value::VARCHAR) AS chunk_length, "
+            f"'{lang}' AS language, CURRENT_TIMESTAMP() AS created_at "
+            f"FROM {self.spec.source_table_fqn} p, "
+            f"LATERAL FLATTEN(INPUT => {split_expr}) c "
+            f"WHERE p.error_information IS NULL AND p.page_content IS NOT NULL AND LENGTH(TRIM(p.page_content)) > 0"
+        )
+
+    def build_preview_and_distribution_sql(self) -> dict[str, str]:
+        return {
+            "distribution_sql": (
+                f"SELECT COUNT(*) AS total_chunks, "
+                f"MIN(chunk_length) AS min_chars, "
+                f"ROUND(AVG(chunk_length), 1) AS avg_chars, "
+                f"MAX(chunk_length) AS max_chars "
+                f"FROM {self.spec.target_table_fqn}"
+            ),
+            "preview_sql": (
+                f"SELECT chunk_id, relative_path, page_index, chunk_index, chunk_length, chunk "
+                f"FROM {self.spec.target_table_fqn} "
+                f"ORDER BY relative_path, page_index, chunk_index "
+                f"LIMIT {max(1, int(self.spec.preview_limit))}"
+            ),
+        }
+
+
+@dataclass(frozen=True)
+class CortexSearchServiceCreatorSpec:
+    """Tab 3 (`FK-W2-03` iii): Create and manage `CORTEX SEARCH SERVICE` on `DOC_CHUNKS`."""
+
+    database: str
+    schema: str
+    service_name: str = "DOCS_SEARCH_SRV"
+    source_table: str = "DOC_CHUNKS"
+    search_column: str = "chunk"
+    attribute_columns: tuple[str, ...] = ("relative_path", "page_index", "language")
+    warehouse: str = "COMPUTE_WH"
+    target_lag: str = "1 hour"
+    embedding_model: str = "snowflake-arctic-embed-m-v1.5"
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "database", validate_snowflake_identifier(self.database, "database"))
+        object.__setattr__(self, "schema", validate_snowflake_identifier(self.schema, "schema"))
+        object.__setattr__(self, "service_name", validate_snowflake_identifier(self.service_name, "service_name"))
+        object.__setattr__(self, "source_table", validate_snowflake_identifier(self.source_table, "source_table"))
+        object.__setattr__(self, "search_column", validate_snowflake_identifier(self.search_column, "search_column"))
+        object.__setattr__(self, "warehouse", validate_snowflake_identifier(self.warehouse, "warehouse"))
+        validated_attrs = tuple(validate_snowflake_identifier(a, "attribute_column") for a in self.attribute_columns if a)
+        object.__setattr__(self, "attribute_columns", validated_attrs)
+
+    @property
+    def service_fqn(self) -> str:
+        return f"{self.database}.{self.schema}.{self.service_name}"
+
+    @property
+    def source_table_fqn(self) -> str:
+        return f"{self.database}.{self.schema}.{self.source_table}"
+
+
+class CortexSearchServiceCreatorBuilder:
+    """SQL/DDL builder for Tab 3 (`Cortex Search 3: Search Service`)."""
+
+    def __init__(self, spec: CortexSearchServiceCreatorSpec) -> None:
+        self.spec = spec
+
+    def build_create_service_ddl(self) -> str:
+        attrs = ", ".join(self.spec.attribute_columns)
+        attr_clause = f"\n  ATTRIBUTES {attrs}" if attrs else ""
+        select_cols = [self.spec.search_column, *self.spec.attribute_columns, "FILE_URL", "CHUNK_ID"]
+        dedup_cols: list[str] = []
+        for col in select_cols:
+            if col.upper() not in [c.upper() for c in dedup_cols]:
+                dedup_cols.append(col)
+        lag = (self.spec.target_lag or "1 hour").replace("'", "''")
+        emb = (self.spec.embedding_model or "snowflake-arctic-embed-m-v1.5").replace("'", "''")
+        return (
+            f"CREATE OR REPLACE CORTEX SEARCH SERVICE {self.spec.service_fqn}\n"
+            f"  ON {self.spec.search_column}{attr_clause}\n"
+            f"  WAREHOUSE = {self.spec.warehouse}\n"
+            f"  TARGET_LAG = '{lag}'\n"
+            f"  EMBEDDING_MODEL = '{emb}'\n"
+            f"AS (\n"
+            f"  SELECT {', '.join(dedup_cols)}\n"
+            f"  FROM {self.spec.source_table_fqn}\n"
+            f")"
+        )
+
+    def build_status_sql(self) -> dict[str, str]:
+        return {
+            "show_sql": f"SHOW CORTEX SEARCH SERVICES IN SCHEMA {self.spec.database}.{self.spec.schema}",
+            "describe_sql": f"DESCRIBE CORTEX SEARCH SERVICE {self.spec.service_fqn}",
+        }
+
+    def build_suspend_resume_sql(self, action: str = "SUSPEND", target: str = "INDEXING") -> str:
+        act = (action or "SUSPEND").strip().upper()
+        tgt = (target or "INDEXING").strip().upper()
+        if act not in ("SUSPEND", "RESUME"):
+            raise SnowflakeComponentError(
+                ErrorCode.UNSUPPORTED_CAPABILITY,
+                f"Action must be 'SUSPEND' or 'RESUME', got {action!r}.",
+                http_status=400,
+            )
+        if tgt not in ("INDEXING", "SERVING", "ALL"):
+            raise SnowflakeComponentError(
+                ErrorCode.UNSUPPORTED_CAPABILITY,
+                f"Target must be 'INDEXING', 'SERVING', or 'ALL', got {target!r}.",
+                http_status=400,
+            )
+        suffix = "" if tgt == "ALL" else f" {tgt}"
+        return f"ALTER CORTEX SEARCH SERVICE {self.spec.service_fqn} {act}{suffix}"
+
+
+@dataclass(frozen=True)
+class CortexSearchStreamTaskSpec:
+    """Tab 4 (`FK-W2-03` iv): Continuous Stage Stream (`DOC_STREAM`) + Atomic Task (`DOC_INGEST_TASK`)."""
+
+    database: str
+    schema: str
+    stage_name: str
+    stream_name: str = "DOC_STREAM"
+    task_name: str = "DOC_INGEST_TASK"
+    parsed_table: str = "PARSED_DOCS"
+    chunks_table: str = "DOC_CHUNKS"
+    warehouse: str = "COMPUTE_WH"
+    schedule: str = "5 MINUTE"
+    parse_mode: str = "LAYOUT"
+    split_format: str = "markdown"
+    chunk_size: int = 1800
+    chunk_overlap: int = 300
+    language: str = "it"
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "database", validate_snowflake_identifier(self.database, "database"))
+        object.__setattr__(self, "schema", validate_snowflake_identifier(self.schema, "schema"))
+        object.__setattr__(self, "stage_name", validate_snowflake_identifier(self.stage_name, "stage_name"))
+        object.__setattr__(self, "stream_name", validate_snowflake_identifier(self.stream_name, "stream_name"))
+        object.__setattr__(self, "task_name", validate_snowflake_identifier(self.task_name, "task_name"))
+        object.__setattr__(self, "parsed_table", validate_snowflake_identifier(self.parsed_table, "parsed_table"))
+        object.__setattr__(self, "chunks_table", validate_snowflake_identifier(self.chunks_table, "chunks_table"))
+        object.__setattr__(self, "warehouse", validate_snowflake_identifier(self.warehouse, "warehouse"))
+
+    @property
+    def stage_fqn(self) -> str:
+        return f"{self.database}.{self.schema}.{self.stage_name}"
+
+    @property
+    def stream_fqn(self) -> str:
+        return f"{self.database}.{self.schema}.{self.stream_name}"
+
+    @property
+    def task_fqn(self) -> str:
+        return f"{self.database}.{self.schema}.{self.task_name}"
+
+    @property
+    def parsed_table_fqn(self) -> str:
+        return f"{self.database}.{self.schema}.{self.parsed_table}"
+
+    @property
+    def chunks_table_fqn(self) -> str:
+        return f"{self.database}.{self.schema}.{self.chunks_table}"
+
+
+class CortexSearchStreamTaskBuilder:
+    """SQL/DDL builder for Tab 4 (`Cortex Search 4: Stream + Task`) with atomic `_DOC_STREAM_BATCH`."""
+
+    def __init__(self, spec: CortexSearchStreamTaskSpec) -> None:
+        self.spec = spec
+
+    def build_enable_stage_directory_ddl(self) -> str:
+        return f"ALTER STAGE {self.spec.stage_fqn} SET DIRECTORY = (ENABLE = TRUE)"
+
+    def build_stream_ddl(self) -> str:
+        return f"CREATE OR REPLACE STREAM {self.spec.stream_fqn} ON STAGE {self.spec.stage_fqn}"
+
+    def build_task_ddl(self) -> str:
+        sched = (self.spec.schedule or "5 MINUTE").replace("'", "''")
+        mode = (self.spec.parse_mode or "LAYOUT").strip().upper()
+        fmt = (self.spec.split_format or "markdown").strip().lower()
+        lang = (self.spec.language or "it").replace("'", "''")
+        return (
+            f"CREATE OR REPLACE TASK {self.spec.task_fqn}\n"
+            f"  WAREHOUSE = {self.spec.warehouse}\n"
+            f"  SCHEDULE = '{sched}'\n"
+            f"  WHEN SYSTEM$STREAM_HAS_DATA('{self.spec.stream_fqn}')\n"
+            f"AS\n"
+            f"BEGIN\n"
+            f"  CREATE OR REPLACE TEMP TABLE _DOC_STREAM_BATCH AS\n"
+            f"    SELECT RELATIVE_PATH, FILE_URL, LAST_MODIFIED,\n"
+            f"           METADATA$ACTION AS STREAM_ACTION,\n"
+            f"           METADATA$ISUPDATE AS STREAM_ISUPDATE\n"
+            f"    FROM {self.spec.stream_fqn};\n\n"
+            f"  DELETE FROM {self.spec.parsed_table_fqn}\n"
+            f"    WHERE relative_path IN (\n"
+            f"      SELECT RELATIVE_PATH FROM _DOC_STREAM_BATCH WHERE STREAM_ACTION = 'DELETE'\n"
+            f"    );\n\n"
+            f"  DELETE FROM {self.spec.chunks_table_fqn}\n"
+            f"    WHERE relative_path IN (\n"
+            f"      SELECT RELATIVE_PATH FROM _DOC_STREAM_BATCH WHERE STREAM_ACTION = 'DELETE'\n"
+            f"    );\n\n"
+            f"  INSERT INTO {self.spec.parsed_table_fqn}\n"
+            f"    (relative_path, file_url, last_modified, page_index, page_content, parsed, error_information, parsed_at)\n"
+            f"    WITH parsed_once AS (\n"
+            f"      SELECT b.RELATIVE_PATH AS relative_path, b.FILE_URL AS file_url, b.LAST_MODIFIED AS last_modified,\n"
+            f"             AI_PARSE_DOCUMENT(\n"
+            f"               TO_FILE('@{self.spec.stage_fqn}', b.RELATIVE_PATH),\n"
+            f"               {{'mode': '{mode}', 'page_split': TRUE}}\n"
+            f"             ) AS parsed\n"
+            f"      FROM _DOC_STREAM_BATCH b\n"
+            f"      WHERE b.STREAM_ACTION = 'INSERT'\n"
+            f"    )\n"
+            f"    SELECT p.relative_path, p.file_url, p.last_modified,\n"
+            f"           f.value:index::INT AS page_index,\n"
+            f"           f.value:content::VARCHAR AS page_content,\n"
+            f"           p.parsed,\n"
+            f"           p.parsed:errorInformation AS error_information,\n"
+            f"           CURRENT_TIMESTAMP() AS parsed_at\n"
+            f"    FROM parsed_once p, LATERAL FLATTEN(INPUT => p.parsed:pages, OUTER => TRUE) f;\n\n"
+            f"  INSERT INTO {self.spec.chunks_table_fqn}\n"
+            f"    (chunk_id, relative_path, file_url, page_index, chunk_index, chunk, chunk_length, language, created_at)\n"
+            f"    SELECT CONCAT(p.relative_path, '#p', COALESCE(TO_VARCHAR(p.page_index), '0'), '#c', TO_VARCHAR(c.index)) AS chunk_id,\n"
+            f"           p.relative_path, p.file_url, p.page_index, c.index AS chunk_index,\n"
+            f"           c.value::VARCHAR AS chunk, LENGTH(c.value::VARCHAR) AS chunk_length,\n"
+            f"           '{lang}' AS language, CURRENT_TIMESTAMP() AS created_at\n"
+            f"    FROM {self.spec.parsed_table_fqn} p\n"
+            f"    JOIN _DOC_STREAM_BATCH b ON p.relative_path = b.RELATIVE_PATH AND b.STREAM_ACTION = 'INSERT',\n"
+            f"    LATERAL FLATTEN(\n"
+            f"      INPUT => SNOWFLAKE.CORTEX.SPLIT_TEXT_RECURSIVE_CHARACTER(\n"
+            f"        p.page_content, '{fmt}', {int(self.spec.chunk_size)}, {int(self.spec.chunk_overlap)}\n"
+            f"      )\n"
+            f"    ) c\n"
+            f"    WHERE p.error_information IS NULL AND p.page_content IS NOT NULL AND LENGTH(TRIM(p.page_content)) > 0;\n"
+            f"END;"
+        )
+
+    def build_task_operation_sql(self, operation: str) -> str:
+        op = (operation or "HISTORY").strip().upper()
+        if op == "RESUME":
+            return f"ALTER TASK {self.spec.task_fqn} RESUME"
+        if op == "SUSPEND":
+            return f"ALTER TASK {self.spec.task_fqn} SUSPEND"
+        if op in ("EXECUTE_NOW", "ESEGUI_ORA", "EXECUTE"):
+            return f"EXECUTE TASK {self.spec.task_fqn}"
+        if op == "HISTORY":
+            return (
+                f"SELECT NAME, STATE, SCHEDULED_TIME, COMPLETED_TIME, ERROR_CODE, ERROR_MESSAGE "
+                f"FROM TABLE({self.spec.database}.INFORMATION_SCHEMA.TASK_HISTORY("
+                f"TASK_NAME => '{self.spec.task_name}', RESULT_LIMIT => 20))"
+            )
+        raise SnowflakeComponentError(
+            ErrorCode.UNSUPPORTED_CAPABILITY,
+            f"Unsupported task operation {operation!r}. Use 'RESUME', 'SUSPEND', 'EXECUTE_NOW', or 'HISTORY'.",
+            http_status=400,
+        )
+
+
+@dataclass(frozen=True)
+class CortexAnalystDisabledCreatorSpec:
+    """`FK-W2-04`: Disabled greyed-out tab in `Files & Knowledge` directing users to Snowsight."""
+
+    display_name: str = "Cortex Analyst (Create in Snowsight)"
+    category: str = "Files & Knowledge"
+    disabled: bool = True
+    message: str = CORTEX_ANALYST_SNOWSIGHT_CREATION_MESSAGE
+
+    def to_ui_state(self) -> dict[str, Any]:
+        return {
+            "component": "SnowflakeCortexAnalystDisabledCreator",
+            "display_name": self.display_name,
+            "category": self.category,
+            "disabled": True,
+            "ui_style": {"opacity": 0.5, "cursor": "not-allowed", "pointer_events": "none"},
+            "snowsight_navigation_path": "AI & ML -> Cortex Analyst",
+            "message": self.message,
+            "usage_targets": ["Data Sources -> Cortex Analyst", "LLM Operations -> Cortex Analyst"],
+        }
+

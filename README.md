@@ -61,6 +61,22 @@ All configuration files, SQL scripts, and container specifications in this repos
 
 ---
 
+## Wave 2 UI, Hub & Native Component Enhancements (`UI-W2-01`, `HUB-W2-01..05`, `DS-W2-01`, `PROV-W2-01`, `MA-W2-01`, `LLM-W2-01..06`, `FK-W2-01..04`)
+
+1. **Browser Tab Branding & Dual-Symbol Splash Loading Screen (`UI-W2-01`)**
+   - Enforces the `"Snowflake Langflow"` browser tab title and Snowflake SVG favicon (`ensureBrowserTabBranding()`), and displays both the Snowflake and Langflow SVG symbols side-by-side (`[Snowflake SVG] [Langflow SVG]`) on the center `Loading...` splash screen while strictly preserving React 18 Fiber tree integrity.
+2. **Snowflake Langflow Hub (`HUB-W2-01..HUB-W2-05`)**
+   - **Section 0 — Primary Context & Cascading Visibility Selector (`HUB-W2-02`):** Cascading `<DATABASE> -> <SCHEMA> -> <OBJECTS>` selector with multi-category visibility filters (`Tables`, `Views`, `Stages`, `Memories`, `Cortex Search Services`, `Semantic Views / Stage YAML Models`, `Cortex Agents`, `Functions`, `Stored Procedures`) persisted via `POST /api/v1/snowflake/context`.
+   - **Section 1 — Hierarchical Governed Creation & Exclusion of Routines (`HUB-W2-03`, `HUB-W2-04`):** Enforces `1. Database -> 2. Schema -> 3. Object in Schema` (`Standard`, `Hybrid`, `Iceberg`, `Interactive`, `Dynamic` tables, `Internal`/`External` stages, `Views`, and `<POSTGRES_INSTANCE>`) with active-role privilege grey-out warnings. Strictly excludes `FUNCTION` (`UDF`/`UDTF`) and `PROCEDURE` creation from the Hub (`HTTP 422 UNSUPPORTED_CAPABILITY`), directing routine creation to `LLM Operations`.
+   - **Section 2 — Full Memory Matrix & `AI_EMBED` Coupling (`HUB-W2-05`):** Supports structured (`Standard`, `Hybrid`, `Interactive`, `Dynamic`), semi-structured (`VARIANT`, `OBJECT`, `ARRAY`), `<POSTGRES_INSTANCE>` (`Relational / JSONB` and `pgvector`), and vector (`VECTOR(FLOAT|INT, 768|1024)`) memories coupled to official `AI_EMBED` models (`snowflake-arctic-embed-m-v1.5`, `snowflake-arctic-embed-m`, `e5-base-v2`, `nomic-embed-text`, `snowflake-arctic-embed-l-v2.0`, `snowflake-arctic-embed-l-v2.0-8k`, `multilingual-e5-large`, `voyage-multilingual-2`, `nv-embed-qa-4`, `voyage-multimodal-3`).
+3. **Sidebar Category Refactoring & Expansion (`DS-W2-01`, `PROV-W2-01`, `MA-W2-01`, `LLM-W2-01..06`, `FK-W2-01..04`)**
+   - **`Data Sources` (`DS-W2-01`, `PROV-W2-01`):** Hierarchical `Engine -> Database -> Schema -> Object Type -> Table / View Name` ordering (`Secure View`, `Materialized View`, `Snowflake Postgres Table`); `Snowflake Object Provisioner` removed from `Data Sources` and replicated into `LLM Operations` and `Files & Knowledge`.
+   - **`Models & Agents` (`MA-W2-01`):** `Snowflake Cortex Agent & A2A` cascades `<DATABASE> -> <SCHEMA> -> Cortex Agent` (`SHOW CORTEX AGENTS IN SCHEMA`).
+   - **`LLM Operations` (`LLM-W2-01..LLM-W2-06`):** Adds `Snowflake Stored Procedure` (with graphical child procedure `CALL <DATABASE>.<SCHEMA>.<CHILD_PROC>()` chaining), `Snowflake Function (UDF / UDTF)`, dedicated `Snowflake AI Complete` (`AI_COMPLETE` with structured JSON schema), task-specific `Snowflake AI Function` (`return_as_json`), `Snowflake SQL Statement`, `Cortex Search` (`SEARCH_PREVIEW`), `Cortex Analyst`, `Snowflake`, and `Snowflake Decision` (`snowflake-decision`).
+   - **`Files & Knowledge` (`FK-W2-01..FK-W2-04`):** Context-cascading `Snowflake Knowledge & Vector Memory`, `Snowflake Stage File System` (Internal `SNOWFLAKE_SSE` & External `STORAGE_INTEGRATION` stages), the 4-node `Cortex Search` indexing pipeline (`1: Parse Document` via `AI_PARSE_DOCUMENT`, `2: Split Text` via `SPLIT_TEXT_RECURSIVE_CHARACTER`, `3: Search Service` via `CREATE OR REPLACE CORTEX SEARCH SERVICE`, `4: Stream + Task` with atomic `_DOC_STREAM_BATCH` temp table), and `Cortex Analyst (Create in Snowsight)` disabled guidance node.
+
+---
+
 ## Parametric Placeholders Reference
 
 | Placeholder | Description |

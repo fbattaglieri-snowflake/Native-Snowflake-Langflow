@@ -71,8 +71,233 @@ class LiveSnowflakeBridge:
         self.context_epoch: int = 1
         self.secondary_roles_mode: str = "NONE"
         self.memories_registry: list[dict[str, Any]] = []
+        self.selected_context: dict[str, Any] = {
+            "databases": [self.database],
+            "schemas_by_db": {self.database: [self.schema, "PUBLIC"]},
+            "visible_objects": {
+                "tables": ["LANGFLOW_FLOW_RUNS", "LANGFLOW_FLOW_SPANS", "LANGFLOW_AUDIT_LOG"],
+                "views": [],
+                "stages": [self.stage_name],
+                "memories": ["SNOWFLAKE_KB_MEM"],
+                "cortex_search_services": [],
+                "semantic_views": [],
+                "semantic_models": [],
+                "cortex_agents": [],
+                "functions": [],
+                "procedures": [],
+                "postgres_instances": [],
+            },
+        }
         self._roles_discovered: bool = False
         self._superuser_synced: bool = False
+
+    def can_create_database(self) -> bool:
+        """Return True if the active role is permitted to execute CREATE DATABASE ON ACCOUNT."""
+        return self.active_role.strip().upper() in (
+            "ACCOUNTADMIN",
+            "SYSADMIN",
+            "SNOWFLAKE_LANGFLOW_ADMIN_ROLE",
+        )
+
+    def can_create_schema(self) -> bool:
+        """Return True if the active role is permitted to execute CREATE SCHEMA in the target database."""
+        return self.active_role.strip().upper() not in (
+            "PUBLIC",
+            "SNOWFLAKE_LANGFLOW_VIEWER_ROLE",
+            "VIEWER_ROLE",
+            "ROLE_VIEWER",
+        )
+
+    def can_create_object(self) -> bool:
+        """Return True if the active role is permitted to create schema-level objects."""
+        return self.can_create_schema()
+
+    def get_role_privileges(self) -> dict[str, bool]:
+        """Compute granular active-role creation privileges for Hub Section 1 & sidebar components."""
+        can_db = self.can_create_database()
+        can_sch = self.can_create_schema()
+        can_obj = self.can_create_object()
+        return {
+            "can_create_database": can_db,
+            "can_create_schema": can_sch,
+            "can_create_table": can_obj,
+            "can_create_stage": can_obj,
+            "can_create_view": can_obj,
+            "can_create_function": can_obj,
+            "can_create_procedure": can_obj,
+            "can_create_cortex_search": can_obj,
+            "can_create_postgres": can_db,
+            "can_create_object": can_obj,
+        }
+
+    @property
+    def role_privileges(self) -> dict[str, bool]:
+        return self.get_role_privileges()
+
+    def update_selected_context(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Persist cascading primary context selection from Snowflake Langflow Hub (`HUB-W2-02`)."""
+        incoming_ctx = payload.get("selected_context") if isinstance(payload.get("selected_context"), dict) else {}
+        new_db = str(payload.get("database") or "").strip().upper()
+        new_sch = str(payload.get("schema") or "").strip().upper()
+        if new_db:
+            self.database = new_db
+        if new_sch:
+            self.schema = new_sch
+
+        dbs = payload.get("databases") or incoming_ctx.get("databases")
+        if isinstance(dbs, list) and dbs:
+            self.selected_context["databases"] = [str(d).strip().upper() for d in dbs if str(d).strip()]
+        elif self.database not in self.selected_context.get("databases", []):
+            self.selected_context.setdefault("databases", []).insert(0, self.database)
+
+        schemas_by_db = payload.get("schemas_by_db") or incoming_ctx.get("schemas_by_db")
+        if isinstance(schemas_by_db, dict) and schemas_by_db:
+            normalized_map: dict[str, list[str]] = {}
+            for k, v in schemas_by_db.items():
+                db_k = str(k).strip().upper()
+                if isinstance(v, list):
+                    normalized_map[db_k] = [str(s).strip().upper() for s in v if str(s).strip()]
+            if normalized_map:
+                self.selected_context["schemas_by_db"] = normalized_map
+        else:
+            cur_map = self.selected_context.setdefault("schemas_by_db", {})
+            cur_list = cur_map.setdefault(self.database, [self.schema])
+            if self.schema not in cur_list:
+                cur_list.insert(0, self.schema)
+
+        vis = payload.get("visible_objects") or incoming_ctx.get("visible_objects")
+        if isinstance(vis, dict):
+            cur_vis = self.selected_context.setdefault("visible_objects", {})
+            for k, v in vis.items():
+                if isinstance(v, list):
+                    cur_vis[k] = [str(item).strip() for item in v if str(item).strip()]
+                elif isinstance(v, bool):
+                    # When Hub passes boolean category toggles, preserve or clear list accordingly
+                    if not v:
+                        cur_vis[k] = []
+                    else:
+                        cur_vis.setdefault(k, [])
+
+        self.context_epoch += 1
+        self.record_audit_event(
+            action="UPDATE_CONTEXT",
+            outcome="ALLOWED",
+            target_object=f"{self.database}.{self.schema}",
+            details={"selected_context": self.selected_context, "context_epoch": self.context_epoch},
+        )
+        return {
+            "ok": True,
+            "status": "ok",
+            "active_role": self.active_role,
+            "context_epoch": self.context_epoch,
+            "database": self.database,
+            "schema": self.schema,
+            "selected_context": self.selected_context,
+            "role_privileges": self.role_privileges,
+        }
+
+    def discover_catalog(
+        self,
+        *,
+        database: str | None = None,
+        schema: str | None = None,
+        object_kind: str | None = None,
+    ) -> dict[str, Any]:
+        """Discover cascading Databases -> Schemas -> Objects for CURRENT_ROLE() (`HUB-W2-02`)."""
+        db = (database or self.database).strip().upper()
+        sch = (schema or self.schema).strip().upper()
+
+        dbs_res = self.execute_sql("SHOW DATABASES")
+        schemas_res = self.execute_sql(f"SHOW SCHEMAS IN DATABASE {db}")
+        objects_res = self.execute_sql(f"SHOW OBJECTS IN SCHEMA {db}.{sch}")
+        stages_res = self.execute_sql(f"SHOW STAGES IN SCHEMA {db}.{sch}")
+        funcs_res = self.execute_sql(f"SHOW USER FUNCTIONS IN SCHEMA {db}.{sch}")
+        procs_res = self.execute_sql(f"SHOW USER PROCEDURES IN SCHEMA {db}.{sch}")
+        search_res = self.execute_sql(f"SHOW CORTEX SEARCH SERVICES IN SCHEMA {db}.{sch}")
+        sem_views_res = self.execute_sql(f"SHOW SEMANTIC VIEWS IN SCHEMA {db}.{sch}")
+        agents_res = self.execute_sql(f"SHOW CORTEX AGENTS IN SCHEMA {db}.{sch}")
+
+        def _extract_names(rows: list[dict[str, Any]], keys: tuple[str, ...] = ("name", "NAME", "OBJECT_NAME")) -> list[str]:
+            out: list[str] = []
+            for r in rows:
+                for k in keys:
+                    val = r.get(k)
+                    if val and str(val).strip() and str(val).strip() not in out:
+                        out.append(str(val).strip())
+                        break
+            return out
+
+        databases = _extract_names(dbs_res.get("rows", [])) or list(
+            dict.fromkeys([db, *self.selected_context.get("databases", [self.database])])
+        )
+        schemas = _extract_names(schemas_res.get("rows", [])) or list(
+            dict.fromkeys([sch, "CORE", "PUBLIC"])
+        )
+        raw_objects = objects_res.get("rows", [])
+        tables: list[str] = []
+        views: list[str] = []
+        for obj in raw_objects:
+            nm = str(obj.get("name") or obj.get("NAME") or "").strip()
+            kd = str(obj.get("kind") or obj.get("KIND") or "TABLE").upper()
+            if not nm:
+                continue
+            if "VIEW" in kd:
+                views.append(nm)
+            else:
+                tables.append(nm)
+        if not tables:
+            tables = list(
+                self.selected_context.get("visible_objects", {}).get(
+                    "tables", ["LANGFLOW_FLOW_RUNS", "LANGFLOW_FLOW_SPANS", "LANGFLOW_AUDIT_LOG"]
+                )
+            )
+        stages = _extract_names(stages_res.get("rows", [])) or [self.stage_name]
+        functions = _extract_names(funcs_res.get("rows", [])) or list(
+            self.selected_context.get("visible_objects", {}).get("functions", [])
+        )
+        procedures = _extract_names(procs_res.get("rows", [])) or list(
+            self.selected_context.get("visible_objects", {}).get("procedures", [])
+        )
+        cortex_search_services = _extract_names(search_res.get("rows", [])) or list(
+            self.selected_context.get("visible_objects", {}).get("cortex_search_services", [])
+        )
+        semantic_views = _extract_names(sem_views_res.get("rows", [])) or list(
+            self.selected_context.get("visible_objects", {}).get("semantic_views", [])
+        )
+        cortex_agents = _extract_names(agents_res.get("rows", [])) or list(
+            self.selected_context.get("visible_objects", {}).get("cortex_agents", [])
+        )
+        memories = [m.get("name", "") for m in self.memories_registry if m.get("name")] or ["SNOWFLAKE_KB_MEM"]
+
+        schemas_by_db = dict(self.selected_context.get("schemas_by_db", {}))
+        schemas_by_db[db] = schemas
+
+        return {
+            "ok": True,
+            "active_role": self.active_role,
+            "context_epoch": self.context_epoch,
+            "database": db,
+            "schema": sch,
+            "object_kind": object_kind,
+            "databases": databases,
+            "schemas": schemas,
+            "schemas_by_db": schemas_by_db,
+            "objects": raw_objects or [{"name": t, "kind": "TABLE"} for t in tables] + [{"name": v, "kind": "VIEW"} for v in views],
+            "tables": tables,
+            "views": views,
+            "stages": stages_res.get("rows", []) or [{"name": s} for s in stages],
+            "stage_names": stages,
+            "memories": memories,
+            "functions": functions,
+            "procedures": procedures,
+            "cortex_search_services": cortex_search_services,
+            "semantic_views": semantic_views,
+            "semantic_models": list(self.selected_context.get("visible_objects", {}).get("semantic_models", [])),
+            "cortex_agents": cortex_agents,
+            "postgres_instances": list(self.selected_context.get("visible_objects", {}).get("postgres_instances", [])),
+            "selected_context": self.selected_context,
+            "role_privileges": self.role_privileges,
+        }
 
     def sync_superuser_credentials(self) -> None:
         """Ensure the SQLite `user` table superuser matches `LANGFLOW_SUPERUSER` and `LANGFLOW_SUPERUSER_PASSWORD`."""
@@ -352,13 +577,18 @@ class LiveSnowflakeBridge:
             "active_role": self.active_role,
             "context_epoch": self.context_epoch,
             "secondary_roles_mode": self.secondary_roles_mode,
+            "role_privileges": self.role_privileges,
+            "selected_context": self.selected_context,
             "cache_invalidated": True,
         }
 
     def check_write_privilege_or_deny(self, action: str, target_object: str) -> dict[str, Any] | None:
         """Fail-closed role check: VIEWER and PUBLIC roles are explicitly denied DDL/write actions."""
-        if self.active_role.upper() in ("PUBLIC", "SNOWFLAKE_LANGFLOW_VIEWER_ROLE", "VIEWER_ROLE"):
-            msg = f"Il ruolo attivo ({self.active_role}) non consente questa operazione ({action} su {target_object})."
+        if self.active_role.upper() in ("PUBLIC", "SNOWFLAKE_LANGFLOW_VIEWER_ROLE", "VIEWER_ROLE", "ROLE_VIEWER"):
+            msg = (
+                f"Il ruolo attivo ({self.active_role}) non dispone dei privilegi per creare questo oggetto "
+                f"in {self.database}.{self.schema} ({action} su {target_object})."
+            )
             self.record_audit_event(
                 action=action,
                 outcome="DENIED",
@@ -373,6 +603,7 @@ class LiveSnowflakeBridge:
                 "message": msg,
                 "active_role": self.active_role,
                 "context_epoch": self.context_epoch,
+                "role_privileges": self.role_privileges,
             }
         return None
 
@@ -489,6 +720,7 @@ def register_snowflake_fastapi_routes(app: Any) -> None:
             status_code=200,
             content={
                 "status": "ok",
+                "ok": True,
                 "authenticated_user": LIVE_BRIDGE.authenticated_user,
                 "active_role": LIVE_BRIDGE.active_role,
                 "available_roles": LIVE_BRIDGE.available_roles,
@@ -497,6 +729,8 @@ def register_snowflake_fastapi_routes(app: Any) -> None:
                 "database": LIVE_BRIDGE.database,
                 "schema": LIVE_BRIDGE.schema,
                 "stage_name": f"@{LIVE_BRIDGE.database}.{LIVE_BRIDGE.schema}.{LIVE_BRIDGE.stage_name}",
+                "role_privileges": LIVE_BRIDGE.role_privileges,
+                "selected_context": LIVE_BRIDGE.selected_context,
                 "traces_tables": {
                     "runs": LIVE_BRIDGE.runs_table,
                     "spans": LIVE_BRIDGE.spans_table,
@@ -511,6 +745,13 @@ def register_snowflake_fastapi_routes(app: Any) -> None:
             },
         )
 
+    @sf_router.post("/context")
+    @sf_router.put("/context")
+    async def post_snowflake_context(request: Request) -> JSONResponse:
+        body = await request.json()
+        res = LIVE_BRIDGE.update_selected_context(body if isinstance(body, dict) else {})
+        return JSONResponse(status_code=200, content=res)
+
     @sf_router.post("/role")
     async def post_switch_role(request: Request) -> JSONResponse:
         body = await request.json()
@@ -519,23 +760,17 @@ def register_snowflake_fastapi_routes(app: Any) -> None:
         return JSONResponse(status_code=result.get("status_code", 200), content=result)
 
     @sf_router.get("/catalog")
-    async def get_snowflake_catalog(database: str | None = None, schema: str | None = None) -> JSONResponse:
-        db = (database or LIVE_BRIDGE.database).strip()
-        sch = (schema or LIVE_BRIDGE.schema).strip()
-        tables_res = LIVE_BRIDGE.execute_sql(f"SHOW OBJECTS IN SCHEMA {db}.{sch}")
-        stages_res = LIVE_BRIDGE.execute_sql(f"SHOW STAGES IN SCHEMA {db}.{sch}")
-        return JSONResponse(
-            status_code=200,
-            content={
-                "ok": True,
-                "active_role": LIVE_BRIDGE.active_role,
-                "context_epoch": LIVE_BRIDGE.context_epoch,
-                "database": db,
-                "schema": sch,
-                "objects": tables_res.get("rows", []),
-                "stages": stages_res.get("rows", []),
-            },
+    async def get_snowflake_catalog(
+        database: str | None = None,
+        schema: str | None = None,
+        object_kind: str | None = None,
+    ) -> JSONResponse:
+        catalog_data = LIVE_BRIDGE.discover_catalog(
+            database=database,
+            schema=schema,
+            object_kind=object_kind,
         )
+        return JSONResponse(status_code=200, content=catalog_data)
 
     @sf_router.post("/sql")
     async def post_execute_governed_sql(request: Request) -> JSONResponse:
@@ -561,27 +796,105 @@ def register_snowflake_fastapi_routes(app: Any) -> None:
     @sf_router.post("/provision")
     async def post_provision_object(request: Request) -> JSONResponse:
         body = await request.json()
-        obj_kind = str(body.get("object_kind") or "table").lower()
+        source = str(body.get("source") or "hub").strip().lower()
+        obj_kind = str(body.get("object_kind") or "table").strip().lower()
+        obj_subtype = str(
+            body.get("object_subtype") or body.get("table_type") or body.get("stage_type") or "STANDARD"
+        ).strip().upper()
         dry_run = bool(body.get("dry_run", False))
         confirmed = bool(body.get("confirmed", False))
         target_name = str(body.get("name") or body.get("object_name") or "NEW_OBJECT").strip()
 
-        denied = LIVE_BRIDGE.check_write_privilege_or_deny(f"PROVISION_{obj_kind.upper()}", target_name)
+        # HUB-W2-04: Strictly block FUNCTION / PROCEDURE creation from Snowflake Langflow Hub
+        forbidden_hub_kinds = {"function", "procedure", "udf", "udtf", "stored_procedure", "stored procedure"}
+        if source == "hub" and (obj_kind in forbidden_hub_kinds or obj_subtype.lower() in forbidden_hub_kinds):
+            msg = (
+                f"La creazione di '{obj_kind}' non è consentita dallo Snowflake Langflow Hub (HUB-W2-04). "
+                "Usa i componenti dedicati in 'LLM Operations -> Stored Procedure / Function'."
+            )
+            LIVE_BRIDGE.record_audit_event(
+                action="HUB_PROVISION_REJECTED",
+                outcome="DENIED",
+                error_code=ErrorCode.UNSUPPORTED_CAPABILITY.value,
+                target_object=target_name,
+                details={"source": source, "object_kind": obj_kind, "reason": msg},
+            )
+            return JSONResponse(
+                status_code=422,
+                content={
+                    "ok": False,
+                    "status_code": 422,
+                    "error_code": ErrorCode.UNSUPPORTED_CAPABILITY.value,
+                    "message": msg,
+                    "active_role": LIVE_BRIDGE.active_role,
+                    "context_epoch": LIVE_BRIDGE.context_epoch,
+                },
+            )
+
+        db = str(body.get("database") or LIVE_BRIDGE.database).strip().upper()
+        sch = str(body.get("schema") or LIVE_BRIDGE.schema).strip().upper()
+        hierarchy_path = ["ACCOUNT", db] if obj_kind == "database" else (
+            ["ACCOUNT", db, target_name.upper()] if obj_kind == "schema" else ["ACCOUNT", db, sch, target_name.upper()]
+        )
+
+        # Enforce active-role RBAC checks at the requested hierarchy level (HUB-W2-03)
+        denied = LIVE_BRIDGE.check_write_privilege_or_deny(f"PROVISION_{obj_kind.upper()}", f"{db}.{sch}.{target_name}")
         if denied:
             return JSONResponse(status_code=403, content=denied)
-
-        db = str(body.get("database") or LIVE_BRIDGE.database).strip()
-        sch = str(body.get("schema") or LIVE_BRIDGE.schema).strip()
+        if obj_kind in ("database", "postgres") and not LIVE_BRIDGE.can_create_database():
+            msg = f"Il ruolo attivo ({LIVE_BRIDGE.active_role}) non dispone dei privilegi per creare {obj_kind.upper()} sull'Account."
+            LIVE_BRIDGE.record_audit_event(
+                action=f"PROVISION_{obj_kind.upper()}",
+                outcome="DENIED",
+                error_code=ErrorCode.AUTHZ_ROLE_DENIED.value,
+                target_object=target_name,
+                details={"message": msg},
+            )
+            return JSONResponse(
+                status_code=403,
+                content={
+                    "ok": False,
+                    "status_code": 403,
+                    "error_code": ErrorCode.AUTHZ_ROLE_DENIED.value,
+                    "message": msg,
+                    "active_role": LIVE_BRIDGE.active_role,
+                    "role_privileges": LIVE_BRIDGE.role_privileges,
+                },
+            )
 
         if obj_kind == "database":
             ddl = f"CREATE DATABASE IF NOT EXISTS {target_name};"
         elif obj_kind == "schema":
             ddl = f"CREATE SCHEMA IF NOT EXISTS {db}.{target_name};"
         elif obj_kind == "stage":
-            ddl = (
-                f"CREATE STAGE IF NOT EXISTS {db}.{sch}.{target_name} "
-                f"DIRECTORY = (ENABLE = TRUE) ENCRYPTION = (TYPE = 'SNOWFLAKE_SSE');"
-            )
+            is_ext = "EXTERNAL" in obj_subtype or bool(body.get("stage_url"))
+            if is_ext:
+                stage_url = str(body.get("stage_url") or "s3://<BUCKET>/<PREFIX>/").strip()
+                storage_int = str(body.get("storage_integration") or "<STORAGE_INTEGRATION>").strip()
+                if any(tok in stage_url.lower() for tok in ("aws_secret", "sas=", "token=", "password=", "key=")):
+                    return JSONResponse(
+                        status_code=422,
+                        content={
+                            "ok": False,
+                            "status_code": 422,
+                            "error_code": ErrorCode.UNSUPPORTED_CAPABILITY.value,
+                            "message": "Inline cloud credentials in external stage URL are forbidden; use STORAGE_INTEGRATION.",
+                            "active_role": LIVE_BRIDGE.active_role,
+                        },
+                    )
+                ddl = (
+                    f"CREATE STAGE IF NOT EXISTS {db}.{sch}.{target_name} "
+                    f"URL = '{stage_url}' STORAGE_INTEGRATION = {storage_int} "
+                    f"DIRECTORY = (ENABLE = TRUE AUTO_REFRESH = TRUE);"
+                )
+            else:
+                ddl = (
+                    f"CREATE STAGE IF NOT EXISTS {db}.{sch}.{target_name} "
+                    f"DIRECTORY = (ENABLE = TRUE) ENCRYPTION = (TYPE = 'SNOWFLAKE_SSE');"
+                )
+        elif obj_kind == "view":
+            select_sql = str(body.get("as_select_sql") or f"SELECT * FROM {LIVE_BRIDGE.runs_table}").strip()
+            ddl = f"CREATE OR REPLACE VIEW {db}.{sch}.{target_name} AS {select_sql};"
         elif obj_kind == "postgres":
             family = str(body.get("compute_family") or "STANDARD_M")
             storage_gb = int(body.get("storage_size_gb") or 10)
@@ -590,20 +903,67 @@ def register_snowflake_fastapi_routes(app: Any) -> None:
                 f"COMPUTE_FAMILY = '{family}' STORAGE_SIZE_GB = {storage_gb} "
                 f"AUTHENTICATION_AUTHORITY = POSTGRES_OR_SNOWFLAKE;"
             )
+        elif obj_kind in forbidden_hub_kinds:
+            # Allowed when source != "hub" (e.g., LLM Operations Stored Procedure / Function component)
+            lang = str(body.get("language") or "SQL").upper()
+            ret_type = str(body.get("return_type") or "VARIANT")
+            sig_args = str(body.get("signature_args") or "")
+            proc_body = str(body.get("body") or "SELECT CURRENT_ROLE()")
+            kw = "PROCEDURE" if "proc" in obj_kind else "FUNCTION"
+            ddl = f"CREATE OR REPLACE {kw} {db}.{sch}.{target_name}({sig_args}) RETURNS {ret_type} LANGUAGE {lang} AS $${proc_body}$$;"
         else:
-            table_type = str(body.get("table_type") or "STANDARD").upper()
+            table_type = str(body.get("table_type") or obj_subtype or "STANDARD").upper()
+            include_vector = bool(body.get("include_vector", "vector_dimension" in body and table_type != "ICEBERG"))
             vector_dim = int(body.get("vector_dimension") or 768)
-            if table_type == "HYBRID":
+            elem_type = str(body.get("vector_element_type") or "FLOAT").upper()
+            if table_type == "ICEBERG":
+                if body.get("include_vector") is True:
+                    return JSONResponse(
+                        status_code=422,
+                        content={
+                            "ok": False,
+                            "status_code": 422,
+                            "error_code": ErrorCode.UNSUPPORTED_CAPABILITY.value,
+                            "message": "Native VECTOR columns are not supported on Iceberg Tables (HUB-W2-05).",
+                            "active_role": LIVE_BRIDGE.active_role,
+                        },
+                    )
+                ext_vol = str(body.get("external_volume") or "<EXTERNAL_VOLUME>").strip()
+                base_loc = str(body.get("base_location") or target_name.lower()).strip()
+                ddl = (
+                    f"CREATE ICEBERG TABLE IF NOT EXISTS {db}.{sch}.{target_name} ("
+                    f"id STRING, content STRING, created_at TIMESTAMP_TZ) "
+                    f"EXTERNAL_VOLUME = '{ext_vol}' CATALOG = 'SNOWFLAKE' BASE_LOCATION = '{base_loc}';"
+                )
+            elif table_type == "INTERACTIVE":
+                wh = str(body.get("warehouse") or LIVE_BRIDGE.warehouse or "<WAREHOUSE>").strip()
+                lag = str(body.get("target_lag") or "1 minute").strip()
+                ddl = (
+                    f"CREATE INTERACTIVE TABLE IF NOT EXISTS {db}.{sch}.{target_name} "
+                    f"TARGET_LAG = '{lag}' WAREHOUSE = {wh} AS "
+                    f"SELECT run_id AS id, flow_id AS content, start_ts AS created_at FROM {LIVE_BRIDGE.runs_table};"
+                )
+            elif table_type == "DYNAMIC":
+                wh = str(body.get("warehouse") or LIVE_BRIDGE.warehouse or "<WAREHOUSE>").strip()
+                lag = str(body.get("target_lag") or "5 minutes").strip()
+                ddl = (
+                    f"CREATE DYNAMIC TABLE IF NOT EXISTS {db}.{sch}.{target_name} "
+                    f"TARGET_LAG = '{lag}' WAREHOUSE = {wh} REFRESH_MODE = AUTO AS "
+                    f"SELECT run_id AS id, flow_id AS content, start_ts AS created_at FROM {LIVE_BRIDGE.runs_table};"
+                )
+            elif table_type == "HYBRID":
+                vec_col = f"embedding VECTOR({elem_type}, {vector_dim}), " if include_vector else ""
                 ddl = (
                     f"CREATE HYBRID TABLE IF NOT EXISTS {db}.{sch}.{target_name} ("
                     f"id VARCHAR(128) PRIMARY KEY, content VARCHAR, metadata VARIANT, "
-                    f"embedding VECTOR(FLOAT, {vector_dim}), created_at TIMESTAMP_TZ DEFAULT CURRENT_TIMESTAMP());"
+                    f"{vec_col}created_at TIMESTAMP_TZ DEFAULT CURRENT_TIMESTAMP());"
                 )
             else:
+                vec_col = f"embedding VECTOR({elem_type}, {vector_dim}), " if include_vector else ""
                 ddl = (
                     f"CREATE TABLE IF NOT EXISTS {db}.{sch}.{target_name} ("
                     f"id VARCHAR(128) PRIMARY KEY, content VARCHAR, metadata VARIANT, "
-                    f"embedding VECTOR(FLOAT, {vector_dim}), created_at TIMESTAMP_TZ DEFAULT CURRENT_TIMESTAMP());"
+                    f"{vec_col}created_at TIMESTAMP_TZ DEFAULT CURRENT_TIMESTAMP());"
                 )
 
         if dry_run or not confirmed:
@@ -614,7 +974,11 @@ def register_snowflake_fastapi_routes(app: Any) -> None:
                     "dry_run": True,
                     "confirmed": confirmed,
                     "active_role": LIVE_BRIDGE.active_role,
+                    "database": db,
+                    "schema": sch,
+                    "hierarchy_path": hierarchy_path,
                     "ddl_preview": ddl,
+                    "role_privileges": LIVE_BRIDGE.role_privileges,
                     "message": "Dry-run DDL preview generated. Set confirmed=true to execute on Snowflake.",
                 },
             )
@@ -625,11 +989,18 @@ def register_snowflake_fastapi_routes(app: Any) -> None:
             outcome="ALLOWED" if exec_res.get("ok") else "ERROR",
             error_code=exec_res.get("error_code"),
             target_object=f"{db}.{sch}.{target_name}",
-            details={"ddl": ddl, "result": exec_res},
+            details={"ddl": ddl, "hierarchy_path": hierarchy_path, "result": exec_res},
         )
         return JSONResponse(
             status_code=exec_res.get("status_code", 200 if exec_res.get("ok") else 500),
-            content={"ok": exec_res.get("ok"), "ddl_executed": ddl, "result": exec_res},
+            content={
+                "ok": exec_res.get("ok", True),
+                "database": db,
+                "schema": sch,
+                "hierarchy_path": hierarchy_path,
+                "ddl_executed": ddl,
+                "result": exec_res,
+            },
         )
 
     @sf_router.get("/traces")
@@ -651,26 +1022,50 @@ def register_snowflake_fastapi_routes(app: Any) -> None:
                 "active_role": LIVE_BRIDGE.active_role,
                 "memories": LIVE_BRIDGE.memories_registry,
                 "supported_backends": [
+                    "Standard Table",
+                    "Hybrid Table",
+                    "Interactive Table",
+                    "Dynamic Table",
+                    "Semi-Structured (VARIANT)",
+                    "Semi-Structured (OBJECT)",
+                    "Semi-Structured (ARRAY)",
+                    "Snowflake Postgres (Relational / JSONB)",
                     "Standard Table (VECTOR)",
                     "Hybrid Table (VECTOR)",
-                    "Cortex Search",
+                    "Interactive Table (VECTOR)",
+                    "Dynamic Table (VECTOR)",
                     "Snowflake Postgres (pgvector)",
+                    "Cortex Search Service",
                 ],
                 "supported_embeddings": [
-                    "snowflake-arctic-embed-l-v2.0 (1024d)",
                     "snowflake-arctic-embed-m-v1.5 (768d)",
+                    "snowflake-arctic-embed-m (768d)",
                     "e5-base-v2 (768d)",
-                    "ollama/nomic-embed-text (768d)",
+                    "nomic-embed-text (768d)",
+                    "snowflake-arctic-embed-l-v2.0 (1024d)",
+                    "snowflake-arctic-embed-l-v2.0-8k (1024d)",
+                    "multilingual-e5-large (1024d)",
+                    "voyage-multilingual-2 (1024d)",
+                    "nv-embed-qa-4 (1024d)",
+                    "voyage-multimodal-3 (1024d)",
                 ],
             },
         )
 
     @sf_router.post("/memories")
     async def post_create_memory(request: Request) -> JSONResponse:
+        from .providers.embeddings import resolve_embedding_dimension
+
         body = await request.json()
         name = str(body.get("name") or "").strip()
-        backend = str(body.get("vector_database") or "Standard Table (VECTOR)")
-        embedding_model = str(body.get("embedding_model") or "snowflake-arctic-embed-m-v1.5")
+        db = str(body.get("database") or LIVE_BRIDGE.database).strip().upper()
+        sch = str(body.get("schema") or LIVE_BRIDGE.schema).strip().upper()
+        category = str(body.get("memory_category") or "vector_table").strip().lower()
+        backend = str(body.get("vector_database") or "Standard Table (VECTOR)").strip()
+        table_type = str(body.get("table_type") or ("HYBRID" if "Hybrid" in backend else "STANDARD")).strip().upper()
+        semi_type = str(body.get("semi_structured_type") or "").strip().upper()
+        embedding_model = str(body.get("embedding_model") or "snowflake-arctic-embed-m-v1.5").strip()
+        elem_type = str(body.get("vector_element_type") or "FLOAT").strip().upper()
         batch_size = int(body.get("batch_size") or 64)
         llm_preprocessing = body.get("llm_preprocessing") or None
 
@@ -678,22 +1073,145 @@ def register_snowflake_fastapi_routes(app: Any) -> None:
         if denied:
             return JSONResponse(status_code=403, content=denied)
 
+        is_vector = (
+            category in ("vector_table", "postgres_pgvector", "cortex_search")
+            or "VECTOR" in backend.upper()
+            or "PGVECTOR" in backend.upper()
+            or "CORTEX SEARCH" in backend.upper()
+        ) and category not in ("structured_table", "semi_structured", "postgres_non_vector")
+
+        if is_vector and ("ICEBERG" in table_type or "ICEBERG" in backend.upper()):
+            return JSONResponse(
+                status_code=422,
+                content={
+                    "ok": False,
+                    "status_code": 422,
+                    "error_code": ErrorCode.UNSUPPORTED_CAPABILITY.value,
+                    "message": "Native VECTOR columns are not supported on Snowflake Iceberg Tables (HUB-W2-05).",
+                    "active_role": LIVE_BRIDGE.active_role,
+                },
+            )
+        if body.get("vector_inside_variant") is True:
+            return JSONResponse(
+                status_code=422,
+                content={
+                    "ok": False,
+                    "status_code": 422,
+                    "error_code": ErrorCode.UNSUPPORTED_CAPABILITY.value,
+                    "message": "VECTOR columns cannot be nested inside VARIANT columns (HUB-W2-05).",
+                    "active_role": LIVE_BRIDGE.active_role,
+                },
+            )
+        if elem_type not in {"FLOAT", "INT"}:
+            return JSONResponse(
+                status_code=422,
+                content={
+                    "ok": False,
+                    "status_code": 422,
+                    "error_code": ErrorCode.UNSUPPORTED_CAPABILITY.value,
+                    "message": f"Unsupported VECTOR element type '{elem_type}'. Expected FLOAT or INT.",
+                    "active_role": LIVE_BRIDGE.active_role,
+                },
+            )
+
+        expected_dim = resolve_embedding_dimension(embedding_model, default=768)
+        requested_dim = int(body.get("vector_dimension") or body.get("dimension") or expected_dim)
+        if is_vector and (requested_dim < 1 or requested_dim > 4096):
+            return JSONResponse(
+                status_code=422,
+                content={
+                    "ok": False,
+                    "status_code": 422,
+                    "error_code": ErrorCode.UNSUPPORTED_CAPABILITY.value,
+                    "message": f"VECTOR dimension {requested_dim} is out of bounds (1..4096).",
+                    "active_role": LIVE_BRIDGE.active_role,
+                },
+            )
+        if is_vector and ("vector_dimension" in body or "dimension" in body) and requested_dim != expected_dim:
+            return JSONResponse(
+                status_code=422,
+                content={
+                    "ok": False,
+                    "status_code": 422,
+                    "error_code": ErrorCode.UNSUPPORTED_CAPABILITY.value,
+                    "message": (
+                        f"VECTOR dimension {requested_dim} does not match selected AI_EMBED model "
+                        f"'{embedding_model}' ({expected_dim}d)."
+                    ),
+                    "active_role": LIVE_BRIDGE.active_role,
+                },
+            )
+
+        dim = expected_dim
         safe_table = "".join(c if c.isalnum() or c == "_" else "_" for c in (name or "MEMORY_STORE")).upper()
-        dim = 1024 if "1024" in embedding_model or "l-v2" in embedding_model else 768
-        table_kw = "HYBRID TABLE" if "Hybrid" in backend else "TABLE"
-        ddl = (
-            f"CREATE {table_kw} IF NOT EXISTS {LIVE_BRIDGE.database}.{LIVE_BRIDGE.schema}.MEM_{safe_table} ("
-            f"chunk_id VARCHAR(128) PRIMARY KEY, memory_name VARCHAR(256), text_chunk VARCHAR, "
-            f"embedding VECTOR(FLOAT, {dim}), metadata VARIANT, created_by_role VARCHAR(128), "
-            f"created_at TIMESTAMP_TZ DEFAULT CURRENT_TIMESTAMP());"
-        )
+        fqn = f"{db}.{sch}.MEM_{safe_table}"
+
+        if category == "semi_structured" or semi_type in ("VARIANT", "OBJECT", "ARRAY"):
+            col_type = semi_type if semi_type in ("VARIANT", "OBJECT", "ARRAY") else "VARIANT"
+            ddl = (
+                f"CREATE TABLE IF NOT EXISTS {fqn} ("
+                f"chunk_id VARCHAR(128) PRIMARY KEY, memory_name VARCHAR(256), text_chunk VARCHAR, "
+                f"payload {col_type}, metadata VARIANT, created_by_role VARCHAR(128), "
+                f"created_at TIMESTAMP_TZ DEFAULT CURRENT_TIMESTAMP());"
+            )
+        elif category == "postgres_non_vector" or ("POSTGRES" in backend.upper() and "PGVECTOR" not in backend.upper()):
+            ddl = (
+                f"CREATE TABLE IF NOT EXISTS {sch.lower()}.mem_{safe_table.lower()} ("
+                f"chunk_id TEXT PRIMARY KEY, memory_name TEXT, text_chunk TEXT, "
+                f"payload JSONB DEFAULT '{{}}'::jsonb, metadata JSONB DEFAULT '{{}}'::jsonb, "
+                f"created_by_role TEXT, created_at TIMESTAMPTZ DEFAULT NOW());"
+            )
+        elif category == "postgres_pgvector" or "PGVECTOR" in backend.upper():
+            ddl = (
+                f"CREATE EXTENSION IF NOT EXISTS vector; "
+                f"CREATE TABLE IF NOT EXISTS {sch.lower()}.mem_{safe_table.lower()} ("
+                f"chunk_id TEXT PRIMARY KEY, memory_name TEXT, text_chunk TEXT, "
+                f"embedding vector({dim}), metadata JSONB DEFAULT '{{}}'::jsonb, "
+                f"created_by_role TEXT, created_at TIMESTAMPTZ DEFAULT NOW());"
+            )
+        elif category == "cortex_search" or "CORTEX SEARCH" in backend.upper():
+            wh = str(body.get("warehouse") or LIVE_BRIDGE.warehouse or "<WAREHOUSE>").strip()
+            clean_embed = embedding_model.split(" ")[0]
+            ddl = (
+                f"CREATE TABLE IF NOT EXISTS {fqn} ("
+                f"chunk_id VARCHAR(128), memory_name VARCHAR(256), text_chunk VARCHAR, "
+                f"created_by_role VARCHAR(128), created_at TIMESTAMP_TZ DEFAULT CURRENT_TIMESTAMP()); "
+                f"CREATE OR REPLACE CORTEX SEARCH SERVICE {db}.{sch}.SVC_{safe_table} "
+                f"ON text_chunk ATTRIBUTES memory_name, created_by_role "
+                f"WAREHOUSE = {wh} TARGET_LAG = '1 minute' EMBEDDING_MODEL = '{clean_embed}' "
+                f"AS (SELECT * FROM {fqn});"
+            )
+        elif not is_vector:
+            table_kw = "HYBRID TABLE" if table_type == "HYBRID" else "TABLE"
+            ddl = (
+                f"CREATE {table_kw} IF NOT EXISTS {fqn} ("
+                f"chunk_id VARCHAR(128) PRIMARY KEY, memory_name VARCHAR(256), text_chunk VARCHAR, "
+                f"metadata VARIANT, created_by_role VARCHAR(128), "
+                f"created_at TIMESTAMP_TZ DEFAULT CURRENT_TIMESTAMP());"
+            )
+        else:
+            table_kw = "HYBRID TABLE" if table_type == "HYBRID" else "TABLE"
+            ddl = (
+                f"CREATE {table_kw} IF NOT EXISTS {fqn} ("
+                f"chunk_id VARCHAR(128) PRIMARY KEY, memory_name VARCHAR(256), text_chunk VARCHAR, "
+                f"embedding VECTOR({elem_type}, {dim}), metadata VARIANT, created_by_role VARCHAR(128), "
+                f"created_at TIMESTAMP_TZ DEFAULT CURRENT_TIMESTAMP());"
+            )
+
         exec_res = LIVE_BRIDGE.execute_sql(ddl)
         entry = {
             "name": name,
-            "table_fqn": f"{LIVE_BRIDGE.database}.{LIVE_BRIDGE.schema}.MEM_{safe_table}",
+            "database": db,
+            "schema": sch,
+            "table_fqn": fqn,
+            "memory_category": category,
             "vector_database": backend,
-            "embedding_model": embedding_model,
-            "dimension": dim,
+            "table_type": table_type,
+            "semi_structured_type": semi_type or None,
+            "is_vector_memory": is_vector,
+            "embedding_model": embedding_model if is_vector else None,
+            "vector_element_type": elem_type if is_vector else None,
+            "dimension": dim if is_vector else None,
             "batch_size": batch_size,
             "llm_preprocessing": llm_preprocessing,
             "created_by_role": LIVE_BRIDGE.active_role,
@@ -701,6 +1219,9 @@ def register_snowflake_fastapi_routes(app: Any) -> None:
             "snowflake_created": bool(exec_res.get("ok")),
         }
         LIVE_BRIDGE.memories_registry.append(entry)
+        vis_mem = LIVE_BRIDGE.selected_context.setdefault("visible_objects", {}).setdefault("memories", [])
+        if name and name not in vis_mem:
+            vis_mem.append(name)
         LIVE_BRIDGE.record_audit_event(
             action="CREATE_MEMORY",
             outcome="ALLOWED",

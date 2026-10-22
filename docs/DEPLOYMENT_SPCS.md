@@ -42,7 +42,7 @@ Langflow's internal transactional ORM (`SQLModel`/`SQLAlchemy`/`Alembic`) requir
    ```
    Connect Langflow with `LANGFLOW_DATABASE_URL=postgresql+psycopg://<USER>:<TOKEN>@<POSTGRES_HOST>:5432/langflow?sslmode=verify-ca&connect_timeout=10`.
 2. **Option B — Single-Replica Development: SPCS Block Storage Volume**
-   Mount a dedicated SPCS `block` volume (`>= 1 GiB`) at `/var/lib/langflow/data` and run periodic quiesced backups (`PRAGMA integrity_check` + SHA-256 verification) to `@<DATABASE>.<SCHEMA>.<STAGE_NAME>/backups/`.
+   Mount a dedicated SPCS `block` volume (`>= 1 GiB`, e.g., `10Gi` in `service-spec.template.yaml`) at `/persist` (`LANGFLOW_PERSIST_DIR=/persist`, `LANGFLOW_CONFIG_DIR=/persist/config`, `LANGFLOW_DATABASE_URL=sqlite:////persist/langflow.db`) and run periodic quiesced backups (`PRAGMA integrity_check` + SHA-256 verification) to `@<DATABASE>.<SCHEMA>.<STAGE_NAME>/backups/`.
 
 ---
 
