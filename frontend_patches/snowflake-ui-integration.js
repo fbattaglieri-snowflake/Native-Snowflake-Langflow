@@ -100,18 +100,43 @@
     return `<svg xmlns="http://www.w3.org/2000/svg" width="${sz}" height="${sz}" viewBox="0 0 64 64" fill="${fill}" style="display:inline-block;vertical-align:middle;flex-shrink:0;"><path d="${OFFICIAL_SNOWFLAKE_PATH}"/></svg>`;
   }
 
-  function buildLangflowSvg(sizePx) {
-    const sz = sizePx || 32;
-    return `<svg xmlns="http://www.w3.org/2000/svg" width="${sz}" height="${sz}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:inline-block;vertical-align:middle;flex-shrink:0;"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>`;
-  }
-
+  const SNOWFLAKE_BLUE = "#29B5E8";
   const SNOWFLAKE_SVG_BLACK = buildOfficialSnowflakeSvg("#000000", 16);
-  const SNOWFLAKE_SVG_COLOR = buildOfficialSnowflakeSvg("#29b5e8", 15);
+  const SNOWFLAKE_SVG_COLOR = buildOfficialSnowflakeSvg("#29B5E8", 15);
+  const SNOWFLAKE_SVG_BLUE = buildOfficialSnowflakeSvg("#29B5E8", 16);
   const SNOWFLAKE_FAVICON_DATA_URI =
     "data:image/svg+xml;utf8," +
     encodeURIComponent(
       `<svg xmlns="http://www.w3.org/2000/svg" width="96" height="96" viewBox="0 0 64 64" fill="#29B5E8"><path d="${OFFICIAL_SNOWFLAKE_PATH}"/></svg>`
     );
+
+  // W2-R2-13: 3 Agent Memory Types for the Langflow `Memories` (+ Snowflake) wizard & Hub Section 2
+  const AGENT_MEMORY_TYPES = [
+    {
+      id: "episodic_session",
+      label: "+ Episodic / Session Memory",
+      default_category: "structured",
+      default_backend: "Hybrid Table",
+      description:
+        "Conversational turns, session state, and short-term episodic recall backed by Snowflake Hybrid Table or Snowflake Postgres (Relational / JSONB).",
+    },
+    {
+      id: "semantic_vector",
+      label: "+ Semantic / Vector Memory",
+      default_category: "vector_table",
+      default_backend: "Standard Table (VECTOR)",
+      description:
+        "Dense semantic embeddings and similarity search backed by Snowflake VECTOR(FLOAT|INT, 768|1024) coupled to AI_EMBED, Snowflake Postgres pgvector, or Cortex Search.",
+    },
+    {
+      id: "structured_long_term",
+      label: "+ Structured / Semi-Structured Long-Term Memory",
+      default_category: "semi_structured",
+      default_backend: "Standard Table (VARIANT)",
+      description:
+        "Persistent agent facts, user preferences, and entity profiles backed by Standard / Dynamic / Interactive Tables with VARIANT/OBJECT/ARRAY or consolidation Views.",
+    },
+  ];
 
   // Official AI_EMBED model catalog with locked vector dimensions (HUB-W2-05)
   const OFFICIAL_AI_EMBED_MODELS = [
@@ -187,9 +212,25 @@
     selected_context: {
       databases: ["SNOWFLAKE_LANGFLOW"],
       schemas_by_db: { SNOWFLAKE_LANGFLOW: ["CORE"] },
+      objects_by_db_schema: {
+        "SNOWFLAKE_LANGFLOW.CORE": {
+          tables: ["LANGFLOW_FLOW_RUNS", "LANGFLOW_FLOW_SPANS", "LANGFLOW_AUDIT_LOG"],
+          views: [],
+          iceberg_tables: [],
+          stages: ["SNOWFLAKE_LANGFLOW_STAGE"],
+          cortex_search_services: [],
+          semantic_views: [],
+          semantic_models: [],
+          cortex_agents: [],
+          functions: [],
+          procedures: [],
+          postgres_instances: [],
+        },
+      },
       visible_objects: {
         tables: ["LANGFLOW_FLOW_RUNS", "LANGFLOW_FLOW_SPANS", "LANGFLOW_AUDIT_LOG"],
         views: [],
+        iceberg_tables: [],
         stages: ["SNOWFLAKE_LANGFLOW_STAGE"],
         memories: ["SNOWFLAKE_KB_MEM"],
         cortex_search_services: [],
@@ -204,8 +245,24 @@
     catalog: {
       databases: ["SNOWFLAKE_LANGFLOW"],
       schemas_by_db: { SNOWFLAKE_LANGFLOW: ["CORE", "PUBLIC"] },
+      objects_by_db_schema: {
+        "SNOWFLAKE_LANGFLOW.CORE": {
+          tables: ["LANGFLOW_FLOW_RUNS", "LANGFLOW_FLOW_SPANS", "LANGFLOW_AUDIT_LOG"],
+          views: [],
+          iceberg_tables: [],
+          stages: ["SNOWFLAKE_LANGFLOW_STAGE"],
+          cortex_search_services: [],
+          semantic_views: [],
+          semantic_models: [],
+          cortex_agents: [],
+          functions: [],
+          procedures: [],
+          postgres_instances: [],
+        },
+      },
       tables: ["LANGFLOW_FLOW_RUNS", "LANGFLOW_FLOW_SPANS", "LANGFLOW_AUDIT_LOG"],
       views: [],
+      iceberg_tables: [],
       stages: ["SNOWFLAKE_LANGFLOW_STAGE"],
       memories: ["SNOWFLAKE_KB_MEM"],
       cortex_search_services: [],
@@ -220,11 +277,34 @@
 
   window.SNOWFLAKE_LANGFLOW_CONTEXT = sfState;
 
+  // W2-R2-14: Inject official Snowflake Blue (#29B5E8) CSS rules in document.head (outside #root)
+  function ensureSnowflakeBlueBrandStyles() {
+    if (!document.head || document.getElementById("sflf-brand-blue-style")) return;
+    const styleEl = document.createElement("style");
+    styleEl.id = "sflf-brand-blue-style";
+    styleEl.textContent = `
+      [data-testid="header_left_section_wrapper"],
+      [data-testid="header_left_section_wrapper"] svg,
+      [data-testid="header_left_section_wrapper"] span,
+      [data-testid="snowflake-langflow-dual-loading-logo"],
+      [data-testid="snowflake-langflow-dual-loading-logo"] svg,
+      [data-testid="empty_page_title"],
+      [data-testid="welcome-to-snowflake-langflow-title"] {
+        color: #29B5E8 !important;
+      }
+      [data-testid="snowflake-langflow-dual-loading-logo"] svg {
+        fill: #29B5E8 !important;
+      }
+    `;
+    document.head.appendChild(styleEl);
+  }
+
   // UI-W2-01: Idempotent browser tab title ("Snowflake Langflow") & Snowflake SVG favicon guard
   function ensureBrowserTabBranding() {
     if (document.title !== BROWSER_TAB_TITLE) {
       document.title = BROWSER_TAB_TITLE;
     }
+    ensureSnowflakeBlueBrandStyles();
     if (!document.head) return;
     const iconLinks = document.head.querySelectorAll('link[rel*="icon"]');
     if (iconLinks.length === 0) {
@@ -258,7 +338,8 @@
     });
   }
 
-  // UI-W2-01: Dual-symbol [Snowflake SVG] [Langflow SVG] loading screen companion overlay mounted on document.body (outside #root)
+  // UI-W2-01 & W2-R2-14: Clean Snowflake Blue (#29B5E8) loading screen overlay mounted on document.body (outside #root)
+  // Strictly shows ONLY the official Snowflake Blue (#29B5E8) logo without any 3-layer Databricks-like icon.
   function ensureDualSymbolLoadingOverlay() {
     const rootEl = document.getElementById("root");
     const hasHeader = !!document.querySelector('[data-testid="header_left_section_wrapper"]');
@@ -271,8 +352,8 @@
         overlay.id = "sflf-dual-loading-overlay";
         overlay.setAttribute("data-testid", "snowflake_langflow_loading_dual_logo");
         overlay.style.cssText =
-          "position:fixed;top:calc(50% - 68px);left:50%;transform:translate(-50%,-50%);z-index:99990;display:inline-flex;align-items:center;justify-content:center;gap:14px;pointer-events:none;user-select:none;color:#29B5E8;";
-        overlay.innerHTML = `${buildOfficialSnowflakeSvg("#29B5E8", 38)}<span style="color:#71717a;font-weight:300;font-size:22px;">+</span><span style="color:#f4f4f5;">${buildLangflowSvg(36)}</span>`;
+          "position:fixed;top:calc(50% - 68px);left:50%;transform:translate(-50%,-50%);z-index:99990;display:inline-flex;align-items:center;justify-content:center;gap:10px;pointer-events:none;user-select:none;color:#29B5E8;";
+        overlay.innerHTML = `${buildOfficialSnowflakeSvg("#29B5E8", 40)}`;
         document.body.appendChild(overlay);
       } else if (overlay) {
         overlay.style.display = "inline-flex";
@@ -282,9 +363,168 @@
     }
   }
 
+  // W2-R2-13 & W2-R2-14: Companion `+ Snowflake` button in official #29B5E8 on the Langflow Memories view
+  function ensureMemoriesPageSnowflakeButton() {
+    if (!document.body) return;
+    const path = (window.location && window.location.pathname) || "";
+    const pageText = document.body.textContent || "";
+    const hasHeadingMemories = Array.from(document.querySelectorAll("h1, h2, h3, [data-testid='mainpage_title']")).some(
+      function (el) {
+        const t = (el.textContent || "").trim();
+        return t === "Memories" || t === "Manage Memories";
+      }
+    );
+    const isMemoriesView =
+      path.toLowerCase().includes("memories") ||
+      path.toLowerCase().includes("memory") ||
+      hasHeadingMemories ||
+      !!document.querySelector('[data-testid*="memories"], [data-testid*="memory-"]') ||
+      (pageText.includes("Memories") &&
+        (pageText.includes("Embedding Model") ||
+          pageText.includes("No memories") ||
+          pageText.includes("Create a Memory") ||
+          pageText.includes("Vector Store")));
+    let btn = document.getElementById("sflf-memories-plus-snowflake-btn");
+    if (!btn) {
+      btn = document.createElement("button");
+      btn.id = "sflf-memories-plus-snowflake-btn";
+      btn.type = "button";
+      btn.setAttribute("data-testid", "memories-plus-snowflake-btn");
+      btn.style.cssText =
+        "position:fixed;bottom:22px;right:22px;z-index:9990;display:none;align-items:center;gap:6px;background:#29B5E8;color:#ffffff;border:1px solid #29B5E8;border-radius:8px;padding:7px 14px;font-family:Inter,sans-serif;font-size:12px;font-weight:600;cursor:pointer;box-shadow:0 6px 18px rgba(41,181,232,0.38);";
+      btn.innerHTML = `${buildOfficialSnowflakeSvg("#ffffff", 14)}<span>+ Snowflake</span>`;
+      btn.onclick = function () {
+        openSnowflakeHubModal("memories");
+      };
+      document.body.appendChild(btn);
+    }
+    if (isMemoriesView) {
+      // Position next to / right under the native `+ Create` button when visible on the Memories page
+      const createBtnCandidate = Array.from(document.querySelectorAll("button")).find(function (b) {
+        if (b.id === "sflf-memories-plus-snowflake-btn") return false;
+        const txt = (b.textContent || "").trim();
+        return txt === "Create" || txt === "+ Create" || txt === "Add Memory" || txt === "Create Memory";
+      });
+      if (createBtnCandidate) {
+        const r = createBtnCandidate.getBoundingClientRect();
+        if (r && r.width > 0 && r.height > 0) {
+          btn.style.top = Math.round(r.bottom + 8) + "px";
+          btn.style.left = Math.round(r.left) + "px";
+          btn.style.bottom = "auto";
+          btn.style.right = "auto";
+        }
+      }
+      btn.style.display = "inline-flex";
+    } else {
+      btn.style.display = "none";
+    }
+  }
+
+  // W2-R2-00, W2-R2-04A, W2-R2-14: Live Canvas Node Auto-Sync when Snowflake context or active role changes
+  function syncCanvasNodesWithSnowflakeContext(ctx) {
+    const activeCtx = ctx || sfState;
+    if (!activeCtx || typeof document === "undefined") return { syncedNodes: 0 };
+
+    const selCtx = activeCtx.selected_context || {};
+    const dbs =
+      Array.isArray(selCtx.databases) && selCtx.databases.length > 0
+        ? selCtx.databases
+        : [activeCtx.database || "SNOWFLAKE_LANGFLOW"];
+    const primaryDb = activeCtx.database || dbs[0] || "SNOWFLAKE_LANGFLOW";
+    const schemasMap = selCtx.schemas_by_db || (activeCtx.catalog && activeCtx.catalog.schemas_by_db) || {};
+    const schemasForDb =
+      Array.isArray(schemasMap[primaryDb]) && schemasMap[primaryDb].length > 0
+        ? schemasMap[primaryDb]
+        : [activeCtx.schema || "CORE"];
+    const primarySchema = activeCtx.schema || schemasForDb[0] || "CORE";
+    const vis = selCtx.visible_objects || activeCtx.catalog || {};
+
+    const nodeEls = document.querySelectorAll('[data-testid^="rf__node-"], .react-flow__node');
+    let syncedCount = 0;
+
+    nodeEls.forEach(function (nodeEl) {
+      nodeEl.setAttribute("data-snowflake-context-epoch", String(activeCtx.context_epoch || 1));
+      nodeEl.setAttribute("data-snowflake-active-role", String(activeCtx.active_role || "ACCOUNTADMIN"));
+      nodeEl.setAttribute("data-snowflake-database", primaryDb);
+      nodeEl.setAttribute("data-snowflake-schema", primarySchema);
+
+      // Update any native <select> or <input> fields inside the canvas node for database / schema / objects
+      const selects = nodeEl.querySelectorAll("select");
+      selects.forEach(function (sel) {
+        const nameAttr = (sel.getAttribute("name") || sel.getAttribute("data-testid") || sel.id || "").toLowerCase();
+        if (nameAttr.includes("database")) {
+          populateSelectOptions(sel, dbs, primaryDb);
+          sel.dispatchEvent(new Event("change", { bubbles: true }));
+        } else if (nameAttr.includes("schema")) {
+          populateSelectOptions(sel, schemasForDb, primarySchema);
+          sel.dispatchEvent(new Event("change", { bubbles: true }));
+        } else if (nameAttr.includes("table_name") || nameAttr.includes("table")) {
+          populateSelectOptions(sel, vis.tables || [], (vis.tables && vis.tables[0]) || "");
+        } else if (nameAttr.includes("view_name") || nameAttr.includes("view")) {
+          populateSelectOptions(sel, vis.views || [], (vis.views && vis.views[0]) || "");
+        } else if (nameAttr.includes("stage")) {
+          populateSelectOptions(sel, vis.stages || [], (vis.stages && vis.stages[0]) || "");
+        } else if (nameAttr.includes("search_service")) {
+          populateSelectOptions(
+            sel,
+            vis.cortex_search_services || [],
+            (vis.cortex_search_services && vis.cortex_search_services[0]) || ""
+          );
+        } else if (nameAttr.includes("semantic_view")) {
+          populateSelectOptions(sel, vis.semantic_views || [], (vis.semantic_views && vis.semantic_views[0]) || "");
+        } else if (nameAttr.includes("cortex_agent")) {
+          populateSelectOptions(sel, vis.cortex_agents || [], (vis.cortex_agents && vis.cortex_agents[0]) || "");
+        } else if (nameAttr.includes("procedure")) {
+          populateSelectOptions(sel, vis.procedures || [], (vis.procedures && vis.procedures[0]) || "");
+        } else if (nameAttr.includes("function")) {
+          populateSelectOptions(sel, vis.functions || [], (vis.functions && vis.functions[0]) || "");
+        }
+      });
+
+      const inputs = nodeEl.querySelectorAll('input[type="text"], input:not([type])');
+      inputs.forEach(function (inp) {
+        const key = (inp.getAttribute("name") || inp.getAttribute("data-testid") || inp.id || "").toLowerCase();
+        const nativeSetter =
+          Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value") &&
+          Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set;
+        if (key === "database" || key.endsWith("_database") || key.includes("input-database")) {
+          if (nativeSetter) nativeSetter.call(inp, primaryDb);
+          else inp.value = primaryDb;
+          inp.dispatchEvent(new Event("input", { bubbles: true }));
+          inp.dispatchEvent(new Event("change", { bubbles: true }));
+        } else if (key === "schema_name" || key === "schema" || key.includes("input-schema")) {
+          if (nativeSetter) nativeSetter.call(inp, primarySchema);
+          else inp.value = primarySchema;
+          inp.dispatchEvent(new Event("input", { bubbles: true }));
+          inp.dispatchEvent(new Event("change", { bubbles: true }));
+        }
+      });
+
+      syncedCount += 1;
+    });
+
+    return {
+      syncedNodes: syncedCount,
+      database: primaryDb,
+      schema: primarySchema,
+      databases: dbs,
+      schemas_by_db: schemasMap,
+      context_epoch: activeCtx.context_epoch || 1,
+    };
+  }
+
+  window.syncCanvasNodesWithSnowflakeContext = syncCanvasNodesWithSnowflakeContext;
+  window.addEventListener("snowflake:context-updated", function (ev) {
+    syncCanvasNodesWithSnowflakeContext((ev && ev.detail) || sfState);
+  });
+  window.addEventListener("snowflake:context-changed", function (ev) {
+    syncCanvasNodesWithSnowflakeContext((ev && ev.detail) || sfState);
+  });
+
   function scanAll() {
     ensureBrowserTabBranding();
     ensureDualSymbolLoadingOverlay();
+    ensureMemoriesPageSnowflakeButton();
     alignTopbarControls();
   }
 
@@ -359,17 +599,29 @@
       sfState = Object.assign(sfState, data);
       window.SNOWFLAKE_LANGFLOW_CONTEXT = sfState;
       updateTopbarWidgets();
-      await fetchSnowflakeCatalog(sfState.database, sfState.schema);
+      await fetchSnowflakeCatalog(
+        sfState.database,
+        sfState.schema,
+        sfState.selected_context && sfState.selected_context.databases,
+        sfState.selected_context && sfState.selected_context.schemas_by_db
+      );
       refreshHubModalPrivilegeAndContextViews();
+      syncCanvasNodesWithSnowflakeContext(sfState);
     } catch (_e) {
       // Keep default state until backend route responds
     }
   }
 
-  async function fetchSnowflakeCatalog(database, schema) {
+  async function fetchSnowflakeCatalog(database, schema, databasesList, schemasByDbMap) {
     try {
       const dbParam = encodeURIComponent(database || sfState.database || "SNOWFLAKE_LANGFLOW");
-      const schParam = encodeURIComponent(schema || sfState.schema || "CORE");
+      let schParam = encodeURIComponent(schema || sfState.schema || "CORE");
+      if (Array.isArray(databasesList) && databasesList.length > 0) {
+        schParam += `&databases=${encodeURIComponent(databasesList.join(","))}`;
+      }
+      if (schemasByDbMap && typeof schemasByDbMap === "object" && Object.keys(schemasByDbMap).length > 0) {
+        schParam += `&schemas_by_db=${encodeURIComponent(JSON.stringify(schemasByDbMap))}`;
+      }
       const resp = await fetch(`/api/v1/snowflake/catalog?database=${dbParam}&schema=${schParam}`, {
         headers: { Accept: "application/json" },
       });
@@ -379,9 +631,19 @@
       if (Array.isArray(data.databases) && data.databases.length > 0) {
         sfState.catalog.databases = data.databases;
       }
+      if (data.schemas_by_db && typeof data.schemas_by_db === "object") {
+        sfState.catalog.schemas_by_db = Object.assign({}, sfState.catalog.schemas_by_db || {}, data.schemas_by_db);
+      }
       if (Array.isArray(data.schemas) && data.schemas.length > 0) {
         sfState.catalog.schemas_by_db = sfState.catalog.schemas_by_db || {};
         sfState.catalog.schemas_by_db[database || sfState.database] = data.schemas;
+      }
+      if (data.objects_by_db_schema && typeof data.objects_by_db_schema === "object") {
+        sfState.catalog.objects_by_db_schema = Object.assign(
+          {},
+          sfState.catalog.objects_by_db_schema || {},
+          data.objects_by_db_schema
+        );
       }
       if (Array.isArray(data.objects)) {
         const tables = [];
@@ -400,9 +662,11 @@
         if (!Array.isArray(data.views) && views.length > 0) sfState.catalog.views = views;
       }
       if (Array.isArray(data.stages)) {
-        sfState.catalog.stages = data.stages.map(function (s) {
-          return typeof s === "string" ? s : s.name || s.STAGE_NAME || "";
-        }).filter(Boolean);
+        sfState.catalog.stages = data.stages
+          .map(function (s) {
+            return typeof s === "string" ? s : s.name || s.STAGE_NAME || "";
+          })
+          .filter(Boolean);
       }
       return sfState.catalog;
     } catch (_e) {
@@ -433,7 +697,9 @@
       window.SNOWFLAKE_LANGFLOW_CONTEXT = sfState;
       updateTopbarWidgets();
       refreshHubModalPrivilegeAndContextViews();
+      syncCanvasNodesWithSnowflakeContext(sfState);
       window.dispatchEvent(new CustomEvent("snowflake:context-updated", { detail: sfState }));
+      window.dispatchEvent(new CustomEvent("snowflake:context-changed", { detail: sfState }));
       showDenialOrStatusBanner(
         "ok",
         "CONTEXT_UPDATED",
@@ -469,6 +735,9 @@
       await fetchSnowflakeContext();
       updateTopbarWidgets();
       refreshHubModalPrivilegeAndContextViews();
+      syncCanvasNodesWithSnowflakeContext(sfState);
+      window.dispatchEvent(new CustomEvent("snowflake:context-updated", { detail: sfState }));
+      window.dispatchEvent(new CustomEvent("snowflake:context-changed", { detail: sfState }));
       showDenialOrStatusBanner(
         "ok",
         "ROLE_SWITCHED",
@@ -496,18 +765,19 @@
   }
 
   // Mount Role Selector & Context indicator directly on document.body (OUTSIDE #root)
+  // W2-R2-14: Colored in official Snowflake Blue (#29B5E8)
   function mountFixedTopbarControls() {
     if (document.getElementById("sflf-body-topbar-controls")) return;
     const ctrl = document.createElement("div");
     ctrl.id = "sflf-body-topbar-controls";
     ctrl.style.cssText =
-      "position:fixed;top:10px;right:228px;z-index:25;display:inline-flex;align-items:center;gap:6px;background:transparent;color:#09090b;padding:1px 4px;font-family:Inter,sans-serif;font-size:11px;height:28px;";
+      "position:fixed;top:10px;right:228px;z-index:25;display:inline-flex;align-items:center;gap:6px;background:transparent;color:#29B5E8;padding:1px 4px;font-family:Inter,sans-serif;font-size:11px;height:28px;";
     ctrl.innerHTML = `
-      <span style="display:inline-flex;align-items:center;">${buildOfficialSnowflakeSvg("#000000", 14)}</span>
-      <label style="font-weight:600;color:#18181b;font-size:11px;">Role:</label>
-      <select id="sflf-role-select" style="background:#ffffff;color:#09090b;border:1px solid #d4d4d8;border-radius:5px;padding:1px 6px;font-size:11px;font-weight:600;cursor:pointer;max-width:142px;height:24px;text-overflow:ellipsis;"></select>
-      <span id="sflf-topbar-context-pill" title="Active Database.Schema Context (Click to configure in Snowflake Hub)" style="background:#f4f4f5;color:#18181b;border:1px solid #d4d4d8;border-radius:5px;padding:2px 6px;font-size:10px;font-weight:600;cursor:pointer;max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${sfState.database}.${sfState.schema}</span>
-      <button id="sflf-open-hub-btn" style="background:#09090b;color:#ffffff;border:none;border-radius:5px;padding:2px 8px;height:24px;font-size:11px;font-weight:600;cursor:pointer;white-space:nowrap;">Snowflake Hub</button>
+      <span style="display:inline-flex;align-items:center;color:#29B5E8;">${buildOfficialSnowflakeSvg("#29B5E8", 14)}</span>
+      <label style="font-weight:600;color:#29B5E8;font-size:11px;">Role:</label>
+      <select id="sflf-role-select" style="background:#ffffff;color:#09090b;border:1px solid rgba(41,181,232,0.55);border-radius:5px;padding:1px 6px;font-size:11px;font-weight:600;cursor:pointer;max-width:142px;height:24px;text-overflow:ellipsis;"></select>
+      <span id="sflf-topbar-context-pill" title="Active Database.Schema Context (Click to configure in Snowflake Hub)" style="background:rgba(41,181,232,0.10);color:#29B5E8;border:1px solid rgba(41,181,232,0.55);border-radius:5px;padding:2px 6px;font-size:10px;font-weight:600;cursor:pointer;max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${sfState.database}.${sfState.schema}</span>
+      <button id="sflf-open-hub-btn" style="background:#29B5E8;color:#ffffff;border:none;border-radius:5px;padding:2px 8px;height:24px;font-size:11px;font-weight:600;cursor:pointer;white-space:nowrap;">Snowflake Hub</button>
     `;
     document.body.appendChild(ctrl);
     alignTopbarControls();
@@ -553,7 +823,12 @@
       epochEl.textContent = `epoch #${sfState.context_epoch}`;
     }
     if (pillEl) {
-      pillEl.textContent = `${sfState.database || "SNOWFLAKE_LANGFLOW"}.${sfState.schema || "CORE"}`;
+      const selDbs =
+        (sfState.selected_context &&
+          Array.isArray(sfState.selected_context.databases) &&
+          sfState.selected_context.databases) || [sfState.database || "SNOWFLAKE_LANGFLOW"];
+      const primaryPair = `${sfState.database || selDbs[0] || "SNOWFLAKE_LANGFLOW"}.${sfState.schema || "CORE"}`;
+      pillEl.textContent = selDbs.length > 1 ? `${primaryPair} (+${selDbs.length - 1} DB)` : primaryPair;
     }
   }
 
@@ -581,6 +856,91 @@
     }
   }
 
+  function renderMultiSelectConeInHubModal(databases, schemasMap, activeDb, activeSchema, cat) {
+    const selCtx = sfState.selected_context || {};
+    const selectedDbs =
+      Array.isArray(selCtx.databases) && selCtx.databases.length > 0 ? selCtx.databases : [activeDb];
+    const selectedSchemasMap = selCtx.schemas_by_db || {};
+
+    // Step 1: Multi-select Databases
+    const dbsBox = document.getElementById("sflf-ctx-multi-dbs");
+    if (dbsBox) {
+      dbsBox.innerHTML = databases
+        .map(function (db) {
+          const isChecked = selectedDbs.indexOf(db) !== -1;
+          return `<label style="display:inline-flex;align-items:center;gap:4px;padding:2px 6px;border-radius:4px;background:#27272a;border:1px solid ${
+            isChecked ? "#29B5E8" : "#3f3f46"
+          };cursor:pointer;"><input type="checkbox" class="sflf-ctx-db-cb" value="${db}" ${
+            isChecked ? "checked" : ""
+          } /> <span>${db}</span></label>`;
+        })
+        .join(" ");
+    }
+
+    // Step 2: Cascading Multi-Select Schemas per Database
+    const schemasBox = document.getElementById("sflf-ctx-multi-schemas");
+    if (schemasBox) {
+      const groupsHtml = selectedDbs
+        .map(function (db) {
+          const dbSchemas =
+            Array.isArray(schemasMap[db]) && schemasMap[db].length > 0
+              ? schemasMap[db]
+              : db === activeDb && Array.isArray(cat.schemas) && cat.schemas.length > 0
+                ? cat.schemas
+                : ["CORE", "PUBLIC"];
+          const chosenForDb =
+            Array.isArray(selectedSchemasMap[db]) && selectedSchemasMap[db].length > 0
+              ? selectedSchemasMap[db]
+              : [db === activeDb ? activeSchema : dbSchemas[0]];
+          const chips = dbSchemas
+            .map(function (sch) {
+              const checked = chosenForDb.indexOf(sch) !== -1;
+              return `<label style="display:inline-flex;align-items:center;gap:3px;padding:1px 5px;border-radius:4px;background:#18181b;border:1px solid ${
+                checked ? "#29B5E8" : "#3f3f46"
+              };"><input type="checkbox" class="sflf-ctx-schema-cb" data-db="${db}" value="${db}.${sch}" ${
+                checked ? "checked" : ""
+              } /> <span>${db}.${sch}</span></label>`;
+            })
+            .join(" ");
+          return `<div style="margin-bottom:4px;"><strong style="color:#29B5E8;font-size:10px;">${db}:</strong> ${chips}</div>`;
+        })
+        .join("");
+      schemasBox.innerHTML = groupsHtml || `<span style="color:#71717a;">Select at least one Database in Step 1.</span>`;
+    }
+
+    // Step 3: Cascading Objects per <DB>.<SCHEMA> (including functions & procedures chips)
+    const objChipsBox = document.getElementById("sflf-ctx-multi-objects");
+    if (objChipsBox) {
+      const objByPair = cat.objects_by_db_schema || selCtx.objects_by_db_schema || {};
+      const pairKeys = Object.keys(objByPair);
+      const effectivePairs = pairKeys.length > 0 ? pairKeys : [`${activeDb}.${activeSchema}`];
+      const categoriesOrder = [
+        { key: "tables", label: "Tables" },
+        { key: "views", label: "Views" },
+        { key: "iceberg_tables", label: "Iceberg Tables" },
+        { key: "stages", label: "Stages" },
+        { key: "cortex_search_services", label: "Cortex Search" },
+        { key: "semantic_views", label: "Semantic Views" },
+        { key: "cortex_agents", label: "Cortex Agents" },
+        { key: "functions", label: "Functions (UDF/UDTF)" },
+        { key: "procedures", label: "Procedures" },
+        { key: "postgres_instances", label: "Postgres" },
+      ];
+      objChipsBox.innerHTML = effectivePairs
+        .map(function (pairKey) {
+          const bucket = objByPair[pairKey] || cat;
+          const catBadges = categoriesOrder
+            .map(function (c) {
+              const items = Array.isArray(bucket[c.key]) ? bucket[c.key] : Array.isArray(cat[c.key]) ? cat[c.key] : [];
+              return `<label style="display:inline-flex;align-items:center;gap:3px;padding:1px 5px;border-radius:4px;background:#27272a;border:1px solid #3f3f46;"><input type="checkbox" class="sflf-ctx-obj-chip" data-pair="${pairKey}" data-category="${c.key}" value="${pairKey}:${c.key}" checked /> <span>${c.label} (${items.length})</span></label>`;
+            })
+            .join(" ");
+          return `<div style="margin-bottom:4px;"><strong style="color:#29B5E8;font-size:10px;">${pairKey}:</strong> ${catBadges}</div>`;
+        })
+        .join("");
+    }
+  }
+
   function refreshHubModalPrivilegeAndContextViews() {
     const modal = document.getElementById("sflf-hub-modal");
     if (!modal) return;
@@ -591,7 +951,10 @@
     if (epochSpan) epochSpan.textContent = `epoch #${sfState.context_epoch}`;
 
     const cat = sfState.catalog || {};
-    const databases = Array.isArray(cat.databases) && cat.databases.length > 0 ? cat.databases : [sfState.database || "SNOWFLAKE_LANGFLOW"];
+    const databases =
+      Array.isArray(cat.databases) && cat.databases.length > 0
+        ? cat.databases
+        : [sfState.database || "SNOWFLAKE_LANGFLOW"];
     const activeDb = sfState.database || databases[0] || "SNOWFLAKE_LANGFLOW";
     const schemasMap = cat.schemas_by_db || {};
     const schemas =
@@ -612,6 +975,8 @@
       populateSelectOptions(ctxSchSel, schemas, activeSchema);
     }
 
+    renderMultiSelectConeInHubModal(databases, schemasMap, activeDb, activeSchema, cat);
+
     // Section 0 object multi-select summary badges
     const objSummaryEl = document.getElementById("sflf-ctx-objects-summary");
     if (objSummaryEl) {
@@ -621,13 +986,15 @@
       objSummaryEl.innerHTML =
         `<span>Tables: <strong>${countOf(cat.tables)}</strong></span> · ` +
         `<span>Views: <strong>${countOf(cat.views)}</strong></span> · ` +
+        `<span>Iceberg: <strong>${countOf(cat.iceberg_tables)}</strong></span> · ` +
         `<span>Stages: <strong>${countOf(cat.stages)}</strong></span> · ` +
         `<span>Memories: <strong>${countOf(cat.memories || sfState.memories)}</strong></span> · ` +
         `<span>Cortex Search: <strong>${countOf(cat.cortex_search_services)}</strong></span> · ` +
         `<span>Analyst Views/YAML: <strong>${countOf(cat.semantic_views) + countOf(cat.semantic_models)}</strong></span> · ` +
         `<span>Cortex Agents: <strong>${countOf(cat.cortex_agents)}</strong></span> · ` +
         `<span>Functions (UDF/UDTF): <strong>${countOf(cat.functions)}</strong></span> · ` +
-        `<span>Procedures: <strong>${countOf(cat.procedures)}</strong></span>`;
+        `<span>Procedures: <strong>${countOf(cat.procedures)}</strong></span> · ` +
+        `<span>Postgres: <strong>${countOf(cat.postgres_instances)}</strong></span>`;
     }
 
     // Section 1 hierarchical selectors: 1. Database -> 2. Schema -> 3. Object
@@ -727,8 +1094,9 @@
     }
   }
 
-  // HUB-W2-05: Update Section 2 Memory backends, AI_EMBED model dimension lock & compatibility guards
+  // HUB-W2-05 & W2-R2-13: Update Section 2 Memory backends, 3 Agent Memory types, AI_EMBED model dimension lock & compatibility guards
   function updateSection2MemoryControlsState() {
+    const agentTypeSel = document.getElementById("sflf-mem-agent-type");
     const catSel = document.getElementById("sflf-mem-category");
     const backendSel = document.getElementById("sflf-mem-backend");
     const embedRow = document.getElementById("sflf-mem-embed-row");
@@ -739,6 +1107,14 @@
     const createBtn = document.getElementById("sflf-btn-create-mem");
 
     if (!catSel || !backendSel) return;
+    if (agentTypeSel && agentTypeSel.dataset.justChanged === "1") {
+      agentTypeSel.dataset.justChanged = "";
+      const chosenType =
+        AGENT_MEMORY_TYPES.find(function (t) {
+          return t.id === agentTypeSel.value;
+        }) || AGENT_MEMORY_TYPES[1];
+      catSel.value = chosenType.default_category;
+    }
     const category = catSel.value || "vector_table";
     const backends = MEMORY_BACKENDS_BY_CATEGORY[category] || MEMORY_BACKENDS_BY_CATEGORY.vector_table;
 
@@ -792,12 +1168,18 @@
     }
   }
 
-  function openSnowflakeHubModal() {
+  function openSnowflakeHubModal(focusSection) {
     let modal = document.getElementById("sflf-hub-modal");
     if (modal) {
       modal.style.display = "flex";
       fetchSnowflakeContext();
       refreshTracesInModal();
+      if (focusSection === "memories") {
+        const sec2El = document.getElementById("sflf-sec2");
+        if (sec2El && typeof sec2El.scrollIntoView === "function") {
+          sec2El.scrollIntoView({ behavior: "smooth", block: "center" });
+        }
+      }
       return;
     }
     modal = document.createElement("div");
@@ -819,9 +1201,9 @@
       <div style="background:#18181b;color:#f4f4f5;border:1px solid #3f3f46;border-radius:12px;width:min(940px,95vw);max-height:88vh;overflow-y:auto;overflow-x:hidden;padding:18px 20px;box-shadow:0 20px 50px rgba(0,0,0,0.6);font-size:12px;box-sizing:border-box;">
         <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;border-bottom:1px solid #27272a;padding-bottom:12px;margin-bottom:14px;">
           <div style="display:flex;align-items:center;gap:8px;min-width:0;">
-            <span style="display:inline-flex;flex-shrink:0;">${buildOfficialSnowflakeSvg("#29b5e8", 20)}</span>
-            <strong style="font-size:14px;color:#ffffff;white-space:nowrap;">Snowflake Langflow Hub</strong>
-            <span style="background:#27272a;color:#38bdf8;border:1px solid #3f3f46;border-radius:5px;padding:2px 8px;font-size:11px;font-weight:600;white-space:nowrap;">Role: <span id="sflf-modal-role">${sfState.active_role}</span> · <span id="sflf-epoch-badge">epoch #${sfState.context_epoch}</span></span>
+            <span style="display:inline-flex;flex-shrink:0;">${buildOfficialSnowflakeSvg("#29B5E8", 20)}</span>
+            <strong style="font-size:14px;color:#29B5E8;white-space:nowrap;">Snowflake Langflow Hub</strong>
+            <span style="background:#27272a;color:#29B5E8;border:1px solid #29B5E8;border-radius:5px;padding:2px 8px;font-size:11px;font-weight:600;white-space:nowrap;">Role: <span id="sflf-modal-role">${sfState.active_role}</span> · <span id="sflf-epoch-badge">epoch #${sfState.context_epoch}</span></span>
           </div>
           <div style="display:flex;align-items:center;gap:12px;flex-shrink:0;white-space:nowrap;">
             <a href="${FORK_GITHUB_URL}" target="_blank" rel="noopener noreferrer" style="color:#a1a1aa;text-decoration:none;font-size:11px;font-weight:500;">Fork GitHub</a>
@@ -832,34 +1214,37 @@
           </div>
         </div>
 
-        <!-- Section 0: Primary Context & Cascading Visibility Selector (HUB-W2-02) -->
-        <div style="background:#27272a;padding:14px;border-radius:8px;min-width:0;box-sizing:border-box;margin-bottom:14px;border:1px solid #0284c7;">
+        <!-- Section 0: Primary Context & Cascading Visibility Selector (W2-R2-00 · HUB-W2-02) -->
+        <div id="sflf-sec0" style="background:#27272a;padding:14px;border-radius:8px;min-width:0;box-sizing:border-box;margin-bottom:14px;border:1px solid #29B5E8;">
           <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;margin-bottom:6px;">
-            <h4 style="margin:0;font-size:13px;color:#38bdf8;">0. Primary Context &amp; Cascading Visibility Selector (HUB-W2-02)</h4>
+            <h4 style="margin:0;font-size:13px;color:#29B5E8;">0. Multi-Database -&gt; Multi-Schema -&gt; Cascading Objects Cone of Visibility (W2-R2-00 · HUB-W2-02)</h4>
             <div style="display:flex;gap:6px;">
               <button id="sflf-btn-refresh-catalog" style="background:#3f3f46;color:#fff;border:none;padding:4px 10px;border-radius:6px;cursor:pointer;font-size:11px;font-weight:500;">Refresh Catalog</button>
-              <button id="sflf-btn-save-context" style="background:#0284c7;color:#fff;border:none;padding:4px 10px;border-radius:6px;cursor:pointer;font-size:11px;font-weight:600;">Apply &amp; Persist Context</button>
+              <button id="sflf-btn-save-context" style="background:#29B5E8;color:#fff;border:none;padding:4px 10px;border-radius:6px;cursor:pointer;font-size:11px;font-weight:600;">Apply &amp; Persist Context</button>
             </div>
           </div>
-          <p style="margin:0 0 10px 0;font-size:11px;color:#a1a1aa;">Seleziona a cascata <strong>1. Database -&gt; 2. Schema -&gt; 3. Oggetti visibili</strong> per <code>CURRENT_ROLE()</code>. I componenti del workflow mostrano dinamicamente nei menu a tendina i Database, gli Schemi e gli Oggetti abilitati qui (inclusi <strong>Functions UDF/UDTF</strong> e <strong>Stored Procedures</strong> esistenti).</p>
+          <p style="margin:0 0 10px 0;font-size:11px;color:#a1a1aa;">Seleziona a cascata <strong>1. Multi-Database -&gt; 2. Multi-Schema -&gt; 3. Oggetti visibili</strong> per <code>CURRENT_ROLE()</code>. Tutti i nodi Snowflake nel canvas si aggiornano automaticamente al salvataggio (inclusi <strong>Functions UDF/UDTF</strong> e <strong>Stored Procedures</strong>).</p>
           <div style="display:grid;grid-template-columns:1fr 1fr 1.4fr;gap:8px;margin-bottom:8px;">
             <div>
-              <label style="display:block;font-size:10px;color:#d4d4d8;margin-bottom:3px;font-weight:600;">1. Database (Visible to Role)</label>
-              <select id="sflf-ctx-db" style="${selectStyle}">
+              <label style="display:block;font-size:10px;color:#d4d4d8;margin-bottom:3px;font-weight:600;">1. Databases (Multi-Select + Primary)</label>
+              <select id="sflf-ctx-db" style="${selectStyle};margin-bottom:4px;">
                 <option value="${sfState.database}">${sfState.database}</option>
               </select>
+              <div id="sflf-ctx-multi-dbs" style="display:flex;flex-wrap:wrap;gap:4px;background:#18181b;border:1px solid #3f3f46;padding:5px;border-radius:6px;font-size:10px;max-height:70px;overflow-y:auto;"></div>
             </div>
             <div>
-              <label style="display:block;font-size:10px;color:#d4d4d8;margin-bottom:3px;font-weight:600;">2. Schema (Cascading from Database)</label>
-              <select id="sflf-ctx-schema" style="${selectStyle}">
+              <label style="display:block;font-size:10px;color:#d4d4d8;margin-bottom:3px;font-weight:600;">2. Schemas per Database (Cascading)</label>
+              <select id="sflf-ctx-schema" style="${selectStyle};margin-bottom:4px;">
                 <option value="${sfState.schema}">${sfState.schema}</option>
               </select>
+              <div id="sflf-ctx-multi-schemas" style="background:#18181b;border:1px solid #3f3f46;padding:5px;border-radius:6px;font-size:10px;max-height:70px;overflow-y:auto;"></div>
             </div>
             <div>
-              <label style="display:block;font-size:10px;color:#d4d4d8;margin-bottom:3px;font-weight:600;">3. Object Visibility Scope (Cascading in Schema)</label>
-              <div style="display:flex;flex-wrap:wrap;gap:6px;background:#18181b;border:1px solid #3f3f46;padding:5px 8px;border-radius:6px;font-size:10px;">
+              <label style="display:block;font-size:10px;color:#d4d4d8;margin-bottom:3px;font-weight:600;">3. Object Visibility Scope per &lt;DB&gt;.&lt;SCHEMA&gt;</label>
+              <div style="display:flex;flex-wrap:wrap;gap:6px;background:#18181b;border:1px solid #3f3f46;padding:5px 8px;border-radius:6px;font-size:10px;margin-bottom:4px;">
                 <label style="display:inline-flex;align-items:center;gap:3px;"><input type="checkbox" class="sflf-ctx-obj-filter" value="tables" checked /> Tables</label>
                 <label style="display:inline-flex;align-items:center;gap:3px;"><input type="checkbox" class="sflf-ctx-obj-filter" value="views" checked /> Views</label>
+                <label style="display:inline-flex;align-items:center;gap:3px;"><input type="checkbox" class="sflf-ctx-obj-filter" value="iceberg_tables" checked /> Iceberg Tables</label>
                 <label style="display:inline-flex;align-items:center;gap:3px;"><input type="checkbox" class="sflf-ctx-obj-filter" value="stages" checked /> Stages</label>
                 <label style="display:inline-flex;align-items:center;gap:3px;"><input type="checkbox" class="sflf-ctx-obj-filter" value="memories" checked /> Memories</label>
                 <label style="display:inline-flex;align-items:center;gap:3px;"><input type="checkbox" class="sflf-ctx-obj-filter" value="cortex_search_services" checked /> Cortex Search</label>
@@ -867,17 +1252,19 @@
                 <label style="display:inline-flex;align-items:center;gap:3px;"><input type="checkbox" class="sflf-ctx-obj-filter" value="cortex_agents" checked /> Cortex Agents</label>
                 <label style="display:inline-flex;align-items:center;gap:3px;"><input type="checkbox" class="sflf-ctx-obj-filter" value="functions" checked /> Functions (UDF/UDTF)</label>
                 <label style="display:inline-flex;align-items:center;gap:3px;"><input type="checkbox" class="sflf-ctx-obj-filter" value="procedures" checked /> Procedures</label>
+                <label style="display:inline-flex;align-items:center;gap:3px;"><input type="checkbox" class="sflf-ctx-obj-filter" value="postgres_instances" checked /> Snowflake Postgres</label>
               </div>
+              <div id="sflf-ctx-multi-objects" style="background:#18181b;border:1px solid #3f3f46;padding:5px;border-radius:6px;font-size:10px;max-height:70px;overflow-y:auto;"></div>
             </div>
           </div>
           <div id="sflf-ctx-objects-summary" style="font-size:10px;color:#a1a1aa;background:#18181b;padding:6px 10px;border-radius:6px;border:1px solid #3f3f46;"></div>
         </div>
 
         <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(380px,1fr));gap:14px;margin-bottom:14px;">
-          <!-- Section 1: Hierarchical Governed Object Provisioning (HUB-W2-03 & HUB-W2-04) -->
+          <!-- Section 1: Hierarchical Governed Object Provisioning (HUB-W2-03 & HUB-W2-04 & W2-R2-04B) -->
           <div style="background:#27272a;padding:14px;border-radius:8px;min-width:0;box-sizing:border-box;">
-            <h4 style="margin:0 0 4px 0;font-size:13px;color:#38bdf8;">1. Governed Object Provisioning (REQ-16 · HUB-W2-03 / HUB-W2-04)</h4>
-            <p style="margin:0 0 8px 0;font-size:11px;color:#a1a1aa;">Ordine gerarchico rigoroso: <strong>1. Database -&gt; 2. Schema -&gt; 3. Oggetto nello Schema</strong>. Tutte le operazioni sono tracciate in <code>LANGFLOW_AUDIT_LOG</code>.</p>
+            <h4 style="margin:0 0 4px 0;font-size:13px;color:#29B5E8;">1. Governed Object Provisioning (REQ-16 · W2-R2-04B · HUB-W2-03 / HUB-W2-04)</h4>
+            <p style="margin:0 0 8px 0;font-size:11px;color:#a1a1aa;">4 Famiglie Infrastrutturali (<strong>Table, View, Stage, Snowflake Postgres</strong>) con ordine gerarchico <strong>1. Database -&gt; 2. Schema -&gt; 3. Oggetto</strong>. <code>Memory</code> si crea nella sezione <code>Memories (+ Snowflake)</code>.</p>
             <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:8px;">
               <div>
                 <label style="display:block;font-size:10px;color:#d4d4d8;margin-bottom:3px;font-weight:600;">1. Database</label>
@@ -928,15 +1315,26 @@
             </div>
             <div style="display:flex;gap:8px;flex-wrap:wrap;">
               <button id="sflf-btn-dryrun" style="background:#3f3f46;color:#fff;border:none;padding:6px 10px;border-radius:6px;cursor:pointer;font-size:11px;font-weight:500;">Dry-Run DDL Preview</button>
-              <button id="sflf-btn-provision" style="background:#0284c7;color:#fff;border:none;padding:6px 10px;border-radius:6px;cursor:pointer;font-size:11px;font-weight:600;">Execute on Snowflake</button>
+              <button id="sflf-btn-provision" style="background:#29B5E8;color:#fff;border:none;padding:6px 10px;border-radius:6px;cursor:pointer;font-size:11px;font-weight:600;">Execute on Snowflake</button>
             </div>
             <div id="sflf-prov-out" style="${codeBoxStyle}">Click "Dry-Run DDL Preview" to inspect the SQL DDL or "Execute on Snowflake" to provision with active role.</div>
           </div>
 
-          <!-- Section 2: Full Memory Matrix & AI_EMBED Dimension Coupling (HUB-W2-05) -->
-          <div style="background:#27272a;padding:14px;border-radius:8px;min-width:0;box-sizing:border-box;">
-            <h4 style="margin:0 0 4px 0;font-size:13px;color:#38bdf8;">2. Create Memory &amp; Vector Store (REQ-10 · HUB-W2-05)</h4>
-            <p style="margin:0 0 8px 0;font-size:11px;color:#a1a1aa;">Crea memorie non-vettoriali (Structured Table, Semi-Structured <code>VARIANT/OBJECT/ARRAY</code>, Snowflake Postgres <code>JSONB</code>) e vettoriali (<code>VECTOR(FLOAT|INT, dim)</code> accoppiato a <code>AI_EMBED</code>, <code>pgvector</code>, <code>Cortex Search</code>).</p>
+          <!-- Section 2: Memories (+ Snowflake) 3 Agent Memory Types & AI_EMBED Dimension Coupling (W2-R2-13 · HUB-W2-05) -->
+          <div id="sflf-sec2" style="background:#27272a;padding:14px;border-radius:8px;min-width:0;box-sizing:border-box;border:1px solid rgba(41,181,232,0.45);">
+            <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:4px;">
+              <h4 style="margin:0;font-size:13px;color:#29B5E8;">2. Memories (+ Snowflake) — 3 Agent Memory Types (W2-R2-13 · HUB-W2-05)</h4>
+              <span style="background:#29B5E8;color:#ffffff;padding:2px 8px;border-radius:5px;font-size:10px;font-weight:600;">+ Snowflake</span>
+            </div>
+            <p style="margin:0 0 8px 0;font-size:11px;color:#a1a1aa;">Crea le 3 tipologie di <strong>Agent Memory Snowflake</strong>: <strong>1. Episodic / Session Memory</strong>, <strong>2. Semantic / Vector Memory</strong> (<code>VECTOR(FLOAT|INT, dim)</code> + <code>AI_EMBED</code> / <code>pgvector</code> / <code>Cortex Search</code>), <strong>3. Structured / Semi-Structured Long-Term Memory</strong>.</p>
+            <div style="margin-bottom:8px;">
+              <label style="display:block;font-size:10px;color:#d4d4d8;margin-bottom:3px;font-weight:600;">Agent Memory Type (+ Snowflake)</label>
+              <select id="sflf-mem-agent-type" style="${selectStyle}">
+                <option value="semantic_vector">2. + Semantic / Vector Memory (VECTOR + AI_EMBED / pgvector / Cortex Search)</option>
+                <option value="episodic_session">1. + Episodic / Session Memory (Hybrid Table / Postgres JSONB)</option>
+                <option value="structured_long_term">3. + Structured / Semi-Structured Long-Term Memory (VARIANT / Dynamic / View)</option>
+              </select>
+            </div>
             <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:8px;">
               <div>
                 <label style="display:block;font-size:10px;color:#d4d4d8;margin-bottom:3px;font-weight:600;">Memory Category</label>
@@ -983,7 +1381,7 @@
                 <label style="display:block;font-size:10px;color:#d4d4d8;margin-bottom:3px;font-weight:600;">Memory / Table Name</label>
                 <input id="sflf-mem-name" placeholder="Memory Name" value="SNOWFLAKE_KB_MEM" style="${inputStyle}" />
               </div>
-              <button id="sflf-btn-create-mem" style="background:#0284c7;color:#fff;border:none;padding:6px 10px;border-radius:6px;cursor:pointer;font-size:11px;font-weight:600;height:28px;">Create Governed Memory</button>
+              <button id="sflf-btn-create-mem" style="background:#29B5E8;color:#fff;border:none;padding:6px 10px;border-radius:6px;cursor:pointer;font-size:11px;font-weight:600;height:28px;">Create Governed Memory</button>
             </div>
             <div id="sflf-mem-constraint-note" style="font-size:10px;color:#a1a1aa;margin-bottom:6px;"></div>
             <div id="sflf-mem-out" style="${codeBoxStyle}">Ready to create governed Snowflake memory under active role.</div>
@@ -994,7 +1392,7 @@
         <div style="background:#27272a;padding:14px;border-radius:8px;min-width:0;box-sizing:border-box;">
           <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;margin-bottom:6px;">
             <div>
-              <h4 style="margin:0 0 2px 0;font-size:13px;color:#38bdf8;">3. Replicated Flow Activity &amp; Governance Audit Log in Snowflake SQL (REQ-15)</h4>
+              <h4 style="margin:0 0 2px 0;font-size:13px;color:#29B5E8;">3. Replicated Flow Activity &amp; Governance Audit Log in Snowflake SQL (REQ-15)</h4>
               <p style="margin:0;font-size:11px;color:#a1a1aa;">Sincronizza le esecuzioni di Langflow verso <code>LANGFLOW_FLOW_RUNS</code>, <code>LANGFLOW_FLOW_SPANS</code> e <code>LANGFLOW_AUDIT_LOG</code> (protette da Row Access Policy <code>LANGFLOW_TRACE_RAP</code>).</p>
             </div>
             <button id="sflf-btn-sync-traces" style="background:#10b981;color:#fff;border:none;padding:6px 12px;border-radius:6px;cursor:pointer;font-size:11px;font-weight:600;white-space:nowrap;">Sync Flow Activity to Snowflake SQL</button>
@@ -1031,6 +1429,48 @@
         refreshHubModalPrivilegeAndContextViews();
       };
     }
+    const multiDbsBox = document.getElementById("sflf-ctx-multi-dbs");
+    if (multiDbsBox) {
+      multiDbsBox.addEventListener("change", async function (ev) {
+        const cb = ev.target;
+        if (!cb || !cb.classList || !cb.classList.contains("sflf-ctx-db-cb")) return;
+        const checkedDbs = [];
+        modal.querySelectorAll(".sflf-ctx-db-cb").forEach(function (el) {
+          if (el.checked && el.value) checkedDbs.push(el.value);
+        });
+        if (checkedDbs.length === 0) checkedDbs.push(sfState.database || "SNOWFLAKE_LANGFLOW");
+        sfState.selected_context = sfState.selected_context || {};
+        sfState.selected_context.databases = checkedDbs;
+        await fetchSnowflakeCatalog(sfState.database, sfState.schema, checkedDbs, sfState.selected_context.schemas_by_db);
+        refreshHubModalPrivilegeAndContextViews();
+      });
+    }
+    const multiSchemasBox = document.getElementById("sflf-ctx-multi-schemas");
+    if (multiSchemasBox) {
+      multiSchemasBox.addEventListener("change", async function (ev) {
+        const cb = ev.target;
+        if (!cb || !cb.classList || !cb.classList.contains("sflf-ctx-schema-cb")) return;
+        const schemasByDb = {};
+        modal.querySelectorAll(".sflf-ctx-schema-cb").forEach(function (el) {
+          if (el.checked && el.value) {
+            const parts = el.value.split(".");
+            if (parts[0] && parts[1]) {
+              schemasByDb[parts[0]] = schemasByDb[parts[0]] || [];
+              if (schemasByDb[parts[0]].indexOf(parts[1]) === -1) schemasByDb[parts[0]].push(parts[1]);
+            }
+          }
+        });
+        sfState.selected_context = sfState.selected_context || {};
+        sfState.selected_context.schemas_by_db = schemasByDb;
+        await fetchSnowflakeCatalog(
+          sfState.database,
+          sfState.schema,
+          sfState.selected_context.databases,
+          schemasByDb
+        );
+        refreshHubModalPrivilegeAndContextViews();
+      });
+    }
     const refreshCatBtn = document.getElementById("sflf-btn-refresh-catalog");
     if (refreshCatBtn) {
       refreshCatBtn.onclick = async function () {
@@ -1045,23 +1485,60 @@
       saveCtxBtn.onclick = function () {
         const db = (ctxDbSel && ctxDbSel.value) || sfState.database;
         const sch = (ctxSchSel && ctxSchSel.value) || sfState.schema;
+        const checkedDbs = [];
+        modal.querySelectorAll(".sflf-ctx-db-cb").forEach(function (cb) {
+          if (cb.checked && cb.value) checkedDbs.push(cb.value);
+        });
+        if (checkedDbs.indexOf(db) === -1) checkedDbs.unshift(db);
+
+        const schemasByDb = {};
+        checkedDbs.forEach(function (d) {
+          schemasByDb[d] = [];
+        });
+        modal.querySelectorAll(".sflf-ctx-schema-cb").forEach(function (cb) {
+          if (cb.checked && cb.value) {
+            const parts = cb.value.split(".");
+            const dName = parts[0];
+            const sName = parts[1];
+            if (dName && sName) {
+              if (!schemasByDb[dName]) schemasByDb[dName] = [];
+              if (schemasByDb[dName].indexOf(sName) === -1) schemasByDb[dName].push(sName);
+            }
+          }
+        });
+        if (!schemasByDb[db] || schemasByDb[db].length === 0) {
+          schemasByDb[db] = [sch];
+        }
+
         const checkedCategories = {};
         const cat = sfState.catalog || {};
         modal.querySelectorAll(".sflf-ctx-obj-filter").forEach(function (cb) {
           const key = cb.value;
           checkedCategories[key] = cb.checked ? cat[key] || [] : [];
         });
-        const schemasByDb = {};
-        schemasByDb[db] = [sch];
+        const objectsByDbSchema = Object.assign({}, cat.objects_by_db_schema || {});
+        const selectedObjects = {};
+        modal.querySelectorAll(".sflf-ctx-obj-chip").forEach(function (chip) {
+          const pairKey = chip.getAttribute("data-pair") || `${db}.${sch}`;
+          const catKey = chip.getAttribute("data-category") || "";
+          if (!catKey) return;
+          selectedObjects[pairKey] = selectedObjects[pairKey] || {};
+          const pairBucket = objectsByDbSchema[pairKey] || cat;
+          selectedObjects[pairKey][catKey] = chip.checked ? pairBucket[catKey] || [] : [];
+        });
         persistSnowflakeContextSelection({
           database: db,
           schema: sch,
-          databases: [db],
+          databases: checkedDbs,
           schemas_by_db: schemasByDb,
+          objects_by_db_schema: objectsByDbSchema,
+          selected_objects: selectedObjects,
           visible_objects: checkedCategories,
           selected_context: {
-            databases: [db],
+            databases: checkedDbs,
             schemas_by_db: schemasByDb,
+            objects_by_db_schema: objectsByDbSchema,
+            selected_objects: selectedObjects,
             visible_objects: checkedCategories,
           },
         });
@@ -1102,9 +1579,16 @@
     }
 
     // Section 2 event listeners
+    const memAgentTypeSel = document.getElementById("sflf-mem-agent-type");
     const memCatSel = document.getElementById("sflf-mem-category");
     const memEmbedSel = document.getElementById("sflf-mem-embed-model");
     const memElemTypeSel = document.getElementById("sflf-mem-vector-elem-type");
+    if (memAgentTypeSel) {
+      memAgentTypeSel.onchange = function () {
+        memAgentTypeSel.dataset.justChanged = "1";
+        updateSection2MemoryControlsState();
+      };
+    }
     if (memCatSel) {
       memCatSel.onchange = function () {
         updateSection2MemoryControlsState();
@@ -1136,6 +1620,12 @@
 
     refreshHubModalPrivilegeAndContextViews();
     refreshTracesInModal();
+    if (focusSection === "memories") {
+      const sec2El = document.getElementById("sflf-sec2");
+      if (sec2El && typeof sec2El.scrollIntoView === "function") {
+        sec2El.scrollIntoView({ behavior: "smooth", block: "center" });
+      }
+    }
   }
 
   async function runProvisionCall(dryRun) {
@@ -1153,16 +1643,19 @@
     let objectKind = parts[0] || "table";
     const objectSubtype = parts[1] || "STANDARD";
 
-    // HUB-W2-04 client-side hard guard: never allow function or procedure creation from Hub
+    // HUB-W2-04 & W2-R2-04B client-side hard guard: never allow function, procedure, or memory creation from Object Provisioner
     if (
       objectKind === "function" ||
       objectKind === "procedure" ||
       objectKind === "udf" ||
       objectKind === "udtf" ||
-      objectKind === "stored_procedure"
+      objectKind === "stored_procedure" ||
+      objectKind === "memory"
     ) {
       const msg =
-        "La creazione di FUNCTION (UDF/UDTF) e STORED PROCEDURE non è consentita dallo Snowflake Langflow Hub (HUB-W2-04). Usa i componenti in LLM Operations.";
+        objectKind === "memory"
+          ? "La creazione di Memory è stata spostata nella pagina Memories (+ Snowflake) (W2-R2-04B / W2-R2-13)."
+          : "La creazione di FUNCTION (UDF/UDTF) e STORED PROCEDURE non è consentita dallo Snowflake Langflow Hub (HUB-W2-04). Usa i componenti in LLM Operations.";
       out.textContent = JSON.stringify({ ok: false, error_code: "UNSUPPORTED_CAPABILITY", message: msg }, null, 2);
       showDenialOrStatusBanner("error", "UNSUPPORTED_CAPABILITY", msg);
       return;
@@ -1220,6 +1713,7 @@
 
   async function runCreateMemoryCall() {
     const name = document.getElementById("sflf-mem-name").value;
+    const agentMemoryType = (document.getElementById("sflf-mem-agent-type") || {}).value || "semantic_vector";
     const category = (document.getElementById("sflf-mem-category") || {}).value || "vector_table";
     const backend = document.getElementById("sflf-mem-backend").value;
     const embedModel = (document.getElementById("sflf-mem-embed-model") || {}).value || "snowflake-arctic-embed-m-v1.5";
@@ -1240,6 +1734,7 @@
         name: name,
         database: sfState.database,
         schema: sfState.schema,
+        agent_memory_type: agentMemoryType,
         memory_category: category,
         vector_database: backend,
         table_type: matchedSpec.table_type || "STANDARD",
@@ -1255,7 +1750,7 @@
     if (!resp.ok || data.ok === false) {
       showDenialOrStatusBanner("error", data.error_code || "AUTHZ_ROLE_DENIED", data.message || "Operazione negata");
     } else {
-      showDenialOrStatusBanner("ok", "MEMORY_CREATED", `Memoria ${name} creata in ${backend}`);
+      showDenialOrStatusBanner("ok", "MEMORY_CREATED", `Memoria ${name} (${agentMemoryType}) creata in ${backend}`);
       await fetchSnowflakeCatalog(sfState.database, sfState.schema);
       refreshHubModalPrivilegeAndContextViews();
       refreshTracesInModal();

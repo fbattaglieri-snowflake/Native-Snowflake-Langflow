@@ -1,22 +1,36 @@
 from __future__ import annotations
 
 import json
+from typing import Any
 
-from lfx.custom import Component
-from lfx.io import DropdownInput, MessageTextInput, MultilineInput, Output, StrInput
-from lfx.schema import Data
-from lfx.schema.message import Message
-from lfx_snowflake.components.ai_function import SUPPORTED_AI_COMPLETE_MODELS
+try:
+    from lfx.custom import Component
+    from lfx.io import DropdownInput, MessageTextInput, MultilineInput, Output, StrInput
+    from lfx.schema import Data
+    from lfx.schema.message import Message
+except ImportError:  # pragma: no cover
+    from lfx_snowflake._lfx_compat import (
+        Component,
+        Data,
+        DropdownInput,
+        Message,
+        MessageTextInput,
+        MultilineInput,
+        Output,
+        StrInput,
+    )
+
+from lfx_snowflake.components.ai_function import get_compatible_models
 from lfx_snowflake.components.llm_operations import SnowflakeDecisionEngine
 from lfx_snowflake.fastapi_live_bridge import LIVE_BRIDGE
 
 
 class SnowflakeDecisionComponent(Component):
-    display_name = "Snowflake Decision"
+    display_name = "Decision"
     description = (
         "Governed Snowflake Decision component (snowflake-decision) supporting "
         "AI_COMPLETE (Structured Decision JSON enforcing {decision, confidence, reasoning, selected_branch, policy_action}) "
-        "and Cortex SystemOne API (Jev-compatible) with Decision JSON, Selected Branch, and Audit Record outputs."
+        "with capability-filtered structured-output models and Cortex SystemOne API (Jev-compatible)."
     )
     icon = "Snowflake"
     name = "SnowflakeDecision"
@@ -35,9 +49,10 @@ class SnowflakeDecisionComponent(Component):
         ),
         DropdownInput(
             name="model",
-            display_name="Model",
-            options=list(SUPPORTED_AI_COMPLETE_MODELS),
-            value="claude-4-sonnet",
+            display_name="Model (Structured Outputs Qualified)",
+            options=get_compatible_models(require_structured_outputs=True),
+            value="claude-sonnet-5-5",
+            real_time_refresh=True,
             combobox=True,
         ),
         MessageTextInput(
@@ -62,10 +77,21 @@ class SnowflakeDecisionComponent(Component):
         Output(display_name="Audit Record", name="audit_record", method="get_audit_record"),
     ]
 
+    def update_build_config(
+        self, build_config: dict[str, Any], field_value: Any, field_name: str | None = None
+    ) -> dict[str, Any]:
+        compatible = get_compatible_models(require_structured_outputs=True)
+        if "model" in build_config:
+            build_config["model"]["options"] = compatible
+            cur = build_config["model"].get("value")
+            if cur and cur not in compatible and compatible:
+                build_config["model"]["value"] = compatible[0]
+        return build_config
+
     def _compute(self) -> dict:
         return SnowflakeDecisionEngine.evaluate_decision(
             engine_mode=self.engine_mode or "AI_COMPLETE (Structured Decision JSON)",
-            model=self.model or "claude-4-sonnet",
+            model=self.model or "claude-sonnet-5-5",
             input_context=self.input_context or "",
             decision_policy=self.decision_policy or "",
             branches_csv=self.branches_csv or "approve,review,reject",

@@ -1,4 +1,4 @@
-"""Comprehensive Wave 2 Test Suite (`UI-W2-01`, `HUB-W2-01..05`, `DS-W2-01`, `PROV-W2-01`, `MA-W2-01`, `LLM-W2-01..06`, `FK-W2-01..04`)."""
+"""Comprehensive Wave 2 & Round 2 Test Suite (`UI-W2-01`, `HUB-W2-01..05`, `DS-W2-01`, `PROV-W2-01`, `MA-W2-01`, `LLM-W2-01..06`, `FK-W2-01..04`, `W2-R2-00..W2-R2-14`)."""
 
 from __future__ import annotations
 
@@ -15,13 +15,18 @@ if str(SRC_DIR) not in sys.path:
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from lfx_snowflake.bundle_manifest import get_bundle_manifest  # noqa: E402
+from lfx_snowflake import standard_langflow  # noqa: E402
+from lfx_snowflake._lfx_compat import Tool  # noqa: E402
+from lfx_snowflake.bundle_manifest import SNOWFLAKE_BUNDLE_COMPONENTS, get_bundle_manifest  # noqa: E402
 from lfx_snowflake.components.ai_function import (  # noqa: E402
     AGGREGATE_AI_FUNCTIONS,
+    AI_COMPLETE_MODEL_CAPABILITIES,
     ALL_SUPPORTED_AI_FUNCTIONS,
+    SUPPORTED_AI_COMPLETE_MODELS,
     TASK_SPECIFIC_AI_FUNCTIONS,
     SnowflakeAICompleteEngine,
     SnowflakeAIFunctionComponent,
+    get_compatible_models,
 )
 from lfx_snowflake.components.data_sources import (  # noqa: E402
     DATA_SOURCE_HIERARCHY_ORDER,
@@ -56,17 +61,85 @@ from lfx_snowflake.components.llm_operations import (  # noqa: E402
     SnowflakeSQLStatementEngine,
     StoredProcedureEngine,
 )
-from lfx_snowflake.fastapi_live_bridge import LiveSnowflakeBridge  # noqa: E402
+from lfx_snowflake.components.utilities_a2a import (  # noqa: E402
+    SnowflakeMessageHistoryAdapter,
+    get_memory_catalog_options,
+    recall_memory_from_catalog,
+)
+from lfx_snowflake.fastapi_live_bridge import AGENT_MEMORY_TYPES, LiveSnowflakeBridge  # noqa: E402
 from lfx_snowflake.governance.models import SnowflakeErrorCode, SnowflakeGovernanceError  # noqa: E402
 from lfx_snowflake.governance.provisioner import SnowflakeObjectProvisioner  # noqa: E402
+from lfx_snowflake.native_category_components.data_source.snowflake_cortex_analyst import (  # noqa: E402
+    SnowflakeCortexAnalystComponent,
+)
+from lfx_snowflake.native_category_components.data_source.snowflake_cortex_search import (  # noqa: E402
+    SnowflakeCortexSearchComponent,
+)
+from lfx_snowflake.native_category_components.data_source.snowflake_iceberg_tables import (  # noqa: E402
+    SnowflakeIcebergTablesComponent,
+)
+from lfx_snowflake.native_category_components.data_source.snowflake_postgres import (  # noqa: E402
+    SnowflakePostgresComponent,
+)
+from lfx_snowflake.native_category_components.data_source.snowflake_tables import (  # noqa: E402
+    SnowflakeTablesComponent,
+)
+from lfx_snowflake.native_category_components.data_source.snowflake_views import (  # noqa: E402
+    SnowflakeViewsComponent,
+)
+from lfx_snowflake.native_category_components.files_and_knowledge.snowflake_cortex_search_parse_document import (  # noqa: E402
+    SnowflakeCortexSearchParseDocumentComponent,
+)
+from lfx_snowflake.native_category_components.files_and_knowledge.snowflake_cortex_search_service_creator import (  # noqa: E402
+    SnowflakeCortexSearchServiceCreatorComponent,
+)
+from lfx_snowflake.native_category_components.files_and_knowledge.snowflake_cortex_search_split_text import (  # noqa: E402
+    SnowflakeCortexSearchSplitTextComponent,
+)
+from lfx_snowflake.native_category_components.files_and_knowledge.snowflake_cortex_search_stream_task import (  # noqa: E402
+    SnowflakeCortexSearchStreamTaskComponent,
+)
+from lfx_snowflake.native_category_components.files_and_knowledge.snowflake_object_provisioner_fk import (  # noqa: E402
+    SnowflakeObjectProvisionerFKComponent,
+)
+from lfx_snowflake.native_category_components.llm_operations.snowflake_ai_complete import (  # noqa: E402
+    SnowflakeAICompleteComponent as SidebarAICompleteComponent,
+)
+from lfx_snowflake.native_category_components.llm_operations.snowflake_ai_function import (  # noqa: E402
+    SnowflakeAIFunctionComponent as SidebarAIFunctionComponent,
+)
+from lfx_snowflake.native_category_components.llm_operations.snowflake_decision import (  # noqa: E402
+    SnowflakeDecisionComponent,
+)
+from lfx_snowflake.native_category_components.llm_operations.snowflake_function_udf import (  # noqa: E402
+    SnowflakeFunctionComponent,
+)
+from lfx_snowflake.native_category_components.llm_operations.snowflake_object_provisioner import (  # noqa: E402
+    SnowflakeObjectProvisionerSidebarComponent,
+)
+from lfx_snowflake.native_category_components.llm_operations.snowflake_stored_procedure import (  # noqa: E402
+    SnowflakeStoredProcedureComponent,
+)
+from lfx_snowflake.native_category_components.models_and_agents.snowflake_standard_chat import (  # noqa: E402
+    StandardChat,
+)
+from lfx_snowflake.native_category_components.models_and_agents.snowflake_standard_messages import (  # noqa: E402
+    StandardMessages,
+)
+from lfx_snowflake.native_category_components.models_and_agents.snowflake_standard_responses import (  # noqa: E402
+    StandardResponses,
+)
+from lfx_snowflake.native_category_components.utilities.snowflake_toolguard import (  # noqa: E402
+    SnowflakeToolGuardPoliciesComponent,
+)
 
 
 def test_ui_w2_01_and_hub_w2_01_to_05_frontend_and_installer() -> None:
-    """Verify UI-W2-01 (browser tab title, Snowflake SVG favicon, dual-symbol Loading... screen) and HUB-W2-01..05 in JS & installer."""
+    """Verify UI-W2-01 (browser tab title, Snowflake SVG favicon, Loading... screen) and HUB-W2-01..05 in JS & installer."""
     ui_js = (REPO_ROOT / "frontend_patches" / "snowflake-ui-integration.js").read_text(encoding="utf-8")
     installer_py = (REPO_ROOT / "scripts" / "install_live_hooks_in_container.py").read_text(encoding="utf-8")
 
-    # UI-W2-01: Browser tab title & Snowflake favicon guard + dual-symbol Loading... screen
+    # UI-W2-01: Browser tab title & Snowflake favicon guard + Loading... screen
     assert "Snowflake Langflow" in ui_js
     assert "ensureBrowserTabBranding" in ui_js
     assert "SNOWFLAKE_SVG_BLACK" in ui_js
@@ -115,13 +188,13 @@ def test_hub_w2_02_to_05_backend_context_catalog_provision_and_memories() -> Non
     assert upd["ok"] is True
     assert "DOCS_SEARCH_SRV" in upd["selected_context"]["visible_objects"]["cortex_search_services"]
 
-    # HUB-W2-04: Provisioning FUNCTION or PROCEDURE from Hub is strictly blocked
-    for blocked_kind in ("function", "procedure", "udf", "udtf", "stored_procedure"):
+    # HUB-W2-04 & W2-R2-04B: Provisioning FUNCTION, PROCEDURE, or MEMORY from Hub/Object Provisioner is strictly blocked
+    for blocked_kind in ("function", "procedure", "udf", "udtf", "stored_procedure", "memory"):
         with pytest.raises(SnowflakeGovernanceError) as exc_info:
             SnowflakeObjectProvisioner.enforce_hub_object_exclusion(blocked_kind, source="hub", active_role="ACCOUNTADMIN")
         assert exc_info.value.error_code == SnowflakeErrorCode.UNSUPPORTED_CAPABILITY
 
-    # Allowed when invoked from LLM Operations (LLM-W2-01)
+    # Allowed when routines are invoked from LLM Operations (LLM-W2-01)
     SnowflakeObjectProvisioner.enforce_hub_object_exclusion("procedure", source="llm_operations", active_role="ACCOUNTADMIN")
     SnowflakeObjectProvisioner.enforce_hub_object_exclusion("udf", source="llm_operations", active_role="ACCOUNTADMIN")
 
@@ -142,7 +215,6 @@ def test_hub_w2_02_to_05_backend_context_catalog_provision_and_memories() -> Non
     )
     dialog = CreateMemoryDialogService(engine)
 
-    # Structured, semi-structured, Postgres relational, and Vector memory creation
     mem_vec = dialog.create_memory(
         name="VecMem768",
         embedding_model=DEFAULT_SNOWFLAKE_EMBEDDING_CATALOG["snowflake-arctic-embed-m-v1.5"],
@@ -157,22 +229,20 @@ def test_hub_w2_02_to_05_backend_context_catalog_provision_and_memories() -> Non
 
 
 def test_ds_w2_01_prov_w2_01_and_ma_w2_01_sidebar_components() -> None:
-    """Verify DS-W2-01 input ordering, PROV-W2-01 relocation out of Data Sources, and MA-W2-01 cascading Cortex Agent."""
+    """Verify DS-W2-01 hierarchy, W2-R2-12 4 split Data Sources, PROV-W2-01 relocation out of Data Sources, and MA-W2-01 cascading Cortex Agent."""
     comp_dir = REPO_ROOT / "src" / "lfx_snowflake" / "native_category_components"
 
-    # DS-W2-01: Engine -> Database -> Schema -> Object Type -> Object Name
+    # DS-W2-01: Engine -> Database -> Schema -> Object Type -> Object Name preserved in domain contract
     assert DATA_SOURCE_HIERARCHY_ORDER[:5] == ("engine", "database", "schema_name", "object_type", "object_name")
     assert "SECURE_VIEW" in SUPPORTED_SNOWFLAKE_OBJECT_TYPES
     assert "MATERIALIZED_VIEW" in SUPPORTED_SNOWFLAKE_OBJECT_TYPES
     assert "SNOWFLAKE_POSTGRES_TABLE" in SUPPORTED_SNOWFLAKE_OBJECT_TYPES
     assert "Snowflake Postgres Table" in SUPPORTED_SNOWFLAKE_OBJECT_LABELS
 
-    ds_src = (comp_dir / "data_source" / "snowflake_data_source.py").read_text(encoding="utf-8")
-    idx_db = ds_src.index('name="database"')
-    idx_sch = ds_src.index('name="schema_name"')
-    idx_type = ds_src.index('name="object_type"')
-    idx_obj = ds_src.index('name="object_name"')
-    assert idx_db < idx_sch < idx_type < idx_obj
+    # W2-R2-12: Monolithic snowflake_data_source.py replaced by 4 split Data Source components
+    assert not (comp_dir / "data_source" / "snowflake_data_source.py").exists()
+    tables_src = (comp_dir / "data_source" / "snowflake_tables.py").read_text(encoding="utf-8")
+    assert tables_src.index('name="database"') < tables_src.index('name="schema_name"') < tables_src.index('name="table_name"')
 
     # PROV-W2-01: Removed from data_source, present in llm_operations and files_and_knowledge with distinct internal names
     assert not (comp_dir / "data_source" / "snowflake_object_provisioner.py").exists()
@@ -192,14 +262,13 @@ def test_ds_w2_01_prov_w2_01_and_ma_w2_01_sidebar_components() -> None:
 
 
 def test_llm_w2_01_to_06_llm_operations_engines_and_components() -> None:
-    """Verify LLM-W2-01..06: Stored Procedure (with graphical child chaining), UDF/UDTF, AI Complete vs AI Function, SQL Statement, Cortex Search, Cortex Analyst, Snowflake, and Snowflake Decision."""
+    """Verify LLM-W2-01..06: Stored Procedure, UDF/UDTF, AI Complete vs AI Function, SQL Statement, Cortex Search, and Decision."""
     # Backward compatibility invariant on ALL_SUPPORTED_AI_FUNCTIONS (length 9)
     assert len(ALL_SUPPORTED_AI_FUNCTIONS) == 9
     assert AGGREGATE_AI_FUNCTIONS == ("AI_SUMMARIZE_AGG", "AI_AGG")
     assert "AI_COMPLETE" not in TASK_SPECIFIC_AI_FUNCTIONS
     assert "AI_TRANSCRIBE" in TASK_SPECIFIC_AI_FUNCTIONS
 
-    # LLM-W2-01: Stored Procedure with child procedure graphical chain + Function (UDF/UDTF)
     sp_engine = StoredProcedureEngine()
     ddl = sp_engine.build_procedure_ddl(
         database="SNOWFLAKE_LANGFLOW",
@@ -231,10 +300,9 @@ def test_llm_w2_01_to_06_llm_operations_engines_and_components() -> None:
     assert "CREATE OR REPLACE FUNCTION SNOWFLAKE_LANGFLOW.CORE.CLEAN_TEXT_UDF" in udf_ddl
     assert "LANGUAGE PYTHON" in udf_ddl
 
-    # LLM-W2-02: Dedicated AI_COMPLETE engine + task-specific AI Function with return_as_json
     aic = SnowflakeAICompleteEngine()
     aic_sql = aic.build_sql(
-        model="claude-3-7-sonnet",
+        model="claude-sonnet-5-5",
         prompt="Summarize strictly as JSON",
         temperature=0.1,
         max_tokens=512,
@@ -253,7 +321,6 @@ def test_llm_w2_01_to_06_llm_operations_engines_and_components() -> None:
     assert "OBJECT_CONSTRUCT" in aif_sql
     assert "AI_SENTIMENT" in aif_sql
 
-    # LLM-W2-03, LLM-W2-04, LLM-W2-06
     sql_eng = SnowflakeSQLStatementEngine()
     stmt = sql_eng.build_sql(
         database="SNOWFLAKE_LANGFLOW",
@@ -280,7 +347,7 @@ def test_llm_w2_01_to_06_llm_operations_engines_and_components() -> None:
     assert cs_payload["limit"] == 5
 
     dec_obj = SnowflakeDecisionEngine.evaluate_decision(
-        model="claude-3-7-sonnet",
+        model="claude-sonnet-5-5",
         input_context="Customer requests approve_refund for order #42",
         branches_csv="approve_refund,escalate_human,reject",
     )
@@ -289,8 +356,7 @@ def test_llm_w2_01_to_06_llm_operations_engines_and_components() -> None:
 
 
 def test_fk_w2_01_to_04_files_and_knowledge_and_4_tab_cortex_search_pipeline() -> None:
-    """Verify FK-W2-01..04: Internal/External Stage DDL, 4-tab Cortex Search pipeline (AI_PARSE_DOCUMENT, SPLIT_TEXT_RECURSIVE_CHARACTER, CREATE CORTEX SEARCH SERVICE, DOC_STREAM + DOC_INGEST_TASK with _DOC_STREAM_BATCH), and disabled Cortex Analyst tab."""
-    # FK-W2-02: Internal & External Stage DDL
+    """Verify FK-W2-01..04 & W2-R2-05..14: Stage DDL, 4-node Cortex Search pipeline, and 26-component Round 2 roster."""
     int_ddl = build_stage_creation_ddl(
         database="SNOWFLAKE_LANGFLOW",
         schema="CORE",
@@ -312,7 +378,6 @@ def test_fk_w2_01_to_04_files_and_knowledge_and_4_tab_cortex_search_pipeline() -
     assert "STORAGE_INTEGRATION = S3_DOCS_INT" in ext_ddl
     assert "DIRECTORY = (ENABLE = TRUE AUTO_REFRESH = TRUE)" in ext_ddl
 
-    # FK-W2-03 Tab 1: Parse Document (exclusively AI_PARSE_DOCUMENT + LIMIT 1 preview + errorInformation + billing notice)
     p_spec = CortexSearchParseDocumentSpec(
         database="SNOWFLAKE_LANGFLOW",
         schema="CORE",
@@ -330,7 +395,6 @@ def test_fk_w2_01_to_04_files_and_knowledge_and_4_tab_cortex_search_pipeline() -
     assert "LIMIT 1" in test_1_sql
     assert "AI_PARSE_DOCUMENT" in AI_PARSE_DOCUMENT_BILLING_NOTICE
 
-    # FK-W2-03 Tab 2: Split Text (SPLIT_TEXT_RECURSIVE_CHARACTER + Python UDF + 1800/300 + <512 token notice)
     s_spec = CortexSearchSplitTextSpec(
         database="SNOWFLAKE_LANGFLOW",
         schema="CORE",
@@ -347,7 +411,6 @@ def test_fk_w2_01_to_04_files_and_knowledge_and_4_tab_cortex_search_pipeline() -
     udf_sql = s_builder.build_langchain_python_udf_ddl()
     assert "RecursiveCharacterTextSplitter" in udf_sql
 
-    # FK-W2-03 Tab 3: Cortex Search Service Creator (CREATE OR REPLACE CORTEX SEARCH SERVICE + Suspend/Resume)
     c_spec = CortexSearchServiceCreatorSpec(
         database="SNOWFLAKE_LANGFLOW",
         schema="CORE",
@@ -367,7 +430,6 @@ def test_fk_w2_01_to_04_files_and_knowledge_and_4_tab_cortex_search_pipeline() -
     assert "ALTER CORTEX SEARCH SERVICE SNOWFLAKE_LANGFLOW.CORE.DOCS_SEARCH_SRV SUSPEND INDEXING" == c_builder.build_suspend_resume_sql("SUSPEND", "INDEXING")
     assert "ALTER CORTEX SEARCH SERVICE SNOWFLAKE_LANGFLOW.CORE.DOCS_SEARCH_SRV RESUME SERVING" == c_builder.build_suspend_resume_sql("RESUME", "SERVING")
 
-    # FK-W2-03 Tab 4: Stream + Task with atomic _DOC_STREAM_BATCH temp table inside BEGIN...END
     st_spec = CortexSearchStreamTaskSpec(
         database="SNOWFLAKE_LANGFLOW",
         schema="CORE",
@@ -383,37 +445,39 @@ def test_fk_w2_01_to_04_files_and_knowledge_and_4_tab_cortex_search_pipeline() -
     assert "EXECUTE TASK SNOWFLAKE_LANGFLOW.CORE.DOC_INGEST_TASK" == st_builder.build_task_operation_sql("EXECUTE_NOW")
     assert "INFORMATION_SCHEMA.TASK_HISTORY" in st_builder.build_task_operation_sql("HISTORY")
 
-    # FK-W2-04: Disabled grey Cortex Analyst creator tab in Files & Knowledge
     dis_state = CortexAnalystDisabledCreatorSpec().to_ui_state()
     assert dis_state["disabled"] is True
     assert dis_state["snowsight_navigation_path"] == "AI & ML -> Cortex Analyst"
     assert "Snowsight" in CORTEX_ANALYST_SNOWSIGHT_CREATION_MESSAGE
 
-    # Verify service-spec.template.yaml mountPath is /persist and bundle_manifest has all Wave 2 components
     spec_yaml = (REPO_ROOT / "service-spec.template.yaml").read_text(encoding="utf-8")
     assert "mountPath: /persist" in spec_yaml
     manifest = get_bundle_manifest()
     comp_ids = {c["component_id"] for c in manifest["components"]}
     for expected_id in (
+        "snowflake_tables",
+        "snowflake_views",
+        "snowflake_iceberg_tables",
+        "snowflake_postgres",
+        "snowflake_cortex_search",
+        "snowflake_cortex_analyst",
         "snowflake_object_provisioner_llm",
         "snowflake_object_provisioner_fk",
         "snowflake_stored_procedure",
         "snowflake_function_udf",
         "snowflake_ai_complete",
+        "snowflake_ai_function",
         "snowflake_sql_statement",
-        "snowflake_cortex_search_llm",
-        "snowflake_cortex_analyst_llm",
         "snowflake_llm_node",
         "snowflake_decision",
         "snowflake_cortex_search_parse_document",
         "snowflake_cortex_search_split_text",
         "snowflake_cortex_search_service_creator",
         "snowflake_cortex_search_stream_task",
-        "snowflake_cortex_analyst_disabled",
+        "snowflake_toolguard_policies",
     ):
         assert expected_id in comp_ids
 
-    # Verify every native_category_components/*.py file parses cleanly and has a unique internal component `name`
     seen_names: dict[str, str] = {}
     for py_path in sorted((REPO_ROOT / "src" / "lfx_snowflake" / "native_category_components").rglob("*.py")):
         if py_path.name == "__init__.py":
@@ -429,7 +493,7 @@ def test_fk_w2_01_to_04_files_and_knowledge_and_4_tab_cortex_search_pipeline() -
                                 comp_name = str(stmt.value.value)
                 assert comp_name not in seen_names, f"Duplicate component name {comp_name} in {py_path} and {seen_names[comp_name]}"
                 seen_names[comp_name] = str(py_path)
-    assert len(seen_names) == 28
+    assert len(seen_names) == 26
 
 
 def test_wave2_undefined_headers_fetch_intercept_guard() -> None:
@@ -437,7 +501,6 @@ def test_wave2_undefined_headers_fetch_intercept_guard() -> None:
     hooks_py = (REPO_ROOT / "scripts" / "install_live_hooks_in_container.py").read_text(encoding="utf-8")
     ui_js = (REPO_ROOT / "frontend_patches" / "snowflake-ui-integration.js").read_text(encoding="utf-8")
 
-    # 1. install_live_hooks_in_container.py patches oXr's hKr.register and Ur.interceptors.request.use
     assert "fetch_intercept_orig" in hooks_py
     assert "fetch_intercept_new" in hooks_py
     assert 'T=T&&typeof T=="object"?{...T}:{};' in hooks_py
@@ -450,8 +513,474 @@ def test_wave2_undefined_headers_fetch_intercept_guard() -> None:
     assert 'c?.headers?.get?.("content-type")' in hooks_py
     assert "__sflfHeadersGuarded" in hooks_py
 
-    # 2. snowflake-ui-integration.js guards window.fetch and passes explicit headers on all fetch calls
     assert "__sflfHeadersGuarded" in ui_js
     assert 'fetch("/api/v1/snowflake/context", {' in ui_js
-    assert 'fetch(`/api/v1/snowflake/catalog?database=${dbParam}&schema=${schParam}`, {' in ui_js
+
+
+def test_w2_r2_00_multi_db_multi_schema_objects_cone_and_canvas_sync() -> None:
+    """Verify W2-R2-00: Multi-Database -> Multi-Schema -> Cascading Objects cone, functions/procedures filtering, and syncCanvasNodesWithSnowflakeContext."""
+    bridge = LiveSnowflakeBridge()
+    cat = bridge.discover_catalog(
+        databases=["SNOWFLAKE_LANGFLOW", "ANALYTICS_DB"],
+        schemas_by_db={"SNOWFLAKE_LANGFLOW": ["CORE", "PUBLIC"], "ANALYTICS_DB": ["MART"]},
+    )
+    assert "SNOWFLAKE_LANGFLOW.CORE" in cat["objects_by_db_schema"]
+    assert "ANALYTICS_DB.MART" in cat["objects_by_db_schema"]
+
+    # Restrict selected_objects for functions and procedures in SNOWFLAKE_LANGFLOW.CORE
+    bridge.update_selected_context(
+        {
+            "databases": ["SNOWFLAKE_LANGFLOW", "ANALYTICS_DB"],
+            "schemas_by_db": {"SNOWFLAKE_LANGFLOW": ["CORE"], "ANALYTICS_DB": ["MART"]},
+            "objects_by_db_schema": {
+                "SNOWFLAKE_LANGFLOW.CORE": {
+                    "tables": ["LANGFLOW_FLOW_RUNS", "EXTRA_TBL"],
+                    "functions": ["ALLOWED_UDF(VARCHAR)", "HIDDEN_UDF(NUMBER)"],
+                    "procedures": ["ALLOWED_PROC(VARCHAR)", "HIDDEN_PROC()"],
+                }
+            },
+            "selected_objects": {
+                "SNOWFLAKE_LANGFLOW.CORE": {
+                    "tables": ["LANGFLOW_FLOW_RUNS"],
+                    "functions": ["ALLOWED_UDF(VARCHAR)"],
+                    "procedures": ["ALLOWED_PROC(VARCHAR)"],
+                }
+            },
+        }
+    )
+    assert bridge.get_context_databases() == ["SNOWFLAKE_LANGFLOW", "ANALYTICS_DB"]
+    assert bridge.get_context_schemas("ANALYTICS_DB") == ["MART"]
+    assert bridge.get_context_objects("SNOWFLAKE_LANGFLOW", "CORE", "tables") == ["LANGFLOW_FLOW_RUNS"]
+    assert bridge.get_context_objects("SNOWFLAKE_LANGFLOW", "CORE", "functions") == ["ALLOWED_UDF(VARCHAR)"]
+    assert bridge.get_context_objects("SNOWFLAKE_LANGFLOW", "CORE", "procedures") == ["ALLOWED_PROC(VARCHAR)"]
+
+    ui_js = (REPO_ROOT / "frontend_patches" / "snowflake-ui-integration.js").read_text(encoding="utf-8")
+    assert "syncCanvasNodesWithSnowflakeContext" in ui_js
+    assert '"functions"' in ui_js and '"procedures"' in ui_js
+
+
+def test_w2_r2_01_02_03_model_catalog_and_dynamic_update_build_config() -> None:
+    """Verify W2-R2-01 (model catalog & capability filtering), W2-R2-02 (Stored Procedure & Function dynamic update_build_config), and W2-R2-03 (AI Function per-function fields)."""
+    # W2-R2-01: Current Cortex models & capability filtering
+    for expected_model in (
+        "claude-sonnet-5-5",
+        "claude-opus-5-5",
+        "claude-haiku-5-5",
+        "openai-gpt-6-astra",
+        "openai-gpt-6.1-sol",
+        "openai-gpt-6-luna",
+        "openai-gpt-6-sol",
+        "grok-4.7",
+        "grok-4.6",
+        "kimi-k3",
+        "glm-5.3",
+    ):
+        assert expected_model in SUPPORTED_AI_COMPLETE_MODELS
+        assert expected_model in AI_COMPLETE_MODEL_CAPABILITIES
+
+    structured_models = get_compatible_models(require_structured_outputs=True)
+    assert "claude-sonnet-5-5" in structured_models
+    assert "openai-gpt-6-astra" in structured_models
+    assert "glm-5.3" not in structured_models
+
+    multimodal_models = get_compatible_models(require_multimodal=True)
+    assert "claude-sonnet-5-5" in multimodal_models
+    assert "grok-4.7" not in multimodal_models
+
+    aic_comp = SidebarAICompleteComponent()
+    aic_cfg = aic_comp.to_build_config()
+    aic_comp.update_build_config(aic_cfg, "JSON Schema Object", "response_format_mode")
+    assert aic_cfg["response_json_schema"]["show"] is True
+    assert "glm-5.3" not in aic_cfg["model"]["options"]
+
+    dec_comp = SnowflakeDecisionComponent()
+    dec_cfg = dec_comp.to_build_config()
+    dec_comp.update_build_config(dec_cfg, "AI_COMPLETE (Structured Decision JSON)", "engine_mode")
+    assert "glm-5.3" not in dec_cfg["model"]["options"]
+
+    # W2-R2-02: Stored Procedure & Function dynamic update_build_config
+    sp_comp = SnowflakeStoredProcedureComponent()
+    sp_cfg = sp_comp.to_build_config()
+    sp_comp.update_build_config(sp_cfg, "CALL Existing", "action_mode")
+    assert sp_cfg["body"]["show"] is False
+    assert sp_cfg["procedure_name"]["show"] is False
+    assert sp_cfg["call_args"]["show"] is True
+
+    sp_comp.update_build_config(sp_cfg, "CREATE OR REPLACE", "action_mode")
+    assert sp_cfg["body"]["show"] is True
+    sp_comp.update_build_config(sp_cfg, "PYTHON", "language")
+    assert "def run(session):" in sp_cfg["body"]["value"]
+
+    fn_comp = SnowflakeFunctionComponent()
+    fn_cfg = fn_comp.to_build_config()
+    fn_comp.update_build_config(fn_cfg, "Execute Existing", "action_mode")
+    assert fn_cfg["body"]["show"] is False
+    assert fn_cfg["function_name"]["show"] is False
+    assert fn_cfg["call_args"]["show"] is True
+
+    fn_comp.update_build_config(fn_cfg, "CREATE OR REPLACE", "action_mode")
+    assert fn_cfg["body"]["show"] is True
+    fn_comp.update_build_config(fn_cfg, "PYTHON", "language")
+    assert "def compute(" in fn_cfg["body"]["value"]
+
+    # W2-R2-03: AI Function dynamic per-function field visibility
+    aif_comp = SidebarAIFunctionComponent()
+    aif_cfg = aif_comp.to_build_config()
+
+    aif_comp.update_build_config(aif_cfg, "AI_TRANSLATE", "ai_function")
+    assert aif_cfg["source_lang"]["show"] is True
+    assert aif_cfg["target_lang"]["show"] is True
+    assert aif_cfg["redact_mode"]["show"] is False
+    assert aif_cfg["pii_categories"]["show"] is False
+
+    aif_comp.update_build_config(aif_cfg, "AI_REDACT", "ai_function")
+    assert aif_cfg["redact_mode"]["show"] is True
+    assert aif_cfg["pii_categories"]["show"] is True
+    assert aif_cfg["source_lang"]["show"] is False
+
+    aif_comp.update_build_config(aif_cfg, "AI_COUNT_TOKENS", "ai_function")
+    assert aif_cfg["model_for_count_tokens"]["show"] is True
+    assert aif_cfg["redact_mode"]["show"] is False
+
+    aif_comp.update_build_config(aif_cfg, "AI_TRANSCRIBE", "ai_function")
+    assert aif_cfg["second_text_or_stage_file"]["show"] is True
+    assert aif_cfg["input_text"]["show"] is False
+
+
+def test_w2_r2_04_object_provisioner_4_families_without_memory() -> None:
+    """Verify W2-R2-04B: Object Provisioner enforces the 4 infrastructure families (table, view, stage, postgres) and excludes memory."""
+    for comp_cls in (SnowflakeObjectProvisionerSidebarComponent, SnowflakeObjectProvisionerFKComponent):
+        comp = comp_cls()
+        cfg = comp.to_build_config()
+        assert cfg["object_kind"]["options"] == ["table", "view", "stage", "postgres"]
+        assert "memory" not in cfg["object_kind"]["options"]
+
+        comp.update_build_config(cfg, "view", "object_kind")
+        assert cfg["view_type"]["show"] is True
+        assert cfg["as_select_query"]["show"] is True
+        assert cfg["table_subtype"]["show"] is False
+
+        comp.update_build_config(cfg, "stage", "object_kind")
+        cfg["stage_type"]["value"] = "EXTERNAL"
+        comp.update_build_config(cfg, "EXTERNAL", "stage_type")
+        assert cfg["external_url"]["show"] is True
+        assert cfg["storage_integration"]["show"] is True
+
+        comp.update_build_config(cfg, "postgres", "object_kind")
+        assert cfg["postgres_instance_name"]["show"] is True
+        assert cfg["compute_family"]["show"] is True
+
+        comp.object_kind = "memory"
+        with pytest.raises(ValueError, match="Memories"):
+            comp.provision_object()
+
+
+def test_w2_r2_05_deprefixed_sidebar_display_names() -> None:
+    """Verify W2-R2-05: Every sidebar component in native_category_components and bundle_manifest has icon='Snowflake' and no 'Snowflake ' prefix in display_name."""
+    for spec in SNOWFLAKE_BUNDLE_COMPONENTS:
+        assert not spec.display_name.startswith("Snowflake "), f"BundleComponentSpec {spec.component_id} still has 'Snowflake ' prefix: {spec.display_name}"
+
+    for py_path in sorted((REPO_ROOT / "src" / "lfx_snowflake" / "native_category_components").rglob("*.py")):
+        if py_path.name == "__init__.py":
+            continue
+        tree = ast.parse(py_path.read_text(encoding="utf-8"))
+        for node in tree.body:
+            if isinstance(node, ast.ClassDef):
+                for stmt in node.body:
+                    if isinstance(stmt, ast.Assign):
+                        for tgt in stmt.targets:
+                            if isinstance(tgt, ast.Name) and tgt.id == "display_name" and isinstance(stmt.value, ast.Constant):
+                                dname = str(stmt.value.value)
+                                assert not dname.startswith("Snowflake "), f"{py_path.name} still has 'Snowflake ' prefix: {dname}"
+
+
+def test_w2_r2_06_and_12_data_sources_split_4_components_and_cortex_search_analyst_tool_mode() -> None:
+    """Verify W2-R2-06 and W2-R2-12: 6 Data Sources components (Tables, Views, Iceberg Tables, Postgres, Cortex Search, Cortex Analyst) with Tool Mode."""
+    tbl_comp = SnowflakeTablesComponent()
+    assert tbl_comp.display_name == "Tables"
+    assert len(tbl_comp.to_toolkit()) == 1
+    assert tbl_comp.to_toolkit()[0].metadata["tool_mode"] is True
+
+    vw_comp = SnowflakeViewsComponent()
+    assert vw_comp.display_name == "Views"
+    assert len(vw_comp.to_toolkit()) == 1
+
+    ice_comp = SnowflakeIcebergTablesComponent()
+    assert ice_comp.display_name == "Iceberg Tables"
+    assert len(ice_comp.to_toolkit()) == 1
+
+    pg_comp = SnowflakePostgresComponent()
+    assert pg_comp.display_name == "Postgres"
+    assert len(pg_comp.to_toolkit()) == 1
+
+    cs_comp = SnowflakeCortexSearchComponent()
+    assert cs_comp.display_name == "Cortex Search"
+    cs_tools = cs_comp.to_toolkit()
+    assert len(cs_tools) == 1
+    assert cs_tools[0].metadata["tool_mode"] is True
+
+    ca_comp = SnowflakeCortexAnalystComponent()
+    assert ca_comp.display_name == "Cortex Analyst"
+    ca_payload = ca_comp.get_analyst_payload().data
+    assert ca_payload["rest_endpoint"] == "/api/v2/cortex/analyst/message"
+    ca_tools = ca_comp.to_toolkit()
+    assert len(ca_tools) == 1
+    assert ca_tools[0].metadata["rest_endpoint"] == "/api/v2/cortex/analyst/message"
+
+
+def test_w2_r2_07_standard_langflow_reasoning_across_3_proxy_apis() -> None:
+    """Verify W2-R2-07: ChatOpenAI reasoning_effort fix (via extra_body, no extra_forbidden), Responses reasoning, Messages Extended Thinking, and flexible max_tokens."""
+    assert StandardChat.display_name == "Proxy - Chat"
+    assert StandardResponses.display_name == "Proxy - Responses"
+    assert StandardMessages.display_name == "Proxy - Messages"
+
+    # 1. /chat/v1: openai-gpt-6-luna defaults unspecified -> none in extra_body; grok-4.7 omits reasoning_effort
+    chat_luna = standard_langflow.resolve_reasoning_options("chat", "openai-gpt-6-luna", reasoning="unspecified", max_tokens=4096)
+    assert chat_luna["max_tokens"] == 4096
+    assert chat_luna["extra_body"] == {"reasoning_effort": "none"}
+
+    chat_sol_high = standard_langflow.resolve_reasoning_options("chat", "openai-gpt-6-sol", reasoning_effort="high", max_tokens=8192)
+    assert chat_sol_high["extra_body"] == {"reasoning_effort": "high"}
+
+    chat_grok = standard_langflow.resolve_reasoning_options("chat", "grok-4.7", reasoning_effort="high", max_tokens=2048)
+    assert chat_grok["extra_body"] is None
+
+    # 2. /responses/v1: store=False, include=['reasoning.encrypted_content'], extra_body.reasoning
+    resp_astra = standard_langflow.resolve_reasoning_options("responses", "openai-gpt-6-astra", reasoning_effort="high", max_tokens=4096)
+    assert resp_astra["store"] is False
+    assert resp_astra["include"] == ["reasoning.encrypted_content"]
+    assert resp_astra["extra_body"] == {"reasoning": {"effort": "high", "summary": "auto"}}
+
+    # 3. /messages: Extended Thinking budget_tokens and auto-adjusted max_tokens > budget_tokens
+    msg_thinking = standard_langflow.resolve_reasoning_options(
+        "messages",
+        "claude-sonnet-5-5",
+        extended_thinking="enabled",
+        thinking_budget_tokens=4096,
+        max_tokens=2048,
+    )
+    assert msg_thinking["thinking"] == {"type": "enabled", "budget_tokens": 4096}
+    assert msg_thinking["max_tokens"] >= 5120
+
+
+def test_w2_r2_08_09_10_utilities_toolguard_redesign_and_sidebar_removals() -> None:
+    """Verify W2-R2-08, W2-R2-09, and W2-R2-10: Smart Router & Python Interpreter PyPI removed from sidebar; ToolGuard wraps Tools and enforces policies."""
+    comp_dir = REPO_ROOT / "src" / "lfx_snowflake" / "native_category_components"
+    assert not (comp_dir / "llm_operations" / "snowflake_smart_router.py").exists()
+    assert not (comp_dir / "utilities" / "snowflake_python_pypi.py").exists()
+
+    raw_tool = Tool(
+        name="query_orders",
+        description="Query orders table",
+        func=lambda q: {"query": q, "rows": [{"order_id": 1}]},
+    )
+    tg = SnowflakeToolGuardPoliciesComponent(tools=[raw_tool], enabled=True)
+    assert tg.display_name == "ToolGuard"
+    guarded = tg.build_guarded_tools()
+    assert len(guarded) == 1
+    assert guarded[0].name == "guarded_query_orders"
+
+    safe_res = guarded[0].invoke("SELECT * FROM ORDERS WHERE id = 1")
+    assert safe_res["toolguard_enforced"] is True
+    assert safe_res["output"]["rows"] == [{"order_id": 1}]
+
+    with pytest.raises(ValueError, match="BLOCKED_BY_TOOLGUARD_POLICY"):
+        guarded[0].invoke("DROP TABLE ORDERS")
+
+
+def test_w2_r2_11_4_node_cortex_search_pipeline_guidance_and_chaining_ports() -> None:
+    """Verify W2-R2-11: 4-node Cortex Search pipeline guidance banner and upstream/downstream chaining ports (1 -> 2 -> 3 -> 4)."""
+    step1 = SnowflakeCortexSearchParseDocumentComponent(
+        database="SNOWFLAKE_LANGFLOW",
+        schema_name="CORE",
+        stage_name="DOCS_STAGE",
+        target_table="CUSTOM_PARSED_DOCS",
+        action_mode="Dry-Run SQL Preview",
+    )
+    ref1 = step1.as_table_reference()
+    assert ref1.data["target_table"] == "CUSTOM_PARSED_DOCS"
+
+    step2 = SnowflakeCortexSearchSplitTextComponent(
+        upstream_parse_result=ref1,
+        target_table="CUSTOM_DOC_CHUNKS",
+        action_mode="Dry-Run SQL Preview",
+    )
+    res2 = step2.run_split_text()
+    assert res2.data["source_table"] == "CUSTOM_PARSED_DOCS"
+    assert res2.data["target_table"] == "CUSTOM_DOC_CHUNKS"
+    assert "W2-R2-11" in res2.data["pipeline_guide"]
+
+    step3 = SnowflakeCortexSearchServiceCreatorComponent(
+        upstream_chunks_result=step2.as_chunks_reference(),
+        service_name="CUSTOM_SEARCH_SRV",
+        action_mode="Dry-Run DDL Preview",
+    )
+    res3 = step3.run_search_service_creator()
+    assert res3.data["source_table"] == "CUSTOM_DOC_CHUNKS"
+    assert "CUSTOM_DOC_CHUNKS" in res3.data["create_service_ddl"]
+
+    step4 = SnowflakeCortexSearchStreamTaskComponent(
+        upstream_stage_or_service=step3.as_service_reference(),
+        action_mode="Dry-Run DDL Preview",
+    )
+    res4 = step4.run_stream_task()
+    assert res4.data["chunks_table_fqn"] == "SNOWFLAKE_LANGFLOW.CORE.CUSTOM_DOC_CHUNKS"
+    assert "_DOC_STREAM_BATCH" in res4.data["task_ddl"]
+
+
+def test_w2_r2_13_memories_plus_snowflake_3_agent_memory_types_and_workflow_recall() -> None:
+    """Verify W2-R2-13: 3 Agent Memory types (episodic_session, semantic_vector, structured_long_term) in Memories (+ Snowflake) and workflow recall."""
+    from lfx_snowflake.fastapi_live_bridge import LIVE_BRIDGE
+
+    mem_type_ids = {m["agent_memory_type"] if isinstance(m, dict) else m for m in AGENT_MEMORY_TYPES}
+    assert mem_type_ids == {"episodic_session", "semantic_vector", "structured_long_term"}
+
+    ep_res = LIVE_BRIDGE.create_or_register_memory(
+        {
+            "name": "AGENT_EPISODIC_TURNS",
+            "agent_memory_type": "episodic_session",
+            "vector_database": "Hybrid Table",
+            "database": "SNOWFLAKE_LANGFLOW",
+            "schema": "CORE",
+            "dry_run": True,
+        }
+    )
+    assert ep_res["ok"] is True
+    assert ep_res["memory"]["agent_memory_type"] == "episodic_session"
+    assert "HYBRID TABLE" in ep_res["ddl"]
+
+    sem_res = LIVE_BRIDGE.create_or_register_memory(
+        {
+            "name": "AGENT_SEMANTIC_VEC",
+            "agent_memory_type": "semantic_vector",
+            "vector_database": "Standard Table (VECTOR)",
+            "embedding_model": "snowflake-arctic-embed-l-v2.0",
+            "database": "SNOWFLAKE_LANGFLOW",
+            "schema": "CORE",
+            "dry_run": True,
+        }
+    )
+    assert sem_res["ok"] is True
+    assert sem_res["memory"]["dimension"] == 1024
+    assert "VECTOR(FLOAT, 1024)" in sem_res["ddl"]
+
+    lt_res = LIVE_BRIDGE.create_or_register_memory(
+        {
+            "name": "AGENT_LONG_TERM_FACTS",
+            "agent_memory_type": "structured_long_term",
+            "vector_database": "Standard Table",
+            "database": "SNOWFLAKE_LANGFLOW",
+            "schema": "CORE",
+            "dry_run": True,
+        }
+    )
+    assert lt_res["ok"] is True
+    assert lt_res["memory"]["agent_memory_type"] == "structured_long_term"
+
+    opts = get_memory_catalog_options(include_none=True)
+    assert "None" in opts
+    assert "AGENT_EPISODIC_TURNS" in opts
+    adapter = SnowflakeMessageHistoryAdapter(memory_catalog_ref="AGENT_SEMANTIC_VEC")
+    recalled = adapter.recall(query="governance")
+    assert recalled["ok"] is True
+    assert recalled["memory"]["name"] == "AGENT_SEMANTIC_VEC"
+    assert recall_memory_from_catalog("AGENT_EPISODIC_TURNS")["memory"]["agent_memory_type"] == "episodic_session"
+
+    modals_tsx = (REPO_ROOT / "frontend_patches" / "settings_and_memories_modals.tsx").read_text(encoding="utf-8")
+    assert "+ Snowflake" in modals_tsx
+    assert "episodic_session" in modals_tsx
+    assert "semantic_vector" in modals_tsx
+    assert "structured_long_term" in modals_tsx
+
+
+def test_w2_r2_14_official_snowflake_blue_29b5e8_and_loading_screen_fix() -> None:
+    """Verify W2-R2-14: Official Snowflake Blue (#29B5E8) branding across topbar/welcome/loading/memories and removal of 3-layer icon from Loading... screen."""
+    ui_js = (REPO_ROOT / "frontend_patches" / "snowflake-ui-integration.js").read_text(encoding="utf-8")
+    topbar_tsx = (REPO_ROOT / "frontend_patches" / "topbar_and_branding.tsx").read_text(encoding="utf-8")
+    hooks_py = (REPO_ROOT / "scripts" / "install_live_hooks_in_container.py").read_text(encoding="utf-8")
+
+    assert "#29B5E8" in ui_js
+    assert "#29B5E8" in topbar_tsx
+    assert "#29B5E8" in hooks_py
+    assert 'data-testid="snowflake-official-logo-blue"' in topbar_tsx
+    assert "?v=sflf042" in hooks_py
+
+    # Verify s4_loading_new in install_live_hooks_in_container.py does NOT contain c6e (3-layer stacked icon)
+    s4_idx = hooks_py.index("s4_loading_new = (")
+    s4_snippet = hooks_py[s4_idx : s4_idx + 260]
+    assert "sf_svg_inline_lg" in s4_snippet
+    assert "c6e" not in s4_snippet
+
+
+def test_w2_r2_00_04a_data_sources_cascading_build_config_and_installer_origin_preservation() -> None:
+    """Verify W2-R2-00 / W2-R2-04A cascading update_build_config across all 6 Data Source components and installer origin preservation."""
+    from lfx_snowflake.fastapi_live_bridge import LIVE_BRIDGE
+
+    LIVE_BRIDGE.update_selected_context(
+        {
+            "database": "RETAIL_DATA_PLATFORM",
+            "schema": "ANALYTICS",
+            "databases": ["RETAIL_DATA_PLATFORM", "SNOWFLAKE_LANGFLOW"],
+            "schemas_by_db": {
+                "RETAIL_DATA_PLATFORM": ["ANALYTICS", "RAW"],
+                "SNOWFLAKE_LANGFLOW": ["CORE"],
+            },
+            "objects_by_db_schema": {
+                "RETAIL_DATA_PLATFORM.ANALYTICS": {
+                    "tables": ["ORDERS_FACT", "CUSTOMERS_DIM"],
+                    "views": ["REVENUE_SUMMARY_VW"],
+                    "iceberg_tables": ["CLICKSTREAM_ICEBERG"],
+                    "postgres_instances": ["RETAIL_PG_MAIN"],
+                    "cortex_search_services": ["PRODUCT_CATALOG_SEARCH"],
+                    "semantic_views": ["RETAIL_SALES_SEMANTIC_VIEW"],
+                }
+            },
+            "selected_objects": {
+                "RETAIL_DATA_PLATFORM.ANALYTICS": {
+                    "tables": ["ORDERS_FACT"],
+                    "views": ["REVENUE_SUMMARY_VW"],
+                    "iceberg_tables": ["CLICKSTREAM_ICEBERG"],
+                    "postgres_instances": ["RETAIL_PG_MAIN"],
+                    "cortex_search_services": ["PRODUCT_CATALOG_SEARCH"],
+                    "semantic_views": ["RETAIL_SALES_SEMANTIC_VIEW"],
+                }
+            },
+        }
+    )
+
+    tbl = SnowflakeTablesComponent()
+    tbl_cfg = tbl.to_build_config()
+    tbl.update_build_config(tbl_cfg, "RETAIL_DATA_PLATFORM", "database")
+    assert "RETAIL_DATA_PLATFORM" in tbl_cfg["database"]["options"]
+    assert "ANALYTICS" in tbl_cfg["schema_name"]["options"]
+    assert tbl_cfg["table_name"]["options"] == ["ORDERS_FACT"]
+
+    vw = SnowflakeViewsComponent()
+    vw_cfg = vw.to_build_config()
+    vw.update_build_config(vw_cfg, "RETAIL_DATA_PLATFORM", "database")
+    assert vw_cfg["view_name"]["options"] == ["REVENUE_SUMMARY_VW"]
+
+    ice = SnowflakeIcebergTablesComponent()
+    ice_cfg = ice.to_build_config()
+    ice.update_build_config(ice_cfg, "RETAIL_DATA_PLATFORM", "database")
+    assert ice_cfg["iceberg_table_name"]["options"] == ["CLICKSTREAM_ICEBERG"]
+
+    pg = SnowflakePostgresComponent()
+    pg_cfg = pg.to_build_config()
+    pg.update_build_config(pg_cfg, "RETAIL_DATA_PLATFORM", "database")
+    assert pg_cfg["postgres_instance"]["options"] == ["RETAIL_PG_MAIN"]
+
+    cs = SnowflakeCortexSearchComponent()
+    cs_cfg = cs.to_build_config()
+    cs.update_build_config(cs_cfg, "RETAIL_DATA_PLATFORM", "database")
+    assert cs_cfg["search_service"]["options"] == ["PRODUCT_CATALOG_SEARCH"]
+
+    ca = SnowflakeCortexAnalystComponent()
+    ca_cfg = ca.to_build_config()
+    ca.update_build_config(ca_cfg, "RETAIL_DATA_PLATFORM", "database")
+    assert ca_cfg["semantic_view"]["options"] == ["RETAIL_SALES_SEMANTIC_VIEW"]
+
+    ui_js = (REPO_ROOT / "frontend_patches" / "snowflake-ui-integration.js").read_text(encoding="utf-8")
+    assert 'id="sflf-sec2"' in ui_js
+    assert "openSnowflakeHubModal(focusSection)" in ui_js
 

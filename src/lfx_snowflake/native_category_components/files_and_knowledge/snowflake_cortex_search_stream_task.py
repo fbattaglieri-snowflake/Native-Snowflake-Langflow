@@ -2,39 +2,33 @@ from __future__ import annotations
 
 from typing import Any
 
-from lfx.custom import Component
-from lfx.io import DataInput, DropdownInput, IntInput, Output, StrInput
-from lfx.schema import Data
+try:
+    from lfx.custom import Component
+    from lfx.io import DataInput, DropdownInput, IntInput, MultilineInput, Output, StrInput
+    from lfx.schema import Data
+except ImportError:  # pragma: no cover
+    from lfx_snowflake._lfx_compat import Component, Data, DataInput, DropdownInput, IntInput, MultilineInput, Output, StrInput
+
 from lfx_snowflake.components.files_and_stage import (
     CortexSearchStreamTaskBuilder,
     CortexSearchStreamTaskSpec,
 )
 from lfx_snowflake.fastapi_live_bridge import LIVE_BRIDGE
+from lfx_snowflake.native_category_components.files_and_knowledge.snowflake_cortex_search_parse_document import (
+    CORTEX_SEARCH_PIPELINE_GUIDE_STEP_1,
+)
 
 
 def _database_options() -> list[str]:
-    ctx = getattr(LIVE_BRIDGE, "selected_context", {}) or {}
-    dbs = list(ctx.get("databases") or [])
-    default_db = getattr(LIVE_BRIDGE, "database", "SNOWFLAKE_LANGFLOW")
-    if default_db and default_db not in dbs:
-        dbs.insert(0, default_db)
-    return dbs or ["SNOWFLAKE_LANGFLOW"]
+    return LIVE_BRIDGE.get_context_databases()
 
 
 def _schema_options(database: str | None = None) -> list[str]:
-    ctx = getattr(LIVE_BRIDGE, "selected_context", {}) or {}
-    db = (database or getattr(LIVE_BRIDGE, "database", "SNOWFLAKE_LANGFLOW")).strip()
-    schemas = list((ctx.get("schemas_by_db") or {}).get(db) or [])
-    default_schema = getattr(LIVE_BRIDGE, "schema", "CORE")
-    if default_schema and default_schema not in schemas:
-        schemas.insert(0, default_schema)
-    return schemas or ["CORE", "PUBLIC"]
+    return LIVE_BRIDGE.get_context_schemas(database)
 
 
-def _stage_options() -> list[str]:
-    ctx = getattr(LIVE_BRIDGE, "selected_context", {}) or {}
-    vis = ctx.get("visible_objects") or {}
-    stages = list(vis.get("stages") or [])
+def _stage_options(database: str | None = None, schema: str | None = None) -> list[str]:
+    stages = list(LIVE_BRIDGE.get_context_objects(database, schema, "stages"))
     if "SNOWFLAKE_LANGFLOW_STAGE" not in stages:
         stages.insert(0, "SNOWFLAKE_LANGFLOW_STAGE")
     return stages
@@ -43,19 +37,31 @@ def _stage_options() -> list[str]:
 class SnowflakeCortexSearchStreamTaskComponent(Component):
     display_name = "Cortex Search 4: Stream + Task"
     description = (
-        "Tab 4 of the Cortex Search indexing pipeline: creates DOC_STREAM on Stage and DOC_INGEST_TASK "
-        "with WHEN SYSTEM$STREAM_HAS_DATA('DOC_STREAM') and an atomic _DOC_STREAM_BATCH temp table inside "
-        "BEGIN ... END; so AI_PARSE_DOCUMENT runs at most once per file and METADATA$ACTION = 'DELETE' "
-        "cleans up PARSED_DOCS and DOC_CHUNKS; includes TASK_HISTORY monitor and Suspend / Resume / Esegui ora."
+        "Step 4 (Optional Continuous Automation) of the 4-node Cortex Search indexing pipeline: creates DOC_STREAM "
+        "on Stage and DOC_INGEST_TASK with WHEN SYSTEM$STREAM_HAS_DATA('DOC_STREAM') and an atomic _DOC_STREAM_BATCH "
+        "temp table inside BEGIN ... END; so AI_PARSE_DOCUMENT runs at most once per file and METADATA$ACTION = 'DELETE' "
+        "cleans up PARSED_DOCS and DOC_CHUNKS while Step 3 Search Service refreshes via TARGET_LAG."
     )
     icon = "Snowflake"
     name = "SnowflakeCortexSearchStreamTask"
 
     inputs = [
+        MultilineInput(
+            name="pipeline_guide",
+            display_name="Pipeline Usage Guide (1 -> 2 -> 3 Initial Build + 4 Continuous Stream + Task)",
+            value=CORTEX_SEARCH_PIPELINE_GUIDE_STEP_1,
+            advanced=False,
+        ),
+        DataInput(
+            name="upstream_stage_or_service",
+            display_name="Upstream Step 1 / Step 3 Reference (Chaining Port)",
+            info="Connect 'Parse Document Result' (Step 1) or 'Search Service Reference' (Step 3) to auto-inherit Database, Schema, Stage, PARSED_DOCS, and DOC_CHUNKS.",
+        ),
         DataInput(
             name="service_ref",
             display_name="Search Service Reference (Optional)",
             info="Optional connection from 'Cortex Search 3: Search Service'.",
+            advanced=True,
         ),
         DropdownInput(
             name="database",
@@ -76,7 +82,7 @@ class SnowflakeCortexSearchStreamTaskComponent(Component):
         DropdownInput(
             name="stage_name",
             display_name="3. Stage",
-            options=_stage_options(),
+            options=_stage_options("SNOWFLAKE_LANGFLOW", "CORE"),
             value="SNOWFLAKE_LANGFLOW_STAGE",
             real_time_refresh=True,
             combobox=True,
@@ -168,14 +174,19 @@ class SnowflakeCortexSearchStreamTaskComponent(Component):
         )
         if "schema_name" in build_config:
             build_config["schema_name"]["options"] = _schema_options(db_val)
+        sch_val = (
+            field_value
+            if field_name == "schema_name" and isinstance(field_value, str)
+            else build_config.get("schema_name", {}).get("value") or "CORE"
+        )
         if "stage_name" in build_config:
-            build_config["stage_name"]["options"] = _stage_options()
+            build_config["stage_name"]["options"] = _stage_options(db_val, sch_val)
         return build_config
 
     def _build_spec_and_builder(
         self,
     ) -> tuple[CortexSearchStreamTaskSpec, CortexSearchStreamTaskBuilder]:
-        ref = getattr(self, "service_ref", None)
+        ref = getattr(self, "upstream_stage_or_service", None) or getattr(self, "service_ref", None)
         ref_data = getattr(ref, "data", ref) if ref is not None else {}
         if not isinstance(ref_data, dict):
             ref_data = {}
@@ -190,13 +201,51 @@ class SnowflakeCortexSearchStreamTaskComponent(Component):
             or getattr(self, "schema_name", "")
             or getattr(LIVE_BRIDGE, "schema", "CORE")
         ).strip()
-        stg = (getattr(self, "stage_name", "") or "SNOWFLAKE_LANGFLOW_STAGE").lstrip("@").strip()
+        stg = (
+            ref_data.get("stage_name")
+            or getattr(self, "stage_name", "")
+            or "SNOWFLAKE_LANGFLOW_STAGE"
+        ).lstrip("@").strip()
         if "." in stg:
             stg = stg.split(".")[-1]
         stream_name = (getattr(self, "stream_name", "") or "DOC_STREAM").strip()
         task_name = (getattr(self, "task_name", "") or "DOC_INGEST_TASK").strip()
-        parsed_table = (getattr(self, "parsed_table", "") or "PARSED_DOCS").strip()
-        chunks_table = (getattr(self, "chunks_table", "") or "DOC_CHUNKS").strip()
+        if "service_name" in ref_data or "service_fqn" in ref_data:
+            # Connected from Step 3 (Search Service): source_table is the chunks table
+            parsed_table = (
+                ref_data.get("parsed_table")
+                or getattr(self, "parsed_table", "")
+                or "PARSED_DOCS"
+            ).strip()
+            chunks_table = (
+                ref_data.get("source_table")
+                or ref_data.get("chunks_table")
+                or getattr(self, "chunks_table", "")
+                or "DOC_CHUNKS"
+            ).strip()
+        elif "stage_name" in ref_data and "target_table" in ref_data and "source_table" not in ref_data:
+            # Connected from Step 1 (Parse Document): target_table is the parsed table
+            parsed_table = (
+                ref_data.get("target_table")
+                or getattr(self, "parsed_table", "")
+                or "PARSED_DOCS"
+            ).strip()
+            chunks_table = (
+                ref_data.get("chunks_table")
+                or getattr(self, "chunks_table", "")
+                or "DOC_CHUNKS"
+            ).strip()
+        else:
+            parsed_table = (
+                ref_data.get("source_table")
+                or getattr(self, "parsed_table", "")
+                or "PARSED_DOCS"
+            ).strip()
+            chunks_table = (
+                ref_data.get("target_table")
+                or getattr(self, "chunks_table", "")
+                or "DOC_CHUNKS"
+            ).strip()
         wh = (getattr(self, "warehouse", "") or getattr(LIVE_BRIDGE, "warehouse", "COMPUTE_WH") or "COMPUTE_WH").strip()
         sched = (getattr(self, "schedule", "") or "5 MINUTE").strip()
         parse_mode = (getattr(self, "parse_mode", "LAYOUT") or "LAYOUT").strip().upper()
@@ -238,12 +287,14 @@ class SnowflakeCortexSearchStreamTaskComponent(Component):
             "tab": "Cortex Search 4: Stream + Task",
             "database": spec.database,
             "schema_name": spec.schema,
+            "stage_name": spec.stage_name,
             "stage_fqn": spec.stage_fqn,
             "stream_fqn": spec.stream_fqn,
             "task_fqn": spec.task_fqn,
             "parsed_table_fqn": spec.parsed_table_fqn,
             "chunks_table_fqn": spec.chunks_table_fqn,
             "atomic_temp_table": "_DOC_STREAM_BATCH",
+            "pipeline_guide": CORTEX_SEARCH_PIPELINE_GUIDE_STEP_1,
             "stage_directory_ddl": stage_dir_ddl,
             "stream_ddl": stream_ddl,
             "task_ddl": task_ddl,

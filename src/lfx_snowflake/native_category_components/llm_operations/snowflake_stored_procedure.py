@@ -4,50 +4,56 @@ import json
 import uuid
 from typing import Any
 
-from lfx.custom import Component
-from lfx.io import DataInput, DropdownInput, MultilineInput, Output, StrInput
-from lfx.schema import Data
-from lfx.schema.message import Message
+try:
+    from lfx.custom import Component
+    from lfx.io import DataInput, DropdownInput, MultilineInput, Output, StrInput
+    from lfx.schema import Data
+    from lfx.schema.message import Message
+except ImportError:  # pragma: no cover
+    from lfx_snowflake._lfx_compat import (
+        Component,
+        Data,
+        DataInput,
+        DropdownInput,
+        Message,
+        MultilineInput,
+        Output,
+        StrInput,
+    )
+
 from lfx_snowflake.components.llm_operations import StoredProcedureEngine
 from lfx_snowflake.fastapi_live_bridge import LIVE_BRIDGE
 
 
 CREATE_REPLACE_PROC_OPTION = "+ Create / Replace Procedure..."
+DEFAULT_SQL_PROC_BODY = "BEGIN\n  RETURN OBJECT_CONSTRUCT('status', 'ok', 'role', CURRENT_ROLE());\nEND;"
+DEFAULT_PYTHON_PROC_BODY = (
+    "def run(session):\n"
+    "    row = session.sql(\"SELECT CURRENT_ROLE() AS role\").collect()[0]\n"
+    "    return {\"status\": \"ok\", \"role\": row[\"ROLE\"]}"
+)
 
 
 def _proc_databases() -> list[str]:
-    ctx = getattr(LIVE_BRIDGE, "selected_context", {}) or {}
-    dbs = list(ctx.get("databases") or [])
-    default_db = getattr(LIVE_BRIDGE, "database", "SNOWFLAKE_LANGFLOW")
-    if default_db and default_db not in dbs:
-        dbs.insert(0, default_db)
-    return dbs or ["SNOWFLAKE_LANGFLOW"]
+    return LIVE_BRIDGE.get_context_databases()
 
 
 def _proc_schemas(database: str | None = None) -> list[str]:
-    ctx = getattr(LIVE_BRIDGE, "selected_context", {}) or {}
-    db = (database or getattr(LIVE_BRIDGE, "database", "SNOWFLAKE_LANGFLOW")).strip()
-    schemas = list((ctx.get("schemas_by_db") or {}).get(db) or [])
-    default_schema = getattr(LIVE_BRIDGE, "schema", "CORE")
-    if default_schema and default_schema not in schemas:
-        schemas.insert(0, default_schema)
-    return schemas or ["CORE", "PUBLIC"]
+    return LIVE_BRIDGE.get_context_schemas(database)
 
 
-def _proc_options() -> list[str]:
-    ctx = getattr(LIVE_BRIDGE, "selected_context", {}) or {}
-    vis = ctx.get("visible_objects") or {}
-    procs = list(vis.get("procedures") or [])
+def _proc_options(database: str | None = None, schema: str | None = None) -> list[str]:
+    procs = list(LIVE_BRIDGE.get_context_objects(database, schema, "procedures"))
     if CREATE_REPLACE_PROC_OPTION not in procs:
         procs.insert(0, CREATE_REPLACE_PROC_OPTION)
     return procs
 
 
 class SnowflakeStoredProcedureComponent(Component):
-    display_name = "Snowflake Stored Procedure"
+    display_name = "Stored Procedure"
     description = (
         "Author, preview, register, and invoke Snowflake Stored Procedures (SQL BEGIN...END or Python 3.12 Snowpark) "
-        "in <Database>.<Schema> with EXECUTE AS CALLER default and graphical Child Procedure chaining."
+        "in <Database>.<Schema> with dynamic code editor visibility, EXECUTE AS CALLER default, and graphical Child Procedure chaining."
     )
     icon = "Snowflake"
     name = "SnowflakeStoredProcedure"
@@ -70,9 +76,16 @@ class SnowflakeStoredProcedureComponent(Component):
             combobox=True,
         ),
         DropdownInput(
+            name="action_mode",
+            display_name="Action Mode",
+            options=["Preview DDL", "CALL Existing", "Execute Existing", "CREATE OR REPLACE", "Create & Execute"],
+            value="Preview DDL",
+            real_time_refresh=True,
+        ),
+        DropdownInput(
             name="procedure_selector",
             display_name="Procedure in Schema",
-            options=_proc_options(),
+            options=_proc_options("SNOWFLAKE_LANGFLOW", "CORE"),
             value=CREATE_REPLACE_PROC_OPTION,
             real_time_refresh=True,
             combobox=True,
@@ -81,6 +94,7 @@ class SnowflakeStoredProcedureComponent(Component):
             name="procedure_name",
             display_name="Procedure Name",
             value="ORCHESTRATE_WORKFLOW_STEP",
+            show=True,
         ),
         DropdownInput(
             name="language",
@@ -88,11 +102,21 @@ class SnowflakeStoredProcedureComponent(Component):
             options=["SQL", "PYTHON"],
             value="SQL",
             real_time_refresh=True,
+            show=True,
         ),
         StrInput(
             name="signature_args",
             display_name="Signature Arguments",
             value="",
+            show=True,
+        ),
+        MultilineInput(
+            name="body",
+            display_name="Procedure Code Body (SQL BEGIN...END; or Python def run(session, ...):)",
+            value=DEFAULT_SQL_PROC_BODY,
+            real_time_refresh=False,
+            advanced=False,
+            show=True,
         ),
         DropdownInput(
             name="return_type",
@@ -100,29 +124,28 @@ class SnowflakeStoredProcedureComponent(Component):
             options=["VARIANT", "VARCHAR", "TABLE(status VARCHAR, details VARIANT)"],
             value="VARIANT",
             combobox=True,
+            show=True,
         ),
         DropdownInput(
             name="execute_as",
             display_name="Execution Rights",
             options=["EXECUTE AS CALLER", "EXECUTE AS OWNER"],
             value="EXECUTE AS CALLER",
+            show=True,
         ),
-        MultilineInput(
-            name="body",
-            display_name="Procedure Body (SQL statements or Python def run(session):)",
-            value="RETURN OBJECT_CONSTRUCT('status', 'ok', 'role', CURRENT_ROLE());",
-        ),
-        DropdownInput(
-            name="action_mode",
-            display_name="Action Mode",
-            options=["Preview DDL", "Execute Existing", "Create & Execute"],
-            value="Preview DDL",
+        StrInput(
+            name="stage_imports",
+            display_name="Stage IMPORTS (optional CSV for Python)",
+            value="",
+            advanced=False,
+            show=True,
         ),
         StrInput(
             name="call_args",
-            display_name="Call Arguments (for Execute)",
+            display_name="Call Arguments (for CALL / Execute)",
             value="",
-            advanced=True,
+            advanced=False,
+            show=True,
         ),
         DataInput(
             name="child_procedures",
@@ -151,12 +174,62 @@ class SnowflakeStoredProcedureComponent(Component):
         db = (
             field_value
             if field_name == "database" and isinstance(field_value, str)
-            else build_config.get("database", {}).get("value") or "SNOWFLAKE_LANGFLOW"
+            else build_config.get("database", {}).get("value") or getattr(self, "database", "SNOWFLAKE_LANGFLOW")
         )
         if "schema_name" in build_config:
             build_config["schema_name"]["options"] = _proc_schemas(db)
+        sch = (
+            field_value
+            if field_name == "schema_name" and isinstance(field_value, str)
+            else build_config.get("schema_name", {}).get("value") or getattr(self, "schema_name", "CORE")
+        )
         if "procedure_selector" in build_config:
-            build_config["procedure_selector"]["options"] = _proc_options()
+            build_config["procedure_selector"]["options"] = _proc_options(db, sch)
+
+        mode = (
+            field_value
+            if field_name == "action_mode" and isinstance(field_value, str)
+            else build_config.get("action_mode", {}).get("value") or getattr(self, "action_mode", "Preview DDL")
+        ).strip()
+        proc_sel = (
+            field_value
+            if field_name == "procedure_selector" and isinstance(field_value, str)
+            else build_config.get("procedure_selector", {}).get("value") or getattr(self, "procedure_selector", CREATE_REPLACE_PROC_OPTION)
+        ).strip()
+        lang = (
+            field_value
+            if field_name == "language" and isinstance(field_value, str)
+            else build_config.get("language", {}).get("value") or getattr(self, "language", "SQL")
+        ).strip().upper()
+
+        is_existing_call = mode in ("CALL Existing", "Execute Existing") or (
+            bool(proc_sel) and proc_sel != CREATE_REPLACE_PROC_OPTION and mode not in ("CREATE OR REPLACE", "Create & Execute", "Preview DDL")
+        )
+        if field_name == "procedure_selector" and proc_sel != CREATE_REPLACE_PROC_OPTION:
+            is_existing_call = True
+
+        authoring_fields = (
+            "procedure_name",
+            "language",
+            "signature_args",
+            "return_type",
+            "execute_as",
+            "stage_imports",
+            "body",
+        )
+        for fname in authoring_fields:
+            if fname in build_config:
+                build_config[fname]["show"] = not is_existing_call
+        if "call_args" in build_config:
+            build_config["call_args"]["show"] = True
+
+        if field_name == "language" and "body" in build_config:
+            cur_body = (build_config["body"].get("value") or "").strip()
+            if lang == "PYTHON" and (not cur_body or cur_body == DEFAULT_SQL_PROC_BODY or "RETURN OBJECT_CONSTRUCT" in cur_body):
+                build_config["body"]["value"] = DEFAULT_PYTHON_PROC_BODY
+            elif lang == "SQL" and (not cur_body or cur_body == DEFAULT_PYTHON_PROC_BODY or "def run(" in cur_body):
+                build_config["body"]["value"] = DEFAULT_SQL_PROC_BODY
+
         return build_config
 
     def _effective_proc_name(self) -> str:
@@ -229,7 +302,7 @@ class SnowflakeStoredProcedureComponent(Component):
                 )
             )
 
-        if mode == "Create & Execute":
+        if mode in ("Create & Execute", "CREATE OR REPLACE"):
             denied = LIVE_BRIDGE.check_write_privilege_or_deny("CREATE_PROCEDURE", f"{db}.{sch}.{nm}")
             if denied:
                 raise ValueError(denied["message"])
@@ -243,7 +316,7 @@ class SnowflakeStoredProcedureComponent(Component):
                     "procedure_fqn": f"{db}.{sch}.{nm}",
                     "active_role": LIVE_BRIDGE.active_role,
                     "child_procedures": [c.get("procedure_fqn") for c in children],
-                    "ddl": ddl if mode == "Create & Execute" else None,
+                    "ddl": ddl if mode in ("Create & Execute", "CREATE OR REPLACE") else None,
                     "call_sql": call_sql,
                     "result": exec_res,
                 },

@@ -165,12 +165,66 @@ export const SnowflakeSettingsPanel: React.FC<SnowflakeSettingsPanelProps> = ({
   );
 };
 
+export const SNOWFLAKE_BLUE = "#29B5E8";
+
+/**
+ * W2-R2-04B: Object Provisioner 4 Infrastructure Families (Memory relocated to Memories `+ Snowflake`).
+ */
+export const OBJECT_FAMILIES = [
+  "Table",
+  "View",
+  "Stage",
+  "Snowflake Postgres",
+] as const;
+
+export type SnowflakeObjectFamily = (typeof OBJECT_FAMILIES)[number];
+
+/**
+ * W2-R2-13: 3 Agent Memory Types for the Langflow `Memories` (`+ Snowflake`) wizard.
+ */
+export const SNOWFLAKE_AGENT_MEMORY_TYPES = [
+  {
+    id: "episodic_session",
+    label: "+ Episodic / Session Memory",
+    description:
+      "Conversational turns, session state, and short-term episodic recall backed by Snowflake Hybrid Table or Snowflake Postgres (Relational / JSONB).",
+    backends: ["Hybrid Table", "Standard Table", "Snowflake Postgres (Relational / JSONB)"],
+  },
+  {
+    id: "semantic_vector",
+    label: "+ Semantic / Vector Memory",
+    description:
+      "Dense semantic embeddings and similarity search backed by Snowflake VECTOR(FLOAT|INT, 768|1024) coupled to AI_EMBED, Snowflake Postgres pgvector, or Cortex Search.",
+    backends: [
+      "Standard Table (VECTOR)",
+      "Hybrid Table (VECTOR)",
+      "Snowflake Postgres (pgvector)",
+      "Cortex Search Service",
+    ],
+  },
+  {
+    id: "structured_long_term",
+    label: "+ Structured / Semi-Structured Long-Term Memory",
+    description:
+      "Persistent agent facts, user preferences, and entity profiles backed by Standard / Dynamic / Interactive Tables with VARIANT/OBJECT/ARRAY or Views.",
+    backends: [
+      "Standard Table (VARIANT)",
+      "Dynamic Table (VARIANT)",
+      "Interactive Table (VARIANT)",
+      "Standard View",
+    ],
+  },
+] as const;
+
+export type SnowflakeAgentMemoryTypeId = (typeof SNOWFLAKE_AGENT_MEMORY_TYPES)[number]["id"];
+
 export interface CreateMemoryDialogProps {
   activeRole: string;
   embeddingModels: string[];
   onCancel: () => void;
   onCreateMemory: (payload: {
     name: string;
+    agentMemoryType?: SnowflakeAgentMemoryTypeId;
     embeddingModel: string;
     vectorDatabase: string;
     batchSize: number;
@@ -181,9 +235,30 @@ export interface CreateMemoryDialogProps {
 }
 
 /**
- * Create Memory Dialog (REQ-10, G-A4):
- * Preserves Name, Embedding Model, Vector Database, Batch Size, optional LLM Preprocessing, Cancel / Create Memory,
- * and separates physical store creation (`CREATE`) from existing vector store binding/usage.
+ * `+ Snowflake` Button on the Langflow `Memories` Page (`W2-R2-13`, `W2-R2-14`):
+ * Styled in official Snowflake Blue (`#29B5E8`).
+ */
+export const MemoriesPlusSnowflakeButton: React.FC<{ onClick: () => void }> = ({ onClick }) => (
+  <button
+    type="button"
+    data-testid="memories-plus-snowflake-btn"
+    onClick={onClick}
+    className="inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-semibold text-white shadow-sm"
+    style={{
+      backgroundColor: SNOWFLAKE_BLUE,
+      borderColor: SNOWFLAKE_BLUE,
+      color: "#ffffff",
+    }}
+  >
+    <span>+ Snowflake</span>
+  </button>
+);
+
+/**
+ * Create Memory Dialog (`REQ-10`, `G-A4`, `W2-R2-13`, `W2-R2-14`):
+ * Supports the 3 Agent Memory Types (`episodic_session`, `semantic_vector`, `structured_long_term`)
+ * under the `+ Snowflake` (`#29B5E8`) Memories wizard, while preserving Name, Embedding Model,
+ * Vector Database, Batch Size, optional LLM Preprocessing, and Cancel / Create Memory controls.
  */
 export const CreateMemoryDialog: React.FC<CreateMemoryDialogProps> = ({
   activeRole,
@@ -192,6 +267,8 @@ export const CreateMemoryDialog: React.FC<CreateMemoryDialogProps> = ({
   onCreateMemory,
 }) => {
   const [name, setName] = useState("");
+  const [agentMemoryType, setAgentMemoryType] =
+    useState<SnowflakeAgentMemoryTypeId>("semantic_vector");
   const [embeddingModel, setEmbeddingModel] = useState(
     embeddingModels[0] || "snowflake-arctic-embed-l-v2.0"
   );
@@ -211,7 +288,49 @@ export const CreateMemoryDialog: React.FC<CreateMemoryDialogProps> = ({
       data-active-role={activeRole}
       className="flex flex-col gap-4 rounded-lg border border-border bg-background p-6 text-sm text-foreground"
     >
-      <h3 className="text-base font-semibold">Create Memory</h3>
+      <div className="flex items-center justify-between">
+        <h3 className="text-base font-semibold" style={{ color: SNOWFLAKE_BLUE }}>
+          Create Snowflake Agent Memory (+ Snowflake)
+        </h3>
+        <span
+          data-testid="memory-active-role-badge"
+          className="rounded px-2 py-0.5 text-xs font-semibold"
+          style={{ color: SNOWFLAKE_BLUE, border: `1px solid ${SNOWFLAKE_BLUE}` }}
+        >
+          Role: {activeRole}
+        </span>
+      </div>
+
+      {/* 3 Agent Memory Type Selector (W2-R2-13) */}
+      <div
+        data-testid="memory-agent-type-cards"
+        className="grid grid-cols-1 gap-2 md:grid-cols-3"
+      >
+        {SNOWFLAKE_AGENT_MEMORY_TYPES.map((memType) => {
+          const isSelected = agentMemoryType === memType.id;
+          return (
+            <button
+              key={memType.id}
+              type="button"
+              data-testid={`memory-type-${memType.id}`}
+              onClick={() => setAgentMemoryType(memType.id)}
+              className="flex flex-col items-start gap-1 rounded border p-2.5 text-left text-xs"
+              style={{
+                borderColor: isSelected ? SNOWFLAKE_BLUE : "var(--border)",
+                backgroundColor: isSelected ? "rgba(41, 181, 232, 0.12)" : "transparent",
+              }}
+            >
+              <span className="font-semibold" style={{ color: SNOWFLAKE_BLUE }}>
+                {memType.label}
+              </span>
+              <span className="text-[11px] text-muted-foreground">
+                {memType.description}
+              </span>
+            </button>
+          );
+        })}
+      </div>
+
       <input
         type="text"
         placeholder="Memory Name"
@@ -300,6 +419,7 @@ export const CreateMemoryDialog: React.FC<CreateMemoryDialogProps> = ({
           onClick={() =>
             onCreateMemory({
               name,
+              agentMemoryType,
               embeddingModel,
               vectorDatabase,
               batchSize,
@@ -310,11 +430,86 @@ export const CreateMemoryDialog: React.FC<CreateMemoryDialogProps> = ({
               createNewPhysicalStore,
             })
           }
-          className="rounded bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground"
+          className="rounded px-3 py-1.5 text-xs font-medium text-white"
+          style={{ backgroundColor: SNOWFLAKE_BLUE, color: "#ffffff" }}
         >
           Create Memory
         </button>
       </div>
+    </div>
+  );
+};
+
+export interface SnowflakeObjectProvisionerModalProps {
+  activeRole: string;
+  database: string;
+  schema: string;
+  onProvision: (payload: {
+    family: SnowflakeObjectFamily;
+    subtype: string;
+    name: string;
+  }) => Promise<void>;
+}
+
+/**
+ * Snowflake Object Provisioner Modal (`W2-R2-04B`):
+ * Strictly exposes the 4 Snowflake Infrastructure Families (`Table`, `View`, `Stage`, `Snowflake Postgres`),
+ * with `Memory` removed and relocated to the Langflow `Memories` (`+ Snowflake`) page.
+ */
+export const SnowflakeObjectProvisionerModal: React.FC<SnowflakeObjectProvisionerModalProps> = ({
+  activeRole,
+  database,
+  schema,
+  onProvision,
+}) => {
+  const [family, setFamily] = useState<SnowflakeObjectFamily>("Table");
+  const [subtype, setSubtype] = useState<string>("STANDARD");
+  const [name, setName] = useState<string>("DEMO_OBJECT");
+
+  return (
+    <div
+      data-testid="snowflake-object-provisioner-modal"
+      data-active-role={activeRole}
+      className="flex flex-col gap-3 rounded-lg border border-border bg-background p-4 text-xs text-foreground"
+    >
+      <h4 className="text-sm font-semibold" style={{ color: SNOWFLAKE_BLUE }}>
+        Object Provisioner ({database}.{schema})
+      </h4>
+      <select
+        data-testid="provisioner-family-select"
+        value={family}
+        onChange={(e) => setFamily(e.target.value as SnowflakeObjectFamily)}
+        className="rounded border border-border bg-background px-2 py-1.5"
+      >
+        {OBJECT_FAMILIES.map((f) => (
+          <option key={f} value={f}>
+            {f}
+          </option>
+        ))}
+      </select>
+      <input
+        type="text"
+        data-testid="provisioner-subtype-input"
+        value={subtype}
+        onChange={(e) => setSubtype(e.target.value)}
+        className="rounded border border-border bg-background px-2 py-1.5"
+      />
+      <input
+        type="text"
+        data-testid="provisioner-name-input"
+        value={name}
+        onChange={(e) => setName(e.target.value)}
+        className="rounded border border-border bg-background px-2 py-1.5"
+      />
+      <button
+        type="button"
+        data-testid="btn-provision-object"
+        onClick={() => onProvision({ family, subtype, name })}
+        className="rounded px-3 py-1.5 font-semibold text-white"
+        style={{ backgroundColor: SNOWFLAKE_BLUE, color: "#ffffff" }}
+      >
+        Provision {family}
+      </button>
     </div>
   );
 };

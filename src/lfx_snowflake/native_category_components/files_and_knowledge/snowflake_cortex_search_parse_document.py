@@ -2,9 +2,13 @@ from __future__ import annotations
 
 from typing import Any
 
-from lfx.custom import Component
-from lfx.io import BoolInput, DropdownInput, Output, StrInput
-from lfx.schema import Data
+try:
+    from lfx.custom import Component
+    from lfx.io import BoolInput, DropdownInput, MultilineInput, Output, StrInput
+    from lfx.schema import Data
+except ImportError:  # pragma: no cover
+    from lfx_snowflake._lfx_compat import BoolInput, Component, Data, DropdownInput, MultilineInput, Output, StrInput
+
 from lfx_snowflake.components.files_and_stage import (
     AI_PARSE_DOCUMENT_BILLING_NOTICE,
     CortexSearchParseDocumentBuilder,
@@ -13,29 +17,27 @@ from lfx_snowflake.components.files_and_stage import (
 from lfx_snowflake.fastapi_live_bridge import LIVE_BRIDGE
 
 
+CORTEX_SEARCH_PIPELINE_GUIDE_STEP_1 = (
+    "CORTEX SEARCH 4-NODE PIPELINE GUIDE (W2-R2-11):\n"
+    "• One-Time / Initial Build (1 -> 2 -> 3): Connect [1: Parse Document] (AI_PARSE_DOCUMENT -> PARSED_DOCS) "
+    "-> [2: Split Text] (SPLIT_TEXT_RECURSIVE_CHARACTER -> DOC_CHUNKS) -> [3: Search Service] "
+    "(CREATE CORTEX SEARCH SERVICE ... ON chunk TARGET_LAG = '1 hour').\n"
+    "• Optional Continuous Automation (4: Stream + Task): Connect [4: Stream + Task] (DOC_STREAM on Stage + "
+    "DOC_INGEST_TASK with atomic _DOC_STREAM_BATCH temp table) to automatically parse & chunk new/deleted Stage "
+    "files into PARSED_DOCS and DOC_CHUNKS while [3: Search Service] refreshes via TARGET_LAG."
+)
+
+
 def _database_options() -> list[str]:
-    ctx = getattr(LIVE_BRIDGE, "selected_context", {}) or {}
-    dbs = list(ctx.get("databases") or [])
-    default_db = getattr(LIVE_BRIDGE, "database", "SNOWFLAKE_LANGFLOW")
-    if default_db and default_db not in dbs:
-        dbs.insert(0, default_db)
-    return dbs or ["SNOWFLAKE_LANGFLOW"]
+    return LIVE_BRIDGE.get_context_databases()
 
 
 def _schema_options(database: str | None = None) -> list[str]:
-    ctx = getattr(LIVE_BRIDGE, "selected_context", {}) or {}
-    db = (database or getattr(LIVE_BRIDGE, "database", "SNOWFLAKE_LANGFLOW")).strip()
-    schemas = list((ctx.get("schemas_by_db") or {}).get(db) or [])
-    default_schema = getattr(LIVE_BRIDGE, "schema", "CORE")
-    if default_schema and default_schema not in schemas:
-        schemas.insert(0, default_schema)
-    return schemas or ["CORE", "PUBLIC"]
+    return LIVE_BRIDGE.get_context_schemas(database)
 
 
-def _stage_options() -> list[str]:
-    ctx = getattr(LIVE_BRIDGE, "selected_context", {}) or {}
-    vis = ctx.get("visible_objects") or {}
-    stages = list(vis.get("stages") or [])
+def _stage_options(database: str | None = None, schema: str | None = None) -> list[str]:
+    stages = list(LIVE_BRIDGE.get_context_objects(database, schema, "stages"))
     if "SNOWFLAKE_LANGFLOW_STAGE" not in stages:
         stages.insert(0, "SNOWFLAKE_LANGFLOW_STAGE")
     return stages
@@ -44,7 +46,8 @@ def _stage_options() -> list[str]:
 class SnowflakeCortexSearchParseDocumentComponent(Component):
     display_name = "Cortex Search 1: Parse Document"
     description = (
-        "Tab 1 of the Cortex Search indexing pipeline: parses documents on a Snowflake Stage "
+        "Step 1 of the 4-node Cortex Search indexing pipeline (1: Parse Document -> 2: Split Text -> 3: Search Service, "
+        "plus optional 4: Stream + Task continuous automation): parses documents on a Snowflake Stage "
         "exclusively using AI_PARSE_DOCUMENT with TO_FILE('@<DB>.<SCHEMA>.<STAGE>', relative_path), "
         "parse_mode (LAYOUT | OCR), page_split (LATERAL FLATTEN on parsed:pages), 'Testa su 1 file' "
         "(LIMIT 1 preview), error column parsed:errorInformation, and per-page billing notice."
@@ -53,6 +56,12 @@ class SnowflakeCortexSearchParseDocumentComponent(Component):
     name = "SnowflakeCortexSearchParseDocument"
 
     inputs = [
+        MultilineInput(
+            name="pipeline_guide",
+            display_name="Pipeline Usage Guide (1 -> 2 -> 3 Initial Build + 4 Continuous Stream + Task)",
+            value=CORTEX_SEARCH_PIPELINE_GUIDE_STEP_1,
+            advanced=False,
+        ),
         DropdownInput(
             name="database",
             display_name="1. Database",
@@ -72,7 +81,7 @@ class SnowflakeCortexSearchParseDocumentComponent(Component):
         DropdownInput(
             name="stage_name",
             display_name="3. Stage",
-            options=_stage_options(),
+            options=_stage_options("SNOWFLAKE_LANGFLOW", "CORE"),
             value="SNOWFLAKE_LANGFLOW_STAGE",
             real_time_refresh=True,
             combobox=True,
@@ -117,7 +126,7 @@ class SnowflakeCortexSearchParseDocumentComponent(Component):
     ]
     outputs = [
         Output(display_name="Parse Document Result", name="parse_result", method="run_parse_document"),
-        Output(display_name="Parsed Docs Table Reference", name="parsed_table_ref", method="as_table_reference"),
+        Output(display_name="Parsed Docs Table Reference (To Step 2: Split Text)", name="parsed_table_ref", method="as_table_reference"),
     ]
 
     def update_build_config(
@@ -132,8 +141,13 @@ class SnowflakeCortexSearchParseDocumentComponent(Component):
         )
         if "schema_name" in build_config:
             build_config["schema_name"]["options"] = _schema_options(db_val)
+        sch_val = (
+            field_value
+            if field_name == "schema_name" and isinstance(field_value, str)
+            else build_config.get("schema_name", {}).get("value") or "CORE"
+        )
         if "stage_name" in build_config:
-            build_config["stage_name"]["options"] = _stage_options()
+            build_config["stage_name"]["options"] = _stage_options(db_val, sch_val)
         return build_config
 
     def _build_spec_and_builder(self) -> tuple[CortexSearchParseDocumentSpec, CortexSearchParseDocumentBuilder]:
@@ -164,6 +178,7 @@ class SnowflakeCortexSearchParseDocumentComponent(Component):
             data={
                 "database": spec.database,
                 "schema_name": spec.schema,
+                "stage_name": spec.stage_name,
                 "stage_fqn": spec.stage_fqn,
                 "target_table": spec.target_table,
                 "target_table_fqn": spec.target_table_fqn,
@@ -187,12 +202,15 @@ class SnowflakeCortexSearchParseDocumentComponent(Component):
                     "sql_function": "AI_PARSE_DOCUMENT",
                     "database": spec.database,
                     "schema_name": spec.schema,
+                    "stage_name": spec.stage_name,
                     "stage_fqn": spec.stage_fqn,
+                    "target_table": spec.target_table,
                     "target_table_fqn": spec.target_table_fqn,
                     "parse_mode": spec.parse_mode,
                     "page_split": spec.page_split,
                     "error_column": "parsed:errorInformation",
                     "billing_notice": AI_PARSE_DOCUMENT_BILLING_NOTICE,
+                    "pipeline_guide": CORTEX_SEARCH_PIPELINE_GUIDE_STEP_1,
                     "ddl_preview": ddl,
                     "test_single_file_sql": test_sql,
                     "batch_insert_sql": batch_sql,
@@ -207,12 +225,17 @@ class SnowflakeCortexSearchParseDocumentComponent(Component):
                     "tab": "Cortex Search 1: Parse Document",
                     "action": "TEST_SINGLE_FILE",
                     "sql_function": "AI_PARSE_DOCUMENT",
+                    "database": spec.database,
+                    "schema_name": spec.schema,
+                    "stage_name": spec.stage_name,
                     "stage_fqn": spec.stage_fqn,
+                    "target_table": spec.target_table,
                     "target_table_fqn": spec.target_table_fqn,
                     "parse_mode": spec.parse_mode,
                     "page_split": spec.page_split,
                     "error_column": "parsed:errorInformation",
                     "billing_notice": AI_PARSE_DOCUMENT_BILLING_NOTICE,
+                    "pipeline_guide": CORTEX_SEARCH_PIPELINE_GUIDE_STEP_1,
                     "executed_sql": test_sql,
                     "preview_rows": res.get("rows", []),
                     "ok": res.get("ok", False),
@@ -230,12 +253,17 @@ class SnowflakeCortexSearchParseDocumentComponent(Component):
                 "tab": "Cortex Search 1: Parse Document",
                 "action": "CREATE_AND_PARSE_ALL",
                 "sql_function": "AI_PARSE_DOCUMENT",
+                "database": spec.database,
+                "schema_name": spec.schema,
+                "stage_name": spec.stage_name,
                 "stage_fqn": spec.stage_fqn,
+                "target_table": spec.target_table,
                 "target_table_fqn": spec.target_table_fqn,
                 "parse_mode": spec.parse_mode,
                 "page_split": spec.page_split,
                 "error_column": "parsed:errorInformation",
                 "billing_notice": AI_PARSE_DOCUMENT_BILLING_NOTICE,
+                "pipeline_guide": CORTEX_SEARCH_PIPELINE_GUIDE_STEP_1,
                 "ddl_executed": ddl,
                 "insert_sql_executed": batch_sql,
                 "ddl_result": ddl_res,

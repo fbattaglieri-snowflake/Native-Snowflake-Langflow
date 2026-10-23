@@ -2,52 +2,60 @@ from __future__ import annotations
 
 from typing import Any
 
-from lfx.custom import Component
-from lfx.io import DataInput, DropdownInput, IntInput, Output, StrInput
-from lfx.schema import Data
+try:
+    from lfx.custom import Component
+    from lfx.io import DataInput, DropdownInput, IntInput, MultilineInput, Output, StrInput
+    from lfx.schema import Data
+except ImportError:  # pragma: no cover
+    from lfx_snowflake._lfx_compat import Component, Data, DataInput, DropdownInput, IntInput, MultilineInput, Output, StrInput
+
 from lfx_snowflake.components.files_and_stage import (
     CORTEX_SEARCH_CHUNK_SIZE_NOTICE,
     CortexSearchSplitTextBuilder,
     CortexSearchSplitTextSpec,
 )
 from lfx_snowflake.fastapi_live_bridge import LIVE_BRIDGE
+from lfx_snowflake.native_category_components.files_and_knowledge.snowflake_cortex_search_parse_document import (
+    CORTEX_SEARCH_PIPELINE_GUIDE_STEP_1,
+)
 
 
 def _database_options() -> list[str]:
-    ctx = getattr(LIVE_BRIDGE, "selected_context", {}) or {}
-    dbs = list(ctx.get("databases") or [])
-    default_db = getattr(LIVE_BRIDGE, "database", "SNOWFLAKE_LANGFLOW")
-    if default_db and default_db not in dbs:
-        dbs.insert(0, default_db)
-    return dbs or ["SNOWFLAKE_LANGFLOW"]
+    return LIVE_BRIDGE.get_context_databases()
 
 
 def _schema_options(database: str | None = None) -> list[str]:
-    ctx = getattr(LIVE_BRIDGE, "selected_context", {}) or {}
-    db = (database or getattr(LIVE_BRIDGE, "database", "SNOWFLAKE_LANGFLOW")).strip()
-    schemas = list((ctx.get("schemas_by_db") or {}).get(db) or [])
-    default_schema = getattr(LIVE_BRIDGE, "schema", "CORE")
-    if default_schema and default_schema not in schemas:
-        schemas.insert(0, default_schema)
-    return schemas or ["CORE", "PUBLIC"]
+    return LIVE_BRIDGE.get_context_schemas(database)
 
 
 class SnowflakeCortexSearchSplitTextComponent(Component):
     display_name = "Cortex Search 2: Split Text"
     description = (
-        "Tab 2 of the Cortex Search indexing pipeline: reads PARSED_DOCS and writes DOC_CHUNKS "
-        "using SNOWFLAKE.CORTEX.SPLIT_TEXT_RECURSIVE_CHARACTER or Python UDF (LangChain RecursiveCharacterTextSplitter), "
-        "split_format (markdown | none), chunk_size=1800, chunk_overlap=300, < ~512 token notice, "
-        "chunk length distribution histogram, first N chunk preview, and total chunk count."
+        "Step 2 of the 4-node Cortex Search indexing pipeline (1: Parse Document -> 2: Split Text -> 3: Search Service): "
+        "reads PARSED_DOCS and writes DOC_CHUNKS using SNOWFLAKE.CORTEX.SPLIT_TEXT_RECURSIVE_CHARACTER or Python UDF "
+        "(LangChain RecursiveCharacterTextSplitter), split_format (markdown | none), chunk_size=1800, chunk_overlap=300, "
+        "< ~512 token notice, chunk length distribution histogram, first N chunk preview, and total chunk count."
     )
     icon = "Snowflake"
     name = "SnowflakeCortexSearchSplitText"
 
     inputs = [
+        MultilineInput(
+            name="pipeline_guide",
+            display_name="Pipeline Usage Guide (1 -> 2 -> 3 Initial Build + 4 Continuous Stream + Task)",
+            value=CORTEX_SEARCH_PIPELINE_GUIDE_STEP_1,
+            advanced=False,
+        ),
+        DataInput(
+            name="upstream_parse_result",
+            display_name="Upstream Step 1: Parse Document Result (Chaining Port)",
+            info="Connect 'Parse Document Result' or 'Parsed Docs Table Reference' from Step 1 to auto-inherit Database, Schema, Stage, and PARSED_DOCS.",
+        ),
         DataInput(
             name="parsed_table_ref",
             display_name="Parsed Docs Reference (Optional)",
             info="Optional connection from 'Cortex Search 1: Parse Document'.",
+            advanced=True,
         ),
         DropdownInput(
             name="database",
@@ -129,7 +137,7 @@ class SnowflakeCortexSearchSplitTextComponent(Component):
     ]
     outputs = [
         Output(display_name="Split Text Result", name="split_result", method="run_split_text"),
-        Output(display_name="Chunks Table Reference", name="chunks_table_ref", method="as_chunks_reference"),
+        Output(display_name="Chunks Table Reference (To Step 3: Search Service)", name="chunks_table_ref", method="as_chunks_reference"),
     ]
 
     def update_build_config(
@@ -147,7 +155,7 @@ class SnowflakeCortexSearchSplitTextComponent(Component):
         return build_config
 
     def _build_spec_and_builder(self) -> tuple[CortexSearchSplitTextSpec, CortexSearchSplitTextBuilder]:
-        ref = getattr(self, "parsed_table_ref", None)
+        ref = getattr(self, "upstream_parse_result", None) or getattr(self, "parsed_table_ref", None)
         ref_data = getattr(ref, "data", ref) if ref is not None else {}
         if not isinstance(ref_data, dict):
             ref_data = {}
@@ -218,13 +226,16 @@ class SnowflakeCortexSearchSplitTextComponent(Component):
             "tab": "Cortex Search 2: Split Text",
             "database": spec.database,
             "schema_name": spec.schema,
+            "source_table": spec.source_table,
             "source_table_fqn": spec.source_table_fqn,
+            "target_table": spec.target_table,
             "target_table_fqn": spec.target_table_fqn,
             "splitter_mode": spec.splitter_mode,
             "split_format": spec.split_format,
             "chunk_size": spec.chunk_size,
             "chunk_overlap": spec.chunk_overlap,
             "chunk_size_notice": CORTEX_SEARCH_CHUNK_SIZE_NOTICE,
+            "pipeline_guide": CORTEX_SEARCH_PIPELINE_GUIDE_STEP_1,
             "ddl_preview": table_ddl,
             "python_udf_ddl": udf_ddl,
             "split_insert_sql": insert_sql,

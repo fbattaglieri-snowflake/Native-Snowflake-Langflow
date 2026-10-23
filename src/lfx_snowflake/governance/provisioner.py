@@ -728,8 +728,10 @@ class SnowflakeObjectProvisioner:
             billable_impact=impact,
         )
 
+    SUPPORTED_INFRASTRUCTURE_OBJECT_FAMILIES: tuple[str, ...] = ("table", "view", "stage", "postgres")
+
     # ------------------------------------------------------------------
-    # 5. Hierarchical Privilege Prechecks & HUB-W2-04 Exclusion
+    # 5. Hierarchical Privilege Prechecks & HUB-W2-04 / W2-R2-04B Exclusion
     # ------------------------------------------------------------------
     @staticmethod
     def enforce_hub_object_exclusion(
@@ -738,10 +740,19 @@ class SnowflakeObjectProvisioner:
         source: str = "hub",
         active_role: str = "PUBLIC",
     ) -> None:
-        """Reject FUNCTION / PROCEDURE creation from Snowflake Langflow Hub (`HUB-W2-04`)."""
+        """Reject FUNCTION / PROCEDURE creation from Hub (`HUB-W2-04`) and MEMORY from Object Provisioner (`W2-R2-04B`)."""
         kind_clean = (object_kind or "").strip().lower()
         src_clean = (source or "hub").strip().lower()
-        if src_clean == "hub" and kind_clean in {
+        if kind_clean in {"memory", "memories", "knowledge_memory"}:
+            raise SnowflakeGovernanceError.unsupported_capability(
+                active_role=active_role,
+                operation="PROVISION_MEMORY_OBJECT",
+                reason=(
+                    f"Creation of '{object_kind}' is excluded from Object Provisioner (W2-R2-04B, W2-R2-13). "
+                    "Use 'Memories -> + Snowflake' to provision Episodic/Session, Semantic/Vector, or Structured Long-Term Memories."
+                ),
+            )
+        if src_clean in {"hub", "object_provisioner"} and kind_clean in {
             "function",
             "procedure",
             "udf",

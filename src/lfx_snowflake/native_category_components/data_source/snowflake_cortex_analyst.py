@@ -3,53 +3,58 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from lfx.custom import Component
-from lfx.io import BoolInput, DropdownInput, IntInput, MessageTextInput, Output
-from lfx.schema import DataFrame
-from lfx.schema.message import Message
+try:
+    from lfx.custom import Component
+    from lfx.io import BoolInput, DropdownInput, IntInput, MessageTextInput, Output
+    from lfx.schema import Data, DataFrame
+    from lfx.schema.message import Message
+except ImportError:  # pragma: no cover
+    from lfx_snowflake._lfx_compat import (
+        BoolInput,
+        Component,
+        Data,
+        DataFrame,
+        DropdownInput,
+        IntInput,
+        Message,
+        MessageTextInput,
+        Output,
+    )
+
+from lfx_snowflake._lfx_compat import Tool
 from lfx_snowflake.fastapi_live_bridge import LIVE_BRIDGE
 
 
 def _analyst_databases() -> list[str]:
-    ctx = getattr(LIVE_BRIDGE, "selected_context", {}) or {}
-    dbs = list(ctx.get("databases") or [])
-    default_db = getattr(LIVE_BRIDGE, "database", "SNOWFLAKE_LANGFLOW")
-    if default_db and default_db not in dbs:
-        dbs.insert(0, default_db)
-    return dbs or ["SNOWFLAKE_LANGFLOW"]
+    return LIVE_BRIDGE.get_context_databases()
 
 
 def _analyst_schemas(database: str | None = None) -> list[str]:
-    ctx = getattr(LIVE_BRIDGE, "selected_context", {}) or {}
-    db = (database or getattr(LIVE_BRIDGE, "database", "SNOWFLAKE_LANGFLOW")).strip()
-    schemas = list((ctx.get("schemas_by_db") or {}).get(db) or [])
-    default_schema = getattr(LIVE_BRIDGE, "schema", "CORE")
-    if default_schema and default_schema not in schemas:
-        schemas.insert(0, default_schema)
-    return schemas or ["CORE", "PUBLIC"]
+    return LIVE_BRIDGE.get_context_schemas(database)
 
 
 def _analyst_sources(database: str, schema: str, source_mode: str) -> list[str]:
-    ctx = getattr(LIVE_BRIDGE, "selected_context", {}) or {}
-    vis = ctx.get("visible_objects") or {}
-    if source_mode == "Stage YAML":
-        models = list(vis.get("semantic_models") or [])
-        fallback = f"@{database}.{schema}.SNOWFLAKE_LANGFLOW_STAGE/semantic_model.yaml"
-        if fallback not in models:
-            models.append(fallback)
+    if source_mode in ("Stage YAML", "Stage YAML Model"):
+        models = list(LIVE_BRIDGE.get_context_objects(database, schema, "semantic_models"))
+        if not models:
+            models = [f"@{database}.{schema}.SNOWFLAKE_LANGFLOW_STAGE/semantic_model.yaml"]
         return models
-    views = list(vis.get("semantic_views") or [])
-    fallback_sv = f"{database}.{schema}.EXAMPLE_SEMANTIC_VIEW"
-    if fallback_sv not in views:
-        views.append(fallback_sv)
+    views = list(LIVE_BRIDGE.get_context_objects(database, schema, "semantic_views"))
+    if not views:
+        views = [f"{database}.{schema}.EXAMPLE_SEMANTIC_VIEW"]
     return views
+
+
+def _memory_catalog_options() -> list[str]:
+    return LIVE_BRIDGE.get_memory_catalog_options(include_none=True)
 
 
 class SnowflakeCortexAnalystComponent(Component):
     display_name = "Cortex Analyst"
     description = (
-        "Natural-language-to-SQL via Snowflake Cortex Analyst over an existing Semantic View "
-        "(SHOW SEMANTIC VIEWS IN SCHEMA) or Stage YAML (LIST @DB.SCHEMA.STAGE) in the active role session."
+        "Natural-language-to-SQL via Snowflake Cortex Analyst (/api/v2/cortex/analyst/message) over an existing "
+        "Semantic View (SHOW SEMANTIC VIEWS IN SCHEMA) or Stage YAML (LIST @DB.SCHEMA.STAGE) in the active role session, "
+        "with Tool Mode for Agents."
     )
     icon = "Snowflake"
     name = "SnowflakeCortexAnalyst"
@@ -86,10 +91,20 @@ class SnowflakeCortexAnalystComponent(Component):
             real_time_refresh=True,
             combobox=True,
         ),
+        DropdownInput(
+            name="memory_catalog_ref",
+            display_name="Snowflake Memory Recall (Optional)",
+            options=_memory_catalog_options(),
+            value="None",
+            real_time_refresh=True,
+            combobox=True,
+            advanced=True,
+        ),
         MessageTextInput(
             name="question",
             display_name="Analytical Question",
             value="Show the latest flow runs by active role",
+            tool_mode=True,
         ),
         BoolInput(
             name="execute_generated_sql",
@@ -106,6 +121,8 @@ class SnowflakeCortexAnalystComponent(Component):
     outputs = [
         Output(display_name="Analyst Message", name="message", method="ask_analyst"),
         Output(display_name="SQL Result DataFrame", name="dataframe", method="run_analyst_sql"),
+        Output(display_name="Analyst Payload & SQL", name="metadata", method="get_analyst_payload"),
+        Output(display_name="Tool", name="component_as_tool", method="to_toolkit", types=["Tool"]),
     ]
 
     def update_build_config(
@@ -113,56 +130,89 @@ class SnowflakeCortexAnalystComponent(Component):
     ) -> dict[str, Any]:
         if "database" in build_config:
             build_config["database"]["options"] = _analyst_databases()
+            if field_name == "database" and isinstance(field_value, str):
+                build_config["database"]["value"] = field_value
         db = (
             field_value
             if field_name == "database" and isinstance(field_value, str)
-            else build_config.get("database", {}).get("value") or "SNOWFLAKE_LANGFLOW"
+            else build_config.get("database", {}).get("value") or LIVE_BRIDGE.database or "SNOWFLAKE_LANGFLOW"
         )
+        schemas = _analyst_schemas(db)
         if "schema_name" in build_config:
-            build_config["schema_name"]["options"] = _analyst_schemas(db)
+            build_config["schema_name"]["options"] = schemas
+            cur_sch = build_config["schema_name"].get("value")
+            if field_name == "schema_name" and isinstance(field_value, str):
+                build_config["schema_name"]["value"] = field_value
+            elif schemas and cur_sch not in schemas:
+                build_config["schema_name"]["value"] = schemas[0]
         sch = (
             field_value
             if field_name == "schema_name" and isinstance(field_value, str)
-            else build_config.get("schema_name", {}).get("value") or "CORE"
+            else build_config.get("schema_name", {}).get("value") or (schemas[0] if schemas else "CORE")
         )
         mode = (
             field_value
             if field_name == "source_mode" and isinstance(field_value, str)
             else build_config.get("source_mode", {}).get("value") or "Semantic View"
         )
+        src_opts = _analyst_sources(db, sch, mode)
         if "semantic_source" in build_config:
-            build_config["semantic_source"]["options"] = _analyst_sources(db, sch, mode)
+            build_config["semantic_source"]["options"] = src_opts
+            if src_opts and build_config["semantic_source"].get("value") not in src_opts:
+                build_config["semantic_source"]["value"] = src_opts[0]
+        build_config["semantic_view"] = {
+            "name": "semantic_view",
+            "options": src_opts,
+            "value": src_opts[0] if src_opts else "",
+        }
+        if "memory_catalog_ref" in build_config:
+            build_config["memory_catalog_ref"]["options"] = _memory_catalog_options()
         return build_config
 
-    def ask_analyst(self) -> Message:
+    def _invoke(self) -> dict[str, Any]:
         db = getattr(self, "database", "SNOWFLAKE_LANGFLOW") or "SNOWFLAKE_LANGFLOW"
         sch = getattr(self, "schema_name", "CORE") or "CORE"
-        src = (self.semantic_source or "").strip()
-        if self.source_mode == "Stage YAML" and not src.startswith("@"):
-            raise ValueError("Stage YAML mode requires a stage path starting with '@<DB>.<SCHEMA>.<STAGE>/...'.")
-        return Message(
-            text=json.dumps(
-                {
-                    "database": db,
-                    "schema_name": sch,
-                    "source_mode": self.source_mode,
-                    "semantic_source": src,
-                    "discovery_sql": (
-                        f"SHOW SEMANTIC VIEWS IN SCHEMA {db}.{sch}"
-                        if self.source_mode == "Semantic View"
-                        else f"LIST @{db}.{sch}.SNOWFLAKE_LANGFLOW_STAGE"
-                    ),
-                    "active_role": LIVE_BRIDGE.active_role,
-                    "question": self.question,
-                },
-                indent=2,
-            )
+        src = (getattr(self, "semantic_source", "") or "").strip()
+        mode = getattr(self, "source_mode", "Semantic View") or "Semantic View"
+        res = LIVE_BRIDGE.invoke_cortex_analyst(
+            database=db,
+            schema=sch,
+            semantic_source=src,
+            source_mode=mode,
+            question=getattr(self, "question", "") or "Show the latest flow runs by active role",
+            execute_sql=bool(getattr(self, "execute_generated_sql", True)),
+            max_rows=int(getattr(self, "max_rows", 50) or 50),
         )
+        res["discovery_sql"] = (
+            f"SHOW SEMANTIC VIEWS IN SCHEMA {db}.{sch}"
+            if mode == "Semantic View"
+            else f"LIST @{db}.{sch}.SNOWFLAKE_LANGFLOW_STAGE"
+        )
+        return res
+
+    def ask_analyst(self) -> Message:
+        return Message(text=json.dumps(self._invoke(), indent=2))
+
+    def get_analyst_payload(self) -> Data:
+        return Data(data=self._invoke())
 
     def run_analyst_sql(self) -> DataFrame:
-        stmt = (
-            f"SELECT run_id, flow_id, effective_role, status, start_ts "
-            f"FROM {LIVE_BRIDGE.runs_table} LIMIT {max(1, int(self.max_rows or 50))}"
-        )
-        res = LIVE_BRIDGE.execute_sql(stmt)
+        res = self._invoke()
         return DataFrame(res.get("rows", []))
+
+    def to_toolkit(self) -> list[Tool]:
+        src = (getattr(self, "semantic_source", "") or "EXAMPLE_SEMANTIC_VIEW").strip()
+
+        def _tool_fn(tool_input: Any = None) -> dict[str, Any]:
+            if isinstance(tool_input, str) and tool_input.strip():
+                self.question = tool_input.strip()
+            return self._invoke()
+
+        return [
+            Tool(
+                name="snowflake_cortex_analyst",
+                description=f"Ask analytical questions in natural language via Snowflake Cortex Analyst ({src}) under active role {LIVE_BRIDGE.active_role}.",
+                func=_tool_fn,
+                metadata={"semantic_source": src, "rest_endpoint": "/api/v2/cortex/analyst/message", "tool_mode": True},
+            )
+        ]

@@ -43,14 +43,65 @@ TASK_SPECIFIC_AI_FUNCTIONS: tuple[str, ...] = (
 )
 
 SUPPORTED_AI_COMPLETE_MODELS: tuple[str, ...] = (
-    "claude-4-sonnet",
-    "claude-3-7-sonnet",
+    "claude-sonnet-5-5",
+    "claude-opus-5-5",
+    "claude-haiku-5-5",
+    "openai-gpt-6-astra",
+    "openai-gpt-6.1-sol",
+    "openai-gpt-6-luna",
+    "openai-gpt-6-sol",
+    "grok-4.7",
+    "grok-4.6",
+    "kimi-k3",
+    "glm-5.3",
+    "llama4-maverick",
     "mistral-large2",
     "llama3.3-70b",
+    "claude-4-sonnet",
+    "claude-3-7-sonnet",
     "openai-gpt-4.1",
     "snowflake-arctic",
     "llama3.1-8b",
 )
+
+AI_COMPLETE_MODEL_CAPABILITIES: dict[str, dict[str, bool]] = {
+    "claude-sonnet-5-5": {"structured_outputs": True, "multimodal": True, "reasoning": True, "tools": True},
+    "claude-opus-5-5": {"structured_outputs": True, "multimodal": True, "reasoning": True, "tools": True},
+    "claude-haiku-5-5": {"structured_outputs": True, "multimodal": True, "reasoning": True, "tools": True},
+    "openai-gpt-6-astra": {"structured_outputs": True, "multimodal": True, "reasoning": True, "tools": True},
+    "openai-gpt-6.1-sol": {"structured_outputs": True, "multimodal": True, "reasoning": True, "tools": True},
+    "openai-gpt-6-luna": {"structured_outputs": True, "multimodal": True, "reasoning": True, "tools": True},
+    "openai-gpt-6-sol": {"structured_outputs": True, "multimodal": True, "reasoning": True, "tools": True},
+    "grok-4.7": {"structured_outputs": True, "multimodal": False, "reasoning": False, "tools": True},
+    "grok-4.6": {"structured_outputs": True, "multimodal": False, "reasoning": False, "tools": True},
+    "kimi-k3": {"structured_outputs": True, "multimodal": False, "reasoning": False, "tools": True},
+    "glm-5.3": {"structured_outputs": False, "multimodal": False, "reasoning": False, "tools": True},
+    "llama4-maverick": {"structured_outputs": True, "multimodal": True, "reasoning": False, "tools": True},
+    "mistral-large2": {"structured_outputs": True, "multimodal": False, "reasoning": False, "tools": True},
+    "llama3.3-70b": {"structured_outputs": True, "multimodal": False, "reasoning": False, "tools": False},
+    "claude-4-sonnet": {"structured_outputs": True, "multimodal": True, "reasoning": True, "tools": True},
+    "claude-3-7-sonnet": {"structured_outputs": True, "multimodal": True, "reasoning": True, "tools": True},
+    "openai-gpt-4.1": {"structured_outputs": True, "multimodal": True, "reasoning": False, "tools": True},
+    "snowflake-arctic": {"structured_outputs": False, "multimodal": False, "reasoning": False, "tools": False},
+    "llama3.1-8b": {"structured_outputs": False, "multimodal": False, "reasoning": False, "tools": False},
+}
+
+
+def get_compatible_models(
+    *,
+    require_structured_outputs: bool = False,
+    require_multimodal: bool = False,
+) -> list[str]:
+    """Filter `SUPPORTED_AI_COMPLETE_MODELS` by capability (`W2-R2-01`)."""
+    compatible: list[str] = []
+    for mdl in SUPPORTED_AI_COMPLETE_MODELS:
+        caps = AI_COMPLETE_MODEL_CAPABILITIES.get(mdl, {})
+        if require_structured_outputs and not caps.get("structured_outputs", False):
+            continue
+        if require_multimodal and not caps.get("multimodal", False):
+            continue
+        compatible.append(mdl)
+    return compatible or list(SUPPORTED_AI_COMPLETE_MODELS)
 
 FUNCTIONS_ACCEPTING_INSTRUCTIONS: frozenset[str] = frozenset(
     {

@@ -2,9 +2,13 @@ from __future__ import annotations
 
 from typing import Any
 
-from lfx.custom import Component
-from lfx.io import BoolInput, DropdownInput, MultilineInput, Output, StrInput
-from lfx.schema import Data
+try:
+    from lfx.custom import Component
+    from lfx.io import BoolInput, DropdownInput, MultilineInput, Output, StrInput
+    from lfx.schema import Data
+except ImportError:  # pragma: no cover
+    from lfx_snowflake._lfx_compat import BoolInput, Component, Data, DropdownInput, MultilineInput, Output, StrInput
+
 from lfx_snowflake.components.files_and_stage import build_stage_creation_ddl
 from lfx_snowflake.fastapi_live_bridge import LIVE_BRIDGE
 
@@ -25,28 +29,15 @@ def _can_create_stage() -> bool:
 
 
 def _database_options() -> list[str]:
-    ctx = getattr(LIVE_BRIDGE, "selected_context", {}) or {}
-    dbs = list(ctx.get("databases") or [])
-    default_db = getattr(LIVE_BRIDGE, "database", "SNOWFLAKE_LANGFLOW")
-    if default_db and default_db not in dbs:
-        dbs.insert(0, default_db)
-    return dbs or ["SNOWFLAKE_LANGFLOW"]
+    return LIVE_BRIDGE.get_context_databases()
 
 
 def _schema_options(database: str | None = None) -> list[str]:
-    ctx = getattr(LIVE_BRIDGE, "selected_context", {}) or {}
-    db = (database or getattr(LIVE_BRIDGE, "database", "SNOWFLAKE_LANGFLOW")).strip()
-    schemas = list((ctx.get("schemas_by_db") or {}).get(db) or [])
-    default_schema = getattr(LIVE_BRIDGE, "schema", "CORE")
-    if default_schema and default_schema not in schemas:
-        schemas.insert(0, default_schema)
-    return schemas or ["CORE", "PUBLIC"]
+    return LIVE_BRIDGE.get_context_schemas(database)
 
 
 def _stage_options(database: str | None = None, schema_name: str | None = None) -> list[str]:
-    ctx = getattr(LIVE_BRIDGE, "selected_context", {}) or {}
-    vis = ctx.get("visible_objects") or {}
-    stages = list(vis.get("stages") or [])
+    stages = list(LIVE_BRIDGE.get_context_objects(database, schema_name, "stages"))
     if "SNOWFLAKE_LANGFLOW_STAGE" not in stages:
         stages.insert(0, "SNOWFLAKE_LANGFLOW_STAGE")
     if _can_create_stage():
@@ -57,7 +48,7 @@ def _stage_options(database: str | None = None, schema_name: str | None = None) 
 
 
 class SnowflakeStageFileSystemComponent(Component):
-    display_name = "Snowflake Stage File System"
+    display_name = "Stage File System"
     description = (
         "List, read, or write files (including safe atomic Append) and provision Internal "
         "(ENCRYPTION = (TYPE = 'SNOWFLAKE_SSE') DIRECTORY = (ENABLE = TRUE)) or External "

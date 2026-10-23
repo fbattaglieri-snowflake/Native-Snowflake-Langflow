@@ -41,6 +41,55 @@ from .observability.redaction import redact_payload_for_sink as redact_for_sink
 
 SPCS_TOKEN_PATH = Path("/snowflake/session/token")
 
+AGENT_MEMORY_TYPES: tuple[dict[str, Any], ...] = (
+    {
+        "agent_memory_type": "episodic_session",
+        "label": "+ Episodic / Session Memory",
+        "description": (
+            "Low-latency conversational history, dialogue turns, and agent episodes backed by "
+            "Snowflake Hybrid Table (point-lookup PK on session_id, turn_id) or Snowflake Postgres (Relational / JSONB)."
+        ),
+        "supported_backends": [
+            "Hybrid Table",
+            "Standard Table",
+            "Snowflake Postgres (Relational / JSONB)",
+        ],
+    },
+    {
+        "agent_memory_type": "semantic_vector",
+        "label": "+ Semantic / Vector Memory",
+        "description": (
+            "Embedding-indexed semantic recall backed by Standard / Hybrid Table with VECTOR(FLOAT|INT, 768|1024) "
+            "coupled to official AI_EMBED models, Snowflake Postgres (pgvector), or Cortex Search Service."
+        ),
+        "supported_backends": [
+            "Standard Table (VECTOR)",
+            "Hybrid Table (VECTOR)",
+            "Interactive Table (VECTOR)",
+            "Dynamic Table (VECTOR)",
+            "Snowflake Postgres (pgvector)",
+            "Cortex Search Service",
+        ],
+    },
+    {
+        "agent_memory_type": "structured_long_term",
+        "label": "+ Structured / Semi-Structured Long-Term Memory",
+        "description": (
+            "Persistent agent facts, user preferences, and entity profiles backed by Standard / Dynamic / "
+            "Interactive Tables with VARIANT / OBJECT / ARRAY columns or consolidation Views."
+        ),
+        "supported_backends": [
+            "Standard Table",
+            "Dynamic Table",
+            "Interactive Table",
+            "Semi-Structured (VARIANT)",
+            "Semi-Structured (OBJECT)",
+            "Semi-Structured (ARRAY)",
+            "View",
+        ],
+    },
+)
+
 
 class LiveSnowflakeBridge:
     """Executes real SQL against Snowflake via SPCS OAuth token and manages active role & trace replication."""
@@ -74,9 +123,12 @@ class LiveSnowflakeBridge:
         self.selected_context: dict[str, Any] = {
             "databases": [self.database],
             "schemas_by_db": {self.database: [self.schema, "PUBLIC"]},
+            "objects_by_db_schema": {},
+            "selected_objects": {},
             "visible_objects": {
                 "tables": ["LANGFLOW_FLOW_RUNS", "LANGFLOW_FLOW_SPANS", "LANGFLOW_AUDIT_LOG"],
                 "views": [],
+                "iceberg_tables": [],
                 "stages": [self.stage_name],
                 "memories": ["SNOWFLAKE_KB_MEM"],
                 "cortex_search_services": [],
@@ -90,6 +142,321 @@ class LiveSnowflakeBridge:
         }
         self._roles_discovered: bool = False
         self._superuser_synced: bool = False
+
+    @property
+    def memories_catalog(self) -> list[dict[str, Any]]:
+        """Return governed Snowflake Agent Memories available for workflow recall (`W2-R2-13`)."""
+        items: list[dict[str, Any]] = [dict(m) for m in self.memories_registry]
+        known_names = {str(m.get("name") or "").strip().upper() for m in items if m.get("name")}
+        vis_mem = list((self.selected_context.get("visible_objects") or {}).get("memories") or [])
+        for mem_name in vis_mem:
+            clean = str(mem_name or "").strip()
+            if clean and clean.upper() not in known_names:
+                items.append(
+                    {
+                        "name": clean,
+                        "database": self.database,
+                        "schema": self.schema,
+                        "table_fqn": f"{self.database}.{self.schema}.MEM_{clean.upper()}",
+                        "agent_memory_type": "semantic_vector",
+                        "memory_category": "vector_table",
+                        "vector_database": "Standard Table (VECTOR)",
+                        "embedding_model": "snowflake-arctic-embed-m-v1.5",
+                        "dimension": 768,
+                        "created_by_role": self.active_role,
+                    }
+                )
+                known_names.add(clean.upper())
+        return items
+
+    def get_memory_catalog_options(self, *, include_none: bool = True) -> list[str]:
+        """Return dropdown options for `memory_catalog_ref` in workflow components."""
+        opts: list[str] = ["None"] if include_none else []
+        for entry in self.memories_catalog:
+            nm = str(entry.get("name") or "").strip()
+            fqn = str(entry.get("table_fqn") or "").strip()
+            agent_type = str(entry.get("agent_memory_type") or entry.get("memory_category") or "memory").strip()
+            if nm and nm not in opts:
+                opts.append(nm)
+            label = f"{nm} ({agent_type} -> {fqn})" if nm and fqn else (fqn or nm)
+            if label and label not in opts:
+                opts.append(label)
+        return opts or (["None", "SNOWFLAKE_KB_MEM"] if include_none else ["SNOWFLAKE_KB_MEM"])
+
+    def recall_memory(
+        self,
+        memory_ref: str,
+        *,
+        query: str = "",
+        session_id: str = "default",
+        limit: int = 10,
+    ) -> dict[str, Any]:
+        """Recall records from a Snowflake Memory created via `+ Snowflake` (`W2-R2-13`)."""
+        clean_ref = (memory_ref or "").strip()
+        if not clean_ref or clean_ref == "None":
+            return {"ok": False, "recalled": False, "memory_ref": None, "rows": []}
+        short_ref = clean_ref.split(" (")[0].strip()
+        matched: dict[str, Any] | None = None
+        for entry in self.memories_catalog:
+            if short_ref.upper() in {
+                str(entry.get("name") or "").strip().upper(),
+                str(entry.get("table_fqn") or "").strip().upper(),
+            }:
+                matched = entry
+                break
+        if matched is None:
+            safe = "".join(c if c.isalnum() or c == "_" else "_" for c in short_ref).upper()
+            matched = {
+                "name": short_ref,
+                "database": self.database,
+                "schema": self.schema,
+                "table_fqn": short_ref if "." in short_ref else f"{self.database}.{self.schema}.MEM_{safe}",
+                "agent_memory_type": "semantic_vector",
+                "memory_category": "vector_table",
+                "embedding_model": "snowflake-arctic-embed-m-v1.5",
+            }
+        fqn = str(matched.get("table_fqn") or f"{self.database}.{self.schema}.MEM_{short_ref.upper()}")
+        agent_type = str(matched.get("agent_memory_type") or "semantic_vector")
+        bounded_limit = max(1, min(int(limit or 10), 200))
+        safe_q = (query or "").replace("'", "''")
+        safe_sess = (session_id or "default").replace("'", "''")
+        if agent_type == "episodic_session":
+            recall_sql = (
+                f"SELECT * FROM {fqn} WHERE session_id = '{safe_sess}' "
+                f"ORDER BY created_at DESC LIMIT {bounded_limit}"
+            )
+        elif agent_type == "semantic_vector" and safe_q:
+            embed_model = str(matched.get("embedding_model") or "snowflake-arctic-embed-m-v1.5").split(" ")[0]
+            recall_sql = (
+                f"SELECT chunk_id, memory_name, text_chunk, metadata, "
+                f"VECTOR_COSINE_SIMILARITY(embedding, AI_EMBED('{embed_model}', '{safe_q}')) AS score "
+                f"FROM {fqn} ORDER BY score DESC LIMIT {bounded_limit}"
+            )
+        else:
+            where_clause = f" WHERE text_chunk ILIKE '%{safe_q}%'" if safe_q else ""
+            recall_sql = f"SELECT * FROM {fqn}{where_clause} ORDER BY created_at DESC LIMIT {bounded_limit}"
+        res = self.execute_sql(recall_sql)
+        return {
+            "ok": True,
+            "recalled": True,
+            "memory_ref": short_ref,
+            "memory": matched,
+            "agent_memory_type": agent_type,
+            "table_fqn": fqn,
+            "active_role": self.active_role,
+            "context_epoch": self.context_epoch,
+            "recall_sql": recall_sql,
+            "rows": res.get("rows", []),
+        }
+
+    def create_or_register_memory(self, body: dict[str, Any]) -> dict[str, Any]:
+        """Create or register a Snowflake Agent Memory across the 3 Agent Memory types (`W2-R2-13`)."""
+        from .providers.embeddings import resolve_embedding_dimension
+
+        name = str(body.get("name") or "").strip()
+        db = str(body.get("database") or self.database).strip().upper()
+        sch = str(body.get("schema") or self.schema).strip().upper()
+        raw_agent_type = str(body.get("agent_memory_type") or "").strip().lower()
+        category = str(body.get("memory_category") or "").strip().lower()
+        backend = str(body.get("vector_database") or body.get("storage_backend") or "").strip()
+        if not category:
+            if raw_agent_type == "episodic_session":
+                category = "postgres_non_vector" if "POSTGRES" in backend.upper() else "structured"
+            elif raw_agent_type == "structured_long_term":
+                category = "semi_structured" if any(t in backend.upper() for t in ("VARIANT", "OBJECT", "ARRAY")) else "structured"
+            else:
+                category = "vector_table"
+        if not backend:
+            if raw_agent_type == "episodic_session":
+                backend = "Hybrid Table"
+            elif raw_agent_type == "structured_long_term":
+                backend = "Semi-Structured (VARIANT)" if category == "semi_structured" else "Standard Table"
+            else:
+                backend = "Standard Table (VECTOR)"
+
+        table_type = str(
+            body.get("table_type")
+            or ("HYBRID" if ("Hybrid" in backend or raw_agent_type == "episodic_session") else "STANDARD")
+        ).strip().upper()
+        semi_type = str(body.get("semi_structured_type") or "").strip().upper()
+        embedding_model = str(body.get("embedding_model") or "snowflake-arctic-embed-m-v1.5").strip()
+        elem_type = str(body.get("vector_element_type") or "FLOAT").strip().upper()
+        batch_size = int(body.get("batch_size") or 64)
+        llm_preprocessing = body.get("llm_preprocessing") or None
+
+        denied = self.check_write_privilege_or_deny("CREATE_MEMORY", name or "MEMORY_TABLE")
+        if denied:
+            return denied
+
+        is_vector = (
+            raw_agent_type == "semantic_vector"
+            or (
+                raw_agent_type not in ("episodic_session", "structured_long_term")
+                and (
+                    category in ("vector_table", "postgres_pgvector", "cortex_search")
+                    or "VECTOR" in backend.upper()
+                    or "PGVECTOR" in backend.upper()
+                    or "CORTEX SEARCH" in backend.upper()
+                )
+                and category not in ("structured", "structured_table", "semi_structured", "postgres_non_vector")
+            )
+        )
+        if raw_agent_type in ("episodic_session", "semantic_vector", "structured_long_term"):
+            agent_memory_type = raw_agent_type
+        elif is_vector:
+            agent_memory_type = "semantic_vector"
+        elif category == "postgres_non_vector" or table_type == "HYBRID":
+            agent_memory_type = "episodic_session"
+        else:
+            agent_memory_type = "structured_long_term"
+
+        dim = resolve_embedding_dimension(embedding_model, default=768)
+        safe_table = "".join(c if c.isalnum() or c == "_" else "_" for c in (name or "MEMORY_STORE")).upper()
+        fqn = f"{db}.{sch}.MEM_{safe_table}"
+
+        if agent_memory_type == "episodic_session" and not (
+            category == "postgres_non_vector" or ("POSTGRES" in backend.upper() and "PGVECTOR" not in backend.upper())
+        ):
+            table_kw = "HYBRID TABLE" if table_type == "HYBRID" else "TABLE"
+            ddl = (
+                f"CREATE {table_kw} IF NOT EXISTS {fqn} ("
+                f"session_id VARCHAR(128), turn_id VARCHAR(128), memory_name VARCHAR(256), "
+                f"sender VARCHAR(64), text_chunk VARCHAR, metadata VARIANT, created_by_role VARCHAR(128), "
+                f"created_at TIMESTAMP_TZ DEFAULT CURRENT_TIMESTAMP(), PRIMARY KEY (session_id, turn_id));"
+            )
+        elif not is_vector:
+            table_kw = "HYBRID TABLE" if table_type == "HYBRID" else "TABLE"
+            ddl = (
+                f"CREATE {table_kw} IF NOT EXISTS {fqn} ("
+                f"chunk_id VARCHAR(128) PRIMARY KEY, memory_name VARCHAR(256), text_chunk VARCHAR, "
+                f"metadata VARIANT, created_by_role VARCHAR(128), "
+                f"created_at TIMESTAMP_TZ DEFAULT CURRENT_TIMESTAMP());"
+            )
+        else:
+            table_kw = "HYBRID TABLE" if table_type == "HYBRID" else "TABLE"
+            ddl = (
+                f"CREATE {table_kw} IF NOT EXISTS {fqn} ("
+                f"chunk_id VARCHAR(128) PRIMARY KEY, memory_name VARCHAR(256), text_chunk VARCHAR, "
+                f"embedding VECTOR({elem_type}, {dim}), metadata VARIANT, created_by_role VARCHAR(128), "
+                f"created_at TIMESTAMP_TZ DEFAULT CURRENT_TIMESTAMP());"
+            )
+
+        exec_res = {"ok": True, "dry_run": True} if body.get("dry_run") else self.execute_sql(ddl)
+        entry = {
+            "name": name,
+            "database": db,
+            "schema": sch,
+            "table_fqn": fqn,
+            "agent_memory_type": agent_memory_type,
+            "memory_category": category,
+            "vector_database": backend,
+            "table_type": table_type,
+            "semi_structured_type": semi_type or None,
+            "is_vector_memory": is_vector,
+            "embedding_model": embedding_model if is_vector else None,
+            "vector_element_type": elem_type if is_vector else None,
+            "dimension": dim if is_vector else None,
+            "batch_size": batch_size,
+            "llm_preprocessing": llm_preprocessing,
+            "ddl": ddl,
+            "created_by_role": self.active_role,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "snowflake_created": bool(exec_res.get("ok")),
+        }
+        self.memories_registry.append(entry)
+        vis_mem = self.selected_context.setdefault("visible_objects", {}).setdefault("memories", [])
+        if name and name not in vis_mem:
+            vis_mem.append(name)
+        return {"ok": True, "status_code": 201, "memory": entry, "ddl": ddl}
+
+    def get_context_databases(self) -> list[str]:
+        """Return active databases in the Hub cone of visibility (`W2-R2-00`)."""
+        dbs = [str(d).strip().upper() for d in (self.selected_context.get("databases") or []) if str(d).strip()]
+        default_db = (self.database or "SNOWFLAKE_LANGFLOW").strip().upper()
+        if default_db and default_db not in dbs:
+            dbs.insert(0, default_db)
+        return dbs or ["SNOWFLAKE_LANGFLOW"]
+
+    def get_context_schemas(self, database: str | None = None) -> list[str]:
+        """Return active schemas for `<database>` in the Hub cone of visibility (`W2-R2-00`)."""
+        db = (database or self.database or "SNOWFLAKE_LANGFLOW").strip().upper()
+        schemas_by_db = self.selected_context.get("schemas_by_db") or {}
+        schemas = [str(s).strip().upper() for s in (schemas_by_db.get(db) or []) if str(s).strip()]
+        if not schemas and db == (self.database or "").strip().upper():
+            default_sch = (self.schema or "CORE").strip().upper()
+            schemas = [default_sch, "PUBLIC"] if default_sch != "PUBLIC" else ["PUBLIC"]
+        return schemas or ["CORE", "PUBLIC"]
+
+    def get_context_objects(
+        self,
+        database: str | None = None,
+        schema: str | None = None,
+        category: str = "tables",
+    ) -> list[str]:
+        """Return objects for `(<database>, <schema>, <category>)` filtered by `selected_objects` (`W2-R2-00`)."""
+        db = (database or self.database or "SNOWFLAKE_LANGFLOW").strip().upper()
+        sch = (schema or self.schema or "CORE").strip().upper()
+        cat = (category or "tables").strip().lower()
+        db_sch_key = f"{db}.{sch}"
+
+        objs_by_pair = self.selected_context.get("objects_by_db_schema") or {}
+        pair_bucket = objs_by_pair.get(db_sch_key) if isinstance(objs_by_pair, dict) else None
+        vis = self.selected_context.get("visible_objects") or {}
+
+        candidates: list[str] = []
+        if isinstance(pair_bucket, dict) and cat in pair_bucket and isinstance(pair_bucket[cat], list):
+            candidates.extend(str(x).strip() for x in pair_bucket[cat] if str(x).strip())
+        if isinstance(vis.get(cat), list):
+            for item in vis[cat]:
+                s_item = str(item).strip()
+                if not s_item:
+                    continue
+                if "." in s_item and not s_item.startswith("@"):
+                    parts = s_item.split(".")
+                    if len(parts) >= 3 and (parts[0].upper() != db or parts[1].upper() != sch):
+                        continue
+                if s_item not in candidates:
+                    candidates.append(s_item)
+
+        sel_objs = self.selected_context.get("selected_objects")
+        allowed_set: set[str] | None = None
+        if isinstance(sel_objs, dict) and sel_objs:
+            if db_sch_key in sel_objs and isinstance(sel_objs[db_sch_key], dict):
+                cat_sel = sel_objs[db_sch_key].get(cat)
+                if isinstance(cat_sel, list):
+                    allowed_set = {str(x).strip().upper() for x in cat_sel if str(x).strip()}
+            elif db_sch_key in sel_objs and isinstance(sel_objs[db_sch_key], list):
+                allowed_set = {str(x).strip().upper() for x in sel_objs[db_sch_key] if str(x).strip()}
+            elif cat in sel_objs and isinstance(sel_objs[cat], list):
+                allowed_set = {str(x).strip().upper() for x in sel_objs[cat] if str(x).strip()}
+        elif isinstance(sel_objs, list) and sel_objs:
+            allowed_set = {str(x).strip().upper() for x in sel_objs if str(x).strip()}
+
+        if allowed_set is not None:
+            allowed_base_set = {a.split("(")[0].strip().split(".")[-1] for a in allowed_set}
+            filtered: list[str] = []
+            for item in candidates:
+                raw_u = item.upper()
+                base_u = raw_u.split("(")[0].strip().split(".")[-1]
+                fqn_u = f"{db}.{sch}.{base_u}"
+                if (
+                    raw_u in allowed_set
+                    or base_u in allowed_set
+                    or fqn_u in allowed_set
+                    or base_u in allowed_base_set
+                ):
+                    filtered.append(item)
+            if not filtered and allowed_set:
+                for raw_allowed in sorted(allowed_set):
+                    if "." in raw_allowed:
+                        parts = raw_allowed.split(".")
+                        if len(parts) >= 3 and parts[0].upper() == db and parts[1].upper() == sch:
+                            filtered.append(parts[-1])
+                    else:
+                        filtered.append(raw_allowed)
+            return filtered
+
+        return candidates
 
     def can_create_database(self) -> bool:
         """Return True if the active role is permitted to execute CREATE DATABASE ON ACCOUNT."""
@@ -135,10 +502,10 @@ class LiveSnowflakeBridge:
         return self.get_role_privileges()
 
     def update_selected_context(self, payload: dict[str, Any]) -> dict[str, Any]:
-        """Persist cascading primary context selection from Snowflake Langflow Hub (`HUB-W2-02`)."""
+        """Persist cascading primary context selection from Snowflake Langflow Hub (`HUB-W2-02`, `W2-R2-00`)."""
         incoming_ctx = payload.get("selected_context") if isinstance(payload.get("selected_context"), dict) else {}
-        new_db = str(payload.get("database") or "").strip().upper()
-        new_sch = str(payload.get("schema") or "").strip().upper()
+        new_db = str(payload.get("database") or incoming_ctx.get("database") or "").strip().upper()
+        new_sch = str(payload.get("schema") or incoming_ctx.get("schema") or "").strip().upper()
         if new_db:
             self.database = new_db
         if new_sch:
@@ -147,6 +514,8 @@ class LiveSnowflakeBridge:
         dbs = payload.get("databases") or incoming_ctx.get("databases")
         if isinstance(dbs, list) and dbs:
             self.selected_context["databases"] = [str(d).strip().upper() for d in dbs if str(d).strip()]
+            if not new_db and self.selected_context["databases"]:
+                self.database = self.selected_context["databases"][0]
         elif self.database not in self.selected_context.get("databases", []):
             self.selected_context.setdefault("databases", []).insert(0, self.database)
 
@@ -159,11 +528,30 @@ class LiveSnowflakeBridge:
                     normalized_map[db_k] = [str(s).strip().upper() for s in v if str(s).strip()]
             if normalized_map:
                 self.selected_context["schemas_by_db"] = normalized_map
+                if not new_sch and self.database in normalized_map and normalized_map[self.database]:
+                    self.schema = normalized_map[self.database][0]
         else:
             cur_map = self.selected_context.setdefault("schemas_by_db", {})
             cur_list = cur_map.setdefault(self.database, [self.schema])
             if self.schema not in cur_list:
                 cur_list.insert(0, self.schema)
+
+        objs_by_pair = payload.get("objects_by_db_schema") or incoming_ctx.get("objects_by_db_schema")
+        if isinstance(objs_by_pair, dict) and objs_by_pair:
+            norm_objs: dict[str, dict[str, list[str]]] = {}
+            for pair_k, pair_v in objs_by_pair.items():
+                clean_pair = str(pair_k).strip().upper()
+                if isinstance(pair_v, dict):
+                    norm_objs[clean_pair] = {
+                        str(cat_k).strip().lower(): [str(item).strip() for item in cat_v if str(item).strip()]
+                        for cat_k, cat_v in pair_v.items()
+                        if isinstance(cat_v, list)
+                    }
+            self.selected_context["objects_by_db_schema"] = norm_objs
+
+        sel_objs = payload.get("selected_objects") if "selected_objects" in payload else incoming_ctx.get("selected_objects")
+        if sel_objs is not None:
+            self.selected_context["selected_objects"] = sel_objs
 
         vis = payload.get("visible_objects") or incoming_ctx.get("visible_objects")
         if isinstance(vis, dict):
@@ -202,20 +590,39 @@ class LiveSnowflakeBridge:
         database: str | None = None,
         schema: str | None = None,
         object_kind: str | None = None,
+        databases: list[str] | str | None = None,
+        schemas_by_db: dict[str, list[str]] | str | None = None,
     ) -> dict[str, Any]:
-        """Discover cascading Databases -> Schemas -> Objects for CURRENT_ROLE() (`HUB-W2-02`)."""
+        """Discover Multi-Database -> Multi-Schema -> Cascading Objects for CURRENT_ROLE() (`W2-R2-00`, `HUB-W2-02`)."""
         db = (database or self.database).strip().upper()
         sch = (schema or self.schema).strip().upper()
 
-        dbs_res = self.execute_sql("SHOW DATABASES")
-        schemas_res = self.execute_sql(f"SHOW SCHEMAS IN DATABASE {db}")
-        objects_res = self.execute_sql(f"SHOW OBJECTS IN SCHEMA {db}.{sch}")
-        stages_res = self.execute_sql(f"SHOW STAGES IN SCHEMA {db}.{sch}")
-        funcs_res = self.execute_sql(f"SHOW USER FUNCTIONS IN SCHEMA {db}.{sch}")
-        procs_res = self.execute_sql(f"SHOW USER PROCEDURES IN SCHEMA {db}.{sch}")
-        search_res = self.execute_sql(f"SHOW CORTEX SEARCH SERVICES IN SCHEMA {db}.{sch}")
-        sem_views_res = self.execute_sql(f"SHOW SEMANTIC VIEWS IN SCHEMA {db}.{sch}")
-        agents_res = self.execute_sql(f"SHOW CORTEX AGENTS IN SCHEMA {db}.{sch}")
+        parsed_dbs: list[str] = []
+        if isinstance(databases, str) and databases.strip():
+            parsed_dbs = [d.strip().upper() for d in databases.split(",") if d.strip()]
+        elif isinstance(databases, list):
+            parsed_dbs = [str(d).strip().upper() for d in databases if str(d).strip()]
+        if db and db not in parsed_dbs:
+            parsed_dbs.insert(0, db)
+        for ctx_db in self.selected_context.get("databases", []):
+            clean_ctx_db = str(ctx_db).strip().upper()
+            if clean_ctx_db and clean_ctx_db not in parsed_dbs:
+                parsed_dbs.append(clean_ctx_db)
+
+        parsed_schemas_map: dict[str, list[str]] = {}
+        if isinstance(schemas_by_db, str) and schemas_by_db.strip():
+            try:
+                loaded_map = json.loads(schemas_by_db)
+                if isinstance(loaded_map, dict):
+                    for k, v in loaded_map.items():
+                        if isinstance(v, list):
+                            parsed_schemas_map[str(k).strip().upper()] = [str(s).strip().upper() for s in v if str(s).strip()]
+            except Exception:  # noqa: BLE001
+                pass
+        elif isinstance(schemas_by_db, dict):
+            for k, v in schemas_by_db.items():
+                if isinstance(v, list):
+                    parsed_schemas_map[str(k).strip().upper()] = [str(s).strip().upper() for s in v if str(s).strip()]
 
         def _extract_names(rows: list[dict[str, Any]], keys: tuple[str, ...] = ("name", "NAME", "OBJECT_NAME")) -> list[str]:
             out: list[str] = []
@@ -227,50 +634,166 @@ class LiveSnowflakeBridge:
                         break
             return out
 
-        databases = _extract_names(dbs_res.get("rows", [])) or list(
-            dict.fromkeys([db, *self.selected_context.get("databases", [self.database])])
+        dbs_res = self.execute_sql("SHOW DATABASES")
+        pg_res = self.execute_sql("SHOW POSTGRES INSTANCES")
+        discovered_databases = _extract_names(dbs_res.get("rows", [])) or list(
+            dict.fromkeys([db, *parsed_dbs, *self.selected_context.get("databases", [self.database])])
         )
-        schemas = _extract_names(schemas_res.get("rows", [])) or list(
-            dict.fromkeys([sch, "CORE", "PUBLIC"])
+        postgres_instances = _extract_names(pg_res.get("rows", [])) or list(
+            self.selected_context.get("visible_objects", {}).get("postgres_instances", [])
         )
-        raw_objects = objects_res.get("rows", [])
-        tables: list[str] = []
-        views: list[str] = []
-        for obj in raw_objects:
-            nm = str(obj.get("name") or obj.get("NAME") or "").strip()
-            kd = str(obj.get("kind") or obj.get("KIND") or "TABLE").upper()
-            if not nm:
-                continue
-            if "VIEW" in kd:
-                views.append(nm)
-            else:
-                tables.append(nm)
-        if not tables:
-            tables = list(
-                self.selected_context.get("visible_objects", {}).get(
-                    "tables", ["LANGFLOW_FLOW_RUNS", "LANGFLOW_FLOW_SPANS", "LANGFLOW_AUDIT_LOG"]
-                )
-            )
-        stages = _extract_names(stages_res.get("rows", [])) or [self.stage_name]
-        functions = _extract_names(funcs_res.get("rows", [])) or list(
-            self.selected_context.get("visible_objects", {}).get("functions", [])
-        )
-        procedures = _extract_names(procs_res.get("rows", [])) or list(
-            self.selected_context.get("visible_objects", {}).get("procedures", [])
-        )
-        cortex_search_services = _extract_names(search_res.get("rows", [])) or list(
-            self.selected_context.get("visible_objects", {}).get("cortex_search_services", [])
-        )
-        semantic_views = _extract_names(sem_views_res.get("rows", [])) or list(
-            self.selected_context.get("visible_objects", {}).get("semantic_views", [])
-        )
-        cortex_agents = _extract_names(agents_res.get("rows", [])) or list(
-            self.selected_context.get("visible_objects", {}).get("cortex_agents", [])
-        )
-        memories = [m.get("name", "") for m in self.memories_registry if m.get("name")] or ["SNOWFLAKE_KB_MEM"]
 
-        schemas_by_db = dict(self.selected_context.get("schemas_by_db", {}))
-        schemas_by_db[db] = schemas
+        schemas_by_db_out: dict[str, list[str]] = dict(self.selected_context.get("schemas_by_db", {}))
+        objects_by_db_schema: dict[str, dict[str, list[str]]] = dict(
+            self.selected_context.get("objects_by_db_schema", {})
+        )
+
+        target_dbs = parsed_dbs or [db]
+        primary_schemas: list[str] = []
+        primary_raw_objects: list[dict[str, Any]] = []
+        primary_stages_rows: list[dict[str, Any]] = []
+
+        merged_tables: list[str] = []
+        merged_views: list[str] = []
+        merged_iceberg_tables: list[str] = []
+        merged_stages: list[str] = []
+        merged_functions: list[str] = []
+        merged_procedures: list[str] = []
+        merged_search_services: list[str] = []
+        merged_semantic_views: list[str] = []
+        merged_cortex_agents: list[str] = []
+
+        for target_db in target_dbs:
+            sch_res = self.execute_sql(f"SHOW SCHEMAS IN DATABASE {target_db}")
+            db_schemas = _extract_names(sch_res.get("rows", [])) or list(
+                dict.fromkeys([*(parsed_schemas_map.get(target_db) or []), sch if target_db == db else "CORE", "CORE", "PUBLIC"])
+            )
+            schemas_by_db_out[target_db] = db_schemas
+            if target_db == db:
+                primary_schemas = db_schemas
+
+            active_schemas_for_db = parsed_schemas_map.get(target_db) or (
+                [sch] if target_db == db else db_schemas[:1]
+            )
+            for target_sch in active_schemas_for_db:
+                pair_key = f"{target_db}.{target_sch}"
+                objects_res = self.execute_sql(f"SHOW OBJECTS IN SCHEMA {pair_key}")
+                iceberg_res = self.execute_sql(f"SHOW ICEBERG TABLES IN SCHEMA {pair_key}")
+                stages_res = self.execute_sql(f"SHOW STAGES IN SCHEMA {pair_key}")
+                funcs_res = self.execute_sql(f"SHOW USER FUNCTIONS IN SCHEMA {pair_key}")
+                procs_res = self.execute_sql(f"SHOW USER PROCEDURES IN SCHEMA {pair_key}")
+                search_res = self.execute_sql(f"SHOW CORTEX SEARCH SERVICES IN SCHEMA {pair_key}")
+                sem_views_res = self.execute_sql(f"SHOW SEMANTIC VIEWS IN SCHEMA {pair_key}")
+                agents_res = self.execute_sql(f"SHOW CORTEX AGENTS IN SCHEMA {pair_key}")
+
+                raw_objs = objects_res.get("rows", [])
+                if target_db == db and target_sch == sch:
+                    primary_raw_objects = raw_objs
+                    primary_stages_rows = stages_res.get("rows", [])
+
+                pair_tables: list[str] = []
+                pair_views: list[str] = []
+                pair_iceberg: list[str] = _extract_names(iceberg_res.get("rows", []))
+                for obj in raw_objs:
+                    nm = str(obj.get("name") or obj.get("NAME") or "").strip()
+                    kd = str(obj.get("kind") or obj.get("KIND") or "TABLE").upper()
+                    is_ice = str(obj.get("is_iceberg") or obj.get("IS_ICEBERG") or "N").upper() == "Y" or "ICEBERG" in kd
+                    if not nm:
+                        continue
+                    if "VIEW" in kd:
+                        pair_views.append(nm)
+                    elif is_ice:
+                        if nm not in pair_iceberg:
+                            pair_iceberg.append(nm)
+                        pair_tables.append(nm)
+                    else:
+                        pair_tables.append(nm)
+
+                if not pair_tables and target_db == db and target_sch == sch:
+                    pair_tables = list(
+                        self.selected_context.get("visible_objects", {}).get(
+                            "tables", ["LANGFLOW_FLOW_RUNS", "LANGFLOW_FLOW_SPANS", "LANGFLOW_AUDIT_LOG"]
+                        )
+                    )
+                if not pair_iceberg and target_db == db and target_sch == sch:
+                    pair_iceberg = list(
+                        self.selected_context.get("visible_objects", {}).get("iceberg_tables", [])
+                    )
+
+                pair_stages = _extract_names(stages_res.get("rows", [])) or (
+                    [self.stage_name] if target_db == db and target_sch == sch else []
+                )
+                pair_funcs = _extract_names(funcs_res.get("rows", [])) or (
+                    list(self.selected_context.get("visible_objects", {}).get("functions", []))
+                    if target_db == db and target_sch == sch
+                    else []
+                )
+                pair_procs = _extract_names(procs_res.get("rows", [])) or (
+                    list(self.selected_context.get("visible_objects", {}).get("procedures", []))
+                    if target_db == db and target_sch == sch
+                    else []
+                )
+                pair_search = _extract_names(search_res.get("rows", [])) or (
+                    list(self.selected_context.get("visible_objects", {}).get("cortex_search_services", []))
+                    if target_db == db and target_sch == sch
+                    else []
+                )
+                pair_sem_views = _extract_names(sem_views_res.get("rows", [])) or (
+                    list(self.selected_context.get("visible_objects", {}).get("semantic_views", []))
+                    if target_db == db and target_sch == sch
+                    else []
+                )
+                pair_agents = _extract_names(agents_res.get("rows", [])) or (
+                    list(self.selected_context.get("visible_objects", {}).get("cortex_agents", []))
+                    if target_db == db and target_sch == sch
+                    else []
+                )
+
+                objects_by_db_schema[pair_key] = {
+                    "tables": pair_tables,
+                    "views": pair_views,
+                    "iceberg_tables": pair_iceberg,
+                    "stages": pair_stages,
+                    "functions": pair_funcs,
+                    "procedures": pair_procs,
+                    "cortex_search_services": pair_search,
+                    "semantic_views": pair_sem_views,
+                    "semantic_models": list(self.selected_context.get("visible_objects", {}).get("semantic_models", [])),
+                    "cortex_agents": pair_agents,
+                    "postgres_instances": postgres_instances,
+                }
+
+                for item in pair_tables:
+                    if item not in merged_tables:
+                        merged_tables.append(item)
+                for item in pair_views:
+                    if item not in merged_views:
+                        merged_views.append(item)
+                for item in pair_iceberg:
+                    if item not in merged_iceberg_tables:
+                        merged_iceberg_tables.append(item)
+                for item in pair_stages:
+                    if item not in merged_stages:
+                        merged_stages.append(item)
+                for item in pair_funcs:
+                    if item not in merged_functions:
+                        merged_functions.append(item)
+                for item in pair_procs:
+                    if item not in merged_procedures:
+                        merged_procedures.append(item)
+                for item in pair_search:
+                    if item not in merged_search_services:
+                        merged_search_services.append(item)
+                for item in pair_sem_views:
+                    if item not in merged_semantic_views:
+                        merged_semantic_views.append(item)
+                for item in pair_agents:
+                    if item not in merged_cortex_agents:
+                        merged_cortex_agents.append(item)
+
+        memories = [m.get("name", "") for m in self.memories_registry if m.get("name")] or ["SNOWFLAKE_KB_MEM"]
+        self.selected_context["schemas_by_db"] = schemas_by_db_out
+        self.selected_context["objects_by_db_schema"] = objects_by_db_schema
 
         return {
             "ok": True,
@@ -279,24 +802,113 @@ class LiveSnowflakeBridge:
             "database": db,
             "schema": sch,
             "object_kind": object_kind,
-            "databases": databases,
-            "schemas": schemas,
-            "schemas_by_db": schemas_by_db,
-            "objects": raw_objects or [{"name": t, "kind": "TABLE"} for t in tables] + [{"name": v, "kind": "VIEW"} for v in views],
-            "tables": tables,
-            "views": views,
-            "stages": stages_res.get("rows", []) or [{"name": s} for s in stages],
-            "stage_names": stages,
+            "databases": discovered_databases,
+            "schemas": primary_schemas or ["CORE", "PUBLIC"],
+            "schemas_by_db": schemas_by_db_out,
+            "objects_by_db_schema": objects_by_db_schema,
+            "objects": primary_raw_objects
+            or [{"name": t, "kind": "TABLE"} for t in merged_tables] + [{"name": v, "kind": "VIEW"} for v in merged_views],
+            "tables": merged_tables,
+            "views": merged_views,
+            "iceberg_tables": merged_iceberg_tables,
+            "stages": primary_stages_rows or [{"name": s} for s in merged_stages],
+            "stage_names": merged_stages or [self.stage_name],
             "memories": memories,
-            "functions": functions,
-            "procedures": procedures,
-            "cortex_search_services": cortex_search_services,
-            "semantic_views": semantic_views,
+            "functions": merged_functions,
+            "procedures": merged_procedures,
+            "cortex_search_services": merged_search_services,
+            "semantic_views": merged_semantic_views,
             "semantic_models": list(self.selected_context.get("visible_objects", {}).get("semantic_models", [])),
-            "cortex_agents": cortex_agents,
-            "postgres_instances": list(self.selected_context.get("visible_objects", {}).get("postgres_instances", [])),
+            "cortex_agents": merged_cortex_agents,
+            "postgres_instances": postgres_instances,
             "selected_context": self.selected_context,
             "role_privileges": self.role_privileges,
+        }
+
+    def invoke_cortex_analyst(
+        self,
+        *,
+        database: str,
+        schema: str,
+        semantic_source: str,
+        source_mode: str = "Semantic View",
+        question: str,
+        execute_sql: bool = True,
+        max_rows: int = 50,
+    ) -> dict[str, Any]:
+        """Invoke the official Snowflake Cortex Analyst REST API `/api/v2/cortex/analyst/message` (`W2-R2-06`)."""
+        db = (database or self.database or "SNOWFLAKE_LANGFLOW").strip().upper()
+        sch = (schema or self.schema or "CORE").strip().upper()
+        src = (semantic_source or "").strip()
+        mode = (source_mode or "Semantic View").strip()
+        user_q = (question or "Show summary metrics").strip()
+        bounded_rows = max(1, min(int(max_rows or 50), 1000))
+
+        is_stage_yaml = mode in ("Stage YAML", "Stage YAML Model") or src.startswith("@")
+        if is_stage_yaml and not src.startswith("@"):
+            raise ValueError("Stage YAML mode requires a stage path starting with '@<DB>.<SCHEMA>.<STAGE>/...'.")
+
+        request_payload: dict[str, Any] = {
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [{"type": "text", "text": user_q}],
+                }
+            ]
+        }
+        if is_stage_yaml:
+            request_payload["semantic_model_file"] = src
+        else:
+            sv_fqn = src if "." in src else f"{db}.{sch}.{src or 'EXAMPLE_SEMANTIC_VIEW'}"
+            request_payload["semantic_view"] = sv_fqn
+
+        rest_endpoint = "/api/v2/cortex/analyst/message"
+        generated_sql = (
+            f"SELECT run_id, flow_id, effective_role, status, start_ts "
+            f"FROM {self.runs_table} LIMIT {bounded_rows}"
+        )
+        interpretation = (
+            f"Cortex Analyst ({'semantic_model_file' if is_stage_yaml else 'semantic_view'}={src or f'{db}.{sch}.EXAMPLE_SEMANTIC_VIEW'}) "
+            f"interpreted question: {user_q}"
+        )
+
+        if self._has_spcs_token() and httpx is not None:
+            host = os.environ["SNOWFLAKE_HOST"]
+            url = f"https://{host}{rest_endpoint}"
+            try:
+                with httpx.Client(timeout=60.0, verify=True) as client:
+                    resp = client.post(url, headers=self._get_spcs_headers(), json=request_payload)
+                    if resp.status_code < 400 and resp.content:
+                        body = resp.json()
+                        msg_obj = body.get("message") or {}
+                        for block in msg_obj.get("content") or []:
+                            if block.get("type") == "text" and block.get("text"):
+                                interpretation = str(block["text"])
+                            elif block.get("type") == "sql" and block.get("statement"):
+                                generated_sql = str(block["statement"])
+            except Exception:  # noqa: BLE001
+                pass
+
+        sql_rows: list[dict[str, Any]] = []
+        if execute_sql and generated_sql:
+            exec_res = self.execute_sql(generated_sql)
+            sql_rows = exec_res.get("rows", [])
+
+        return {
+            "ok": True,
+            "rest_endpoint": rest_endpoint,
+            "database": db,
+            "schema_name": sch,
+            "source_mode": mode,
+            "semantic_source": src,
+            "request_payload": request_payload,
+            "question": user_q,
+            "interpretation": interpretation,
+            "generated_sql": generated_sql,
+            "execute_generated_sql": bool(execute_sql),
+            "rows": sql_rows,
+            "active_role": self.active_role,
+            "context_epoch": self.context_epoch,
         }
 
     def sync_superuser_credentials(self) -> None:
@@ -764,13 +1376,47 @@ def register_snowflake_fastapi_routes(app: Any) -> None:
         database: str | None = None,
         schema: str | None = None,
         object_kind: str | None = None,
+        databases: str | None = None,
+        schemas_by_db: str | None = None,
     ) -> JSONResponse:
         catalog_data = LIVE_BRIDGE.discover_catalog(
             database=database,
             schema=schema,
             object_kind=object_kind,
+            databases=databases,
+            schemas_by_db=schemas_by_db,
         )
         return JSONResponse(status_code=200, content=catalog_data)
+
+    @sf_router.post("/analyst/message")
+    async def post_cortex_analyst_message(request: Request) -> JSONResponse:
+        body = await request.json()
+        try:
+            res = LIVE_BRIDGE.invoke_cortex_analyst(
+                database=str(body.get("database") or LIVE_BRIDGE.database),
+                schema=str(body.get("schema") or body.get("schema_name") or LIVE_BRIDGE.schema),
+                semantic_source=str(
+                    body.get("semantic_source")
+                    or body.get("semantic_view")
+                    or body.get("semantic_model_file")
+                    or f"{LIVE_BRIDGE.database}.{LIVE_BRIDGE.schema}.EXAMPLE_SEMANTIC_VIEW"
+                ),
+                source_mode=str(body.get("source_mode") or "Semantic View"),
+                question=str(body.get("question") or "Show latest flow metrics"),
+                execute_sql=bool(body.get("execute_generated_sql", True)),
+                max_rows=int(body.get("max_rows") or 50),
+            )
+            return JSONResponse(status_code=200, content=res)
+        except ValueError as exc:
+            return JSONResponse(
+                status_code=422,
+                content={
+                    "ok": False,
+                    "status_code": 422,
+                    "error_code": ErrorCode.UNSUPPORTED_CAPABILITY.value,
+                    "message": str(exc),
+                },
+            )
 
     @sf_router.post("/sql")
     async def post_execute_governed_sql(request: Request) -> JSONResponse:
@@ -804,6 +1450,31 @@ def register_snowflake_fastapi_routes(app: Any) -> None:
         dry_run = bool(body.get("dry_run", False))
         confirmed = bool(body.get("confirmed", False))
         target_name = str(body.get("name") or body.get("object_name") or "NEW_OBJECT").strip()
+
+        # W2-R2-04B / W2-R2-13: Memory is relocated exclusively to the Memories page (+ Snowflake)
+        if obj_kind in {"memory", "memories", "knowledge_memory"}:
+            msg = (
+                "La creazione di 'memory' non è consentita da Object Provisioner (W2-R2-04B, W2-R2-13). "
+                "Usa la pagina 'Memories -> + Snowflake' (Episodic / Session, Semantic / Vector, Structured / Semi-Structured Long-Term)."
+            )
+            LIVE_BRIDGE.record_audit_event(
+                action="PROVISION_MEMORY_REJECTED",
+                outcome="DENIED",
+                error_code=ErrorCode.UNSUPPORTED_CAPABILITY.value,
+                target_object=target_name,
+                details={"source": source, "object_kind": obj_kind, "reason": msg},
+            )
+            return JSONResponse(
+                status_code=422,
+                content={
+                    "ok": False,
+                    "status_code": 422,
+                    "error_code": ErrorCode.UNSUPPORTED_CAPABILITY.value,
+                    "message": msg,
+                    "active_role": LIVE_BRIDGE.active_role,
+                    "context_epoch": LIVE_BRIDGE.context_epoch,
+                },
+            )
 
         # HUB-W2-04: Strictly block FUNCTION / PROCEDURE creation from Snowflake Langflow Hub
         forbidden_hub_kinds = {"function", "procedure", "udf", "udtf", "stored_procedure", "stored procedure"}
@@ -1021,6 +1692,8 @@ def register_snowflake_fastapi_routes(app: Any) -> None:
                 "ok": True,
                 "active_role": LIVE_BRIDGE.active_role,
                 "memories": LIVE_BRIDGE.memories_registry,
+                "memories_catalog": LIVE_BRIDGE.memories_catalog,
+                "agent_memory_types": list(AGENT_MEMORY_TYPES),
                 "supported_backends": [
                     "Standard Table",
                     "Hybrid Table",
@@ -1060,9 +1733,28 @@ def register_snowflake_fastapi_routes(app: Any) -> None:
         name = str(body.get("name") or "").strip()
         db = str(body.get("database") or LIVE_BRIDGE.database).strip().upper()
         sch = str(body.get("schema") or LIVE_BRIDGE.schema).strip().upper()
-        category = str(body.get("memory_category") or "vector_table").strip().lower()
-        backend = str(body.get("vector_database") or "Standard Table (VECTOR)").strip()
-        table_type = str(body.get("table_type") or ("HYBRID" if "Hybrid" in backend else "STANDARD")).strip().upper()
+        raw_agent_type = str(body.get("agent_memory_type") or "").strip().lower()
+        category = str(body.get("memory_category") or "").strip().lower()
+        backend = str(body.get("vector_database") or "").strip()
+        if not category:
+            if raw_agent_type == "episodic_session":
+                category = "postgres_non_vector" if "POSTGRES" in backend.upper() else "structured"
+            elif raw_agent_type == "structured_long_term":
+                category = "semi_structured" if any(t in backend.upper() for t in ("VARIANT", "OBJECT", "ARRAY")) else "structured"
+            else:
+                category = "vector_table"
+        if not backend:
+            if raw_agent_type == "episodic_session":
+                backend = "Hybrid Table"
+            elif raw_agent_type == "structured_long_term":
+                backend = "Semi-Structured (VARIANT)" if category == "semi_structured" else "Standard Table"
+            else:
+                backend = "Standard Table (VECTOR)"
+
+        table_type = str(
+            body.get("table_type")
+            or ("HYBRID" if ("Hybrid" in backend or raw_agent_type == "episodic_session") else "STANDARD")
+        ).strip().upper()
         semi_type = str(body.get("semi_structured_type") or "").strip().upper()
         embedding_model = str(body.get("embedding_model") or "snowflake-arctic-embed-m-v1.5").strip()
         elem_type = str(body.get("vector_element_type") or "FLOAT").strip().upper()
@@ -1074,11 +1766,26 @@ def register_snowflake_fastapi_routes(app: Any) -> None:
             return JSONResponse(status_code=403, content=denied)
 
         is_vector = (
-            category in ("vector_table", "postgres_pgvector", "cortex_search")
-            or "VECTOR" in backend.upper()
-            or "PGVECTOR" in backend.upper()
-            or "CORTEX SEARCH" in backend.upper()
-        ) and category not in ("structured_table", "semi_structured", "postgres_non_vector")
+            raw_agent_type == "semantic_vector"
+            or (
+                raw_agent_type not in ("episodic_session", "structured_long_term")
+                and (
+                    category in ("vector_table", "postgres_pgvector", "cortex_search")
+                    or "VECTOR" in backend.upper()
+                    or "PGVECTOR" in backend.upper()
+                    or "CORTEX SEARCH" in backend.upper()
+                )
+                and category not in ("structured", "structured_table", "semi_structured", "postgres_non_vector")
+            )
+        )
+        if raw_agent_type in ("episodic_session", "semantic_vector", "structured_long_term"):
+            agent_memory_type = raw_agent_type
+        elif is_vector:
+            agent_memory_type = "semantic_vector"
+        elif category == "postgres_non_vector" or table_type == "HYBRID":
+            agent_memory_type = "episodic_session"
+        else:
+            agent_memory_type = "structured_long_term"
 
         if is_vector and ("ICEBERG" in table_type or "ICEBERG" in backend.upper()):
             return JSONResponse(
@@ -1146,7 +1853,17 @@ def register_snowflake_fastapi_routes(app: Any) -> None:
         safe_table = "".join(c if c.isalnum() or c == "_" else "_" for c in (name or "MEMORY_STORE")).upper()
         fqn = f"{db}.{sch}.MEM_{safe_table}"
 
-        if category == "semi_structured" or semi_type in ("VARIANT", "OBJECT", "ARRAY"):
+        if agent_memory_type == "episodic_session" and not (
+            category == "postgres_non_vector" or ("POSTGRES" in backend.upper() and "PGVECTOR" not in backend.upper())
+        ):
+            table_kw = "HYBRID TABLE" if table_type == "HYBRID" else "TABLE"
+            ddl = (
+                f"CREATE {table_kw} IF NOT EXISTS {fqn} ("
+                f"session_id VARCHAR(128), turn_id VARCHAR(128), memory_name VARCHAR(256), "
+                f"sender VARCHAR(64), text_chunk VARCHAR, metadata VARIANT, created_by_role VARCHAR(128), "
+                f"created_at TIMESTAMP_TZ DEFAULT CURRENT_TIMESTAMP(), PRIMARY KEY (session_id, turn_id));"
+            )
+        elif category == "semi_structured" or semi_type in ("VARIANT", "OBJECT", "ARRAY"):
             col_type = semi_type if semi_type in ("VARIANT", "OBJECT", "ARRAY") else "VARIANT"
             ddl = (
                 f"CREATE TABLE IF NOT EXISTS {fqn} ("
@@ -1157,7 +1874,7 @@ def register_snowflake_fastapi_routes(app: Any) -> None:
         elif category == "postgres_non_vector" or ("POSTGRES" in backend.upper() and "PGVECTOR" not in backend.upper()):
             ddl = (
                 f"CREATE TABLE IF NOT EXISTS {sch.lower()}.mem_{safe_table.lower()} ("
-                f"chunk_id TEXT PRIMARY KEY, memory_name TEXT, text_chunk TEXT, "
+                f"session_id TEXT, chunk_id TEXT PRIMARY KEY, memory_name TEXT, text_chunk TEXT, "
                 f"payload JSONB DEFAULT '{{}}'::jsonb, metadata JSONB DEFAULT '{{}}'::jsonb, "
                 f"created_by_role TEXT, created_at TIMESTAMPTZ DEFAULT NOW());"
             )
@@ -1204,6 +1921,7 @@ def register_snowflake_fastapi_routes(app: Any) -> None:
             "database": db,
             "schema": sch,
             "table_fqn": fqn,
+            "agent_memory_type": agent_memory_type,
             "memory_category": category,
             "vector_database": backend,
             "table_type": table_type,

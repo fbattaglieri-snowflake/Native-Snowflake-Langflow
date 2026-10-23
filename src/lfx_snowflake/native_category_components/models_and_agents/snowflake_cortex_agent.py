@@ -3,45 +3,33 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from lfx.custom import Component
-from lfx.io import DropdownInput, MessageTextInput, Output, StrInput
-from lfx.schema.message import Message
+try:
+    from lfx.custom import Component
+    from lfx.io import DropdownInput, MessageTextInput, Output, StrInput
+    from lfx.schema.message import Message
+except ImportError:  # pragma: no cover
+    from lfx_snowflake._lfx_compat import Component, DropdownInput, Message, MessageTextInput, Output, StrInput
+
 from lfx_snowflake.fastapi_live_bridge import LIVE_BRIDGE
 
 
 def _agent_databases() -> list[str]:
-    ctx = getattr(LIVE_BRIDGE, "selected_context", {}) or {}
-    dbs = list(ctx.get("databases") or [])
-    default_db = getattr(LIVE_BRIDGE, "database", "SNOWFLAKE_LANGFLOW")
-    if default_db and default_db not in dbs:
-        dbs.insert(0, default_db)
-    return dbs or ["SNOWFLAKE_LANGFLOW"]
+    return LIVE_BRIDGE.get_context_databases()
 
 
 def _agent_schemas(database: str | None = None) -> list[str]:
-    ctx = getattr(LIVE_BRIDGE, "selected_context", {}) or {}
-    db = (database or getattr(LIVE_BRIDGE, "database", "SNOWFLAKE_LANGFLOW")).strip()
-    schemas = list((ctx.get("schemas_by_db") or {}).get(db) or [])
-    default_schema = getattr(LIVE_BRIDGE, "schema", "CORE")
-    if default_schema and default_schema not in schemas:
-        schemas.insert(0, default_schema)
-    return schemas or ["CORE", "PUBLIC"]
+    return LIVE_BRIDGE.get_context_schemas(database)
 
 
 def _cortex_agents(database: str = "SNOWFLAKE_LANGFLOW", schema: str = "CORE") -> list[str]:
-    ctx = getattr(LIVE_BRIDGE, "selected_context", {}) or {}
-    vis = ctx.get("visible_objects") or {}
-    agents = list(vis.get("cortex_agents") or [])
-    fallback = f"{database}.{schema}.EXAMPLE_AGENT"
-    if fallback not in agents:
-        agents.append(fallback)
-    if "EXAMPLE_AGENT" not in agents:
-        agents.append("EXAMPLE_AGENT")
+    agents = list(LIVE_BRIDGE.get_context_objects(database, schema, "cortex_agents"))
+    if not agents:
+        agents = [f"{database}.{schema}.EXAMPLE_AGENT", "EXAMPLE_AGENT"]
     return agents
 
 
 class SnowflakeCortexAgentA2AComponent(Component):
-    display_name = "Snowflake Cortex Agent & A2A"
+    display_name = "Cortex Agent & A2A"
     description = (
         "Invoke a Snowflake Cortex Agent (/api/v2/databases/{db}/schemas/{schema}/agents/{name}:run "
         "or /api/v2/cortex/agent:run with thread_id and parent_message_id) via cascading "
@@ -115,20 +103,31 @@ class SnowflakeCortexAgentA2AComponent(Component):
     ) -> dict[str, Any]:
         if "database" in build_config:
             build_config["database"]["options"] = _agent_databases()
+            if field_name == "database" and isinstance(field_value, str):
+                build_config["database"]["value"] = field_value
         db = (
             field_value
             if field_name == "database" and isinstance(field_value, str)
-            else build_config.get("database", {}).get("value") or "SNOWFLAKE_LANGFLOW"
+            else build_config.get("database", {}).get("value") or LIVE_BRIDGE.database or "SNOWFLAKE_LANGFLOW"
         )
+        schemas = _agent_schemas(db)
         if "schema_name" in build_config:
-            build_config["schema_name"]["options"] = _agent_schemas(db)
+            build_config["schema_name"]["options"] = schemas
+            cur_sch = build_config["schema_name"].get("value")
+            if field_name == "schema_name" and isinstance(field_value, str):
+                build_config["schema_name"]["value"] = field_value
+            elif schemas and cur_sch not in schemas:
+                build_config["schema_name"]["value"] = schemas[0]
         sch = (
             field_value
             if field_name == "schema_name" and isinstance(field_value, str)
-            else build_config.get("schema_name", {}).get("value") or "CORE"
+            else build_config.get("schema_name", {}).get("value") or (schemas[0] if schemas else "CORE")
         )
         if "cortex_agent" in build_config:
-            build_config["cortex_agent"]["options"] = _cortex_agents(db, sch)
+            agent_opts = _cortex_agents(db, sch)
+            build_config["cortex_agent"]["options"] = agent_opts
+            if agent_opts and build_config["cortex_agent"].get("value") not in agent_opts:
+                build_config["cortex_agent"]["value"] = agent_opts[0]
         return build_config
 
     def invoke_agent(self) -> Message:

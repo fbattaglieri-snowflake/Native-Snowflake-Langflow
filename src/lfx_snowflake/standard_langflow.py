@@ -1,0 +1,308 @@
+"""Sanitized in-repo mirror of `standard_langflow` for `W2-R2-07` reasoning & token validation."""
+from __future__ import annotations
+
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
+from datetime import datetime, timezone
+from functools import cached_property
+import os
+import weakref
+
+try:
+    from lfx.base.models.provider_ssrf import provider_httpx_clients
+except ImportError:  # pragma: no cover
+    try:
+        import httpx
+
+        def provider_httpx_clients(base_url: str) -> dict:
+            return {
+                "http_client": httpx.Client(base_url=base_url),
+                "http_async_client": httpx.AsyncClient(base_url=base_url),
+            }
+    except ImportError:
+        class _DummyHttpClient:
+            def __init__(self, base_url: str = "") -> None:
+                self.base_url = base_url
+
+            def close(self) -> None:
+                pass
+
+            async def aclose(self) -> None:
+                pass
+
+        def provider_httpx_clients(base_url: str) -> dict:
+            return {
+                "http_client": _DummyHttpClient(base_url=base_url),
+                "http_async_client": _DummyHttpClient(base_url=base_url),
+            }
+
+
+class _FallbackChatOpenAI:
+    def __init__(self, **kwargs):
+        if "reasoning_effort" in kwargs:
+            raise ValueError(
+                "1 validation error for ChatOpenAI\nreasoning_effort\n"
+                "  Extra inputs are not permitted [type=extra_forbidden]"
+            )
+        for k, v in kwargs.items():
+            setattr(self, k, v)
+
+
+class _FallbackChatAnthropic:
+    def __init__(self, **kwargs):
+        for k, v in kwargs.items():
+            setattr(self, k, v)
+
+
+try:
+    from langchain_openai import ChatOpenAI
+except ImportError:  # pragma: no cover
+    ChatOpenAI = _FallbackChatOpenAI  # type: ignore[assignment,misc]
+
+try:
+    from langchain_anthropic import ChatAnthropic
+except ImportError:  # pragma: no cover
+    ChatAnthropic = _FallbackChatAnthropic  # type: ignore[assignment,misc]
+
+try:
+    from pydantic import PrivateAttr
+except ImportError:  # pragma: no cover
+    def PrivateAttr(default=None):  # type: ignore[misc]
+        return default
+
+try:
+    import anthropic
+except ImportError:  # pragma: no cover
+    anthropic = None  # type: ignore[assignment]
+
+ORIGIN = os.environ.get(
+    'SNOWFLAKE_STANDARD_PROXY_ORIGIN',
+    'http://<PROXY_SERVICE>.<DNS_NAMESPACE>:8080',
+)
+OLLAMA_ORIGIN = os.environ.get(
+    'SNOWFLAKE_OLLAMA_ORIGIN',
+    'http://<OLLAMA_SERVICE>.<DNS_NAMESPACE>:11434/v1',
+)
+BASES = {
+    'chat': ORIGIN + '/chat/v1',
+    'responses': ORIGIN + '/responses/v1',
+    'messages': ORIGIN + '/messages',
+    'ollama': OLLAMA_ORIGIN,
+}
+
+CHAT_REASONING_REQUIRED_MODELS = ('openai-gpt-6-luna', 'openai-gpt-6-sol')
+CHAT_REASONING_UNSUPPORTED_MODELS = ('grok-4.6', 'grok-4.7', 'kimi-k3', 'glm-5.3')
+VALID_CHAT_REASONING_EFFORTS = ('unspecified', 'none', 'low', 'medium', 'high')
+VALID_RESPONSES_REASONING_EFFORTS = ('unspecified', 'low', 'medium', 'high')
+
+
+def close_clients(clients):
+    try:
+        clients['http_client'].close()
+    finally:
+        try:
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                pool.submit(lambda: asyncio.run(clients['http_async_client'].aclose())).result()
+        except RuntimeError:
+            pass
+
+
+@contextmanager
+def discovery_transport(protocol):
+    clients = provider_httpx_clients(BASES[protocol])
+    if not {'http_client', 'http_async_client'} <= clients.keys():
+        raise ValueError('STANDARD_PROTECTED_TRANSPORT_REQUIRED')
+    try:
+        yield clients['http_client']
+    finally:
+        close_clients(clients)
+
+
+def catalog(protocol, *, stream=False):
+    base = BASES[protocol]
+    path = '/v1/models' if protocol == 'messages' else '/models'
+    with discovery_transport(protocol) as client:
+        response = client.get(
+            base + path,
+            params={'limit': 1000} if protocol == 'messages' else None,
+            timeout=20,
+            follow_redirects=False,
+        )
+        response.raise_for_status()
+        body = response.json()
+    if body.get('has_more'):
+        raise ValueError('STANDARD_CATALOG_TRUNCATED')
+    rows = body['data']
+    identifiers = []
+    for row in rows:
+        identifier = row['id']
+        if not isinstance(identifier, str) or not identifier or identifier in identifiers:
+            raise ValueError('STANDARD_CATALOG_INVALID')
+        if protocol != 'ollama':
+            metadata = row['metadata']
+            if metadata['release_status'] not in ('experimental', 'qualified'):
+                raise ValueError('STANDARD_RELEASE_INVALID')
+            if datetime.fromisoformat(metadata['expires_at'].replace('Z', '+00:00')) <= datetime.now(timezone.utc):
+                continue
+            if stream and (
+                'streaming' not in metadata.get('capabilities', [])
+                or protocol == 'responses'
+                and metadata.get('response_stream') != 'ordered-items'
+            ):
+                continue
+        elif stream:
+            continue
+        identifiers.append(identifier)
+    return sorted(identifiers)
+
+
+def refresh(config, protocol):
+    field = config['model_id']
+    field['options'] = []
+    try:
+        field['options'] = catalog(protocol)
+    except Exception:
+        field['info'] = 'Discovery unavailable. No cached fallback; retry Refresh explicitly.'
+        raise ValueError('STANDARD_DISCOVERY_UNAVAILABLE') from None
+    field['info'] = 'Live published catalog. Refresh to see new models; saved selection never changes automatically.'
+    if field.get('value') and field['value'] not in field['options']:
+        field['info'] += ' Saved model unavailable: choose explicitly.'
+    return config
+
+
+class ProtectedAnthropic(ChatAnthropic):
+    _transports: dict = PrivateAttr()
+
+    @cached_property
+    def _client(self):
+        return anthropic.Anthropic(**self._client_params, http_client=self._transports['http_client'])
+
+    @cached_property
+    def _async_client(self):
+        return anthropic.AsyncAnthropic(**self._client_params, http_client=self._transports['http_async_client'])
+
+
+def resolve_reasoning_options(
+    protocol: str,
+    identifier: str,
+    *,
+    reasoning: str = 'unspecified',
+    reasoning_effort: str | None = None,
+    extended_thinking: str = 'disabled',
+    thinking_budget_tokens: int = 2048,
+    max_tokens: int = 2048,
+) -> dict:
+    """Resolve protocol-specific reasoning/thinking options without triggering ChatOpenAI extra_forbidden (`W2-R2-07`)."""
+    effective_max_tokens = int(max_tokens or 2048)
+    if effective_max_tokens < 1 or effective_max_tokens > 128000:
+        raise ValueError('STANDARD_TOKEN_LIMIT_OUT_OF_RANGE')
+
+    raw_effort = (reasoning_effort if reasoning_effort is not None else reasoning) or 'unspecified'
+    raw_effort = str(raw_effort).strip().lower()
+
+    if protocol == 'chat':
+        if raw_effort not in VALID_CHAT_REASONING_EFFORTS:
+            raise ValueError(f'Invalid chat reasoning_effort: {raw_effort}')
+        if identifier in CHAT_REASONING_UNSUPPORTED_MODELS:
+            return {'max_tokens': effective_max_tokens, 'extra_body': None}
+        if identifier in CHAT_REASONING_REQUIRED_MODELS:
+            effort_val = 'none' if raw_effort == 'unspecified' else raw_effort
+            return {'max_tokens': effective_max_tokens, 'extra_body': {'reasoning_effort': effort_val}}
+        if raw_effort != 'unspecified':
+            return {'max_tokens': effective_max_tokens, 'extra_body': {'reasoning_effort': raw_effort}}
+        return {'max_tokens': effective_max_tokens, 'extra_body': None}
+
+    if protocol == 'responses':
+        if raw_effort not in VALID_RESPONSES_REASONING_EFFORTS and raw_effort != 'none':
+            raise ValueError(f'Invalid responses reasoning_effort: {raw_effort}')
+        effort_val = 'medium' if raw_effort in ('unspecified', 'none', '') else raw_effort
+        return {
+            'max_tokens': effective_max_tokens,
+            'store': False,
+            'include': ['reasoning.encrypted_content'],
+            'output_version': 'responses/v1',
+            'extra_body': {'reasoning': {'effort': effort_val, 'summary': 'auto'}},
+        }
+
+    if protocol == 'messages':
+        mode = str(extended_thinking or 'disabled').strip().lower()
+        if mode == 'enabled':
+            budget = max(1024, min(32768, int(thinking_budget_tokens or 2048)))
+            if effective_max_tokens <= budget:
+                effective_max_tokens = budget + 1024
+            return {
+                'max_tokens': effective_max_tokens,
+                'thinking': {'type': 'enabled', 'budget_tokens': budget},
+            }
+        return {'max_tokens': effective_max_tokens, 'thinking': None}
+
+    return {'max_tokens': effective_max_tokens, 'extra_body': None}
+
+
+def build(
+    protocol,
+    identifier,
+    stream=False,
+    reasoning='unspecified',
+    max_tokens=2048,
+    *,
+    reasoning_effort=None,
+    extended_thinking='disabled',
+    thinking_budget_tokens=2048,
+):
+    if type(stream) is not bool:
+        raise ValueError('STANDARD_STREAM_BOOLEAN_REQUIRED')
+    resolved = resolve_reasoning_options(
+        protocol,
+        identifier,
+        reasoning=reasoning,
+        reasoning_effort=reasoning_effort,
+        extended_thinking=extended_thinking,
+        thinking_budget_tokens=thinking_budget_tokens,
+        max_tokens=max_tokens,
+    )
+    if identifier not in (catalog(protocol, stream=True) if stream else catalog(protocol)):
+        raise ValueError('STANDARD_SELECTED_MODEL_UNAVAILABLE: no automatic replacement')
+    clients = provider_httpx_clients(BASES[protocol])
+    if not {'http_client', 'http_async_client'} <= clients.keys():
+        raise ValueError('STANDARD_PROTECTED_TRANSPORT_REQUIRED')
+    common = dict(
+        model=identifier,
+        api_key='private-spcs',
+        base_url=BASES[protocol],
+        max_tokens=resolved['max_tokens'],
+        max_retries=0,
+        timeout=180,
+        streaming=stream,
+    )
+    try:
+        if protocol == 'messages':
+            anth_kwargs = dict(common)
+            if resolved.get('thinking'):
+                anth_kwargs['thinking'] = resolved['thinking']
+            model = ProtectedAnthropic(**anth_kwargs)
+            model._transports = clients
+        else:
+            options = {}
+            if protocol == 'responses':
+                options.update(
+                    store=False,
+                    include=['reasoning.encrypted_content'],
+                    output_version='responses/v1',
+                )
+            if resolved.get('extra_body'):
+                options['extra_body'] = resolved['extra_body']
+            if protocol == 'ollama':
+                options['temperature'] = 0.1
+            model = ChatOpenAI(
+                **common,
+                **clients,
+                use_responses_api=protocol == 'responses',
+                **options,
+            )
+        weakref.finalize(model, close_clients, clients)
+        return model
+    except BaseException:
+        close_clients(clients)
+        raise

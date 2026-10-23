@@ -3,50 +3,52 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from lfx.custom import Component
-from lfx.io import BoolInput, DropdownInput, MultilineInput, Output, StrInput
-from lfx.schema import DataFrame
-from lfx.schema.message import Message
+try:
+    from lfx.custom import Component
+    from lfx.io import BoolInput, DropdownInput, MultilineInput, Output, StrInput
+    from lfx.schema import DataFrame
+    from lfx.schema.message import Message
+except ImportError:  # pragma: no cover
+    from lfx_snowflake._lfx_compat import (
+        BoolInput,
+        Component,
+        DataFrame,
+        DropdownInput,
+        Message,
+        MultilineInput,
+        Output,
+        StrInput,
+    )
+
 from lfx_snowflake.components.llm_operations import SnowflakeFunctionEngine
 from lfx_snowflake.fastapi_live_bridge import LIVE_BRIDGE
 
 
 CREATE_REPLACE_FUNC_OPTION = "+ Create / Replace Function..."
+DEFAULT_SQL_FUNC_BODY = "UPPER(TRIM(x))"
+DEFAULT_PYTHON_FUNC_BODY = "def compute(x):\n    return (x or '').strip().upper()"
 
 
 def _func_databases() -> list[str]:
-    ctx = getattr(LIVE_BRIDGE, "selected_context", {}) or {}
-    dbs = list(ctx.get("databases") or [])
-    default_db = getattr(LIVE_BRIDGE, "database", "SNOWFLAKE_LANGFLOW")
-    if default_db and default_db not in dbs:
-        dbs.insert(0, default_db)
-    return dbs or ["SNOWFLAKE_LANGFLOW"]
+    return LIVE_BRIDGE.get_context_databases()
 
 
 def _func_schemas(database: str | None = None) -> list[str]:
-    ctx = getattr(LIVE_BRIDGE, "selected_context", {}) or {}
-    db = (database or getattr(LIVE_BRIDGE, "database", "SNOWFLAKE_LANGFLOW")).strip()
-    schemas = list((ctx.get("schemas_by_db") or {}).get(db) or [])
-    default_schema = getattr(LIVE_BRIDGE, "schema", "CORE")
-    if default_schema and default_schema not in schemas:
-        schemas.insert(0, default_schema)
-    return schemas or ["CORE", "PUBLIC"]
+    return LIVE_BRIDGE.get_context_schemas(database)
 
 
-def _func_options() -> list[str]:
-    ctx = getattr(LIVE_BRIDGE, "selected_context", {}) or {}
-    vis = ctx.get("visible_objects") or {}
-    funcs = list(vis.get("functions") or [])
+def _func_options(database: str | None = None, schema: str | None = None) -> list[str]:
+    funcs = list(LIVE_BRIDGE.get_context_objects(database, schema, "functions"))
     if CREATE_REPLACE_FUNC_OPTION not in funcs:
         funcs.insert(0, CREATE_REPLACE_FUNC_OPTION)
     return funcs
 
 
 class SnowflakeFunctionComponent(Component):
-    display_name = "Snowflake Function (UDF / UDTF)"
+    display_name = "Function (UDF / UDTF)"
     description = (
         "Author, preview, register, and invoke Snowflake Scalar UDFs and Tabular UDTFs "
-        "(SQL or Python 3.12 with optional Stage IMPORTS) in <Database>.<Schema>."
+        "(SQL or Python 3.12 with optional Stage IMPORTS) in <Database>.<Schema> with dynamic code editor visibility."
     )
     icon = "Snowflake"
     name = "SnowflakeFunctionUDF"
@@ -69,9 +71,16 @@ class SnowflakeFunctionComponent(Component):
             combobox=True,
         ),
         DropdownInput(
+            name="action_mode",
+            display_name="Action Mode",
+            options=["Preview DDL", "Execute Existing", "Invoke Existing", "CREATE OR REPLACE", "Create & Invoke"],
+            value="Preview DDL",
+            real_time_refresh=True,
+        ),
+        DropdownInput(
             name="function_selector",
             display_name="Function in Schema",
-            options=_func_options(),
+            options=_func_options("SNOWFLAKE_LANGFLOW", "CORE"),
             value=CREATE_REPLACE_FUNC_OPTION,
             real_time_refresh=True,
             combobox=True,
@@ -80,6 +89,7 @@ class SnowflakeFunctionComponent(Component):
             name="function_name",
             display_name="Function Name",
             value="NORMALIZE_TEXT_UDF",
+            show=True,
         ),
         DropdownInput(
             name="function_kind",
@@ -87,6 +97,7 @@ class SnowflakeFunctionComponent(Component):
             options=["Scalar UDF", "Tabular UDTF"],
             value="Scalar UDF",
             real_time_refresh=True,
+            show=True,
         ),
         DropdownInput(
             name="language",
@@ -94,38 +105,40 @@ class SnowflakeFunctionComponent(Component):
             options=["SQL", "PYTHON"],
             value="SQL",
             real_time_refresh=True,
+            show=True,
         ),
         StrInput(
             name="signature_args",
             display_name="Signature Arguments",
             value="x VARCHAR",
+            show=True,
+        ),
+        MultilineInput(
+            name="body",
+            display_name="Function Code Body (SQL expression or Python def compute(...):)",
+            value=DEFAULT_SQL_FUNC_BODY,
+            real_time_refresh=False,
+            advanced=False,
+            show=True,
         ),
         StrInput(
             name="return_type",
             display_name="Return Type (VARCHAR, VARIANT, or TABLE(...))",
             value="VARCHAR",
+            show=True,
         ),
         StrInput(
             name="stage_imports",
             display_name="Stage IMPORTS (optional CSV, e.g. @DB.SCHEMA.STAGE/helper.py)",
             value="",
-            advanced=True,
-        ),
-        MultilineInput(
-            name="body",
-            display_name="Function Body (SQL expression or Python handler)",
-            value="UPPER(TRIM(x))",
-        ),
-        DropdownInput(
-            name="action_mode",
-            display_name="Action Mode",
-            options=["Preview DDL", "Invoke Existing", "Create & Invoke"],
-            value="Preview DDL",
+            advanced=False,
+            show=True,
         ),
         StrInput(
             name="call_args",
             display_name="Invocation Arguments",
             value="'snowflake langflow'",
+            show=True,
         ),
         BoolInput(
             name="return_as_json",
@@ -146,12 +159,62 @@ class SnowflakeFunctionComponent(Component):
         db = (
             field_value
             if field_name == "database" and isinstance(field_value, str)
-            else build_config.get("database", {}).get("value") or "SNOWFLAKE_LANGFLOW"
+            else build_config.get("database", {}).get("value") or getattr(self, "database", "SNOWFLAKE_LANGFLOW")
         )
         if "schema_name" in build_config:
             build_config["schema_name"]["options"] = _func_schemas(db)
+        sch = (
+            field_value
+            if field_name == "schema_name" and isinstance(field_value, str)
+            else build_config.get("schema_name", {}).get("value") or getattr(self, "schema_name", "CORE")
+        )
         if "function_selector" in build_config:
-            build_config["function_selector"]["options"] = _func_options()
+            build_config["function_selector"]["options"] = _func_options(db, sch)
+
+        mode = (
+            field_value
+            if field_name == "action_mode" and isinstance(field_value, str)
+            else build_config.get("action_mode", {}).get("value") or getattr(self, "action_mode", "Preview DDL")
+        ).strip()
+        fn_sel = (
+            field_value
+            if field_name == "function_selector" and isinstance(field_value, str)
+            else build_config.get("function_selector", {}).get("value") or getattr(self, "function_selector", CREATE_REPLACE_FUNC_OPTION)
+        ).strip()
+        lang = (
+            field_value
+            if field_name == "language" and isinstance(field_value, str)
+            else build_config.get("language", {}).get("value") or getattr(self, "language", "SQL")
+        ).strip().upper()
+
+        is_existing_call = mode in ("Execute Existing", "Invoke Existing") or (
+            bool(fn_sel) and fn_sel != CREATE_REPLACE_FUNC_OPTION and mode not in ("CREATE OR REPLACE", "Create & Invoke", "Preview DDL")
+        )
+        if field_name == "function_selector" and fn_sel != CREATE_REPLACE_FUNC_OPTION:
+            is_existing_call = True
+
+        authoring_fields = (
+            "function_name",
+            "function_kind",
+            "language",
+            "signature_args",
+            "return_type",
+            "stage_imports",
+            "body",
+        )
+        for fname in authoring_fields:
+            if fname in build_config:
+                build_config[fname]["show"] = not is_existing_call
+        if "call_args" in build_config:
+            build_config["call_args"]["show"] = True
+
+        if field_name == "language" and "body" in build_config:
+            cur_body = (build_config["body"].get("value") or "").strip()
+            if lang == "PYTHON" and (not cur_body or cur_body == DEFAULT_SQL_FUNC_BODY):
+                build_config["body"]["value"] = DEFAULT_PYTHON_FUNC_BODY
+            elif lang == "SQL" and (not cur_body or cur_body == DEFAULT_PYTHON_FUNC_BODY or "def compute(" in cur_body):
+                build_config["body"]["value"] = DEFAULT_SQL_FUNC_BODY
+
         return build_config
 
     def _effective_func_name(self) -> str:
@@ -206,7 +269,7 @@ class SnowflakeFunctionComponent(Component):
                 )
             )
 
-        if mode == "Create & Invoke":
+        if mode in ("Create & Invoke", "CREATE OR REPLACE"):
             denied = LIVE_BRIDGE.check_write_privilege_or_deny("CREATE_FUNCTION", f"{db}.{sch}.{nm}")
             if denied:
                 raise ValueError(denied["message"])

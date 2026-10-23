@@ -3,35 +3,38 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from lfx.custom import Component
-from lfx.io import DropdownInput, IntInput, MultilineInput, Output, StrInput
-from lfx.schema import Data, DataFrame
-from lfx.schema.message import Message
+try:
+    from lfx.custom import Component
+    from lfx.io import DropdownInput, IntInput, MultilineInput, Output, StrInput
+    from lfx.schema import Data, DataFrame
+    from lfx.schema.message import Message
+except ImportError:  # pragma: no cover
+    from lfx_snowflake._lfx_compat import (
+        Component,
+        Data,
+        DataFrame,
+        DropdownInput,
+        IntInput,
+        Message,
+        MultilineInput,
+        Output,
+        StrInput,
+    )
+
 from lfx_snowflake.components.llm_operations import SnowflakeSQLStatementEngine
 from lfx_snowflake.fastapi_live_bridge import LIVE_BRIDGE
 
 
 def _sql_databases() -> list[str]:
-    ctx = getattr(LIVE_BRIDGE, "selected_context", {}) or {}
-    dbs = list(ctx.get("databases") or [])
-    default_db = getattr(LIVE_BRIDGE, "database", "SNOWFLAKE_LANGFLOW")
-    if default_db and default_db not in dbs:
-        dbs.insert(0, default_db)
-    return dbs or ["SNOWFLAKE_LANGFLOW"]
+    return LIVE_BRIDGE.get_context_databases()
 
 
 def _sql_schemas(database: str | None = None) -> list[str]:
-    ctx = getattr(LIVE_BRIDGE, "selected_context", {}) or {}
-    db = (database or getattr(LIVE_BRIDGE, "database", "SNOWFLAKE_LANGFLOW")).strip()
-    schemas = list((ctx.get("schemas_by_db") or {}).get(db) or [])
-    default_schema = getattr(LIVE_BRIDGE, "schema", "CORE")
-    if default_schema and default_schema not in schemas:
-        schemas.insert(0, default_schema)
-    return schemas or ["CORE", "PUBLIC"]
+    return LIVE_BRIDGE.get_context_schemas(database)
 
 
 class SnowflakeSQLStatementComponent(Component):
-    display_name = "Snowflake SQL Statement"
+    display_name = "SQL Statement"
     description = (
         "Execute a governed Snowflake SQL statement (SELECT / CALL / SHOW) within context "
         "<Database>.<Schema> under the active role with DataFrame or JSON Object (OBJECT_CONSTRUCT) output."

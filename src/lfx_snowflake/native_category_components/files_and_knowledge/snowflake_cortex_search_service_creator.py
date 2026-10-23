@@ -2,52 +2,60 @@ from __future__ import annotations
 
 from typing import Any
 
-from lfx.custom import Component
-from lfx.io import DataInput, DropdownInput, Output, StrInput
-from lfx.schema import Data
+try:
+    from lfx.custom import Component
+    from lfx.io import DataInput, DropdownInput, MultilineInput, Output, StrInput
+    from lfx.schema import Data
+except ImportError:  # pragma: no cover
+    from lfx_snowflake._lfx_compat import Component, Data, DataInput, DropdownInput, MultilineInput, Output, StrInput
+
 from lfx_snowflake.components.files_and_stage import (
     CortexSearchServiceCreatorBuilder,
     CortexSearchServiceCreatorSpec,
 )
 from lfx_snowflake.components.knowledge_and_memories import DEFAULT_SNOWFLAKE_EMBEDDING_CATALOG
 from lfx_snowflake.fastapi_live_bridge import LIVE_BRIDGE
+from lfx_snowflake.native_category_components.files_and_knowledge.snowflake_cortex_search_parse_document import (
+    CORTEX_SEARCH_PIPELINE_GUIDE_STEP_1,
+)
 
 
 def _database_options() -> list[str]:
-    ctx = getattr(LIVE_BRIDGE, "selected_context", {}) or {}
-    dbs = list(ctx.get("databases") or [])
-    default_db = getattr(LIVE_BRIDGE, "database", "SNOWFLAKE_LANGFLOW")
-    if default_db and default_db not in dbs:
-        dbs.insert(0, default_db)
-    return dbs or ["SNOWFLAKE_LANGFLOW"]
+    return LIVE_BRIDGE.get_context_databases()
 
 
 def _schema_options(database: str | None = None) -> list[str]:
-    ctx = getattr(LIVE_BRIDGE, "selected_context", {}) or {}
-    db = (database or getattr(LIVE_BRIDGE, "database", "SNOWFLAKE_LANGFLOW")).strip()
-    schemas = list((ctx.get("schemas_by_db") or {}).get(db) or [])
-    default_schema = getattr(LIVE_BRIDGE, "schema", "CORE")
-    if default_schema and default_schema not in schemas:
-        schemas.insert(0, default_schema)
-    return schemas or ["CORE", "PUBLIC"]
+    return LIVE_BRIDGE.get_context_schemas(database)
 
 
 class SnowflakeCortexSearchServiceCreatorComponent(Component):
     display_name = "Cortex Search 3: Search Service"
     description = (
-        "Tab 3 of the Cortex Search indexing pipeline: executes CREATE OR REPLACE CORTEX SEARCH SERVICE "
-        "ON <search_column> ATTRIBUTES <attr_cols> WAREHOUSE = <WH> TARGET_LAG = '<lag>' "
-        "EMBEDDING_MODEL = '<model>' AS (SELECT ... FROM <DB>.<SCHEMA>.DOC_CHUNKS), "
+        "Step 3 of the 4-node Cortex Search indexing pipeline (1: Parse Document -> 2: Split Text -> 3: Search Service): "
+        "executes CREATE OR REPLACE CORTEX SEARCH SERVICE ON <search_column> ATTRIBUTES <attr_cols> WAREHOUSE = <WH> "
+        "TARGET_LAG = '<lag>' EMBEDDING_MODEL = '<model>' AS (SELECT ... FROM <DB>.<SCHEMA>.DOC_CHUNKS), "
         "inspects live status (SHOW/DESCRIBE CORTEX SEARCH SERVICE), and supports Suspend / Resume."
     )
     icon = "Snowflake"
     name = "SnowflakeCortexSearchServiceCreator"
 
     inputs = [
+        MultilineInput(
+            name="pipeline_guide",
+            display_name="Pipeline Usage Guide (1 -> 2 -> 3 Initial Build + 4 Continuous Stream + Task)",
+            value=CORTEX_SEARCH_PIPELINE_GUIDE_STEP_1,
+            advanced=False,
+        ),
+        DataInput(
+            name="upstream_chunks_result",
+            display_name="Upstream Step 2: Split Text Result (Chaining Port)",
+            info="Connect 'Split Text Result' or 'Chunks Table Reference' from Step 2 to auto-inherit Database, Schema, and DOC_CHUNKS.",
+        ),
         DataInput(
             name="chunks_table_ref",
             display_name="Chunks Table Reference (Optional)",
             info="Optional connection from 'Cortex Search 2: Split Text'.",
+            advanced=True,
         ),
         DropdownInput(
             name="database",
@@ -118,7 +126,7 @@ class SnowflakeCortexSearchServiceCreatorComponent(Component):
     ]
     outputs = [
         Output(display_name="Search Service Result", name="service_result", method="run_search_service_creator"),
-        Output(display_name="Search Service Reference", name="service_ref", method="as_service_reference"),
+        Output(display_name="Search Service Reference (To Step 4: Stream + Task)", name="service_ref", method="as_service_reference"),
     ]
 
     def update_build_config(
@@ -138,7 +146,7 @@ class SnowflakeCortexSearchServiceCreatorComponent(Component):
     def _build_spec_and_builder(
         self,
     ) -> tuple[CortexSearchServiceCreatorSpec, CortexSearchServiceCreatorBuilder]:
-        ref = getattr(self, "chunks_table_ref", None)
+        ref = getattr(self, "upstream_chunks_result", None) or getattr(self, "chunks_table_ref", None)
         ref_data = getattr(ref, "data", ref) if ref is not None else {}
         if not isinstance(ref_data, dict):
             ref_data = {}
@@ -183,6 +191,7 @@ class SnowflakeCortexSearchServiceCreatorComponent(Component):
                 "schema_name": spec.schema,
                 "service_name": spec.service_name,
                 "service_fqn": spec.service_fqn,
+                "source_table": spec.source_table,
                 "source_table_fqn": spec.source_table_fqn,
                 "search_column": spec.search_column,
                 "attribute_columns": list(spec.attribute_columns),
@@ -220,12 +229,14 @@ class SnowflakeCortexSearchServiceCreatorComponent(Component):
             "schema_name": spec.schema,
             "service_name": spec.service_name,
             "service_fqn": spec.service_fqn,
+            "source_table": spec.source_table,
             "source_table_fqn": spec.source_table_fqn,
             "search_column": spec.search_column,
             "attribute_columns": list(spec.attribute_columns),
             "warehouse": spec.warehouse,
             "target_lag": spec.target_lag,
             "embedding_model": spec.embedding_model,
+            "pipeline_guide": CORTEX_SEARCH_PIPELINE_GUIDE_STEP_1,
             "create_service_ddl": create_ddl,
             "show_sql": status_sql["show_sql"],
             "describe_sql": status_sql["describe_sql"],

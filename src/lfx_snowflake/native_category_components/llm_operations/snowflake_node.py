@@ -3,38 +3,29 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from lfx.custom import Component
-from lfx.io import DropdownInput, IntInput, MultilineInput, Output
-from lfx.schema import Data, DataFrame
-from lfx.schema.message import Message
+try:
+    from lfx.custom import Component
+    from lfx.io import DropdownInput, IntInput, MultilineInput, Output
+    from lfx.schema import Data, DataFrame
+    from lfx.schema.message import Message
+except ImportError:  # pragma: no cover
+    from lfx_snowflake._lfx_compat import Component, Data, DataFrame, DropdownInput, IntInput, Message, MultilineInput, Output
+
 from lfx_snowflake.fastapi_live_bridge import LIVE_BRIDGE
 
 
 def _node_databases() -> list[str]:
-    ctx = getattr(LIVE_BRIDGE, "selected_context", {}) or {}
-    dbs = list(ctx.get("databases") or [])
-    default_db = getattr(LIVE_BRIDGE, "database", "SNOWFLAKE_LANGFLOW")
-    if default_db and default_db not in dbs:
-        dbs.insert(0, default_db)
-    return dbs or ["SNOWFLAKE_LANGFLOW"]
+    return LIVE_BRIDGE.get_context_databases()
 
 
 def _node_schemas(database: str | None = None) -> list[str]:
-    ctx = getattr(LIVE_BRIDGE, "selected_context", {}) or {}
-    db = (database or getattr(LIVE_BRIDGE, "database", "SNOWFLAKE_LANGFLOW")).strip()
-    schemas = list((ctx.get("schemas_by_db") or {}).get(db) or [])
-    default_schema = getattr(LIVE_BRIDGE, "schema", "CORE")
-    if default_schema and default_schema not in schemas:
-        schemas.insert(0, default_schema)
-    return schemas or ["CORE", "PUBLIC"]
+    return LIVE_BRIDGE.get_context_schemas(database)
 
 
-def _node_targets() -> list[str]:
-    ctx = getattr(LIVE_BRIDGE, "selected_context", {}) or {}
-    vis = ctx.get("visible_objects") or {}
+def _node_targets(database: str | None = None, schema: str | None = None) -> list[str]:
     items: list[str] = []
     for k in ("tables", "views", "procedures", "functions"):
-        for item in vis.get(k) or []:
+        for item in LIVE_BRIDGE.get_context_objects(database, schema, k):
             if item not in items:
                 items.append(item)
     for fallback in ("LANGFLOW_FLOW_RUNS", "LANGFLOW_FLOW_SPANS", "LANGFLOW_AUDIT_LOG"):
@@ -44,9 +35,9 @@ def _node_targets() -> list[str]:
 
 
 class SnowflakeLLMOperationComponent(Component):
-    display_name = "Snowflake"
+    display_name = "Operations"
     description = (
-        "Unified context-bound Snowflake operational node in LLM Operations bound to "
+        "Unified context-bound Snowflake Operations node in LLM Operations bound to "
         "Hub <Database>.<Schema> and active role."
     )
     icon = "Snowflake"
@@ -79,7 +70,7 @@ class SnowflakeLLMOperationComponent(Component):
         DropdownInput(
             name="target_object",
             display_name="Target Object in Schema",
-            options=_node_targets(),
+            options=_node_targets("SNOWFLAKE_LANGFLOW", "CORE"),
             value="LANGFLOW_FLOW_RUNS",
             real_time_refresh=True,
             combobox=True,
@@ -115,8 +106,13 @@ class SnowflakeLLMOperationComponent(Component):
         )
         if "schema_name" in build_config:
             build_config["schema_name"]["options"] = _node_schemas(db)
+        sch = (
+            field_value
+            if field_name == "schema_name" and isinstance(field_value, str)
+            else build_config.get("schema_name", {}).get("value") or "CORE"
+        )
         if "target_object" in build_config:
-            build_config["target_object"]["options"] = _node_targets()
+            build_config["target_object"]["options"] = _node_targets(db, sch)
         return build_config
 
     def _build_sql(self) -> str:

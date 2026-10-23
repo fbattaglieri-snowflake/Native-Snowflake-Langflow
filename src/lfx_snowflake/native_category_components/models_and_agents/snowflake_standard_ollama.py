@@ -1,12 +1,20 @@
-from lfx.base.models.model import LCModelComponent
-from lfx.io import DropdownInput, IntInput
-from lfx.field_typing import LanguageModel
-import standard_langflow
+try:
+    from lfx.base.models.model import LCModelComponent
+    from lfx.io import DropdownInput, IntInput
+    from lfx.field_typing import LanguageModel
+except ImportError:  # pragma: no cover
+    from lfx_snowflake._lfx_compat import DropdownInput, IntInput, LCModelComponent, LanguageModel
+
+try:
+    import standard_langflow
+except ImportError:  # pragma: no cover
+    from lfx_snowflake import standard_langflow
+
 
 class PrivateOllama(LCModelComponent):
-    display_name = "Ollama (Snowflake Hosted)"
+    display_name = "Private - Ollama"
     name = "PrivateOllama"
-    icon = "Ollama"
+    icon = "Snowflake"
     description = "Snowflake-hosted Ollama service on SPCS GPU compute pool."
     inputs = [
         *LCModelComponent.get_base_inputs(),
