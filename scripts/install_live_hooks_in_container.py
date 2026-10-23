@@ -3,12 +3,18 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import re
 import shutil
+import sqlite3
 import urllib.parse
 from pathlib import Path
 
 import orjson
+
+os.environ.setdefault("UV_CACHE_DIR", "/tmp/uv-cache")
+os.environ.setdefault("XDG_CACHE_HOME", "/tmp/.cache")
+os.environ.setdefault("SQLITE_TMPDIR", "/tmp")
 
 SITE_PACKAGES = Path("/app/.venv/lib64/python3.14/site-packages")
 LANGFLOW_MAIN = SITE_PACKAGES / "langflow" / "main.py"
@@ -17,6 +23,62 @@ LFX_COMPONENTS_DIR = SITE_PACKAGES / "lfx" / "components"
 LFX_INDEX_JSON = SITE_PACKAGES / "lfx" / "_assets" / "component_index.json"
 COMPONENTS_ROOT = Path("/opt/standard-components")
 SOURCE_ROOT = Path("/opt/snowflake-langflow")
+PERSIST_SQLITE_DB = Path("/persist/langflow.db")
+WRITABLE_CACHE_DIRS = (
+    Path("/tmp/uv-cache"),
+    Path("/tmp/.cache"),
+    Path("/app/data/.cache/uv"),
+)
+
+
+def ensure_container_stability_and_sqlite_wal() -> None:
+    """Configure writable UV_CACHE_DIR (0777) and SQLite WAL + busy_timeout=30000 on /persist/langflow.db."""
+    # ENV UV_CACHE_DIR=/tmp/uv-cache XDG_CACHE_HOME=/tmp/.cache SQLITE_TMPDIR=/tmp
+    os.environ["UV_CACHE_DIR"] = os.environ.get("UV_CACHE_DIR") or "/tmp/uv-cache"
+    os.environ["XDG_CACHE_HOME"] = os.environ.get("XDG_CACHE_HOME") or "/tmp/.cache"
+    os.environ["SQLITE_TMPDIR"] = os.environ.get("SQLITE_TMPDIR") or "/tmp"
+
+    for cache_dir in WRITABLE_CACHE_DIRS:
+        try:
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            os.chmod(cache_dir, 0o777)
+        except OSError:
+            pass
+
+    if PERSIST_SQLITE_DB.exists() or PERSIST_SQLITE_DB.parent.exists():
+        try:
+            PERSIST_SQLITE_DB.parent.mkdir(parents=True, exist_ok=True)
+            with sqlite3.connect(str(PERSIST_SQLITE_DB), timeout=30.0) as conn:
+                conn.execute("PRAGMA busy_timeout=30000;")
+                conn.execute("PRAGMA journal_mode=WAL;")
+                conn.execute("PRAGMA synchronous=NORMAL;")
+                conn.execute("PRAGMA temp_store=MEMORY;")
+        except Exception as exc:
+            print(f"[install_live_hooks] Warning configuring WAL on {PERSIST_SQLITE_DB}: {exc}")
+
+    try:
+        from sqlalchemy import event
+        from sqlalchemy.engine import Engine
+
+        if not getattr(Engine, "_sflf_sqlite_wal_listener_registered", False):
+
+            @event.listens_for(Engine, "connect")
+            def _sflf_set_sqlite_pragma(dbapi_connection, _connection_record) -> None:
+                if isinstance(dbapi_connection, sqlite3.Connection) or "sqlite" in type(dbapi_connection).__module__.lower():
+                    cursor = dbapi_connection.cursor()
+                    try:
+                        cursor.execute("PRAGMA busy_timeout=30000;")
+                        cursor.execute("PRAGMA journal_mode=WAL;")
+                        cursor.execute("PRAGMA synchronous=NORMAL;")
+                        cursor.execute("PRAGMA temp_store=MEMORY;")
+                    except Exception:
+                        pass
+                    finally:
+                        cursor.close()
+
+            setattr(Engine, "_sflf_sqlite_wal_listener_registered", True)
+    except Exception:
+        pass
 
 OFFICIAL_SNOWFLAKE_PATH = (
     "M9.86 15.298l13.008 7.8a3.72 3.72 0 0 0 4.589-.601 4.01 4.01 0 0 0 1.227-2.908V3.956a3.81 3.81 0 0 0-1.861-3.42 "
@@ -45,6 +107,9 @@ def _svg_data_uri(fill: str) -> str:
 
 
 def install_all() -> None:
+    # 0a. Configure writable UV_CACHE_DIR (0777) and SQLite WAL + busy_timeout=30000 on /persist/langflow.db
+    ensure_container_stability_and_sqlite_wal()
+
     # 0. Install lfx_snowflake package into site-packages so all runtime/live bridge imports resolve
     pkg_src = SOURCE_ROOT / "src" / "lfx_snowflake"
     pkg_dst = SITE_PACKAGES / "lfx_snowflake"
@@ -167,10 +232,41 @@ def install_all() -> None:
     LFX_INDEX_JSON.write_bytes(orjson.dumps(blob, option=orjson.OPT_SORT_KEYS))
     print(f"[install_live_hooks] Updated component_index.json (sha256={digest[:16]}...)")
 
-    # 4. Patch langflow/main.py to mount /api/v1/snowflake/* routes
+    # 4. Patch langflow/main.py to mount /api/v1/snowflake/* routes + SQLite WAL / busy_timeout=30000 + UV_CACHE_DIR
     main_text = LANGFLOW_MAIN.read_text(encoding="utf-8")
     hook_snippet = (
         "    load_plugin_routes(app)\n"
+        "    import os as _sflf_os, sqlite3 as _sflf_sqlite3\n"
+        "    from pathlib import Path as _SflfPath\n"
+        "    _sflf_os.environ.setdefault('UV_CACHE_DIR', '/tmp/uv-cache')\n"
+        "    _sflf_os.environ.setdefault('XDG_CACHE_HOME', '/tmp/.cache')\n"
+        "    _sflf_os.environ.setdefault('SQLITE_TMPDIR', '/tmp')\n"
+        "    for _d in ('/tmp/uv-cache', '/tmp/.cache', '/app/data/.cache/uv'):\n"
+        "        try:\n"
+        "            _SflfPath(_d).mkdir(parents=True, exist_ok=True)\n"
+        "            _sflf_os.chmod(_d, 0o777)\n"
+        "        except OSError:\n"
+        "            pass\n"
+        "    try:\n"
+        "        from sqlalchemy import event as _sflf_sa_event\n"
+        "        from sqlalchemy.engine import Engine as _SflfSaEngine\n"
+        "        if not getattr(_SflfSaEngine, '_sflf_sqlite_wal_listener_registered', False):\n"
+        "            @_sflf_sa_event.listens_for(_SflfSaEngine, 'connect')\n"
+        "            def _sflf_on_sqlite_connect(dbapi_conn, _conn_rec):\n"
+        "                if isinstance(dbapi_conn, _sflf_sqlite3.Connection) or 'sqlite' in type(dbapi_conn).__module__.lower():\n"
+        "                    _cur = dbapi_conn.cursor()\n"
+        "                    try:\n"
+        "                        _cur.execute('PRAGMA busy_timeout=30000;')\n"
+        "                        _cur.execute('PRAGMA journal_mode=WAL;')\n"
+        "                        _cur.execute('PRAGMA synchronous=NORMAL;')\n"
+        "                        _cur.execute('PRAGMA temp_store=MEMORY;')\n"
+        "                    except Exception:\n"
+        "                        pass\n"
+        "                    finally:\n"
+        "                        _cur.close()\n"
+        "            setattr(_SflfSaEngine, '_sflf_sqlite_wal_listener_registered', True)\n"
+        "    except Exception:\n"
+        "        pass\n"
         "    from lfx_snowflake.fastapi_live_bridge import register_snowflake_fastapi_routes\n"
         "    register_snowflake_fastapi_routes(app)\n"
     )
@@ -179,7 +275,17 @@ def install_all() -> None:
             raise RuntimeError("Could not find load_plugin_routes(app) in langflow/main.py")
         main_text = main_text.replace("    load_plugin_routes(app)\n", hook_snippet, 1)
         LANGFLOW_MAIN.write_text(main_text, encoding="utf-8")
-        print("[install_live_hooks] Patched langflow/main.py with register_snowflake_fastapi_routes(app)")
+        print("[install_live_hooks] Patched langflow/main.py with SQLite WAL connect listener and register_snowflake_fastapi_routes(app)")
+    elif "_sflf_sqlite_wal_listener_registered" not in main_text:
+        old_hook = (
+            "    load_plugin_routes(app)\n"
+            "    from lfx_snowflake.fastapi_live_bridge import register_snowflake_fastapi_routes\n"
+            "    register_snowflake_fastapi_routes(app)\n"
+        )
+        if old_hook in main_text:
+            main_text = main_text.replace(old_hook, hook_snippet, 1)
+            LANGFLOW_MAIN.write_text(main_text, encoding="utf-8")
+            print("[install_live_hooks] Upgraded langflow/main.py hook with SQLite WAL connect listener + UV_CACHE_DIR")
 
     # 5. Patch compiled React bundle in langflow/frontend/assets/*.js (100% React Virtual-DOM safe!)
     sf_svg_inline_sm = (
@@ -353,6 +459,24 @@ def install_all() -> None:
         txt = txt.replace(s4_loading_orig, s4_loading_new)
         txt = txt.replace(s5_orig, "")
         txt = txt.replace(
+            '"data-testid":"loading_icon",className:"',
+            '"data-testid":"loading_icon",style:{color:"#29B5E8",fill:"#29B5E8",stroke:"#29B5E8"},className:"text-[#29B5E8] ',
+        )
+        txt = txt.replace(
+            'className:"loading-component',
+            'style:{color:"#29B5E8"},className:"loading-component text-[#29B5E8]',
+        )
+        if '"data-testid":"new-project-btn",style:{backgroundColor:"#29B5E8"' not in txt:
+            txt = txt.replace(
+                '"data-testid":"new-project-btn"',
+                '"data-testid":"new-project-btn",style:{backgroundColor:"#29B5E8",borderColor:"#29B5E8",color:"#ffffff"}',
+            )
+        if '"data-testid":"empty_page_create_first_flow_button",style:{backgroundColor:"#29B5E8"' not in txt:
+            txt = txt.replace(
+                '"data-testid":"empty_page_create_first_flow_button"',
+                '"data-testid":"empty_page_create_first_flow_button",style:{backgroundColor:"#29B5E8",borderColor:"#29B5E8",color:"#ffffff"}',
+            )
+        txt = txt.replace(
             'Tke=({href:e="#",children:t,newPage:n=!1,icon:o="external-link"})=>v.jsx(au,{className:"cursor-pointer rounded-none p-3 px-4"',
             'Tke=({href:e="#",children:t,newPage:n=!1,icon:o="external-link"})=>v.jsx(au,{className:"cursor-pointer rounded-none py-1.5 px-3 text-xs"',
         )
@@ -462,38 +586,60 @@ def install_all() -> None:
             count=1,
             flags=re.IGNORECASE,
         )
+    # Bump cache-bust query param from ?v=sflf042 to ?v=sflf043
     html_text = re.sub(
         r'src="(\./assets/index-[^"?]+\.js)(?:\?[^"]*)?"',
-        r'src="\1?v=sflf042"',
+        r'src="\1?v=sflf043"',
         html_text,
     )
     inject_block = (
         '    <meta name="google" content="notranslate" />\n'
         f"    <script>{dom_guard_banner.strip()}</script>\n"
-        "    <style>\n"
+        '    <style id="sflf-brand-blue-style">\n'
         '      [data-testid="empty_page_discord_button"],\n'
         '      [data-testid="menu_discord_button"],\n'
         '      [data-testid="menu_twitter_button"],\n'
         '      [data-testid="header_right_section_wrapper"] [data-testid="icon-Discord"] { display: none !important; }\n'
         '      [data-testid="header_left_section_wrapper"] svg,\n'
         '      [data-testid="empty_page_logo_light"] svg,\n'
+        '      [data-testid="snowflake-langflow-dual-loading-logo"],\n'
         '      [data-testid="snowflake-langflow-dual-loading-logo"] svg,\n'
-        '      #root .loading-component svg { color: #29B5E8 !important; fill: #29B5E8 !important; }\n'
-        '      [data-testid="mainpage_title"] { color: #29B5E8 !important; }\n'
+        '      [data-testid="index-initial-snowflake-loader"],\n'
+        '      [data-testid="loading_icon"],\n'
+        '      [data-testid*="loading"],\n'
+        '      [data-testid*="loading"] *,\n'
+        '      [data-testid*="loading"] svg,\n'
+        '      #root .loading-component,\n'
+        '      #root .loading-component *,\n'
+        '      #root .loading-component svg { color: #29B5E8 !important; fill: #29B5E8 !important; stroke: #29B5E8 !important; }\n'
+        '      [data-testid="mainpage_title"],\n'
+        '      [data-testid="welcome-to-snowflake-langflow-title"] { color: #29B5E8 !important; }\n'
+        '      [data-testid="new-project-btn"],\n'
+        '      [data-testid="empty_page_create_first_flow_button"] {\n'
+        '        background-color: #29B5E8 !important;\n'
+        '        border-color: #29B5E8 !important;\n'
+        '        color: #ffffff !important;\n'
+        "      }\n"
+        '      [data-testid="new-project-btn"]:hover,\n'
+        '      [data-testid="empty_page_create_first_flow_button"]:hover {\n'
+        '        background-color: #0284c7 !important;\n'
+        '        border-color: #0284c7 !important;\n'
+        '        color: #ffffff !important;\n'
+        "      }\n"
         "    </style>\n"
-        '    <script defer src="./snowflake-ui-integration.js?v=sflf042"></script>\n'
+        '    <script defer src="./snowflake-ui-integration.js?v=sflf043"></script>\n'
         "  </head>"
     )
     if "snowflake-ui-integration.js" not in html_text:
         html_text = html_text.replace("  </head>", inject_block, 1)
     else:
         html_text = re.sub(
-            r"<style>[\s\S]*?</style>\s*<script defer src=\"\./snowflake-ui-integration\.js[^\"]*\"></script>\s*</head>",
+            r"<style(?:\s+id=\"sflf-brand-blue-style\")?>[\s\S]*?</style>\s*<script defer src=\"\./snowflake-ui-integration\.js[^\"]*\"></script>\s*</head>",
             inject_block,
             html_text,
         )
     index_html.write_text(html_text, encoding="utf-8")
-    print("[install_live_hooks] Updated index.html with Snowflake SVG favicon, title, and snowflake-ui-integration.js?v=sflf042")
+    print("[install_live_hooks] Updated index.html with Snowflake SVG favicon, title, and snowflake-ui-integration.js?v=sflf043")
 
     # 7. Verify component_index.json integrity and FastAPI routes
     from langflow.main import create_app

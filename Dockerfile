@@ -10,16 +10,20 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PIP_NO_CACHE_DIR=1 \
+    UV_CACHE_DIR=/tmp/uv-cache \
+    XDG_CACHE_HOME=/tmp/.cache \
+    SQLITE_TMPDIR=/tmp \
     LANGFLOW_HOST=0.0.0.0 \
     LANGFLOW_PORT=7860 \
     LANGFLOW_BUNDLE_PACKAGES="lfx_snowflake" \
     SNOWFLAKE_UPSTREAM_TAG="v1.12.5"
 
-# Create dedicated non-root user and group (UID 1000 / GID 1000)
+# Create dedicated non-root user and group (UID 1000 / GID 1000) and writable cache/SQLite WAL dirs (0777)
 RUN groupadd --gid 1000 langflow \
     && useradd --uid 1000 --gid 1000 --create-home --shell /bin/bash langflow \
-    && mkdir -p /app /var/lib/langflow/data /var/lib/langflow/outbox \
-    && chown -R 1000:1000 /app /var/lib/langflow
+    && mkdir -p /app /app/data/.cache/uv /tmp/uv-cache /tmp/.cache /persist /var/lib/langflow/data /var/lib/langflow/outbox \
+    && chmod -R 0777 /tmp/uv-cache /tmp/.cache /app/data /persist \
+    && chown -R 1000:1000 /app /persist /var/lib/langflow
 
 WORKDIR /app
 

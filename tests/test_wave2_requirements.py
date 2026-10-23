@@ -829,11 +829,22 @@ def test_w2_r2_11_4_node_cortex_search_pipeline_guidance_and_chaining_ports() ->
 
 
 def test_w2_r2_13_memories_plus_snowflake_3_agent_memory_types_and_workflow_recall() -> None:
-    """Verify W2-R2-13: 3 Agent Memory types (episodic_session, semantic_vector, structured_long_term) in Memories (+ Snowflake) and workflow recall."""
-    from lfx_snowflake.fastapi_live_bridge import LIVE_BRIDGE
+    """Verify W2-R2-13 & W2-R3-05: 5 Canonical Agent Memory types + 3 Legacy aliases (episodic_session, semantic_vector, structured_long_term) and workflow recall."""
+    from lfx_snowflake.fastapi_live_bridge import LEGACY_MEMORY_TYPE_ALIASES, LIVE_BRIDGE
 
-    mem_type_ids = {m["agent_memory_type"] if isinstance(m, dict) else m for m in AGENT_MEMORY_TYPES}
-    assert mem_type_ids == {"episodic_session", "semantic_vector", "structured_long_term"}
+    mem_type_ids = {m["id"] if "id" in m else m["agent_memory_type"] for m in AGENT_MEMORY_TYPES}
+    assert mem_type_ids == {
+        "graph_state_checkpointer",
+        "buffer_window_memory",
+        "summary_memory",
+        "user_profile_entity_memory",
+        "episodic_memory",
+    }
+    assert set(LEGACY_MEMORY_TYPE_ALIASES.keys()) == {
+        "episodic_session",
+        "semantic_vector",
+        "structured_long_term",
+    }
 
     ep_res = LIVE_BRIDGE.create_or_register_memory(
         {
@@ -847,6 +858,7 @@ def test_w2_r2_13_memories_plus_snowflake_3_agent_memory_types_and_workflow_reca
     )
     assert ep_res["ok"] is True
     assert ep_res["memory"]["agent_memory_type"] == "episodic_session"
+    assert ep_res["memory"]["canonical_memory_type"] == "buffer_window_memory"
     assert "HYBRID TABLE" in ep_res["ddl"]
 
     sem_res = LIVE_BRIDGE.create_or_register_memory(
@@ -876,6 +888,7 @@ def test_w2_r2_13_memories_plus_snowflake_3_agent_memory_types_and_workflow_reca
     )
     assert lt_res["ok"] is True
     assert lt_res["memory"]["agent_memory_type"] == "structured_long_term"
+    assert lt_res["memory"]["canonical_memory_type"] == "user_profile_entity_memory"
 
     opts = get_memory_catalog_options(include_none=True)
     assert "None" in opts
@@ -903,7 +916,7 @@ def test_w2_r2_14_official_snowflake_blue_29b5e8_and_loading_screen_fix() -> Non
     assert "#29B5E8" in topbar_tsx
     assert "#29B5E8" in hooks_py
     assert 'data-testid="snowflake-official-logo-blue"' in topbar_tsx
-    assert "?v=sflf042" in hooks_py
+    assert "?v=sflf042" in hooks_py or "?v=sflf043" in hooks_py
 
     # Verify s4_loading_new in install_live_hooks_in_container.py does NOT contain c6e (3-layer stacked icon)
     s4_idx = hooks_py.index("s4_loading_new = (")
@@ -983,4 +996,292 @@ def test_w2_r2_00_04a_data_sources_cascading_build_config_and_installer_origin_p
     ui_js = (REPO_ROOT / "frontend_patches" / "snowflake-ui-integration.js").read_text(encoding="utf-8")
     assert 'id="sflf-sec2"' in ui_js
     assert "openSnowflakeHubModal(focusSection)" in ui_js
+
+
+def test_w2_r3_01_02_loading_snowflake_blue_mutation_observer_and_create_first_flow_button() -> None:
+    """Verify W2-R3 Items 1 & 2: Loading... screen #29B5E8 with read-only MutationObserver and '+ Create first flow' button in #29B5E8."""
+    ui_js = (REPO_ROOT / "frontend_patches" / "snowflake-ui-integration.js").read_text(encoding="utf-8")
+    hooks_py = (REPO_ROOT / "scripts" / "install_live_hooks_in_container.py").read_text(encoding="utf-8")
+
+    # Item 1: Loading... screen & MutationObserver in #29B5E8
+    assert "#root .loading-component" in ui_js
+    assert '[data-testid*="loading"]' in ui_js
+    assert "fill: #29B5E8 !important;" in ui_js
+    assert "stroke: #29B5E8 !important;" in ui_js
+    assert "_loadingBodyObserverInstalled" in ui_js
+    assert "new MutationObserver" in ui_js
+    assert "#root .loading-component" in hooks_py
+
+    # Item 2: '+ Create first flow' / new-project-btn in #29B5E8
+    assert '[data-testid="new-project-btn"]' in ui_js
+    assert '[data-testid="empty_page_create_first_flow_button"]' in ui_js
+    assert "styleCreateFirstFlowButtons" in ui_js
+    assert "+ Create first flow" in ui_js
+    assert 'data-testid="new-project-btn"' in hooks_py
+
+
+def test_w2_r3_03_04_snowsight_hierarchical_tree_tristate_checkboxes_and_responsive_css() -> None:
+    """Verify W2-R3 Items 3 & 4: Snowsight-style hierarchical expandable tree, tri-state cascading checkboxes, lazy-load routes, and fluid responsive CSS."""
+    ui_js = (REPO_ROOT / "frontend_patches" / "snowflake-ui-integration.js").read_text(encoding="utf-8")
+    modals_tsx = (REPO_ROOT / "frontend_patches" / "settings_and_memories_modals.tsx").read_text(encoding="utf-8")
+    bridge_py = (REPO_ROOT / "src" / "lfx_snowflake" / "fastapi_live_bridge.py").read_text(encoding="utf-8")
+
+    # Item 3: Snowsight hierarchical tree + search + tri-state cascading checkboxes
+    for content in (ui_js, modals_tsx):
+        assert 'data-testid="snowsight-hierarchy-tree"' in content
+        assert 'data-testid="snowsight-hierarchy-search"' in content
+        assert "Search databases, schemas, tables, memories, services..." in content
+        assert "data-indeterminate" in content
+        assert ".indeterminate =" in content
+
+    assert "computeDatabaseTriState" in ui_js
+    assert "computeSchemaTriState" in ui_js
+    assert "computeCategoryTriState" in ui_js
+    assert "toggleTreeDatabaseSelection" in ui_js
+    assert "toggleTreeSchemaSelection" in ui_js
+    assert "toggleTreeObjectSelection" in ui_js
+    assert "/api/v1/snowflake/schemas" in ui_js
+    assert "/api/v1/snowflake/objects" in ui_js
+    assert '@sf_router.get("/schemas")' in bridge_py
+    assert '@sf_router.get("/objects")' in bridge_py
+
+    # Item 4: Fluid responsive CSS across zoom levels
+    assert "clamp(320px, 94vw, 980px)" in ui_js or "clamp(320px,94vw,980px)" in ui_js
+    assert "min(90dvh, 90vh)" in ui_js or "min(90dvh,90vh)" in ui_js
+    assert "repeat(auto-fit, minmax(min(100%, 280px), 1fr))" in ui_js
+    assert "clamp(320px, 94vw, 980px)" in modals_tsx
+
+
+def test_w2_r3_05_06_five_langchain_memory_types_optional_embeddings_and_memories_only_button() -> None:
+    """Verify W2-R3 Items 5 & 6: 5 LangChain/Langflow Memory Types, non-embedding SQL lookup, optional Snowflake/external embeddings, strict Memories-only '+ Snowflake' button, light modal, and searchable cards."""
+    from lfx_snowflake.components.knowledge_and_memories import (
+        AGENT_MEMORY_TYPES as KM_MEMORY_TYPES,
+        EMBEDDING_PROVIDERS_CATALOG as KM_EMBED_CATALOG,
+        SnowflakeMemoryManagerComponent,
+    )
+    from lfx_snowflake.fastapi_live_bridge import (
+        EMBEDDING_PROVIDERS_CATALOG,
+        EXTERNAL_EMBEDDING_PROVIDERS,
+        LIVE_BRIDGE,
+    )
+
+    expected_5_types = [
+        "graph_state_checkpointer",
+        "buffer_window_memory",
+        "summary_memory",
+        "user_profile_entity_memory",
+        "episodic_memory",
+    ]
+    assert [m["id"] for m in AGENT_MEMORY_TYPES] == expected_5_types
+    assert [m["id"] for m in KM_MEMORY_TYPES] == expected_5_types
+
+    bridge_prov_ids = {p["id"] if isinstance(p, dict) else p for p in EMBEDDING_PROVIDERS_CATALOG}
+    km_prov_ids = {p["id"] if isinstance(p, dict) else p for p in KM_EMBED_CATALOG}
+    for prov_key in ("snowflake_cortex", "openai", "cohere", "huggingface_ollama", "custom_endpoint"):
+        assert prov_key in bridge_prov_ids
+        assert prov_key in km_prov_ids
+    assert "openai" in EXTERNAL_EMBEDDING_PROVIDERS
+
+    # Non-embedding (default) creation and direct SQL lookup across all 5 canonical types
+    for mem_type_id in expected_5_types:
+        res = LIVE_BRIDGE.create_or_register_memory(
+            {
+                "name": f"TEST_{mem_type_id.upper()}",
+                "agent_memory_type": mem_type_id,
+                "enable_embedding": False,
+                "database": "SNOWFLAKE_LANGFLOW",
+                "schema": "CORE",
+                "dry_run": True,
+            }
+        )
+        assert res["ok"] is True
+        mem = res["memory"]
+        assert mem["canonical_memory_type"] == mem_type_id
+        assert mem["enable_embedding"] is False
+        assert "VECTOR(" not in res["ddl"]
+        assert "SELECT " in mem["how_to_feed_without_embedding"]
+
+        recall_res = LIVE_BRIDGE.recall_memory(
+            f"TEST_{mem_type_id.upper()}",
+            query="status check",
+            session_id="sess_01",
+            thread_id="thr_01",
+            user_id="usr_01",
+        )
+        assert recall_res["ok"] is True
+        assert recall_res["enable_embedding"] is False
+        assert "SELECT " in recall_res["recall_sql"]
+
+    # Optional embedding enabled: Snowflake Cortex AI_EMBED (768d) and External OpenAI (1536d)
+    vec_sf = LIVE_BRIDGE.create_or_register_memory(
+        {
+            "name": "TEST_EPISODIC_SF_EMBED",
+            "agent_memory_type": "episodic_memory",
+            "enable_embedding": True,
+            "embedding_provider": "snowflake_cortex",
+            "embedding_model": "snowflake-arctic-embed-m-v1.5",
+            "database": "SNOWFLAKE_LANGFLOW",
+            "schema": "CORE",
+            "dry_run": True,
+        }
+    )
+    assert vec_sf["ok"] is True
+    assert vec_sf["memory"]["enable_embedding"] is True
+    assert vec_sf["memory"]["dimension"] == 768
+    assert "VECTOR(FLOAT, 768)" in vec_sf["ddl"]
+
+    vec_ext = LIVE_BRIDGE.create_or_register_memory(
+        {
+            "name": "TEST_EPISODIC_OPENAI_EMBED",
+            "agent_memory_type": "episodic_memory",
+            "enable_embedding": True,
+            "embedding_provider": "openai",
+            "embedding_model": "text-embedding-3-small",
+            "database": "SNOWFLAKE_LANGFLOW",
+            "schema": "CORE",
+            "dry_run": True,
+        }
+    )
+    assert vec_ext["ok"] is True
+    assert vec_ext["memory"]["enable_embedding"] is True
+    assert vec_ext["memory"]["embedding_provider"] == "openai"
+    assert vec_ext["memory"]["dimension"] == 1536
+
+    # Component metadata & recall
+    comp = SnowflakeMemoryManagerComponent(
+        name="COMP_MEM_TEST",
+        agent_memory_type="buffer_window_memory",
+        enable_embedding=False,
+    )
+    meta = comp.get_type_metadata()
+    assert meta["id"] == "buffer_window_memory"
+    assert meta["needs_embedding_badge"] == "NO"
+
+    # Item 6: Strict Memories view check, normal z-index behind modals, light modal & searchable cards
+    ui_js = (REPO_ROOT / "frontend_patches" / "snowflake-ui-integration.js").read_text(encoding="utf-8")
+    modals_tsx = (REPO_ROOT / "frontend_patches" / "settings_and_memories_modals.tsx").read_text(encoding="utf-8")
+    assert "function isStrictMemoriesView()" in ui_js
+    assert "function isAnyModalDialogOpen()" in ui_js
+    assert 'z-index:10' in ui_js
+    assert '"create-snowflake-memory-modal"' in ui_js
+    assert '"snowflake-memories-cards-grid"' in ui_js
+    assert 'data-testid="create-snowflake-memory-modal"' in modals_tsx
+    assert 'data-testid="snowflake-memories-cards-grid"' in modals_tsx
+
+
+def test_w2_r3_07_spcs_sqlite_wal_busy_timeout_and_writable_uv_cache_dir(tmp_path: Path) -> None:
+    """Verify W2-R3 Item 7: SQLite WAL mode + busy_timeout=30000 and writable UV_CACHE_DIR=/tmp/uv-cache."""
+    from lfx_snowflake.fastapi_live_bridge import _open_sqlite_conn, ensure_sqlite_wal_and_uv_cache
+
+    test_db = tmp_path / "test_langflow.db"
+    status = ensure_sqlite_wal_and_uv_cache()
+    assert status["uv_cache_dir"]
+    assert status["busy_timeout_ms"] == 30000
+
+    conn_rw = _open_sqlite_conn(str(test_db), readonly=False, timeout=30.0)
+    try:
+        journal = conn_rw.execute("PRAGMA journal_mode;").fetchone()[0]
+        busy = conn_rw.execute("PRAGMA busy_timeout;").fetchone()[0]
+        assert str(journal).lower() == "wal"
+        assert int(busy) == 30000
+        conn_rw.execute("CREATE TABLE IF NOT EXISTS t (id INT);")
+        conn_rw.commit()
+    finally:
+        conn_rw.close()
+
+    conn_ro = _open_sqlite_conn(str(test_db), readonly=True, timeout=30.0)
+    try:
+        busy_ro = conn_ro.execute("PRAGMA busy_timeout;").fetchone()[0]
+        assert int(busy_ro) == 30000
+    finally:
+        conn_ro.close()
+
+    dockerfile_txt = (REPO_ROOT / "Dockerfile").read_text(encoding="utf-8")
+    hooks_py = (REPO_ROOT / "scripts" / "install_live_hooks_in_container.py").read_text(encoding="utf-8")
+    assert "UV_CACHE_DIR=/tmp/uv-cache" in dockerfile_txt
+    assert "PRAGMA busy_timeout=30000" in hooks_py
+    assert "PRAGMA journal_mode=WAL" in hooks_py
+
+
+def test_w2_r3_08_verifier_rbac_api_routes_and_custom_embedding_dimensions() -> None:
+    """Verify W2-R3 RBAC enforcement on 5 memory types, custom endpoint dimensions, and Snowsight tree context epoch."""
+    from lfx_snowflake.api_routes import SnowflakeAPIRouter
+    from lfx_snowflake.fastapi_live_bridge import LIVE_BRIDGE
+
+    router = SnowflakeAPIRouter(initial_role="DATA_ENGINEER_ROLE")
+    cat_resp = router.list_memories_catalog()
+    assert cat_resp.status_code == 200
+    assert len(cat_resp.body["agent_memory_types"]) == 5
+    assert "openai" in cat_resp.body["external_embedding_providers"]
+
+    # Custom endpoint dimension (e.g. 2048d) when enable_embedding=True
+    custom_resp = router.create_or_bind_memory(
+        name="CUSTOM_ENDPOINT_MEM",
+        agent_memory_type="episodic_memory",
+        enable_embedding=True,
+        embedding_provider="custom_endpoint",
+        embedding_model="custom-bge-2048",
+        custom_dimension=2048,
+        endpoint_url="https://embeddings.internal.example/v1/embeddings",
+        create_new_physical_store=True,
+    )
+    assert custom_resp.status_code == 201
+    assert custom_resp.body["memory"]["dimension"] == 2048
+    assert custom_resp.body["memory"]["embedding_provider"] == "custom_endpoint"
+
+    # Switch to ANALYST_ROLE -> physical store creation denied (403), binding existing allowed (201)
+    router.switch_active_role("ANALYST_ROLE")
+    denied_resp = router.create_or_bind_memory(
+        name="FORBIDDEN_PHYSICAL_MEM",
+        agent_memory_type="graph_state_checkpointer",
+        create_new_physical_store=True,
+    )
+    assert denied_resp.status_code == 403
+    assert denied_resp.body["error_code"] == "AUTHZ_ROLE_DENIED"
+
+    bind_resp = router.create_or_bind_memory(
+        name="ALLOWED_BIND_MEM",
+        agent_memory_type="graph_state_checkpointer",
+        create_new_physical_store=False,
+    )
+    assert bind_resp.status_code == 201
+    assert bind_resp.body["memory"]["canonical_memory_type"] == "graph_state_checkpointer"
+
+    # Verify Snowsight hierarchical tree context persistence & context_epoch increment
+    epoch_before = LIVE_BRIDGE.context_epoch
+    ctx_res = LIVE_BRIDGE.set_context(
+        {
+            "databases": ["SNOWFLAKE_LANGFLOW"],
+            "schemas_by_db": {"SNOWFLAKE_LANGFLOW": ["CORE"]},
+            "objects_by_db_schema": {
+                "SNOWFLAKE_LANGFLOW.CORE": {
+                    "tables": ["LANGFLOW_FLOW_RUNS"],
+                    "memories": ["ALLOWED_BIND_MEM"],
+                }
+            },
+        }
+    )
+    assert ctx_res["ok"] is True
+    assert LIVE_BRIDGE.context_epoch == epoch_before + 1
+    assert "SNOWFLAKE_LANGFLOW.CORE" in ctx_res["selected_context"]["objects_by_db_schema"]
+
+    # Verify LIVE_BRIDGE HTTP 403 PERMISSION_DENIED when PUBLIC role attempts non-dry-run physical memory creation
+    prev_role = LIVE_BRIDGE.active_role
+    try:
+        LIVE_BRIDGE.active_role = "PUBLIC"
+        forbidden_live = LIVE_BRIDGE.create_or_register_memory(
+            {
+                "name": "PUBLIC_DENIED_MEM",
+                "agent_memory_type": "summary_memory",
+                "create_new_physical_store": True,
+                "dry_run": False,
+            }
+        )
+        assert forbidden_live["ok"] is False
+        assert forbidden_live["status_code"] == 403
+        assert forbidden_live["error"]["code"] == "PERMISSION_DENIED"
+    finally:
+        LIVE_BRIDGE.active_role = prev_role
+
+
 

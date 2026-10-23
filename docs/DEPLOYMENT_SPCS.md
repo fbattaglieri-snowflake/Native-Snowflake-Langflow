@@ -41,8 +41,8 @@ Langflow's internal transactional ORM (`SQLModel`/`SQLAlchemy`/`Alembic`) requir
      NETWORK_POLICY = <POSTGRES_INGRESS_POLICY>;
    ```
    Connect Langflow with `LANGFLOW_DATABASE_URL=postgresql+psycopg://<USER>:<TOKEN>@<POSTGRES_HOST>:5432/langflow?sslmode=verify-ca&connect_timeout=10`.
-2. **Option B — Single-Replica Development: SPCS Block Storage Volume**
-   Mount a dedicated SPCS `block` volume (`>= 1 GiB`, e.g., `10Gi` in `service-spec.template.yaml`) at `/persist` (`LANGFLOW_PERSIST_DIR=/persist`, `LANGFLOW_CONFIG_DIR=/persist/config`, `LANGFLOW_DATABASE_URL=sqlite:////persist/langflow.db`) and run periodic quiesced backups (`PRAGMA integrity_check` + SHA-256 verification) to `@<DATABASE>.<SCHEMA>.<STAGE_NAME>/backups/`.
+2. **Option B — Single-Replica Development: SPCS Block Storage Volume (with SQLite WAL & Writable `UV_CACHE_DIR`)**
+   Mount a dedicated SPCS `block` volume (`>= 1 GiB`, e.g., `10Gi` in `service-spec.template.yaml`) at `/persist` (`LANGFLOW_PERSIST_DIR=/persist`, `LANGFLOW_CONFIG_DIR=/persist/config`, `LANGFLOW_DATABASE_URL=sqlite:////persist/langflow.db`). At startup and on every SQLite connection (`ensure_sqlite_wal_and_uv_cache()` / `_open_sqlite_conn()`), SnowflakeLangflow enforces `PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA busy_timeout=30000; PRAGMA temp_store=MEMORY;` and sets `UV_CACHE_DIR=/tmp/uv-cache` (`XDG_CACHE_HOME=/tmp/.cache`, `SQLITE_TMPDIR=/tmp`) to prevent `sqlite3.OperationalError: database is locked` and container cache permission errors. Run periodic quiesced backups (`PRAGMA integrity_check` + SHA-256 verification) to `@<DATABASE>.<SCHEMA>.<STAGE_NAME>/backups/`.
 
 ---
 

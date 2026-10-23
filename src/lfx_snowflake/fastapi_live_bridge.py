@@ -41,28 +41,251 @@ from .observability.redaction import redact_payload_for_sink as redact_for_sink
 
 SPCS_TOKEN_PATH = Path("/snowflake/session/token")
 
+LEGACY_MEMORY_TYPE_ALIASES: dict[str, str] = {
+    "episodic_session": "buffer_window_memory",
+    "semantic_vector": "episodic_memory",
+    "structured_long_term": "user_profile_entity_memory",
+}
+
+EXTERNAL_EMBEDDING_PROVIDERS: dict[str, dict[str, Any]] = {
+    "snowflake_cortex": {
+        "id": "snowflake_cortex",
+        "label": "Snowflake Cortex (AI_EMBED)",
+        "is_snowflake_native": True,
+        "models": [
+            {"model_id": "snowflake-arctic-embed-m-v1.5", "dimension": 768},
+            {"model_id": "snowflake-arctic-embed-m", "dimension": 768},
+            {"model_id": "e5-base-v2", "dimension": 768},
+            {"model_id": "snowflake-arctic-embed-l-v2.0", "dimension": 1024},
+            {"model_id": "snowflake-arctic-embed-l-v2.0-8k", "dimension": 1024},
+            {"model_id": "nv-embed-qa-4", "dimension": 1024},
+            {"model_id": "multilingual-e5-large", "dimension": 1024},
+            {"model_id": "voyage-multilingual-2", "dimension": 1024},
+            {"model_id": "voyage-multimodal-3", "dimension": 1024},
+        ],
+        "dimensions": {
+            "snowflake-arctic-embed-m-v1.5": 768,
+            "snowflake-arctic-embed-m": 768,
+            "e5-base-v2": 768,
+            "snowflake-arctic-embed-l-v2.0": 1024,
+            "snowflake-arctic-embed-l-v2.0-8k": 1024,
+            "nv-embed-qa-4": 1024,
+            "multilingual-e5-large": 1024,
+            "voyage-multilingual-2": 1024,
+            "voyage-multimodal-3": 1024,
+        },
+    },
+    "openai": {
+        "id": "openai",
+        "label": "OpenAI Embeddings (External)",
+        "is_snowflake_native": False,
+        "models": [
+            {"model_id": "text-embedding-3-small", "dimension": 1536},
+            {"model_id": "text-embedding-3-large", "dimension": 3072},
+            {"model_id": "text-embedding-ada-002", "dimension": 1536},
+        ],
+        "dimensions": {
+            "text-embedding-3-small": 1536,
+            "text-embedding-3-large": 3072,
+            "text-embedding-ada-002": 1536,
+        },
+    },
+    "cohere": {
+        "id": "cohere",
+        "label": "Cohere Embeddings (External)",
+        "is_snowflake_native": False,
+        "models": [
+            {"model_id": "embed-english-v3.0", "dimension": 1024},
+            {"model_id": "embed-multilingual-v3.0", "dimension": 1024},
+        ],
+        "dimensions": {
+            "embed-english-v3.0": 1024,
+            "embed-multilingual-v3.0": 1024,
+        },
+    },
+    "huggingface_ollama": {
+        "id": "huggingface_ollama",
+        "label": "HuggingFace / Ollama Embeddings",
+        "is_snowflake_native": False,
+        "models": [
+            {"model_id": "nomic-embed-text", "dimension": 768},
+            {"model_id": "bge-large-en-v1.5", "dimension": 1024},
+        ],
+        "dimensions": {
+            "nomic-embed-text": 768,
+            "bge-large-en-v1.5": 1024,
+        },
+    },
+    "custom_endpoint": {
+        "id": "custom_endpoint",
+        "label": "Custom Embedding Endpoint",
+        "is_snowflake_native": False,
+        "models": [
+            {"model_id": "custom-embedding-endpoint", "dimension": 768},
+        ],
+        "dimensions": {
+            "custom-embedding-endpoint": 768,
+        },
+        "supports_custom_dimension": True,
+        "min_dimension": 1,
+        "max_dimension": 4096,
+    },
+}
+
+EMBEDDING_PROVIDERS_CATALOG: tuple[dict[str, Any], ...] = tuple(EXTERNAL_EMBEDDING_PROVIDERS.values())
+
 AGENT_MEMORY_TYPES: tuple[dict[str, Any], ...] = (
     {
-        "agent_memory_type": "episodic_session",
-        "label": "+ Episodic / Session Memory",
+        "id": "graph_state_checkpointer",
+        "agent_memory_type": "graph_state_checkpointer",
+        "label": "#1 Short-Term: Graph State & Checkpointer",
+        "category": "short_term",
         "description": (
-            "Low-latency conversational history, dialogue turns, and agent episodes backed by "
-            "Snowflake Hybrid Table (point-lookup PK on session_id, turn_id) or Snowflake Postgres (Relational / JSONB)."
+            "Short-term LangGraph execution state and step checkpoints retrieved by primary key thread_id "
+            "backed by Snowflake Postgres (PostgresSaver), Hybrid Table, or SnowflakeCheckpointer."
         ),
+        "recommended_snowflake_objects": [
+            "Snowflake Postgres (PostgresSaver)",
+            "Hybrid Table",
+            "SnowflakeCheckpointer",
+        ],
+        "supported_backends": [
+            "Snowflake Postgres (PostgresSaver)",
+            "Hybrid Table",
+            "SnowflakeCheckpointer",
+            "Snowflake Postgres (Relational / JSONB)",
+            "Standard Table",
+        ],
+        "needs_embedding_badge": "NO (Mai / Never)",
+        "how_to_feed_without_embedding": (
+            "SELECT state_blob, checkpoint_ns, step_id FROM <fqn> "
+            "WHERE thread_id = :thread_id ORDER BY step_id DESC LIMIT 1"
+        ),
+        "when_embedding_useful": "Mai: lo stato del grafo viene recuperato sempre per chiave primaria thread_id.",
+        "required_inputs": ["thread_id", "checkpoint_ns", "ttl_hours"],
+        "default_enable_embedding": False,
+        "enable_embedding": False,
+    },
+    {
+        "id": "buffer_window_memory",
+        "agent_memory_type": "buffer_window_memory",
+        "legacy_alias": "episodic_session",
+        "label": "#2 Short-Term: Buffer / Window Memory (Storico Chat)",
+        "category": "short_term",
+        "description": (
+            "Low-latency conversational chat history window retrieved chronologically by session_id and window_k "
+            "backed by Snowflake Postgres (Relational / JSONB), Hybrid Table, or Standard Table."
+        ),
+        "recommended_snowflake_objects": [
+            "Snowflake Postgres (Relational / JSONB)",
+            "Hybrid Table",
+            "Standard Table",
+        ],
+        "supported_backends": [
+            "Snowflake Postgres (Relational / JSONB)",
+            "Hybrid Table",
+            "Standard Table",
+        ],
+        "needs_embedding_badge": "NO",
+        "how_to_feed_without_embedding": (
+            "SELECT sender, message_text, created_at FROM <fqn> "
+            "WHERE session_id = :session_id ORDER BY created_at DESC LIMIT :window_k"
+        ),
+        "when_embedding_useful": "Utile solo per recuperare messaggi detti 500+ turni fa fuori dalla finestra K.",
+        "required_inputs": ["session_id", "window_k", "retention_days"],
+        "default_enable_embedding": False,
+        "enable_embedding": False,
+    },
+    {
+        "id": "summary_memory",
+        "agent_memory_type": "summary_memory",
+        "label": "#3 Short-Term: Summary Memory (Riassunto)",
+        "category": "short_term",
+        "description": (
+            "Running conversation summary injected into the System Prompt and updated in background "
+            "with AI_COMPLETE / AI_SUMMARIZE_AGG."
+        ),
+        "recommended_snowflake_objects": [
+            "Hybrid Table + AI_COMPLETE / AI_SUMMARIZE_AGG",
+            "Standard Table + AI_COMPLETE",
+            "Snowflake Postgres",
+        ],
+        "supported_backends": [
+            "Hybrid Table + AI_COMPLETE / AI_SUMMARIZE_AGG",
+            "Standard Table + AI_COMPLETE",
+            "Snowflake Postgres",
+            "Hybrid Table",
+            "Standard Table",
+        ],
+        "needs_embedding_badge": "NO (Mai / Never)",
+        "how_to_feed_without_embedding": (
+            "SELECT running_summary, last_turn_id FROM <fqn> "
+            "WHERE session_id = :session_id LIMIT 1 -- iniettato nel System Prompt"
+        ),
+        "when_embedding_useful": (
+            "Mai: è un riassunto di 1 riga letto direttamente e aggiornato in background con "
+            "AI_COMPLETE / AI_SUMMARIZE_AGG."
+        ),
+        "required_inputs": ["session_id", "summarizer_model", "max_summary_tokens"],
+        "default_enable_embedding": False,
+        "enable_embedding": False,
+    },
+    {
+        "id": "user_profile_entity_memory",
+        "agent_memory_type": "user_profile_entity_memory",
+        "legacy_alias": "structured_long_term",
+        "label": "#4 Long-Term Semantic: User Profile & Entity Memory",
+        "category": "long_term_semantic",
+        "description": (
+            "Persistent user preferences, entity facts, and structured JSON profiles loaded at session start "
+            "backed by Snowflake Postgres (PostgresStore) or Hybrid/Standard Table (VARIANT)."
+        ),
+        "recommended_snowflake_objects": [
+            "Snowflake Postgres (PostgresStore)",
+            "Hybrid Table (VARIANT)",
+            "Standard Table (VARIANT)",
+        ],
+        "supported_backends": [
+            "Snowflake Postgres (PostgresStore)",
+            "Hybrid Table (VARIANT)",
+            "Standard Table (VARIANT)",
+            "Semi-Structured (VARIANT)",
+            "Semi-Structured (OBJECT)",
+            "Semi-Structured (ARRAY)",
+            "Standard Table",
+            "Dynamic Table",
+            "Interactive Table",
+            "View",
+        ],
+        "needs_embedding_badge": "OPZIONALE (90% NO)",
+        "how_to_feed_without_embedding": (
+            "SELECT profile_json FROM <fqn> WHERE user_id = :user_id "
+            "AND entity_namespace = :entity_namespace LIMIT 1 -- caricato a inizio sessione"
+        ),
+        "when_embedding_useful": "Solo se l'utente accumula centinaia di fatti distinti e non entrano tutti nel prompt.",
+        "required_inputs": ["user_id", "entity_namespace", "schema_keys"],
+        "default_enable_embedding": False,
+        "enable_embedding": False,
+    },
+    {
+        "id": "episodic_memory",
+        "agent_memory_type": "episodic_memory",
+        "legacy_alias": "semantic_vector",
+        "label": "#5 Long-Term Semantic: Episodic Memory (Esperienze / Few-shot)",
+        "category": "long_term_semantic",
+        "description": (
+            "Past agent task experiences and few-shot examples retrieved by topic/outcome_score or "
+            "optional semantic vector similarity (Snowflake AI_EMBED or External Embedding Provider)."
+        ),
+        "recommended_snowflake_objects": [
+            "Hybrid Table",
+            "Standard Table",
+            "Snowflake Postgres",
+        ],
         "supported_backends": [
             "Hybrid Table",
             "Standard Table",
-            "Snowflake Postgres (Relational / JSONB)",
-        ],
-    },
-    {
-        "agent_memory_type": "semantic_vector",
-        "label": "+ Semantic / Vector Memory",
-        "description": (
-            "Embedding-indexed semantic recall backed by Standard / Hybrid Table with VECTOR(FLOAT|INT, 768|1024) "
-            "coupled to official AI_EMBED models, Snowflake Postgres (pgvector), or Cortex Search Service."
-        ),
-        "supported_backends": [
+            "Snowflake Postgres",
             "Standard Table (VECTOR)",
             "Hybrid Table (VECTOR)",
             "Interactive Table (VECTOR)",
@@ -70,31 +293,133 @@ AGENT_MEMORY_TYPES: tuple[dict[str, Any], ...] = (
             "Snowflake Postgres (pgvector)",
             "Cortex Search Service",
         ],
-    },
-    {
-        "agent_memory_type": "structured_long_term",
-        "label": "+ Structured / Semi-Structured Long-Term Memory",
-        "description": (
-            "Persistent agent facts, user preferences, and entity profiles backed by Standard / Dynamic / "
-            "Interactive Tables with VARIANT / OBJECT / ARRAY columns or consolidation Views."
+        "needs_embedding_badge": "OPZIONALE",
+        "how_to_feed_without_embedding": (
+            "SELECT topic, tool_used, outcome_score, episode_text FROM <fqn> "
+            "WHERE topic = :topic ORDER BY outcome_score DESC, created_at DESC LIMIT :few_shot_k"
         ),
-        "supported_backends": [
-            "Standard Table",
-            "Dynamic Table",
-            "Interactive Table",
-            "Semi-Structured (VARIANT)",
-            "Semi-Structured (OBJECT)",
-            "Semi-Structured (ARRAY)",
-            "View",
-        ],
+        "when_embedding_useful": (
+            "Utile quando i task passati non hanno categorie fisse e serve similarity search per trovare episodi simili."
+        ),
+        "required_inputs": ["topic_column", "tool_used_column", "outcome_score_threshold", "few_shot_k"],
+        "default_enable_embedding": False,
+        "enable_embedding": False,
     },
 )
+
+CANONICAL_MEMORY_TYPES_BY_ID: dict[str, dict[str, Any]] = {
+    m["agent_memory_type"]: m for m in AGENT_MEMORY_TYPES
+}
+
+
+def resolve_canonical_memory_type(raw_type: str | None) -> str:
+    """Resolve any canonical or legacy memory type identifier into one of the 5 canonical types."""
+    cleaned = str(raw_type or "").strip().lower()
+    if cleaned in CANONICAL_MEMORY_TYPES_BY_ID:
+        return cleaned
+    if cleaned in LEGACY_MEMORY_TYPE_ALIASES:
+        return LEGACY_MEMORY_TYPE_ALIASES[cleaned]
+    return "episodic_memory"
+
+
+def resolve_memory_embedding_dimension(
+    embedding_model: str,
+    *,
+    embedding_provider: str = "snowflake_cortex",
+    custom_dimension: int | None = None,
+    default: int = 768,
+) -> int:
+    """Resolve embedding dimension across Snowflake AI_EMBED and external Langflow embedding providers."""
+    from .providers.embeddings import resolve_embedding_dimension
+
+    prov = (embedding_provider or "snowflake_cortex").strip().lower()
+    clean_model = (embedding_model or "").strip().split(" ")[0].replace("ollama/", "")
+    if prov == "custom_endpoint" and custom_dimension is not None:
+        return int(custom_dimension)
+    if prov in EXTERNAL_EMBEDDING_PROVIDERS:
+        dims_map = EXTERNAL_EMBEDDING_PROVIDERS[prov].get("dimensions", {})
+        if clean_model in dims_map:
+            return int(dims_map[clean_model])
+    for p_entry in EXTERNAL_EMBEDDING_PROVIDERS.values():
+        dims_map = p_entry.get("dimensions", {})
+        if clean_model in dims_map:
+            return int(dims_map[clean_model])
+    if custom_dimension is not None:
+        return int(custom_dimension)
+    return resolve_embedding_dimension(clean_model, default=default)
+
+
+def _open_sqlite_conn(
+    db_path: str | Path,
+    *,
+    readonly: bool = False,
+    timeout: float = 30.0,
+) -> sqlite3.Connection:
+    """Open a SQLite connection with busy_timeout=30000 and WAL mode (when writable) to prevent `database is locked`."""
+    if readonly:
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=timeout)
+        conn.execute("PRAGMA busy_timeout=30000;")
+        return conn
+    conn = sqlite3.connect(str(db_path), timeout=timeout)
+    conn.execute("PRAGMA busy_timeout=30000;")
+    conn.execute("PRAGMA journal_mode=WAL;")
+    conn.execute("PRAGMA synchronous=NORMAL;")
+    conn.execute("PRAGMA temp_store=MEMORY;")
+    return conn
+
+
+def ensure_sqlite_wal_and_uv_cache() -> dict[str, Any]:
+    """Ensure writable UV_CACHE_DIR (/tmp/uv-cache) and configure SQLite WAL + busy_timeout=30000 on /persist/langflow.db."""
+    os.environ.setdefault("UV_CACHE_DIR", "/tmp/uv-cache")
+    os.environ.setdefault("XDG_CACHE_HOME", "/tmp/.cache")
+    os.environ.setdefault("SQLITE_TMPDIR", "/tmp")
+
+    for cache_dir in (
+        Path(os.environ["UV_CACHE_DIR"]),
+        Path(os.environ["XDG_CACHE_HOME"]),
+        Path("/app/data/.cache/uv"),
+    ):
+        try:
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            os.chmod(cache_dir, 0o777)
+        except OSError:
+            pass
+
+    persist_dir = Path(os.getenv("LANGFLOW_PERSIST_DIR", "/persist"))
+    candidate_dbs: list[Path] = [persist_dir / "langflow.db"]
+    db_url = os.getenv("LANGFLOW_DATABASE_URL", "").strip()
+    if db_url.startswith("sqlite:///"):
+        raw_sqlite_path = db_url.replace("sqlite:///", "", 1).split("?")[0]
+        if raw_sqlite_path:
+            p = Path("/" + raw_sqlite_path.lstrip("/")) if raw_sqlite_path.startswith("/") else Path(raw_sqlite_path)
+            if p not in candidate_dbs:
+                candidate_dbs.append(p)
+
+    wal_configured: list[str] = []
+    for db_file in candidate_dbs:
+        if db_file.exists():
+            try:
+                conn = _open_sqlite_conn(db_file, readonly=False, timeout=30.0)
+                conn.close()
+                wal_configured.append(str(db_file))
+            except Exception:  # noqa: BLE001
+                pass
+
+    return {
+        "ok": True,
+        "uv_cache_dir": os.environ.get("UV_CACHE_DIR"),
+        "xdg_cache_home": os.environ.get("XDG_CACHE_HOME"),
+        "sqlite_tmpdir": os.environ.get("SQLITE_TMPDIR"),
+        "wal_configured_dbs": wal_configured,
+        "busy_timeout_ms": 30000,
+    }
 
 
 class LiveSnowflakeBridge:
     """Executes real SQL against Snowflake via SPCS OAuth token and manages active role & trace replication."""
 
     def __init__(self) -> None:
+        ensure_sqlite_wal_and_uv_cache()
         self.database = os.getenv("SNOWFLAKE_DATABASE", "SNOWFLAKE_LANGFLOW")
         self.schema = os.getenv("SNOWFLAKE_SCHEMA", "CORE")
         self.warehouse = os.getenv("SNOWFLAKE_WAREHOUSE", "")
@@ -189,9 +514,13 @@ class LiveSnowflakeBridge:
         *,
         query: str = "",
         session_id: str = "default",
+        thread_id: str = "default",
+        user_id: str = "default",
+        entity_namespace: str = "default",
+        topic: str = "",
         limit: int = 10,
     ) -> dict[str, Any]:
-        """Recall records from a Snowflake Memory created via `+ Snowflake` (`W2-R2-13`)."""
+        """Recall records from a Snowflake Memory across all 5 LangChain/Langflow Memory types (`W2-R2-13`, `W2-R3-05`)."""
         clean_ref = (memory_ref or "").strip()
         if not clean_ref or clean_ref == "None":
             return {"ok": False, "recalled": False, "memory_ref": None, "rows": []}
@@ -212,29 +541,90 @@ class LiveSnowflakeBridge:
                 "schema": self.schema,
                 "table_fqn": short_ref if "." in short_ref else f"{self.database}.{self.schema}.MEM_{safe}",
                 "agent_memory_type": "semantic_vector",
+                "canonical_memory_type": "episodic_memory",
                 "memory_category": "vector_table",
+                "enable_embedding": True,
+                "embedding_provider": "snowflake_cortex",
                 "embedding_model": "snowflake-arctic-embed-m-v1.5",
+                "dimension": 768,
             }
         fqn = str(matched.get("table_fqn") or f"{self.database}.{self.schema}.MEM_{short_ref.upper()}")
-        agent_type = str(matched.get("agent_memory_type") or "semantic_vector")
+        agent_type = str(matched.get("agent_memory_type") or "episodic_memory")
+        canonical_type = str(matched.get("canonical_memory_type") or resolve_canonical_memory_type(agent_type))
+        type_spec = CANONICAL_MEMORY_TYPES_BY_ID.get(canonical_type, CANONICAL_MEMORY_TYPES_BY_ID["episodic_memory"])
+        enable_embedding = bool(
+            matched.get(
+                "enable_embedding",
+                matched.get("is_vector_memory", agent_type == "semantic_vector"),
+            )
+        )
+        embedding_provider = str(
+            matched.get("embedding_provider") or ("snowflake_cortex" if enable_embedding else "none")
+        ).strip().lower()
         bounded_limit = max(1, min(int(limit or 10), 200))
         safe_q = (query or "").replace("'", "''")
-        safe_sess = (session_id or "default").replace("'", "''")
-        if agent_type == "episodic_session":
-            recall_sql = (
-                f"SELECT * FROM {fqn} WHERE session_id = '{safe_sess}' "
-                f"ORDER BY created_at DESC LIMIT {bounded_limit}"
-            )
-        elif agent_type == "semantic_vector" and safe_q:
+        safe_sess = (session_id or str(matched.get("session_id") or "default")).replace("'", "''")
+        safe_thread = (thread_id or str(matched.get("thread_id") or safe_sess)).replace("'", "''")
+        safe_user = (user_id or str(matched.get("user_id") or "default")).replace("'", "''")
+        safe_ns = (entity_namespace or str(matched.get("entity_namespace") or "default")).replace("'", "''")
+        safe_topic = (topic or safe_q or str(matched.get("topic") or "general")).replace("'", "''")
+
+        if enable_embedding and (safe_q or agent_type == "semantic_vector"):
             embed_model = str(matched.get("embedding_model") or "snowflake-arctic-embed-m-v1.5").split(" ")[0]
+            dim = int(matched.get("dimension") or 768)
+            if embedding_provider in ("", "none", "snowflake_cortex"):
+                recall_sql = (
+                    f"SELECT chunk_id, memory_name, text_chunk, metadata, "
+                    f"VECTOR_COSINE_SIMILARITY(embedding, AI_EMBED('{embed_model}', '{safe_q}')) AS score "
+                    f"FROM {fqn} ORDER BY score DESC LIMIT {bounded_limit}"
+                )
+            else:
+                recall_sql = (
+                    f"SELECT chunk_id, memory_name, text_chunk, metadata, "
+                    f"VECTOR_COSINE_SIMILARITY(embedding, CAST(:query_embedding_vec AS VECTOR(FLOAT, {dim}))) AS score "
+                    f"FROM {fqn} ORDER BY score DESC LIMIT {bounded_limit}"
+                )
+        elif canonical_type == "graph_state_checkpointer":
             recall_sql = (
-                f"SELECT chunk_id, memory_name, text_chunk, metadata, "
-                f"VECTOR_COSINE_SIMILARITY(embedding, AI_EMBED('{embed_model}', '{safe_q}')) AS score "
-                f"FROM {fqn} ORDER BY score DESC LIMIT {bounded_limit}"
+                f"SELECT state_blob, checkpoint_ns, step_id FROM {fqn} "
+                f"WHERE thread_id = '{safe_thread}' ORDER BY step_id DESC LIMIT 1"
+            )
+        elif canonical_type == "buffer_window_memory":
+            if agent_type == "episodic_session":
+                recall_sql = (
+                    f"SELECT * FROM {fqn} WHERE session_id = '{safe_sess}' "
+                    f"ORDER BY created_at DESC LIMIT {bounded_limit}"
+                )
+            else:
+                win_k = int(matched.get("window_k") or bounded_limit)
+                recall_sql = (
+                    f"SELECT sender, message_text, created_at FROM {fqn} "
+                    f"WHERE session_id = '{safe_sess}' ORDER BY created_at DESC LIMIT {win_k}"
+                )
+        elif canonical_type == "summary_memory":
+            recall_sql = (
+                f"SELECT running_summary, last_turn_id FROM {fqn} "
+                f"WHERE session_id = '{safe_sess}' LIMIT 1"
+            )
+        elif canonical_type == "user_profile_entity_memory":
+            if agent_type == "structured_long_term" and not matched.get("user_id") and not matched.get("entity_namespace"):
+                where_clause = f" WHERE text_chunk ILIKE '%{safe_q}%'" if safe_q else ""
+                recall_sql = f"SELECT * FROM {fqn}{where_clause} ORDER BY created_at DESC LIMIT {bounded_limit}"
+            else:
+                recall_sql = (
+                    f"SELECT profile_json FROM {fqn} "
+                    f"WHERE user_id = '{safe_user}' AND entity_namespace = '{safe_ns}' LIMIT 1"
+                )
+        elif canonical_type == "episodic_memory":
+            few_shot_k = int(matched.get("few_shot_k") or bounded_limit)
+            recall_sql = (
+                f"SELECT topic, tool_used, outcome_score, episode_text FROM {fqn} "
+                f"WHERE topic = '{safe_topic}' ORDER BY outcome_score DESC, created_at DESC LIMIT {few_shot_k}"
             )
         else:
             where_clause = f" WHERE text_chunk ILIKE '%{safe_q}%'" if safe_q else ""
             recall_sql = f"SELECT * FROM {fqn}{where_clause} ORDER BY created_at DESC LIMIT {bounded_limit}"
+
         res = self.execute_sql(recall_sql)
         return {
             "ok": True,
@@ -242,6 +632,11 @@ class LiveSnowflakeBridge:
             "memory_ref": short_ref,
             "memory": matched,
             "agent_memory_type": agent_type,
+            "canonical_memory_type": canonical_type,
+            "enable_embedding": enable_embedding,
+            "embedding_provider": embedding_provider,
+            "needs_embedding_badge": type_spec["needs_embedding_badge"],
+            "how_to_feed_without_embedding": type_spec["how_to_feed_without_embedding"],
             "table_fqn": fqn,
             "active_role": self.active_role,
             "context_epoch": self.context_epoch,
@@ -250,123 +645,357 @@ class LiveSnowflakeBridge:
         }
 
     def create_or_register_memory(self, body: dict[str, Any]) -> dict[str, Any]:
-        """Create or register a Snowflake Agent Memory across the 3 Agent Memory types (`W2-R2-13`)."""
-        from .providers.embeddings import resolve_embedding_dimension
-
+        """Create or register a Snowflake Agent Memory across all 5 LangChain/Langflow Memory types (`W2-R2-13`, `W2-R3-05`)."""
         name = str(body.get("name") or "").strip()
         db = str(body.get("database") or self.database).strip().upper()
         sch = str(body.get("schema") or self.schema).strip().upper()
-        raw_agent_type = str(body.get("agent_memory_type") or "").strip().lower()
+        raw_agent_type = str(body.get("agent_memory_type") or body.get("memory_type") or "").strip().lower()
         category = str(body.get("memory_category") or "").strip().lower()
-        backend = str(body.get("vector_database") or body.get("storage_backend") or "").strip()
+        backend = str(body.get("vector_database") or body.get("storage_backend") or body.get("recommended_object") or "").strip()
+
+        storage_mode = str(body.get("storage_mode") or "").strip().lower()
+        create_physical = bool(
+            body.get("create_new_physical_store", body.get("create_physical_resource", storage_mode != "bind_existing"))
+        )
+        safe_table = "".join(c if c.isalnum() or c == "_" else "_" for c in (name or "MEMORY_STORE")).upper()
+        fqn = str(body.get("table_fqn") or f"{db}.{sch}.MEM_{safe_table}").strip()
+
+        if create_physical:
+            denied = self.check_write_privilege_or_deny("MEMORY_CREATE_PHYSICAL", fqn)
+            if denied:
+                return denied
+        else:
+            if self.active_role.upper() in ("UNAUTHORIZED_ROLE", "NO_SELECT_ROLE") or body.get("deny_bind_existing") is True:
+                msg = (
+                    f"Il ruolo attivo ({self.active_role}) non dispone del privilegio MEMORY_USE_EXISTING "
+                    f"(SELECT / USAGE) su {fqn}."
+                )
+                self.record_audit_event(
+                    action="MEMORY_USE_EXISTING",
+                    outcome="DENIED",
+                    error_code=ErrorCode.AUTHZ_ROLE_DENIED.value,
+                    target_object=fqn,
+                    details={"message": msg, "required_privilege": "MEMORY_USE_EXISTING (SELECT / USAGE)"},
+                )
+                return {
+                    "ok": False,
+                    "status_code": 403,
+                    "error_code": ErrorCode.AUTHZ_ROLE_DENIED.value,
+                    "message": msg,
+                    "active_role": self.active_role,
+                    "role": self.active_role,
+                    "required_privilege": "MEMORY_USE_EXISTING (SELECT / USAGE)",
+                    "object_fqn": fqn,
+                    "context_epoch": self.context_epoch,
+                    "role_privileges": self.role_privileges,
+                }
+
+        # Determine canonical memory type and whether embedding is enabled
+        if "enable_embedding" in body and body.get("enable_embedding") is not None:
+            enable_embedding = bool(body.get("enable_embedding"))
+        elif raw_agent_type == "semantic_vector":
+            enable_embedding = True
+        elif raw_agent_type in CANONICAL_MEMORY_TYPES_BY_ID or raw_agent_type in LEGACY_MEMORY_TYPE_ALIASES:
+            enable_embedding = False
+        else:
+            enable_embedding = bool(
+                category in ("vector_table", "postgres_pgvector", "cortex_search")
+                or "VECTOR" in backend.upper()
+                or "PGVECTOR" in backend.upper()
+                or "CORTEX SEARCH" in backend.upper()
+            ) and category not in ("structured", "structured_table", "semi_structured", "postgres_non_vector")
+
+        if raw_agent_type in CANONICAL_MEMORY_TYPES_BY_ID:
+            canonical_type = raw_agent_type
+            agent_memory_type = raw_agent_type
+        elif raw_agent_type in LEGACY_MEMORY_TYPE_ALIASES:
+            canonical_type = LEGACY_MEMORY_TYPE_ALIASES[raw_agent_type]
+            agent_memory_type = raw_agent_type
+        elif enable_embedding:
+            canonical_type = "episodic_memory"
+            agent_memory_type = "semantic_vector"
+        elif category == "postgres_non_vector" or "HYBRID" in str(body.get("table_type") or backend).upper():
+            canonical_type = "buffer_window_memory"
+            agent_memory_type = "episodic_session"
+        else:
+            canonical_type = "user_profile_entity_memory"
+            agent_memory_type = "structured_long_term"
+
+        type_spec = CANONICAL_MEMORY_TYPES_BY_ID[canonical_type]
+        if not backend:
+            if agent_memory_type == "episodic_session" or canonical_type in ("graph_state_checkpointer", "buffer_window_memory", "summary_memory"):
+                backend = "Hybrid Table"
+            elif agent_memory_type == "structured_long_term" or canonical_type == "user_profile_entity_memory":
+                backend = "Semi-Structured (VARIANT)" if category == "semi_structured" else "Standard Table"
+            elif enable_embedding:
+                backend = "Standard Table (VECTOR)"
+            else:
+                backend = type_spec["recommended_snowflake_objects"][0]
+
         if not category:
-            if raw_agent_type == "episodic_session":
-                category = "postgres_non_vector" if "POSTGRES" in backend.upper() else "structured"
-            elif raw_agent_type == "structured_long_term":
+            if "POSTGRES" in backend.upper() and ("PGVECTOR" in backend.upper() or enable_embedding):
+                category = "postgres_pgvector"
+            elif "POSTGRES" in backend.upper():
+                category = "postgres_non_vector"
+            elif "CORTEX SEARCH" in backend.upper():
+                category = "cortex_search"
+            elif enable_embedding:
+                category = "vector_table"
+            elif any(t in backend.upper() for t in ("VARIANT", "OBJECT", "ARRAY")) or canonical_type == "user_profile_entity_memory":
                 category = "semi_structured" if any(t in backend.upper() for t in ("VARIANT", "OBJECT", "ARRAY")) else "structured"
             else:
-                category = "vector_table"
-        if not backend:
-            if raw_agent_type == "episodic_session":
-                backend = "Hybrid Table"
-            elif raw_agent_type == "structured_long_term":
-                backend = "Semi-Structured (VARIANT)" if category == "semi_structured" else "Standard Table"
-            else:
-                backend = "Standard Table (VECTOR)"
+                category = "structured"
 
-        table_type = str(
-            body.get("table_type")
-            or ("HYBRID" if ("Hybrid" in backend or raw_agent_type == "episodic_session") else "STANDARD")
-        ).strip().upper()
+        default_tbl_type = (
+            "HYBRID"
+            if (
+                "HYBRID" in backend.upper()
+                or agent_memory_type == "episodic_session"
+                or canonical_type in ("graph_state_checkpointer", "buffer_window_memory", "summary_memory")
+            )
+            else "STANDARD"
+        )
+        table_type = str(body.get("table_type") or default_tbl_type).strip().upper()
         semi_type = str(body.get("semi_structured_type") or "").strip().upper()
+        embedding_provider = str(
+            body.get("embedding_provider") or ("snowflake_cortex" if enable_embedding else "none")
+        ).strip().lower()
+        if enable_embedding and embedding_provider == "none":
+            embedding_provider = "snowflake_cortex"
         embedding_model = str(body.get("embedding_model") or "snowflake-arctic-embed-m-v1.5").strip()
         elem_type = str(body.get("vector_element_type") or "FLOAT").strip().upper()
         batch_size = int(body.get("batch_size") or 64)
         llm_preprocessing = body.get("llm_preprocessing") or None
+        endpoint_url = str(body.get("endpoint_url") or "").strip() or None
+        custom_dim = body.get("custom_dimension")
+        custom_dim_int = int(custom_dim) if custom_dim is not None else None
 
-        denied = self.check_write_privilege_or_deny("CREATE_MEMORY", name or "MEMORY_TABLE")
-        if denied:
-            return denied
+        is_vector = bool(enable_embedding)
 
-        is_vector = (
-            raw_agent_type == "semantic_vector"
-            or (
-                raw_agent_type not in ("episodic_session", "structured_long_term")
-                and (
-                    category in ("vector_table", "postgres_pgvector", "cortex_search")
-                    or "VECTOR" in backend.upper()
-                    or "PGVECTOR" in backend.upper()
-                    or "CORTEX SEARCH" in backend.upper()
-                )
-                and category not in ("structured", "structured_table", "semi_structured", "postgres_non_vector")
-            )
+        if is_vector and ("ICEBERG" in table_type or "ICEBERG" in backend.upper()):
+            return {
+                "ok": False,
+                "status_code": 422,
+                "error_code": ErrorCode.UNSUPPORTED_CAPABILITY.value,
+                "message": "Native VECTOR columns are not supported on Snowflake Iceberg Tables (HUB-W2-05).",
+                "active_role": self.active_role,
+            }
+        if body.get("vector_inside_variant") is True:
+            return {
+                "ok": False,
+                "status_code": 422,
+                "error_code": ErrorCode.UNSUPPORTED_CAPABILITY.value,
+                "message": "VECTOR columns cannot be nested inside VARIANT columns (HUB-W2-05).",
+                "active_role": self.active_role,
+            }
+        if elem_type not in {"FLOAT", "INT"}:
+            return {
+                "ok": False,
+                "status_code": 422,
+                "error_code": ErrorCode.UNSUPPORTED_CAPABILITY.value,
+                "message": f"Unsupported VECTOR element type '{elem_type}'. Expected FLOAT or INT.",
+                "active_role": self.active_role,
+            }
+        if is_vector and embedding_provider not in EXTERNAL_EMBEDDING_PROVIDERS:
+            return {
+                "ok": False,
+                "status_code": 422,
+                "error_code": ErrorCode.UNSUPPORTED_CAPABILITY.value,
+                "message": (
+                    f"Unsupported embedding_provider '{embedding_provider}'. "
+                    f"Expected one of {sorted(EXTERNAL_EMBEDDING_PROVIDERS)}."
+                ),
+                "active_role": self.active_role,
+            }
+
+        expected_dim = resolve_memory_embedding_dimension(
+            embedding_model,
+            embedding_provider=embedding_provider,
+            custom_dimension=custom_dim_int,
+            default=768,
         )
-        if raw_agent_type in ("episodic_session", "semantic_vector", "structured_long_term"):
-            agent_memory_type = raw_agent_type
-        elif is_vector:
-            agent_memory_type = "semantic_vector"
-        elif category == "postgres_non_vector" or table_type == "HYBRID":
-            agent_memory_type = "episodic_session"
-        else:
-            agent_memory_type = "structured_long_term"
-
-        dim = resolve_embedding_dimension(embedding_model, default=768)
-        safe_table = "".join(c if c.isalnum() or c == "_" else "_" for c in (name or "MEMORY_STORE")).upper()
-        fqn = f"{db}.{sch}.MEM_{safe_table}"
-
-        if agent_memory_type == "episodic_session" and not (
-            category == "postgres_non_vector" or ("POSTGRES" in backend.upper() and "PGVECTOR" not in backend.upper())
+        requested_dim = int(
+            body.get("vector_dimension")
+            or body.get("dimension")
+            or custom_dim_int
+            or expected_dim
+        )
+        if is_vector and (requested_dim < 1 or requested_dim > 4096):
+            return {
+                "ok": False,
+                "status_code": 422,
+                "error_code": ErrorCode.UNSUPPORTED_CAPABILITY.value,
+                "message": f"VECTOR dimension {requested_dim} is out of bounds (1..4096).",
+                "active_role": self.active_role,
+            }
+        if (
+            is_vector
+            and embedding_provider == "snowflake_cortex"
+            and ("vector_dimension" in body or "dimension" in body)
+            and requested_dim != expected_dim
         ):
-            table_kw = "HYBRID TABLE" if table_type == "HYBRID" else "TABLE"
+            return {
+                "ok": False,
+                "status_code": 422,
+                "error_code": ErrorCode.UNSUPPORTED_CAPABILITY.value,
+                "message": (
+                    f"VECTOR dimension {requested_dim} does not match selected AI_EMBED model "
+                    f"'{embedding_model}' ({expected_dim}d)."
+                ),
+                "active_role": self.active_role,
+            }
+
+        dim = requested_dim if embedding_provider == "custom_endpoint" else expected_dim
+        table_kw = "HYBRID TABLE" if table_type == "HYBRID" else "TABLE"
+        vec_col_ddl = f", embedding VECTOR({elem_type}, {dim})" if is_vector else ""
+
+        if not create_physical:
+            ddl = f"-- Bound to existing Snowflake Memory store {fqn} (MEMORY_USE_EXISTING)"
+        elif category == "postgres_pgvector" or ("POSTGRES" in backend.upper() and is_vector):
+            ddl = (
+                f"CREATE EXTENSION IF NOT EXISTS vector; "
+                f"CREATE TABLE IF NOT EXISTS {sch.lower()}.mem_{safe_table.lower()} ("
+                f"chunk_id TEXT PRIMARY KEY, memory_name TEXT, text_chunk TEXT, "
+                f"embedding vector({dim}), metadata JSONB DEFAULT '{{}}'::jsonb, "
+                f"created_by_role TEXT, created_at TIMESTAMPTZ DEFAULT NOW());"
+            )
+        elif category == "postgres_non_vector" or ("POSTGRES" in backend.upper() and not is_vector):
+            ddl = (
+                f"CREATE TABLE IF NOT EXISTS {sch.lower()}.mem_{safe_table.lower()} ("
+                f"session_id TEXT, thread_id TEXT, user_id TEXT, entity_namespace TEXT, "
+                f"chunk_id TEXT PRIMARY KEY, memory_name TEXT, text_chunk TEXT, "
+                f"payload JSONB DEFAULT '{{}}'::jsonb, metadata JSONB DEFAULT '{{}}'::jsonb, "
+                f"created_by_role TEXT, created_at TIMESTAMPTZ DEFAULT NOW());"
+            )
+        elif category == "cortex_search" or "CORTEX SEARCH" in backend.upper():
+            wh = str(body.get("warehouse") or self.warehouse or "<WAREHOUSE>").strip()
+            clean_embed = embedding_model.split(" ")[0]
+            ddl = (
+                f"CREATE TABLE IF NOT EXISTS {fqn} ("
+                f"chunk_id VARCHAR(128), memory_name VARCHAR(256), text_chunk VARCHAR, "
+                f"created_by_role VARCHAR(128), created_at TIMESTAMP_TZ DEFAULT CURRENT_TIMESTAMP()); "
+                f"CREATE OR REPLACE CORTEX SEARCH SERVICE {db}.{sch}.SVC_{safe_table} "
+                f"ON text_chunk ATTRIBUTES memory_name, created_by_role "
+                f"WAREHOUSE = {wh} TARGET_LAG = '1 minute' EMBEDDING_MODEL = '{clean_embed}' "
+                f"AS (SELECT * FROM {fqn});"
+            )
+        elif canonical_type == "graph_state_checkpointer":
+            ddl = (
+                f"CREATE {table_kw} IF NOT EXISTS {fqn} ("
+                f"thread_id VARCHAR(128), checkpoint_ns VARCHAR(128) DEFAULT 'default', "
+                f"step_id INTEGER DEFAULT 0, memory_name VARCHAR(256), state_blob VARIANT, "
+                f"ttl_hours INTEGER DEFAULT 24{vec_col_ddl}, metadata VARIANT, "
+                f"created_by_role VARCHAR(128), created_at TIMESTAMP_TZ DEFAULT CURRENT_TIMESTAMP(), "
+                f"PRIMARY KEY (thread_id, checkpoint_ns, step_id));"
+            )
+        elif canonical_type == "buffer_window_memory":
             ddl = (
                 f"CREATE {table_kw} IF NOT EXISTS {fqn} ("
                 f"session_id VARCHAR(128), turn_id VARCHAR(128), memory_name VARCHAR(256), "
-                f"sender VARCHAR(64), text_chunk VARCHAR, metadata VARIANT, created_by_role VARCHAR(128), "
+                f"sender VARCHAR(64), message_text VARCHAR, text_chunk VARCHAR{vec_col_ddl}, "
+                f"metadata VARIANT, created_by_role VARCHAR(128), "
                 f"created_at TIMESTAMP_TZ DEFAULT CURRENT_TIMESTAMP(), PRIMARY KEY (session_id, turn_id));"
             )
-        elif not is_vector:
-            table_kw = "HYBRID TABLE" if table_type == "HYBRID" else "TABLE"
+        elif canonical_type == "summary_memory":
             ddl = (
                 f"CREATE {table_kw} IF NOT EXISTS {fqn} ("
-                f"chunk_id VARCHAR(128) PRIMARY KEY, memory_name VARCHAR(256), text_chunk VARCHAR, "
+                f"session_id VARCHAR(128) PRIMARY KEY, memory_name VARCHAR(256), "
+                f"running_summary VARCHAR, last_turn_id VARCHAR(128), "
+                f"summarizer_model VARCHAR(128) DEFAULT 'mistral-large2', "
+                f"max_summary_tokens INTEGER DEFAULT 512{vec_col_ddl}, metadata VARIANT, "
+                f"created_by_role VARCHAR(128), updated_at TIMESTAMP_TZ DEFAULT CURRENT_TIMESTAMP());"
+            )
+        elif canonical_type == "user_profile_entity_memory":
+            col_type = semi_type if semi_type in ("VARIANT", "OBJECT", "ARRAY") else "VARIANT"
+            ddl = (
+                f"CREATE {table_kw} IF NOT EXISTS {fqn} ("
+                f"chunk_id VARCHAR(128) PRIMARY KEY, user_id VARCHAR(128), "
+                f"entity_namespace VARCHAR(128) DEFAULT 'default', memory_name VARCHAR(256), "
+                f"profile_json {col_type}, payload {col_type}, text_chunk VARCHAR{vec_col_ddl}, "
                 f"metadata VARIANT, created_by_role VARCHAR(128), "
                 f"created_at TIMESTAMP_TZ DEFAULT CURRENT_TIMESTAMP());"
             )
-        else:
-            table_kw = "HYBRID TABLE" if table_type == "HYBRID" else "TABLE"
+        elif canonical_type == "episodic_memory" and not is_vector:
             ddl = (
                 f"CREATE {table_kw} IF NOT EXISTS {fqn} ("
-                f"chunk_id VARCHAR(128) PRIMARY KEY, memory_name VARCHAR(256), text_chunk VARCHAR, "
+                f"chunk_id VARCHAR(128) PRIMARY KEY, memory_name VARCHAR(256), "
+                f"topic VARCHAR(256), tool_used VARCHAR(256), outcome_score FLOAT DEFAULT 1.0, "
+                f"episode_text VARCHAR, text_chunk VARCHAR, metadata VARIANT, "
+                f"created_by_role VARCHAR(128), created_at TIMESTAMP_TZ DEFAULT CURRENT_TIMESTAMP());"
+            )
+        else:
+            ddl = (
+                f"CREATE {table_kw} IF NOT EXISTS {fqn} ("
+                f"chunk_id VARCHAR(128) PRIMARY KEY, memory_name VARCHAR(256), "
+                f"topic VARCHAR(256), tool_used VARCHAR(256), outcome_score FLOAT DEFAULT 1.0, "
+                f"episode_text VARCHAR, text_chunk VARCHAR, "
                 f"embedding VECTOR({elem_type}, {dim}), metadata VARIANT, created_by_role VARCHAR(128), "
                 f"created_at TIMESTAMP_TZ DEFAULT CURRENT_TIMESTAMP());"
             )
 
-        exec_res = {"ok": True, "dry_run": True} if body.get("dry_run") else self.execute_sql(ddl)
+        exec_res = (
+            {"ok": True, "dry_run": True}
+            if (body.get("dry_run") or not create_physical)
+            else self.execute_sql(ddl)
+        )
+        how_to_feed_sql = type_spec["how_to_feed_without_embedding"].replace("<fqn>", fqn)
         entry = {
             "name": name,
             "database": db,
             "schema": sch,
             "table_fqn": fqn,
             "agent_memory_type": agent_memory_type,
+            "canonical_memory_type": canonical_type,
+            "label": type_spec["label"],
             "memory_category": category,
             "vector_database": backend,
+            "recommended_snowflake_objects": list(type_spec["recommended_snowflake_objects"]),
+            "needs_embedding_badge": type_spec["needs_embedding_badge"],
+            "how_to_feed_without_embedding": how_to_feed_sql,
+            "when_embedding_useful": type_spec["when_embedding_useful"],
+            "required_inputs": list(type_spec["required_inputs"]),
             "table_type": table_type,
             "semi_structured_type": semi_type or None,
+            "enable_embedding": is_vector,
             "is_vector_memory": is_vector,
+            "embedding_provider": embedding_provider if is_vector else "none",
             "embedding_model": embedding_model if is_vector else None,
             "vector_element_type": elem_type if is_vector else None,
             "dimension": dim if is_vector else None,
+            "endpoint_url": endpoint_url if is_vector else None,
             "batch_size": batch_size,
             "llm_preprocessing": llm_preprocessing,
+            "thread_id": body.get("thread_id"),
+            "checkpoint_ns": body.get("checkpoint_ns"),
+            "ttl_hours": body.get("ttl_hours"),
+            "session_id": body.get("session_id"),
+            "window_k": body.get("window_k"),
+            "retention_days": body.get("retention_days"),
+            "summarizer_model": body.get("summarizer_model"),
+            "max_summary_tokens": body.get("max_summary_tokens"),
+            "user_id": body.get("user_id"),
+            "entity_namespace": body.get("entity_namespace"),
+            "schema_keys": body.get("schema_keys"),
+            "topic_column": body.get("topic_column"),
+            "tool_used_column": body.get("tool_used_column"),
+            "outcome_score_threshold": body.get("outcome_score_threshold"),
+            "few_shot_k": body.get("few_shot_k"),
+            "storage_mode": "create_physical" if create_physical else "bind_existing",
             "ddl": ddl,
             "created_by_role": self.active_role,
             "created_at": datetime.now(timezone.utc).isoformat(),
-            "snowflake_created": bool(exec_res.get("ok")),
+            "snowflake_created": bool(exec_res.get("ok")) and create_physical,
         }
         self.memories_registry.append(entry)
         vis_mem = self.selected_context.setdefault("visible_objects", {}).setdefault("memories", [])
         if name and name not in vis_mem:
             vis_mem.append(name)
+        self.record_audit_event(
+            action="MEMORY_CREATE_PHYSICAL" if create_physical else "MEMORY_USE_EXISTING",
+            outcome="ALLOWED",
+            target_object=entry["table_fqn"],
+            details=entry,
+        )
         return {"ok": True, "status_code": 201, "memory": entry, "ddl": ddl}
 
     def get_context_databases(self) -> list[str]:
@@ -792,6 +1421,9 @@ class LiveSnowflakeBridge:
                         merged_cortex_agents.append(item)
 
         memories = [m.get("name", "") for m in self.memories_registry if m.get("name")] or ["SNOWFLAKE_KB_MEM"]
+        for pair_val in objects_by_db_schema.values():
+            if isinstance(pair_val, dict):
+                pair_val.setdefault("memories", list(memories))
         self.selected_context["schemas_by_db"] = schemas_by_db_out
         self.selected_context["objects_by_db_schema"] = objects_by_db_schema
 
@@ -806,6 +1438,7 @@ class LiveSnowflakeBridge:
             "schemas": primary_schemas or ["CORE", "PUBLIC"],
             "schemas_by_db": schemas_by_db_out,
             "objects_by_db_schema": objects_by_db_schema,
+            "categories": objects_by_db_schema.get(f"{db}.{sch}", {}),
             "objects": primary_raw_objects
             or [{"name": t, "kind": "TABLE"} for t in merged_tables] + [{"name": v, "kind": "VIEW"} for v in merged_views],
             "tables": merged_tables,
@@ -926,7 +1559,7 @@ class LiveSnowflakeBridge:
             from langflow.services.auth.utils import get_password_hash
 
             hashed = get_password_hash(su_pass)
-            conn = sqlite3.connect(str(db_path), timeout=0.5)
+            conn = _open_sqlite_conn(db_path, readonly=False, timeout=30.0)
             cur = conn.cursor()
             cur.execute(
                 "UPDATE user SET username = ?, password = ?, is_active = 1, is_superuser = 1 WHERE is_superuser = 1",
@@ -947,7 +1580,7 @@ class LiveSnowflakeBridge:
             return {"ok": False, "persist_dir": str(persist_dir), "db_exists": False, "flows_count": 0}
         try:
             backup_dir.mkdir(parents=True, exist_ok=True)
-            conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=0.5)
+            conn = _open_sqlite_conn(db_path, readonly=True, timeout=30.0)
             conn.row_factory = sqlite3.Row
             cur = conn.cursor()
             cur.execute("SELECT id, name, description, updated_at, folder_id, user_id, is_component FROM flow")
@@ -1194,9 +1827,18 @@ class LiveSnowflakeBridge:
             "cache_invalidated": True,
         }
 
+    def set_context(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Alias for `update_selected_context` used by Snowsight hierarchical tree context sync."""
+        return self.update_selected_context(payload)
+
     def check_write_privilege_or_deny(self, action: str, target_object: str) -> dict[str, Any] | None:
         """Fail-closed role check: VIEWER and PUBLIC roles are explicitly denied DDL/write actions."""
-        if self.active_role.upper() in ("PUBLIC", "SNOWFLAKE_LANGFLOW_VIEWER_ROLE", "VIEWER_ROLE", "ROLE_VIEWER"):
+        if not self.can_create_object() or self.active_role.upper() in (
+            "PUBLIC",
+            "SNOWFLAKE_LANGFLOW_VIEWER_ROLE",
+            "VIEWER_ROLE",
+            "ROLE_VIEWER",
+        ):
             msg = (
                 f"Il ruolo attivo ({self.active_role}) non dispone dei privilegi per creare questo oggetto "
                 f"in {self.database}.{self.schema} ({action} su {target_object})."
@@ -1206,14 +1848,25 @@ class LiveSnowflakeBridge:
                 outcome="DENIED",
                 error_code=ErrorCode.AUTHZ_ROLE_DENIED.value,
                 target_object=target_object,
-                details={"message": msg},
+                details={"message": msg, "required_privilege": action, "object_fqn": target_object},
             )
             return {
                 "ok": False,
                 "status_code": 403,
                 "error_code": ErrorCode.AUTHZ_ROLE_DENIED.value,
+                "error": {
+                    "code": "PERMISSION_DENIED",
+                    "error_code": ErrorCode.AUTHZ_ROLE_DENIED.value,
+                    "message": msg,
+                    "role": self.active_role,
+                    "required_privilege": action,
+                    "object_fqn": target_object,
+                },
                 "message": msg,
                 "active_role": self.active_role,
+                "role": self.active_role,
+                "required_privilege": action,
+                "object_fqn": target_object,
                 "context_epoch": self.context_epoch,
                 "role_privileges": self.role_privileges,
             }
@@ -1228,7 +1881,7 @@ class LiveSnowflakeBridge:
 
         if db_path.exists():
             try:
-                conn = sqlite3.connect(str(db_path))
+                conn = _open_sqlite_conn(db_path, readonly=False, timeout=30.0)
                 conn.row_factory = sqlite3.Row
                 cur = conn.cursor()
                 tables = {
@@ -1314,6 +1967,7 @@ def register_snowflake_fastapi_routes(app: Any) -> None:
     from fastapi import APIRouter, Request
     from fastapi.responses import JSONResponse
 
+    ensure_sqlite_wal_and_uv_cache()
     sf_router = APIRouter(prefix="/api/v1/snowflake", tags=["SnowflakeLangflow"])
 
     @sf_router.get("/persistence")
@@ -1385,6 +2039,30 @@ def register_snowflake_fastapi_routes(app: Any) -> None:
             object_kind=object_kind,
             databases=databases,
             schemas_by_db=schemas_by_db,
+        )
+        return JSONResponse(status_code=200, content=catalog_data)
+
+    @sf_router.get("/schemas")
+    async def get_snowflake_schemas(
+        database: str | None = None,
+        databases: str | None = None,
+    ) -> JSONResponse:
+        catalog_data = LIVE_BRIDGE.discover_catalog(
+            database=database,
+            databases=databases,
+        )
+        return JSONResponse(status_code=200, content=catalog_data)
+
+    @sf_router.get("/objects")
+    async def get_snowflake_objects(
+        database: str | None = None,
+        schema: str | None = None,
+        object_kind: str | None = None,
+    ) -> JSONResponse:
+        catalog_data = LIVE_BRIDGE.discover_catalog(
+            database=database,
+            schema=schema,
+            object_kind=object_kind,
         )
         return JSONResponse(status_code=200, content=catalog_data)
 
@@ -1694,6 +2372,9 @@ def register_snowflake_fastapi_routes(app: Any) -> None:
                 "memories": LIVE_BRIDGE.memories_registry,
                 "memories_catalog": LIVE_BRIDGE.memories_catalog,
                 "agent_memory_types": list(AGENT_MEMORY_TYPES),
+                "legacy_memory_type_aliases": dict(LEGACY_MEMORY_TYPE_ALIASES),
+                "external_embedding_providers": EXTERNAL_EMBEDDING_PROVIDERS,
+                "embedding_providers_catalog": list(EMBEDDING_PROVIDERS_CATALOG),
                 "supported_backends": [
                     "Standard Table",
                     "Hybrid Table",
@@ -1703,6 +2384,9 @@ def register_snowflake_fastapi_routes(app: Any) -> None:
                     "Semi-Structured (OBJECT)",
                     "Semi-Structured (ARRAY)",
                     "Snowflake Postgres (Relational / JSONB)",
+                    "Snowflake Postgres (PostgresSaver)",
+                    "Snowflake Postgres (PostgresStore)",
+                    "SnowflakeCheckpointer",
                     "Standard Table (VECTOR)",
                     "Hybrid Table (VECTOR)",
                     "Interactive Table (VECTOR)",
@@ -1721,232 +2405,23 @@ def register_snowflake_fastapi_routes(app: Any) -> None:
                     "voyage-multilingual-2 (1024d)",
                     "nv-embed-qa-4 (1024d)",
                     "voyage-multimodal-3 (1024d)",
+                    "text-embedding-3-small (1536d)",
+                    "text-embedding-3-large (3072d)",
+                    "text-embedding-ada-002 (1536d)",
+                    "embed-english-v3.0 (1024d)",
+                    "embed-multilingual-v3.0 (1024d)",
+                    "bge-large-en-v1.5 (1024d)",
+                    "custom-embedding-endpoint (1..4096d)",
                 ],
             },
         )
 
     @sf_router.post("/memories")
     async def post_create_memory(request: Request) -> JSONResponse:
-        from .providers.embeddings import resolve_embedding_dimension
-
         body = await request.json()
-        name = str(body.get("name") or "").strip()
-        db = str(body.get("database") or LIVE_BRIDGE.database).strip().upper()
-        sch = str(body.get("schema") or LIVE_BRIDGE.schema).strip().upper()
-        raw_agent_type = str(body.get("agent_memory_type") or "").strip().lower()
-        category = str(body.get("memory_category") or "").strip().lower()
-        backend = str(body.get("vector_database") or "").strip()
-        if not category:
-            if raw_agent_type == "episodic_session":
-                category = "postgres_non_vector" if "POSTGRES" in backend.upper() else "structured"
-            elif raw_agent_type == "structured_long_term":
-                category = "semi_structured" if any(t in backend.upper() for t in ("VARIANT", "OBJECT", "ARRAY")) else "structured"
-            else:
-                category = "vector_table"
-        if not backend:
-            if raw_agent_type == "episodic_session":
-                backend = "Hybrid Table"
-            elif raw_agent_type == "structured_long_term":
-                backend = "Semi-Structured (VARIANT)" if category == "semi_structured" else "Standard Table"
-            else:
-                backend = "Standard Table (VECTOR)"
-
-        table_type = str(
-            body.get("table_type")
-            or ("HYBRID" if ("Hybrid" in backend or raw_agent_type == "episodic_session") else "STANDARD")
-        ).strip().upper()
-        semi_type = str(body.get("semi_structured_type") or "").strip().upper()
-        embedding_model = str(body.get("embedding_model") or "snowflake-arctic-embed-m-v1.5").strip()
-        elem_type = str(body.get("vector_element_type") or "FLOAT").strip().upper()
-        batch_size = int(body.get("batch_size") or 64)
-        llm_preprocessing = body.get("llm_preprocessing") or None
-
-        denied = LIVE_BRIDGE.check_write_privilege_or_deny("CREATE_MEMORY", name or "MEMORY_TABLE")
-        if denied:
-            return JSONResponse(status_code=403, content=denied)
-
-        is_vector = (
-            raw_agent_type == "semantic_vector"
-            or (
-                raw_agent_type not in ("episodic_session", "structured_long_term")
-                and (
-                    category in ("vector_table", "postgres_pgvector", "cortex_search")
-                    or "VECTOR" in backend.upper()
-                    or "PGVECTOR" in backend.upper()
-                    or "CORTEX SEARCH" in backend.upper()
-                )
-                and category not in ("structured", "structured_table", "semi_structured", "postgres_non_vector")
-            )
-        )
-        if raw_agent_type in ("episodic_session", "semantic_vector", "structured_long_term"):
-            agent_memory_type = raw_agent_type
-        elif is_vector:
-            agent_memory_type = "semantic_vector"
-        elif category == "postgres_non_vector" or table_type == "HYBRID":
-            agent_memory_type = "episodic_session"
-        else:
-            agent_memory_type = "structured_long_term"
-
-        if is_vector and ("ICEBERG" in table_type or "ICEBERG" in backend.upper()):
-            return JSONResponse(
-                status_code=422,
-                content={
-                    "ok": False,
-                    "status_code": 422,
-                    "error_code": ErrorCode.UNSUPPORTED_CAPABILITY.value,
-                    "message": "Native VECTOR columns are not supported on Snowflake Iceberg Tables (HUB-W2-05).",
-                    "active_role": LIVE_BRIDGE.active_role,
-                },
-            )
-        if body.get("vector_inside_variant") is True:
-            return JSONResponse(
-                status_code=422,
-                content={
-                    "ok": False,
-                    "status_code": 422,
-                    "error_code": ErrorCode.UNSUPPORTED_CAPABILITY.value,
-                    "message": "VECTOR columns cannot be nested inside VARIANT columns (HUB-W2-05).",
-                    "active_role": LIVE_BRIDGE.active_role,
-                },
-            )
-        if elem_type not in {"FLOAT", "INT"}:
-            return JSONResponse(
-                status_code=422,
-                content={
-                    "ok": False,
-                    "status_code": 422,
-                    "error_code": ErrorCode.UNSUPPORTED_CAPABILITY.value,
-                    "message": f"Unsupported VECTOR element type '{elem_type}'. Expected FLOAT or INT.",
-                    "active_role": LIVE_BRIDGE.active_role,
-                },
-            )
-
-        expected_dim = resolve_embedding_dimension(embedding_model, default=768)
-        requested_dim = int(body.get("vector_dimension") or body.get("dimension") or expected_dim)
-        if is_vector and (requested_dim < 1 or requested_dim > 4096):
-            return JSONResponse(
-                status_code=422,
-                content={
-                    "ok": False,
-                    "status_code": 422,
-                    "error_code": ErrorCode.UNSUPPORTED_CAPABILITY.value,
-                    "message": f"VECTOR dimension {requested_dim} is out of bounds (1..4096).",
-                    "active_role": LIVE_BRIDGE.active_role,
-                },
-            )
-        if is_vector and ("vector_dimension" in body or "dimension" in body) and requested_dim != expected_dim:
-            return JSONResponse(
-                status_code=422,
-                content={
-                    "ok": False,
-                    "status_code": 422,
-                    "error_code": ErrorCode.UNSUPPORTED_CAPABILITY.value,
-                    "message": (
-                        f"VECTOR dimension {requested_dim} does not match selected AI_EMBED model "
-                        f"'{embedding_model}' ({expected_dim}d)."
-                    ),
-                    "active_role": LIVE_BRIDGE.active_role,
-                },
-            )
-
-        dim = expected_dim
-        safe_table = "".join(c if c.isalnum() or c == "_" else "_" for c in (name or "MEMORY_STORE")).upper()
-        fqn = f"{db}.{sch}.MEM_{safe_table}"
-
-        if agent_memory_type == "episodic_session" and not (
-            category == "postgres_non_vector" or ("POSTGRES" in backend.upper() and "PGVECTOR" not in backend.upper())
-        ):
-            table_kw = "HYBRID TABLE" if table_type == "HYBRID" else "TABLE"
-            ddl = (
-                f"CREATE {table_kw} IF NOT EXISTS {fqn} ("
-                f"session_id VARCHAR(128), turn_id VARCHAR(128), memory_name VARCHAR(256), "
-                f"sender VARCHAR(64), text_chunk VARCHAR, metadata VARIANT, created_by_role VARCHAR(128), "
-                f"created_at TIMESTAMP_TZ DEFAULT CURRENT_TIMESTAMP(), PRIMARY KEY (session_id, turn_id));"
-            )
-        elif category == "semi_structured" or semi_type in ("VARIANT", "OBJECT", "ARRAY"):
-            col_type = semi_type if semi_type in ("VARIANT", "OBJECT", "ARRAY") else "VARIANT"
-            ddl = (
-                f"CREATE TABLE IF NOT EXISTS {fqn} ("
-                f"chunk_id VARCHAR(128) PRIMARY KEY, memory_name VARCHAR(256), text_chunk VARCHAR, "
-                f"payload {col_type}, metadata VARIANT, created_by_role VARCHAR(128), "
-                f"created_at TIMESTAMP_TZ DEFAULT CURRENT_TIMESTAMP());"
-            )
-        elif category == "postgres_non_vector" or ("POSTGRES" in backend.upper() and "PGVECTOR" not in backend.upper()):
-            ddl = (
-                f"CREATE TABLE IF NOT EXISTS {sch.lower()}.mem_{safe_table.lower()} ("
-                f"session_id TEXT, chunk_id TEXT PRIMARY KEY, memory_name TEXT, text_chunk TEXT, "
-                f"payload JSONB DEFAULT '{{}}'::jsonb, metadata JSONB DEFAULT '{{}}'::jsonb, "
-                f"created_by_role TEXT, created_at TIMESTAMPTZ DEFAULT NOW());"
-            )
-        elif category == "postgres_pgvector" or "PGVECTOR" in backend.upper():
-            ddl = (
-                f"CREATE EXTENSION IF NOT EXISTS vector; "
-                f"CREATE TABLE IF NOT EXISTS {sch.lower()}.mem_{safe_table.lower()} ("
-                f"chunk_id TEXT PRIMARY KEY, memory_name TEXT, text_chunk TEXT, "
-                f"embedding vector({dim}), metadata JSONB DEFAULT '{{}}'::jsonb, "
-                f"created_by_role TEXT, created_at TIMESTAMPTZ DEFAULT NOW());"
-            )
-        elif category == "cortex_search" or "CORTEX SEARCH" in backend.upper():
-            wh = str(body.get("warehouse") or LIVE_BRIDGE.warehouse or "<WAREHOUSE>").strip()
-            clean_embed = embedding_model.split(" ")[0]
-            ddl = (
-                f"CREATE TABLE IF NOT EXISTS {fqn} ("
-                f"chunk_id VARCHAR(128), memory_name VARCHAR(256), text_chunk VARCHAR, "
-                f"created_by_role VARCHAR(128), created_at TIMESTAMP_TZ DEFAULT CURRENT_TIMESTAMP()); "
-                f"CREATE OR REPLACE CORTEX SEARCH SERVICE {db}.{sch}.SVC_{safe_table} "
-                f"ON text_chunk ATTRIBUTES memory_name, created_by_role "
-                f"WAREHOUSE = {wh} TARGET_LAG = '1 minute' EMBEDDING_MODEL = '{clean_embed}' "
-                f"AS (SELECT * FROM {fqn});"
-            )
-        elif not is_vector:
-            table_kw = "HYBRID TABLE" if table_type == "HYBRID" else "TABLE"
-            ddl = (
-                f"CREATE {table_kw} IF NOT EXISTS {fqn} ("
-                f"chunk_id VARCHAR(128) PRIMARY KEY, memory_name VARCHAR(256), text_chunk VARCHAR, "
-                f"metadata VARIANT, created_by_role VARCHAR(128), "
-                f"created_at TIMESTAMP_TZ DEFAULT CURRENT_TIMESTAMP());"
-            )
-        else:
-            table_kw = "HYBRID TABLE" if table_type == "HYBRID" else "TABLE"
-            ddl = (
-                f"CREATE {table_kw} IF NOT EXISTS {fqn} ("
-                f"chunk_id VARCHAR(128) PRIMARY KEY, memory_name VARCHAR(256), text_chunk VARCHAR, "
-                f"embedding VECTOR({elem_type}, {dim}), metadata VARIANT, created_by_role VARCHAR(128), "
-                f"created_at TIMESTAMP_TZ DEFAULT CURRENT_TIMESTAMP());"
-            )
-
-        exec_res = LIVE_BRIDGE.execute_sql(ddl)
-        entry = {
-            "name": name,
-            "database": db,
-            "schema": sch,
-            "table_fqn": fqn,
-            "agent_memory_type": agent_memory_type,
-            "memory_category": category,
-            "vector_database": backend,
-            "table_type": table_type,
-            "semi_structured_type": semi_type or None,
-            "is_vector_memory": is_vector,
-            "embedding_model": embedding_model if is_vector else None,
-            "vector_element_type": elem_type if is_vector else None,
-            "dimension": dim if is_vector else None,
-            "batch_size": batch_size,
-            "llm_preprocessing": llm_preprocessing,
-            "created_by_role": LIVE_BRIDGE.active_role,
-            "created_at": datetime.now(timezone.utc).isoformat(),
-            "snowflake_created": bool(exec_res.get("ok")),
-        }
-        LIVE_BRIDGE.memories_registry.append(entry)
-        vis_mem = LIVE_BRIDGE.selected_context.setdefault("visible_objects", {}).setdefault("memories", [])
-        if name and name not in vis_mem:
-            vis_mem.append(name)
-        LIVE_BRIDGE.record_audit_event(
-            action="CREATE_MEMORY",
-            outcome="ALLOWED",
-            target_object=entry["table_fqn"],
-            details=entry,
-        )
-        return JSONResponse(status_code=201, content={"ok": True, "memory": entry, "ddl": ddl})
+        res = LIVE_BRIDGE.create_or_register_memory(body if isinstance(body, dict) else {})
+        status_code = int(res.get("status_code") or (201 if res.get("ok") else 422))
+        return JSONResponse(status_code=status_code, content=res)
 
     @sf_router.post("/mcp/streamable")
     async def post_mcp_streamable(request: Request) -> JSONResponse:

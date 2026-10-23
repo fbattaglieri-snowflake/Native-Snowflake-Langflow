@@ -30,6 +30,16 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Callable, Mapping
 
+from ..fastapi_live_bridge import (
+    AGENT_MEMORY_TYPES,
+    CANONICAL_MEMORY_TYPES_BY_ID,
+    EMBEDDING_PROVIDERS_CATALOG,
+    EXTERNAL_EMBEDDING_PROVIDERS,
+    LEGACY_MEMORY_TYPE_ALIASES,
+    LIVE_BRIDGE,
+    resolve_canonical_memory_type,
+    resolve_memory_embedding_dimension,
+)
 from .files_and_stage import (
     ErrorCode,
     SnowflakeComponentError,
@@ -140,9 +150,17 @@ _MEMORY_BACKEND_ALIASES: dict[str, VectorBackendType] = {
     "SEMI-STRUCTURED (ARRAY)": VectorBackendType.SEMI_STRUCTURED_ARRAY,
     "ARRAY": VectorBackendType.SEMI_STRUCTURED_ARRAY,
     "POSTGRES_RELATIONAL": VectorBackendType.POSTGRES_RELATIONAL,
+    "SNOWFLAKE POSTGRES": VectorBackendType.POSTGRES_RELATIONAL,
     "SNOWFLAKE POSTGRES (RELATIONAL)": VectorBackendType.POSTGRES_RELATIONAL,
     "SNOWFLAKE POSTGRES (RELATIONAL/JSONB)": VectorBackendType.POSTGRES_RELATIONAL,
     "SNOWFLAKE POSTGRES (RELATIONAL / JSONB)": VectorBackendType.POSTGRES_RELATIONAL,
+    "SNOWFLAKE POSTGRES (POSTGRESSAVER)": VectorBackendType.POSTGRES_RELATIONAL,
+    "SNOWFLAKE POSTGRES (POSTGRESSTORE)": VectorBackendType.POSTGRES_JSONB,
+    "SNOWFLAKECHECKPOINTER": VectorBackendType.HYBRID_RELATIONAL,
+    "HYBRID TABLE + AI_COMPLETE / AI_SUMMARIZE_AGG": VectorBackendType.HYBRID_RELATIONAL,
+    "STANDARD TABLE + AI_COMPLETE": VectorBackendType.STANDARD_RELATIONAL,
+    "HYBRID TABLE (VARIANT)": VectorBackendType.HYBRID_RELATIONAL,
+    "STANDARD TABLE (VARIANT)": VectorBackendType.SEMI_STRUCTURED_VARIANT,
     "POSTGRES_JSONB": VectorBackendType.POSTGRES_JSONB,
     "SNOWFLAKE POSTGRES (JSONB)": VectorBackendType.POSTGRES_JSONB,
 }
@@ -273,6 +291,52 @@ DEFAULT_SNOWFLAKE_EMBEDDING_CATALOG: dict[str, EmbeddingModelSpec] = {
         provider="Ollama (Snowflake Hosted)",
         dimension=768,
         version="1.5",
+    ),
+}
+
+EXTERNAL_EMBEDDING_MODELS_CATALOG: dict[str, EmbeddingModelSpec] = {
+    **DEFAULT_SNOWFLAKE_EMBEDDING_CATALOG,
+    "text-embedding-3-small": EmbeddingModelSpec(
+        model_id="text-embedding-3-small",
+        provider="OpenAI Embeddings (External)",
+        dimension=1536,
+        version="3.0",
+    ),
+    "text-embedding-3-large": EmbeddingModelSpec(
+        model_id="text-embedding-3-large",
+        provider="OpenAI Embeddings (External)",
+        dimension=3072,
+        version="3.0",
+    ),
+    "text-embedding-ada-002": EmbeddingModelSpec(
+        model_id="text-embedding-ada-002",
+        provider="OpenAI Embeddings (External)",
+        dimension=1536,
+        version="2.0",
+    ),
+    "embed-english-v3.0": EmbeddingModelSpec(
+        model_id="embed-english-v3.0",
+        provider="Cohere Embeddings (External)",
+        dimension=1024,
+        version="3.0",
+    ),
+    "embed-multilingual-v3.0": EmbeddingModelSpec(
+        model_id="embed-multilingual-v3.0",
+        provider="Cohere Embeddings (External)",
+        dimension=1024,
+        version="3.0",
+    ),
+    "bge-large-en-v1.5": EmbeddingModelSpec(
+        model_id="bge-large-en-v1.5",
+        provider="HuggingFace / Ollama Embeddings",
+        dimension=1024,
+        version="1.5",
+    ),
+    "custom-embedding-endpoint": EmbeddingModelSpec(
+        model_id="custom-embedding-endpoint",
+        provider="Custom Embedding Endpoint",
+        dimension=768,
+        version="1.0",
     ),
 }
 
@@ -735,6 +799,11 @@ class CreateMemoryDialogService:
         vector_column: str = "EMBEDDING_VEC",
         warehouse: str | None = None,
         target_lag: str = "1 minute",
+        agent_memory_type: str = "episodic_memory",
+        enable_embedding: bool | None = None,
+        embedding_provider: str = "snowflake_cortex",
+        custom_dimension: int | None = None,
+        endpoint_url: str | None = None,
     ) -> dict[str, Any]:
         self.state = DialogState.LOADING
         try:
@@ -745,17 +814,40 @@ class CreateMemoryDialogService:
                     http_status=400,
                 )
             backend_enum = normalize_memory_backend_type(vector_database)
+            if enable_embedding is False and backend_enum in VECTOR_MEMORY_BACKENDS:
+                backend_enum = (
+                    VectorBackendType.HYBRID_RELATIONAL
+                    if backend_enum == VectorBackendType.HYBRID_VECTOR
+                    else VectorBackendType.STANDARD_RELATIONAL
+                )
+
+            prov_clean = (embedding_provider or "snowflake_cortex").strip().lower()
             if isinstance(embedding_model, EmbeddingModelSpec):
                 resolved_embed = embedding_model
+            elif prov_clean == "custom_endpoint":
+                dim_val = int(custom_dimension or vector_dimension_override or 768)
+                resolved_embed = EmbeddingModelSpec(
+                    model_id=str(embedding_model or "custom-embedding-endpoint").strip(),
+                    provider="Custom Embedding Endpoint",
+                    dimension=dim_val,
+                    version="1.0",
+                )
             elif isinstance(embedding_model, str) and embedding_model.strip():
                 clean_model = embedding_model.strip().split(" ")[0].replace("ollama/", "")
-                if clean_model not in DEFAULT_SNOWFLAKE_EMBEDDING_CATALOG:
+                catalog_lookup = (
+                    EXTERNAL_EMBEDDING_MODELS_CATALOG
+                    if prov_clean not in ("", "snowflake_cortex")
+                    else DEFAULT_SNOWFLAKE_EMBEDDING_CATALOG
+                )
+                if clean_model not in catalog_lookup and clean_model in EXTERNAL_EMBEDDING_MODELS_CATALOG:
+                    catalog_lookup = EXTERNAL_EMBEDDING_MODELS_CATALOG
+                if clean_model not in catalog_lookup:
                     raise SnowflakeComponentError(
                         ErrorCode.UNSUPPORTED_CAPABILITY,
                         f"Unsupported embedding model '{embedding_model}'. Expected one of {sorted(DEFAULT_SNOWFLAKE_EMBEDDING_CATALOG)}.",
                         http_status=422,
                     )
-                resolved_embed = DEFAULT_SNOWFLAKE_EMBEDDING_CATALOG[clean_model]
+                resolved_embed = catalog_lookup[clean_model]
             else:
                 resolved_embed = DEFAULT_SNOWFLAKE_EMBEDDING_CATALOG["snowflake-arctic-embed-m-v1.5"]
 
@@ -795,15 +887,33 @@ class CreateMemoryDialogService:
                     "backend_type": config.backend_type.value,
                 }
 
+            canonical_type = resolve_canonical_memory_type(agent_memory_type)
+            type_spec = CANONICAL_MEMORY_TYPES_BY_ID[canonical_type]
+            effective_enable_embedding = (
+                bool(enable_embedding) if enable_embedding is not None else config.is_vector_memory
+            )
+
             self.state = DialogState.CREATED
             self.last_error = None
             return {
                 "state": self.state.value,
                 "memory_name": config.name,
+                "agent_memory_type": agent_memory_type,
+                "canonical_memory_type": canonical_type,
+                "recommended_snowflake_objects": list(type_spec["recommended_snowflake_objects"]),
+                "needs_embedding_badge": type_spec["needs_embedding_badge"],
+                "how_to_feed_without_embedding": type_spec["how_to_feed_without_embedding"].replace(
+                    "<fqn>", config.table_fqn
+                ),
+                "when_embedding_useful": type_spec["when_embedding_useful"],
+                "required_inputs": list(type_spec["required_inputs"]),
                 "backend_type": config.backend_type.value,
+                "enable_embedding": effective_enable_embedding,
                 "is_vector_memory": config.is_vector_memory,
+                "embedding_provider": prov_clean if effective_enable_embedding else "none",
                 "embedding_model": config.embedding_spec.model_id if config.is_vector_memory else None,
                 "dimension": config.embedding_spec.dimension if config.is_vector_memory else None,
+                "endpoint_url": endpoint_url if effective_enable_embedding else None,
                 "space_fingerprint": config.embedding_spec.space_fingerprint,
                 "batch_size": config.batch_size,
                 "llm_preprocessing_enabled": preproc.enabled,
@@ -1198,3 +1308,145 @@ class SnowflakeMemoryBaseComponent:
             include_metadata=True,
             top_k=top_k,
         )
+
+
+class SnowflakeMemoryManagerComponent:
+    """Langflow `SnowflakeMemoryManagerComponent` supporting all 5 LangChain/Langflow Memory Types (`W2-R3-05`).
+
+    Supports:
+    1. `graph_state_checkpointer` (#1 Short-Term: Graph State & Checkpointer)
+    2. `buffer_window_memory` (#2 Short-Term: Buffer / Window Memory, alias `episodic_session`)
+    3. `summary_memory` (#3 Short-Term: Summary Memory)
+    4. `user_profile_entity_memory` (#4 Long-Term Semantic: User Profile & Entity Memory, alias `structured_long_term`)
+    5. `episodic_memory` (#5 Long-Term Semantic: Episodic Memory, alias `semantic_vector`)
+
+    Includes non-embedding SQL lookup mode (`enable_embedding=False`, default) and optional
+    Snowflake `AI_EMBED` (`snowflake_cortex`) or external embedding providers (`openai`, `cohere`,
+    `huggingface_ollama`, `custom_endpoint`).
+    """
+
+    display_name = "Snowflake Memory Manager"
+    category = "Memories"
+    icon = "Snowflake"
+    memory_types = AGENT_MEMORY_TYPES
+    legacy_aliases = LEGACY_MEMORY_TYPE_ALIASES
+    external_embedding_providers = EXTERNAL_EMBEDDING_PROVIDERS
+    embedding_providers_catalog = EMBEDDING_PROVIDERS_CATALOG
+
+    def __init__(
+        self,
+        *,
+        name: str = "SNOWFLAKE_AGENT_MEMORY",
+        agent_memory_type: str = "episodic_memory",
+        database: str | None = None,
+        schema: str | None = None,
+        storage_backend: str | None = None,
+        enable_embedding: bool = False,
+        embedding_provider: str = "snowflake_cortex",
+        embedding_model: str = "snowflake-arctic-embed-m-v1.5",
+        custom_dimension: int | None = None,
+        endpoint_url: str | None = None,
+        thread_id: str = "default",
+        checkpoint_ns: str = "default",
+        ttl_hours: int = 24,
+        session_id: str = "default",
+        window_k: int = 10,
+        retention_days: int = 30,
+        summarizer_model: str = "mistral-large2",
+        max_summary_tokens: int = 512,
+        user_id: str = "default",
+        entity_namespace: str = "default",
+        schema_keys: list[str] | None = None,
+        topic_column: str = "topic",
+        tool_used_column: str = "tool_used",
+        outcome_score_threshold: float = 0.7,
+        few_shot_k: int = 3,
+        create_new_physical_store: bool = True,
+    ) -> None:
+        self.name = name
+        self.agent_memory_type = agent_memory_type
+        self.canonical_memory_type = resolve_canonical_memory_type(agent_memory_type)
+        self.database = (database or LIVE_BRIDGE.database).strip().upper()
+        self.schema = (schema or LIVE_BRIDGE.schema).strip().upper()
+        type_spec = CANONICAL_MEMORY_TYPES_BY_ID[self.canonical_memory_type]
+        self.storage_backend = storage_backend or type_spec["recommended_snowflake_objects"][0]
+        self.enable_embedding = bool(enable_embedding)
+        self.embedding_provider = (embedding_provider or "snowflake_cortex").strip().lower()
+        self.embedding_model = embedding_model
+        self.custom_dimension = custom_dimension
+        self.endpoint_url = endpoint_url
+        self.thread_id = thread_id
+        self.checkpoint_ns = checkpoint_ns
+        self.ttl_hours = ttl_hours
+        self.session_id = session_id
+        self.window_k = window_k
+        self.retention_days = retention_days
+        self.summarizer_model = summarizer_model
+        self.max_summary_tokens = max_summary_tokens
+        self.user_id = user_id
+        self.entity_namespace = entity_namespace
+        self.schema_keys = schema_keys or ["preferences", "role", "department"]
+        self.topic_column = topic_column
+        self.tool_used_column = tool_used_column
+        self.outcome_score_threshold = outcome_score_threshold
+        self.few_shot_k = few_shot_k
+        self.create_new_physical_store = create_new_physical_store
+
+    def get_type_metadata(self) -> dict[str, Any]:
+        return dict(CANONICAL_MEMORY_TYPES_BY_ID[self.canonical_memory_type])
+
+    def provision_or_register(self, *, dry_run: bool = True) -> dict[str, Any]:
+        return LIVE_BRIDGE.create_or_register_memory(
+            {
+                "name": self.name,
+                "database": self.database,
+                "schema": self.schema,
+                "agent_memory_type": self.agent_memory_type,
+                "vector_database": self.storage_backend,
+                "enable_embedding": self.enable_embedding,
+                "embedding_provider": self.embedding_provider,
+                "embedding_model": self.embedding_model,
+                "custom_dimension": self.custom_dimension,
+                "endpoint_url": self.endpoint_url,
+                "thread_id": self.thread_id,
+                "checkpoint_ns": self.checkpoint_ns,
+                "ttl_hours": self.ttl_hours,
+                "session_id": self.session_id,
+                "window_k": self.window_k,
+                "retention_days": self.retention_days,
+                "summarizer_model": self.summarizer_model,
+                "max_summary_tokens": self.max_summary_tokens,
+                "user_id": self.user_id,
+                "entity_namespace": self.entity_namespace,
+                "schema_keys": self.schema_keys,
+                "topic_column": self.topic_column,
+                "tool_used_column": self.tool_used_column,
+                "outcome_score_threshold": self.outcome_score_threshold,
+                "few_shot_k": self.few_shot_k,
+                "create_new_physical_store": self.create_new_physical_store,
+                "dry_run": dry_run,
+            }
+        )
+
+    def recall(
+        self,
+        *,
+        query: str = "",
+        session_id: str | None = None,
+        thread_id: str | None = None,
+        user_id: str | None = None,
+        entity_namespace: str | None = None,
+        topic: str = "",
+        limit: int | None = None,
+    ) -> dict[str, Any]:
+        return LIVE_BRIDGE.recall_memory(
+            self.name,
+            query=query,
+            session_id=session_id or self.session_id,
+            thread_id=thread_id or self.thread_id,
+            user_id=user_id or self.user_id,
+            entity_namespace=entity_namespace or self.entity_namespace,
+            topic=topic,
+            limit=limit or self.window_k,
+        )
+

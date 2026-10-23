@@ -19,6 +19,15 @@ from .bundle_manifest import (
     get_bundle_manifest,
     verify_invariant_category_integrity,
 )
+from .fastapi_live_bridge import (
+    AGENT_MEMORY_TYPES,
+    CANONICAL_MEMORY_TYPES_BY_ID,
+    EMBEDDING_PROVIDERS_CATALOG,
+    EXTERNAL_EMBEDDING_PROVIDERS,
+    LEGACY_MEMORY_TYPE_ALIASES,
+    resolve_canonical_memory_type,
+    resolve_memory_embedding_dimension,
+)
 
 STAGE_URI_REGEX = re.compile(
     r"^@(?P<database>(?:[A-Za-z_][A-Za-z0-9_$]*|<[A-Za-z_][A-Za-z0-9_]*>))\."
@@ -376,6 +385,10 @@ class SnowflakeAPIRouter:
                 "bundle": get_bundle_manifest(),
                 "branding": SNOWFLAKE_BRANDING_CONTRACT,
                 "invariant_integrity": integrity,
+                "agent_memory_types": list(AGENT_MEMORY_TYPES),
+                "legacy_memory_type_aliases": dict(LEGACY_MEMORY_TYPE_ALIASES),
+                "external_embedding_providers": EXTERNAL_EMBEDDING_PROVIDERS,
+                "embedding_providers_catalog": list(EMBEDDING_PROVIDERS_CATALOG),
                 "session": {
                     "active_role": self.active_role,
                     "available_roles": list(self.available_roles),
@@ -705,17 +718,38 @@ class SnowflakeAPIRouter:
         )
 
     # ------------------------------------------------------------------
-    # 5. Create Memory Dialog Endpoint (REQ-10, G-A4)
+    # 5. Create Memory Dialog Endpoint (REQ-10, G-A4, W2-R3-05)
     # ------------------------------------------------------------------
+    def list_memories_catalog(self) -> SnowflakeAPIResponse:
+        """GET /api/v1/snowflake/memories"""
+        return SnowflakeAPIResponse(
+            status_code=200,
+            body={
+                "memories": list(self.memories_registry.values()),
+                "agent_memory_types": list(AGENT_MEMORY_TYPES),
+                "legacy_memory_type_aliases": dict(LEGACY_MEMORY_TYPE_ALIASES),
+                "external_embedding_providers": EXTERNAL_EMBEDDING_PROVIDERS,
+                "embedding_providers_catalog": list(EMBEDDING_PROVIDERS_CATALOG),
+                "active_role": self.active_role,
+                "context_epoch": self.context_epoch,
+            },
+        )
+
     def create_or_bind_memory(
         self,
         name: str,
-        embedding_model: str,
-        vector_database: str,
+        embedding_model: str = "snowflake-arctic-embed-m-v1.5",
+        vector_database: str = "snowflake_vector",
         batch_size: int = 64,
         llm_preprocessing_enabled: bool = False,
         llm_preprocessing_provider: str | None = None,
         create_new_physical_store: bool = False,
+        *,
+        agent_memory_type: str = "episodic_memory",
+        enable_embedding: bool = False,
+        embedding_provider: str = "snowflake_cortex",
+        custom_dimension: int | None = None,
+        endpoint_url: str | None = None,
     ) -> SnowflakeAPIResponse:
         """POST /api/v1/snowflake/memories/create"""
         # Granular permission separation (G-A4): using an existing vector store does NOT require CREATE privilege
@@ -735,7 +769,16 @@ class SnowflakeAPIRouter:
 
         valid_backends = {
             b["id"] for b in SETTINGS_CONTRACT["DB Providers"]["backends"]
+        } | {
+            "snowflake_vector",
+            "snowflake_standard_vector",
+            "snowflake_standard_table",
+            "snowflake_hybrid_table",
+            "snowflake_postgres",
         }
+        for mem_spec in AGENT_MEMORY_TYPES:
+            valid_backends.update(mem_spec.get("recommended_snowflake_objects", []))
+            valid_backends.update(mem_spec.get("supported_backends", []))
         if vector_database not in valid_backends:
             return self.build_error_response(
                 error_code="UNSUPPORTED_CAPABILITY",
@@ -750,11 +793,36 @@ class SnowflakeAPIRouter:
                 detail="llm_preprocessing_provider is required when LLM Preprocessing is enabled",
             )
 
+        canonical_type = resolve_canonical_memory_type(agent_memory_type)
+        type_spec = CANONICAL_MEMORY_TYPES_BY_ID[canonical_type]
+        dim = (
+            resolve_memory_embedding_dimension(
+                embedding_model,
+                embedding_provider=embedding_provider,
+                custom_dimension=custom_dimension,
+                default=768,
+            )
+            if enable_embedding
+            else None
+        )
+
         memory_id = str(uuid.uuid4())
         record = {
             "memory_id": memory_id,
             "name": name,
+            "agent_memory_type": agent_memory_type,
+            "canonical_memory_type": canonical_type,
+            "label": type_spec["label"],
+            "recommended_snowflake_objects": list(type_spec["recommended_snowflake_objects"]),
+            "needs_embedding_badge": type_spec["needs_embedding_badge"],
+            "how_to_feed_without_embedding": type_spec["how_to_feed_without_embedding"],
+            "when_embedding_useful": type_spec["when_embedding_useful"],
+            "required_inputs": list(type_spec["required_inputs"]),
+            "enable_embedding": bool(enable_embedding),
+            "embedding_provider": embedding_provider if enable_embedding else "none",
             "embedding_model": embedding_model,
+            "dimension": dim,
+            "endpoint_url": endpoint_url if enable_embedding else None,
             "vector_database": vector_database,
             "batch_size": int(batch_size),
             "llm_preprocessing_enabled": bool(llm_preprocessing_enabled),
@@ -773,6 +841,10 @@ class SnowflakeAPIRouter:
             outcome="SUCCESS",
             target_object=name,
             details={
+                "agent_memory_type": agent_memory_type,
+                "canonical_memory_type": canonical_type,
+                "enable_embedding": enable_embedding,
+                "embedding_provider": embedding_provider,
                 "vector_database": vector_database,
                 "create_new_physical_store": create_new_physical_store,
                 "llm_preprocessing_enabled": llm_preprocessing_enabled,
