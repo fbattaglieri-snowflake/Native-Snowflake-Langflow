@@ -3,12 +3,10 @@ from __future__ import annotations
 import json
 from typing import Any
 
-try:
-    from lfx.custom import Component
-    from lfx.io import DropdownInput, MessageTextInput, Output, StrInput
-    from lfx.schema.message import Message
-except ImportError:  # pragma: no cover
-    from lfx_snowflake._lfx_compat import Component, DropdownInput, Message, MessageTextInput, Output, StrInput
+import lfx_snowflake._lfx_compat  # noqa: F401
+from lfx.custom import Component
+from lfx.io import DropdownInput, MessageTextInput, Output, StrInput
+from lfx.schema.message import Message
 
 from lfx_snowflake.fastapi_live_bridge import LIVE_BRIDGE
 

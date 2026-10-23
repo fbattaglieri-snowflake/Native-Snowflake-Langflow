@@ -3,22 +3,11 @@ from __future__ import annotations
 import json
 from typing import Any
 
-try:
-    from lfx.custom import Component
-    from lfx.io import BoolInput, DropdownInput, MessageTextInput, Output, StrInput
-    from lfx.schema import Data
-    from lfx.schema.message import Message
-except ImportError:  # pragma: no cover
-    from lfx_snowflake._lfx_compat import (
-        BoolInput,
-        Component,
-        Data,
-        DropdownInput,
-        Message,
-        MessageTextInput,
-        Output,
-        StrInput,
-    )
+import lfx_snowflake._lfx_compat  # noqa: F401
+from lfx.custom import Component
+from lfx.io import BoolInput, DropdownInput, MessageTextInput, Output, StrInput
+from lfx.schema import Data
+from lfx.schema.message import Message
 
 from lfx_snowflake.components.ai_function import (
     TASK_SPECIFIC_AI_FUNCTIONS,

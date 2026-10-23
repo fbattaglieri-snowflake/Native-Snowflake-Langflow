@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from . import _lfx_compat as _lfx_compat  # noqa: F401
 from .api_routes import SnowflakeAPIResponse, SnowflakeAPIRouter, redact_secrets_in_obj
 from .bundle_manifest import (
     BUNDLE_ID,

@@ -63,24 +63,28 @@ def install_all() -> None:
     ):
         if std_candidate.exists():
             cand_text = std_candidate.read_text(encoding="utf-8")
-            for std_target in (Path("/app/standard_langflow.py"), SITE_PACKAGES / "standard_langflow.py"):
+            prev_text = ""
+            for existing_std in (SITE_PACKAGES / "standard_langflow.py", Path("/app/standard_langflow.py")):
+                if existing_std.exists():
+                    prev_text = existing_std.read_text(encoding="utf-8", errors="ignore")
+                    if "<PROXY_SERVICE>" not in prev_text:
+                        break
+            if prev_text and "<PROXY_SERVICE>" in cand_text:
+                m_orig = re.search(r"ORIGIN\s*=\s*['\"](http[^'\"]+)['\"]", prev_text)
+                m_ollama = re.search(r"['\"]ollama['\"]\s*:\s*['\"](http[^'\"]+)['\"]", prev_text)
+                if m_orig and "<PROXY_SERVICE>" not in m_orig.group(1):
+                    cand_text = cand_text.replace(
+                        "http://<PROXY_SERVICE>.<DNS_NAMESPACE>:8080",
+                        m_orig.group(1),
+                    )
+                if m_ollama and "<OLLAMA_SERVICE>" not in m_ollama.group(1):
+                    cand_text = cand_text.replace(
+                        "http://<OLLAMA_SERVICE>.<DNS_NAMESPACE>:11434/v1",
+                        m_ollama.group(1),
+                    )
+            for std_target in (SITE_PACKAGES / "standard_langflow.py", Path("/app/standard_langflow.py")):
                 if std_target.parent.exists():
-                    out_text = cand_text
-                    if std_target.exists() and "<PROXY_SERVICE>" in out_text:
-                        prev_text = std_target.read_text(encoding="utf-8", errors="ignore")
-                        m_orig = re.search(r"ORIGIN\s*=\s*['\"](http[^'\"]+)['\"]", prev_text)
-                        m_ollama = re.search(r"['\"]ollama['\"]\s*:\s*['\"](http[^'\"]+)['\"]", prev_text)
-                        if m_orig and "<PROXY_SERVICE>" not in m_orig.group(1):
-                            out_text = out_text.replace(
-                                "http://<PROXY_SERVICE>.<DNS_NAMESPACE>:8080",
-                                m_orig.group(1),
-                            )
-                        if m_ollama and "<OLLAMA_SERVICE>" not in m_ollama.group(1):
-                            out_text = out_text.replace(
-                                "http://<OLLAMA_SERVICE>.<DNS_NAMESPACE>:11434/v1",
-                                m_ollama.group(1),
-                            )
-                    std_target.write_text(out_text, encoding="utf-8")
+                    std_target.write_text(cand_text, encoding="utf-8")
                     print(f"[install_live_hooks] Installed standard_langflow.py into {std_target}")
             break
 

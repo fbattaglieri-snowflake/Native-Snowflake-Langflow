@@ -1,9 +1,7 @@
-try:
-    from lfx.base.models.model import LCModelComponent
-    from lfx.io import DropdownInput, IntInput
-    from lfx.field_typing import LanguageModel
-except ImportError:  # pragma: no cover
-    from lfx_snowflake._lfx_compat import DropdownInput, IntInput, LCModelComponent, LanguageModel
+import lfx_snowflake._lfx_compat  # noqa: F401
+from lfx.base.models.model import LCModelComponent
+from lfx.io import DropdownInput, IntInput
+from lfx.field_typing import LanguageModel
 
 try:
     import standard_langflow

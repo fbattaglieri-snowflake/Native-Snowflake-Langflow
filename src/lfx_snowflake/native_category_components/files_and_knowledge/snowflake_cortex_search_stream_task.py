@@ -2,12 +2,10 @@ from __future__ import annotations
 
 from typing import Any
 
-try:
-    from lfx.custom import Component
-    from lfx.io import DataInput, DropdownInput, IntInput, MultilineInput, Output, StrInput
-    from lfx.schema import Data
-except ImportError:  # pragma: no cover
-    from lfx_snowflake._lfx_compat import Component, Data, DataInput, DropdownInput, IntInput, MultilineInput, Output, StrInput
+import lfx_snowflake._lfx_compat  # noqa: F401
+from lfx.custom import Component
+from lfx.io import DataInput, DropdownInput, IntInput, MultilineInput, Output, StrInput
+from lfx.schema import Data
 
 from lfx_snowflake.components.files_and_stage import (
     CortexSearchStreamTaskBuilder,

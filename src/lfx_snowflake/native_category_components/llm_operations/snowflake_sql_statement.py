@@ -3,23 +3,11 @@ from __future__ import annotations
 import json
 from typing import Any
 
-try:
-    from lfx.custom import Component
-    from lfx.io import DropdownInput, IntInput, MultilineInput, Output, StrInput
-    from lfx.schema import Data, DataFrame
-    from lfx.schema.message import Message
-except ImportError:  # pragma: no cover
-    from lfx_snowflake._lfx_compat import (
-        Component,
-        Data,
-        DataFrame,
-        DropdownInput,
-        IntInput,
-        Message,
-        MultilineInput,
-        Output,
-        StrInput,
-    )
+import lfx_snowflake._lfx_compat  # noqa: F401
+from lfx.custom import Component
+from lfx.io import DropdownInput, IntInput, MultilineInput, Output, StrInput
+from lfx.schema import Data, DataFrame
+from lfx.schema.message import Message
 
 from lfx_snowflake.components.llm_operations import SnowflakeSQLStatementEngine
 from lfx_snowflake.fastapi_live_bridge import LIVE_BRIDGE

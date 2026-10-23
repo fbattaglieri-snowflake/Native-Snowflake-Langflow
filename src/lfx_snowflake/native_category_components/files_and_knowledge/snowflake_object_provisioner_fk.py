@@ -2,10 +2,8 @@ from __future__ import annotations
 
 from typing import Any
 
-try:
-    from lfx.io import BoolInput, DropdownInput, IntInput, MultilineInput, Output, StrInput
-except ImportError:  # pragma: no cover
-    from lfx_snowflake._lfx_compat import BoolInput, DropdownInput, IntInput, MultilineInput, Output, StrInput
+import lfx_snowflake._lfx_compat  # noqa: F401
+from lfx.io import BoolInput, DropdownInput, IntInput, MultilineInput, Output, StrInput
 
 from lfx_snowflake.native_category_components.llm_operations.snowflake_object_provisioner import (
     CREATE_NEW_DB_DISABLED_OPTION,

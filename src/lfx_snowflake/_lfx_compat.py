@@ -187,3 +187,63 @@ class LCModelComponent(Component):
             StrInput(name="system_message", display_name="System Message", value="", advanced=True),
             BoolInput(name="stream", display_name="Stream", value=False, advanced=True),
         ]
+
+
+def ensure_lfx_shim_installed() -> None:
+    """Install lightweight `lfx.*` module shims only when running outside the Langflow container."""
+    import importlib.util
+    import sys
+    import types
+
+    if "lfx" in sys.modules or importlib.util.find_spec("lfx") is not None:
+        return
+
+    lfx_mod = types.ModuleType("lfx")
+    custom_mod = types.ModuleType("lfx.custom")
+    custom_mod.Component = Component  # type: ignore[attr-defined]
+
+    io_mod = types.ModuleType("lfx.io")
+    for cls in (
+        BoolInput,
+        DataInput,
+        DropdownInput,
+        FloatInput,
+        HandleInput,
+        IntInput,
+        MessageTextInput,
+        MultilineInput,
+        Output,
+        StrInput,
+    ):
+        setattr(io_mod, cls.__name__, cls)
+
+    schema_mod = types.ModuleType("lfx.schema")
+    schema_mod.Data = Data  # type: ignore[attr-defined]
+    schema_mod.DataFrame = DataFrame  # type: ignore[attr-defined]
+    schema_mod.Message = Message  # type: ignore[attr-defined]
+
+    msg_mod = types.ModuleType("lfx.schema.message")
+    msg_mod.Message = Message  # type: ignore[attr-defined]
+
+    base_mod = types.ModuleType("lfx.base")
+    base_models_mod = types.ModuleType("lfx.base.models")
+    base_model_mod = types.ModuleType("lfx.base.models.model")
+    base_model_mod.LCModelComponent = LCModelComponent  # type: ignore[attr-defined]
+
+    ft_mod = types.ModuleType("lfx.field_typing")
+    ft_mod.LanguageModel = LanguageModel  # type: ignore[attr-defined]
+    ft_mod.Tool = Tool  # type: ignore[attr-defined]
+
+    sys.modules["lfx"] = lfx_mod
+    sys.modules["lfx.custom"] = custom_mod
+    sys.modules["lfx.io"] = io_mod
+    sys.modules["lfx.schema"] = schema_mod
+    sys.modules["lfx.schema.message"] = msg_mod
+    sys.modules["lfx.base"] = base_mod
+    sys.modules["lfx.base.models"] = base_models_mod
+    sys.modules["lfx.base.models.model"] = base_model_mod
+    sys.modules["lfx.field_typing"] = ft_mod
+
+
+ensure_lfx_shim_installed()
+
