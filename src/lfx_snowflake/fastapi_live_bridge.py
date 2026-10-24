@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 import os
+import re
 import sqlite3
+import threading
 import time
 import uuid
 import urllib.request
@@ -470,6 +473,8 @@ class LiveSnowflakeBridge:
                 "postgres_instances": [],
             },
         }
+        self.contexts_by_flow_id: dict[str, dict[str, Any]] = {}
+        self.active_flow_id: str | None = None
         self._roles_discovered: bool = False
         self._superuser_synced: bool = False
         self._roles_last_refreshed_ts: float = 0.0
@@ -477,7 +482,225 @@ class LiveSnowflakeBridge:
         self._schemas_cache: dict[str, tuple[float, list[str]]] = {}
         self._objects_cache: dict[str, tuple[float, dict[str, Any]]] = {}
         self._synced_tx_ids: set[str] = set()
+        self._synced_vertex_build_ids: set[str] = set()
+        self._auto_sync_daemon_started: bool = False
+        self.auto_sync_enabled: bool = True
+        self.last_auto_sync_ts: str | None = None
+        self.synced_runs_count: int = 0
+        self.synced_spans_count: int = 0
         self._http_client: Any = None
+        self._ensure_flow_contexts_sqlite_table()
+        self._load_flow_contexts_sqlite()
+
+    @staticmethod
+    def _normalize_flow_id(flow_id: str | None) -> str | None:
+        """Normalize flow_id across URLs (hyphenated UUIDs), SQLite (32-char hex), and custom workflow keys."""
+        if flow_id is None:
+            return None
+        clean = str(flow_id).strip()
+        if not clean or clean.lower() in {"null", "undefined", "none", ""}:
+            return None
+        if re.fullmatch(r"[0-9a-fA-F]{32}", clean):
+            try:
+                return str(uuid.UUID(clean))
+            except Exception:  # noqa: BLE001
+                return clean
+        if re.fullmatch(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}", clean):
+            try:
+                return str(uuid.UUID(clean))
+            except Exception:  # noqa: BLE001
+                return clean.lower()
+        return clean
+
+    def _resolve_writable_sqlite_db_path(self) -> Path:
+        """Return writable SQLite DB path (`/persist/langflow.db` in SPCS or `/tmp/sflf_persist/langflow.db` fallback)."""
+        env_dir = os.getenv("LANGFLOW_PERSIST_DIR", "").strip()
+        if env_dir:
+            p_dir = Path(env_dir)
+            try:
+                p_dir.mkdir(parents=True, exist_ok=True)
+                return p_dir / "langflow.db"
+            except OSError:
+                pass
+        persist_dir = Path("/persist")
+        try:
+            if persist_dir.exists() and os.access(persist_dir, os.W_OK):
+                return persist_dir / "langflow.db"
+            persist_dir.mkdir(parents=True, exist_ok=True)
+            if os.access(persist_dir, os.W_OK):
+                return persist_dir / "langflow.db"
+        except OSError:
+            pass
+        fallback_dir = Path("/tmp/sflf_persist")
+        fallback_dir.mkdir(parents=True, exist_ok=True)
+        return fallback_dir / "langflow.db"
+
+    def _default_context_template(self) -> dict[str, Any]:
+        """Return a fresh default Snowflake context dictionary for a newly initialized workflow."""
+        default_db = (os.getenv("SNOWFLAKE_DATABASE", "SNOWFLAKE_LANGFLOW") or self.database or "SNOWFLAKE_LANGFLOW").strip().upper()
+        default_sch = (os.getenv("SNOWFLAKE_SCHEMA", "CORE") or self.schema or "CORE").strip().upper()
+        return {
+            "database": default_db,
+            "schema": default_sch,
+            "databases": [default_db],
+            "schemas_by_db": {default_db: [default_sch, "PUBLIC"] if default_sch != "PUBLIC" else ["PUBLIC"]},
+            "objects_by_db_schema": {},
+            "selected_objects": {},
+            "visible_objects": {
+                "tables": ["LANGFLOW_FLOW_RUNS", "LANGFLOW_FLOW_SPANS", "LANGFLOW_AUDIT_LOG"],
+                "views": [],
+                "iceberg_tables": [],
+                "stages": [self.stage_name],
+                "memories": ["SNOWFLAKE_KB_MEM"],
+                "cortex_search_services": [],
+                "semantic_views": [],
+                "semantic_models": [],
+                "cortex_agents": [],
+                "functions": [],
+                "procedures": [],
+                "postgres_instances": [],
+            },
+        }
+
+    def _ensure_flow_contexts_sqlite_table(self) -> Path | None:
+        """Ensure `snowflake_flow_contexts` table exists in SQLite (`langflow.db`)."""
+        try:
+            db_path = self._resolve_writable_sqlite_db_path()
+            conn = _open_sqlite_conn(db_path, readonly=False, timeout=30.0)
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS snowflake_flow_contexts (
+                    flow_id TEXT PRIMARY KEY,
+                    active_role TEXT,
+                    database_name TEXT,
+                    schema_name TEXT,
+                    context_epoch INTEGER,
+                    selected_context_json TEXT,
+                    updated_at TEXT
+                )
+                """
+            )
+            conn.commit()
+            conn.close()
+            return db_path
+        except Exception:  # noqa: BLE001
+            return None
+
+    def _load_flow_contexts_sqlite(self) -> dict[str, dict[str, Any]]:
+        """Hydrate `self.contexts_by_flow_id` from SQLite `snowflake_flow_contexts`."""
+        loaded: dict[str, dict[str, Any]] = {}
+        try:
+            db_path = self._resolve_writable_sqlite_db_path()
+            if not db_path.exists():
+                return loaded
+            conn = _open_sqlite_conn(db_path, readonly=True, timeout=30.0)
+            conn.row_factory = sqlite3.Row
+            cur = conn.cursor()
+            tables = {r[0] for r in cur.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+            if "snowflake_flow_contexts" in tables:
+                rows = cur.execute("SELECT * FROM snowflake_flow_contexts").fetchall()
+                for row in rows:
+                    row_d = dict(row)
+                    raw_fid = str(row_d.get("flow_id") or "").strip()
+                    norm_fid = self._normalize_flow_id(raw_fid) or raw_fid
+                    if not norm_fid:
+                        continue
+                    try:
+                        parsed_ctx = json.loads(str(row_d.get("selected_context_json") or "{}"))
+                    except Exception:  # noqa: BLE001
+                        parsed_ctx = {}
+                    if isinstance(parsed_ctx, dict) and parsed_ctx:
+                        parsed_ctx.setdefault("flow_id", norm_fid)
+                        if row_d.get("database_name") and "database" not in parsed_ctx:
+                            parsed_ctx["database"] = str(row_d["database_name"])
+                        if row_d.get("schema_name") and "schema" not in parsed_ctx:
+                            parsed_ctx["schema"] = str(row_d["schema_name"])
+                        self.contexts_by_flow_id[norm_fid] = parsed_ctx
+                        loaded[norm_fid] = parsed_ctx
+            conn.close()
+        except Exception:  # noqa: BLE001
+            pass
+        return loaded
+
+    def _save_flow_context_sqlite(self, flow_id: str | None, ctx: dict[str, Any]) -> bool:
+        """Persist a workflow's Snowflake context into SQLite `snowflake_flow_contexts`."""
+        try:
+            db_path = self._ensure_flow_contexts_sqlite_table()
+            if db_path is None:
+                return False
+            norm_fid = self._normalize_flow_id(flow_id) or "__global__"
+            db_name = str(ctx.get("database") or (ctx.get("databases") or [self.database])[0] or self.database)
+            sch_map = ctx.get("schemas_by_db") or {}
+            sch_name = str(
+                ctx.get("schema")
+                or (sch_map.get(db_name) or [self.schema])[0]
+                or self.schema
+            )
+            now_iso = datetime.now(timezone.utc).isoformat()
+            conn = _open_sqlite_conn(db_path, readonly=False, timeout=30.0)
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO snowflake_flow_contexts
+                (flow_id, active_role, database_name, schema_name, context_epoch, selected_context_json, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    norm_fid,
+                    self.active_role,
+                    db_name,
+                    sch_name,
+                    int(self.context_epoch),
+                    json.dumps(ctx),
+                    now_iso,
+                ),
+            )
+            conn.commit()
+            conn.close()
+            return True
+        except Exception:  # noqa: BLE001
+            return False
+
+    def get_flow_context(self, flow_id: str | None = None) -> dict[str, Any]:
+        """Return the Snowflake context scoped to `flow_id` (hydrating from SQLite if needed), or global context when `flow_id` is None."""
+        norm_fid = self._normalize_flow_id(flow_id)
+        if not norm_fid:
+            return self.selected_context
+        if norm_fid not in self.contexts_by_flow_id:
+            self._load_flow_contexts_sqlite()
+        if norm_fid not in self.contexts_by_flow_id:
+            hex_alt = norm_fid.replace("-", "")
+            if hex_alt in self.contexts_by_flow_id:
+                self.contexts_by_flow_id[norm_fid] = copy.deepcopy(self.contexts_by_flow_id[hex_alt])
+            else:
+                fresh = self._default_context_template()
+                fresh["flow_id"] = norm_fid
+                self.contexts_by_flow_id[norm_fid] = fresh
+                self._save_flow_context_sqlite(norm_fid, fresh)
+        ctx = self.contexts_by_flow_id[norm_fid]
+        ctx["flow_id"] = norm_fid
+        ctx["active_role"] = self.active_role
+        ctx.setdefault("context_epoch", self.context_epoch)
+        return ctx
+
+    def set_active_flow(self, flow_id: str | None) -> dict[str, Any]:
+        """Activate a workflow's Snowflake context as the active session context."""
+        norm_fid = self._normalize_flow_id(flow_id)
+        self.active_flow_id = norm_fid
+        if norm_fid:
+            ctx = self.get_flow_context(norm_fid)
+            self.selected_context = copy.deepcopy(ctx)
+            dbs = ctx.get("databases") or []
+            if ctx.get("database"):
+                self.database = str(ctx["database"]).strip().upper()
+            elif dbs:
+                self.database = str(dbs[0]).strip().upper()
+            sch_map = ctx.get("schemas_by_db") or {}
+            if ctx.get("schema"):
+                self.schema = str(ctx["schema"]).strip().upper()
+            elif self.database in sch_map and sch_map[self.database]:
+                self.schema = str(sch_map[self.database][0]).strip().upper()
+            return self.selected_context
+        return self.selected_context
 
     def invalidate_catalog_cache(self) -> None:
         """Clear in-memory catalog caches on role switch or explicit refresh."""
@@ -1153,21 +1376,28 @@ class LiveSnowflakeBridge:
         except Exception:  # noqa: BLE001
             pass
 
-    def get_context_databases(self) -> list[str]:
-        """Return active databases in the Hub cone of visibility (`W2-R2-00`)."""
-        dbs = [str(d).strip().upper() for d in (self.selected_context.get("databases") or []) if str(d).strip()]
-        default_db = (self.database or "SNOWFLAKE_LANGFLOW").strip().upper()
-        if default_db and default_db not in dbs:
+    def get_context_databases(self, flow_id: str | None = None) -> list[str]:
+        """Return active databases in the Hub cone of visibility (`W2-R2-00`), optionally scoped to `flow_id`."""
+        norm_fid = self._normalize_flow_id(flow_id)
+        target_ctx = self.get_flow_context(norm_fid) if norm_fid else self.selected_context
+        dbs = [str(d).strip().upper() for d in (target_ctx.get("databases") or []) if str(d).strip()]
+        if norm_fid and dbs:
+            return dbs
+        default_db = (target_ctx.get("database") or self.database or "SNOWFLAKE_LANGFLOW").strip().upper()
+        if default_db and default_db not in dbs and not norm_fid:
             dbs.insert(0, default_db)
-        return dbs or ["SNOWFLAKE_LANGFLOW"]
+        return dbs or [default_db or "SNOWFLAKE_LANGFLOW"]
 
-    def get_context_schemas(self, database: str | None = None) -> list[str]:
-        """Return active schemas for `<database>` in the Hub cone of visibility (`W2-R2-00`)."""
-        db = (database or self.database or "SNOWFLAKE_LANGFLOW").strip().upper()
-        schemas_by_db = self.selected_context.get("schemas_by_db") or {}
+    def get_context_schemas(self, database: str | None = None, flow_id: str | None = None) -> list[str]:
+        """Return active schemas for `<database>` in the Hub cone of visibility (`W2-R2-00`), optionally scoped to `flow_id`."""
+        norm_fid = self._normalize_flow_id(flow_id)
+        target_ctx = self.get_flow_context(norm_fid) if norm_fid else self.selected_context
+        ctx_db = str(target_ctx.get("database") or self.database or "SNOWFLAKE_LANGFLOW").strip().upper()
+        db = (database or ctx_db or "SNOWFLAKE_LANGFLOW").strip().upper()
+        schemas_by_db = target_ctx.get("schemas_by_db") or {}
         schemas = [str(s).strip().upper() for s in (schemas_by_db.get(db) or []) if str(s).strip()]
-        if not schemas and db == (self.database or "").strip().upper():
-            default_sch = (self.schema or "CORE").strip().upper()
+        if not schemas and db == ctx_db:
+            default_sch = str(target_ctx.get("schema") or self.schema or "CORE").strip().upper()
             schemas = [default_sch, "PUBLIC"] if default_sch != "PUBLIC" else ["PUBLIC"]
         return schemas or ["CORE", "PUBLIC"]
 
@@ -1176,21 +1406,26 @@ class LiveSnowflakeBridge:
         database: str | None = None,
         schema: str | None = None,
         category: str = "tables",
+        flow_id: str | None = None,
     ) -> list[str]:
-        """Return objects for `(<database>, <schema>, <category>)` filtered by `selected_objects` (`W2-R2-00`)."""
-        db = (database or self.database or "SNOWFLAKE_LANGFLOW").strip().upper()
-        sch = (schema or self.schema or "CORE").strip().upper()
+        """Return objects for `(<database>, <schema>, <category>)` filtered by `selected_objects` (`W2-R2-00`), optionally scoped to `flow_id`."""
+        norm_fid = self._normalize_flow_id(flow_id)
+        target_ctx = self.get_flow_context(norm_fid) if norm_fid else self.selected_context
+        ctx_db = str(target_ctx.get("database") or self.database or "SNOWFLAKE_LANGFLOW").strip().upper()
+        ctx_sch = str(target_ctx.get("schema") or self.schema or "CORE").strip().upper()
+        db = (database or ctx_db or "SNOWFLAKE_LANGFLOW").strip().upper()
+        sch = (schema or ctx_sch or "CORE").strip().upper()
         cat = (category or "tables").strip().lower()
         db_sch_key = f"{db}.{sch}"
 
-        objs_by_pair = self.selected_context.get("objects_by_db_schema") or {}
+        objs_by_pair = target_ctx.get("objects_by_db_schema") or {}
         pair_bucket = objs_by_pair.get(db_sch_key) if isinstance(objs_by_pair, dict) else None
-        vis = self.selected_context.get("visible_objects") or {}
+        vis = target_ctx.get("visible_objects") or {}
 
         candidates: list[str] = []
         if isinstance(pair_bucket, dict) and cat in pair_bucket and isinstance(pair_bucket[cat], list):
             candidates.extend(str(x).strip() for x in pair_bucket[cat] if str(x).strip())
-        if isinstance(vis.get(cat), list):
+        elif isinstance(vis.get(cat), list):
             for item in vis[cat]:
                 s_item = str(item).strip()
                 if not s_item:
@@ -1202,7 +1437,7 @@ class LiveSnowflakeBridge:
                 if s_item not in candidates:
                     candidates.append(s_item)
 
-        sel_objs = self.selected_context.get("selected_objects")
+        sel_objs = target_ctx.get("selected_objects")
         allowed_set: set[str] | None = None
         if isinstance(sel_objs, dict) and sel_objs:
             if db_sch_key in sel_objs and isinstance(sel_objs[db_sch_key], dict):
@@ -1285,43 +1520,157 @@ class LiveSnowflakeBridge:
     def role_privileges(self) -> dict[str, bool]:
         return self.get_role_privileges()
 
-    def update_selected_context(self, payload: dict[str, Any]) -> dict[str, Any]:
-        """Persist cascading primary context selection from Snowflake Langflow Hub (`HUB-W2-02`, `W2-R2-00`)."""
+    @staticmethod
+    def _extract_context_object_set(ctx: dict[str, Any]) -> tuple[set[str], set[str], set[str]]:
+        """Extract normalized `(databases_set, schemas_set, objects_set)` from a context dictionary."""
+        dbs_set: set[str] = {
+            str(d).strip().upper()
+            for d in (ctx.get("databases") or [])
+            if str(d).strip()
+        }
+        schemas_set: set[str] = set()
+        schemas_by_db = ctx.get("schemas_by_db") or {}
+        if isinstance(schemas_by_db, dict):
+            for db_k, sch_list in schemas_by_db.items():
+                db_u = str(db_k).strip().upper()
+                if isinstance(sch_list, list):
+                    for s in sch_list:
+                        s_u = str(s).strip().upper()
+                        if db_u and s_u:
+                            schemas_set.add(f"{db_u}.{s_u}")
+
+        objs_set: set[str] = set()
+        for map_key in ("objects_by_db_schema", "selected_objects"):
+            pair_map = ctx.get(map_key)
+            if isinstance(pair_map, dict):
+                for pair_k, pair_v in pair_map.items():
+                    clean_pair = str(pair_k).strip().upper()
+                    if isinstance(pair_v, dict):
+                        for cat_k, cat_v in pair_v.items():
+                            cat_l = str(cat_k).strip().lower()
+                            if isinstance(cat_v, list):
+                                for item in cat_v:
+                                    item_u = str(item).strip().upper()
+                                    if item_u:
+                                        objs_set.add(f"{clean_pair}.{cat_l}:{item_u}")
+                    elif isinstance(pair_v, list):
+                        for item in pair_v:
+                            item_u = str(item).strip().upper()
+                            if item_u:
+                                objs_set.add(f"{clean_pair}:{item_u}")
+            elif isinstance(pair_map, list):
+                for item in pair_map:
+                    item_u = str(item).strip().upper()
+                    if item_u:
+                        objs_set.add(item_u)
+
+        vis_map = ctx.get("visible_objects")
+        if isinstance(vis_map, dict):
+            for cat_k, cat_v in vis_map.items():
+                cat_l = str(cat_k).strip().lower()
+                if isinstance(cat_v, list):
+                    for item in cat_v:
+                        item_u = str(item).strip().upper()
+                        if item_u:
+                            objs_set.add(f"visible.{cat_l}:{item_u}")
+        return dbs_set, schemas_set, objs_set
+
+    def remove_object_from_context(
+        self,
+        *,
+        object_name: str,
+        category: str = "tables",
+        database: str | None = None,
+        schema: str | None = None,
+        flow_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Explicitly remove an object from a workflow's Snowflake context and emit `OBJECT_REMOVED_FROM_CONTEXT`."""
+        norm_fid = self._normalize_flow_id(flow_id)
+        target_ctx = copy.deepcopy(self.get_flow_context(norm_fid) if norm_fid else self.selected_context)
+        db = (database or target_ctx.get("database") or self.database or "SNOWFLAKE_LANGFLOW").strip().upper()
+        sch = (schema or target_ctx.get("schema") or self.schema or "CORE").strip().upper()
+        cat = (category or "tables").strip().lower()
+        obj_u = str(object_name or "").strip().upper()
+        pair_key = f"{db}.{sch}"
+
+        for map_key in ("objects_by_db_schema", "selected_objects"):
+            m = target_ctx.get(map_key)
+            if isinstance(m, dict) and pair_key in m and isinstance(m[pair_key], dict):
+                if cat in m[pair_key] and isinstance(m[pair_key][cat], list):
+                    m[pair_key][cat] = [
+                        x for x in m[pair_key][cat] if str(x).strip().upper() != obj_u
+                    ]
+        vis = target_ctx.get("visible_objects")
+        if isinstance(vis, dict) and cat in vis and isinstance(vis[cat], list):
+            vis[cat] = [x for x in vis[cat] if str(x).strip().upper() != obj_u]
+
+        return self.update_selected_context(target_ctx, flow_id=norm_fid)
+
+    def update_selected_context(
+        self,
+        payload: dict[str, Any],
+        flow_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Persist cascading primary context selection from Snowflake Langflow Hub (`HUB-W2-02`, `W2-R2-00`, per-workflow `flow_id`)."""
         incoming_ctx = payload.get("selected_context") if isinstance(payload.get("selected_context"), dict) else {}
+        effective_flow_id = self._normalize_flow_id(
+            flow_id
+            or payload.get("flow_id")
+            or incoming_ctx.get("flow_id")
+        )
+
+        # Snapshot previous context before applying update to detect removed databases/schemas/objects
+        if effective_flow_id:
+            base_ctx = copy.deepcopy(self.get_flow_context(effective_flow_id))
+        else:
+            base_ctx = copy.deepcopy(self.selected_context)
+
+        prev_dbs, prev_schemas, prev_objs = self._extract_context_object_set(base_ctx)
+
         new_db = str(payload.get("database") or incoming_ctx.get("database") or "").strip().upper()
         new_sch = str(payload.get("schema") or incoming_ctx.get("schema") or "").strip().upper()
         if new_db:
             self.database = new_db
+            base_ctx["database"] = new_db
         if new_sch:
             self.schema = new_sch
+            base_ctx["schema"] = new_sch
 
-        dbs = payload.get("databases") or incoming_ctx.get("databases")
-        if isinstance(dbs, list) and dbs:
-            self.selected_context["databases"] = [str(d).strip().upper() for d in dbs if str(d).strip()]
-            if not new_db and self.selected_context["databases"]:
-                self.database = self.selected_context["databases"][0]
-        elif self.database not in self.selected_context.get("databases", []):
-            self.selected_context.setdefault("databases", []).insert(0, self.database)
+        has_dbs_key = "databases" in payload or "databases" in incoming_ctx
+        dbs = payload.get("databases") if "databases" in payload else incoming_ctx.get("databases")
+        if has_dbs_key and isinstance(dbs, list):
+            base_ctx["databases"] = [str(d).strip().upper() for d in dbs if str(d).strip()]
+            if not new_db and base_ctx["databases"]:
+                self.database = base_ctx["databases"][0]
+                base_ctx["database"] = self.database
+        elif self.database not in base_ctx.get("databases", []):
+            base_ctx.setdefault("databases", []).insert(0, self.database)
 
-        schemas_by_db = payload.get("schemas_by_db") or incoming_ctx.get("schemas_by_db")
-        if isinstance(schemas_by_db, dict) and schemas_by_db:
+        has_schemas_key = "schemas_by_db" in payload or "schemas_by_db" in incoming_ctx
+        schemas_by_db = payload.get("schemas_by_db") if "schemas_by_db" in payload else incoming_ctx.get("schemas_by_db")
+        if has_schemas_key and isinstance(schemas_by_db, dict):
             normalized_map: dict[str, list[str]] = {}
             for k, v in schemas_by_db.items():
                 db_k = str(k).strip().upper()
                 if isinstance(v, list):
                     normalized_map[db_k] = [str(s).strip().upper() for s in v if str(s).strip()]
-            if normalized_map:
-                self.selected_context["schemas_by_db"] = normalized_map
-                if not new_sch and self.database in normalized_map and normalized_map[self.database]:
-                    self.schema = normalized_map[self.database][0]
+            base_ctx["schemas_by_db"] = normalized_map
+            if not new_sch and self.database in normalized_map and normalized_map[self.database]:
+                self.schema = normalized_map[self.database][0]
+                base_ctx["schema"] = self.schema
         else:
-            cur_map = self.selected_context.setdefault("schemas_by_db", {})
+            cur_map = base_ctx.setdefault("schemas_by_db", {})
             cur_list = cur_map.setdefault(self.database, [self.schema])
             if self.schema not in cur_list:
                 cur_list.insert(0, self.schema)
 
-        objs_by_pair = payload.get("objects_by_db_schema") or incoming_ctx.get("objects_by_db_schema")
-        if isinstance(objs_by_pair, dict) and objs_by_pair:
+        has_objs_key = "objects_by_db_schema" in payload or "objects_by_db_schema" in incoming_ctx
+        objs_by_pair = (
+            payload.get("objects_by_db_schema")
+            if "objects_by_db_schema" in payload
+            else incoming_ctx.get("objects_by_db_schema")
+        )
+        if has_objs_key and isinstance(objs_by_pair, dict):
             norm_objs: dict[str, dict[str, list[str]]] = {}
             for pair_k, pair_v in objs_by_pair.items():
                 clean_pair = str(pair_k).strip().upper()
@@ -1331,15 +1680,19 @@ class LiveSnowflakeBridge:
                         for cat_k, cat_v in pair_v.items()
                         if isinstance(cat_v, list)
                     }
-            self.selected_context["objects_by_db_schema"] = norm_objs
+            base_ctx["objects_by_db_schema"] = norm_objs
 
-        sel_objs = payload.get("selected_objects") if "selected_objects" in payload else incoming_ctx.get("selected_objects")
+        sel_objs = (
+            payload.get("selected_objects")
+            if "selected_objects" in payload
+            else incoming_ctx.get("selected_objects")
+        )
         if sel_objs is not None:
-            self.selected_context["selected_objects"] = sel_objs
+            base_ctx["selected_objects"] = sel_objs
 
-        vis = payload.get("visible_objects") or incoming_ctx.get("visible_objects")
+        vis = payload.get("visible_objects") if "visible_objects" in payload else incoming_ctx.get("visible_objects")
         if isinstance(vis, dict):
-            cur_vis = self.selected_context.setdefault("visible_objects", {})
+            cur_vis = base_ctx.setdefault("visible_objects", {})
             for k, v in vis.items():
                 if isinstance(v, list):
                     cur_vis[k] = [str(item).strip() for item in v if str(item).strip()]
@@ -1350,24 +1703,70 @@ class LiveSnowflakeBridge:
                     else:
                         cur_vis.setdefault(k, [])
 
+        base_ctx.setdefault("database", self.database)
+        base_ctx.setdefault("schema", self.schema)
+        base_ctx["active_role"] = self.active_role
+        if effective_flow_id:
+            base_ctx["flow_id"] = effective_flow_id
+
+        new_dbs, new_schemas, new_objs = self._extract_context_object_set(base_ctx)
+        removed_databases = sorted(prev_dbs - new_dbs) if has_dbs_key else []
+        removed_schemas = sorted(prev_schemas - new_schemas) if has_schemas_key else []
+        removed_objects = sorted(prev_objs - new_objs) if (has_objs_key or sel_objs is not None or isinstance(vis, dict)) else []
+        added_objects = sorted(new_objs - prev_objs)
+
         self.context_epoch += 1
+        base_ctx["context_epoch"] = self.context_epoch
+        self.selected_context = copy.deepcopy(base_ctx)
+        if effective_flow_id:
+            self.active_flow_id = effective_flow_id
+            self.contexts_by_flow_id[effective_flow_id] = copy.deepcopy(base_ctx)
+            self._save_flow_context_sqlite(effective_flow_id, base_ctx)
+        else:
+            self.contexts_by_flow_id["__global__"] = copy.deepcopy(base_ctx)
+            self._save_flow_context_sqlite("__global__", base_ctx)
+
         compact_audit_details = {
+            "flow_id": effective_flow_id,
             "database": self.database,
             "schema": self.schema,
             "databases": list(self.selected_context.get("databases") or []),
             "schemas_by_db": dict(self.selected_context.get("schemas_by_db") or {}),
             "selected_pairs_count": len(self.selected_context.get("selected_objects") or {}),
+            "added_objects": added_objects,
+            "removed_objects": removed_objects,
+            "removed_databases": removed_databases,
+            "removed_schemas": removed_schemas,
             "context_epoch": self.context_epoch,
         }
         self.record_audit_event(
             action="UPDATE_CONTEXT",
             outcome="ALLOWED",
             target_object=f"{self.database}.{self.schema}",
+            flow_id=effective_flow_id,
             details=compact_audit_details,
         )
+
+        if removed_databases or removed_schemas or removed_objects:
+            self.record_audit_event(
+                action="OBJECT_REMOVED_FROM_CONTEXT",
+                outcome="ALLOWED",
+                target_object=effective_flow_id or f"{self.database}.{self.schema}",
+                flow_id=effective_flow_id,
+                details={
+                    "flow_id": effective_flow_id,
+                    "removed_databases": removed_databases,
+                    "removed_schemas": removed_schemas,
+                    "removed_objects": removed_objects,
+                    "context_epoch": self.context_epoch,
+                },
+            )
+
         return {
             "ok": True,
             "status": "ok",
+            "flow_id": effective_flow_id,
+            "active_flow_id": self.active_flow_id,
             "active_role": self.active_role,
             "context_epoch": self.context_epoch,
             "database": self.database,
@@ -2085,10 +2484,10 @@ class LiveSnowflakeBridge:
         details_json = json.dumps(redacted).replace("'", "''")
         if len(details_json) > 12000:
             details_json = json.dumps({"summary": "truncated_large_audit_payload", "keys": list(redacted.keys())}).replace("'", "''")
-        err_sql = f"'{error_code}'" if error_code else "NULL"
+        err_sql = f"'{str(error_code).replace(chr(39), chr(39)*2)}'" if error_code else "NULL"
         tgt_sql = f"'{str(target_object).replace(chr(39), chr(39)*2)}'" if target_object else "NULL"
-        flw_sql = f"'{flow_id}'" if flow_id else "NULL"
-        run_sql = f"'{run_id}'" if run_id else "NULL"
+        flw_sql = f"'{str(flow_id).replace(chr(39), chr(39)*2)}'" if flow_id else "NULL"
+        run_sql = f"'{str(run_id).replace(chr(39), chr(39)*2)}'" if run_id else "NULL"
         stmt = (
             f"INSERT INTO {self.audit_table} "
             f"(event_id, event_ts, authenticated_user, effective_role, execution_mode, context_epoch, "
@@ -2145,6 +2544,11 @@ class LiveSnowflakeBridge:
         previous_role = self.active_role
         self.active_role = clean
         self.context_epoch += 1
+        self.selected_context["active_role"] = self.active_role
+        self.selected_context["context_epoch"] = self.context_epoch
+        if self.active_flow_id and self.active_flow_id in self.contexts_by_flow_id:
+            self.contexts_by_flow_id[self.active_flow_id]["active_role"] = self.active_role
+            self.contexts_by_flow_id[self.active_flow_id]["context_epoch"] = self.context_epoch
         self.invalidate_catalog_cache()
         self.record_audit_event(
             action="ROLE_SWITCH",
@@ -2164,9 +2568,9 @@ class LiveSnowflakeBridge:
             "cache_invalidated": True,
         }
 
-    def set_context(self, payload: dict[str, Any]) -> dict[str, Any]:
+    def set_context(self, payload: dict[str, Any], flow_id: str | None = None) -> dict[str, Any]:
         """Alias for `update_selected_context` used by Snowsight hierarchical tree context sync."""
-        return self.update_selected_context(payload)
+        return self.update_selected_context(payload, flow_id=flow_id)
 
     def check_write_privilege_or_deny(self, action: str, target_object: str) -> dict[str, Any] | None:
         """Fail-closed role check: VIEWER and PUBLIC roles are explicitly denied DDL/write actions."""
@@ -2210,73 +2614,121 @@ class LiveSnowflakeBridge:
         return None
 
     def sync_langflow_traces_to_snowflake(self, limit: int = 25, *, replicate_sqlite: bool = True) -> dict[str, Any]:
-        """Replicate Langflow SQLite `transaction` / `vertex_build` rows into Snowflake `LANGFLOW_FLOW_RUNS` & `SPANS`."""
+        """Replicate Langflow SQLite `transaction` and `vertex_build` rows into Snowflake `LANGFLOW_FLOW_RUNS` & `LANGFLOW_FLOW_SPANS`."""
         persist_dir = Path(os.getenv("LANGFLOW_PERSIST_DIR", "/persist"))
-        db_path = persist_dir / "langflow.db"
+        candidate_db_paths = [persist_dir / "langflow.db"]
+        writable_db = self._resolve_writable_sqlite_db_path()
+        if writable_db not in candidate_db_paths:
+            candidate_db_paths.append(writable_db)
+
         replicated_runs = 0
         replicated_spans = 0
 
-        if replicate_sqlite and db_path.exists():
-            try:
-                conn = _open_sqlite_conn(db_path, readonly=True, timeout=30.0)
-                conn.row_factory = sqlite3.Row
-                cur = conn.cursor()
-                tables = {
-                    r[0]
-                    for r in cur.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
-                }
-                if "transaction" in tables:
-                    bounded_tx = min(int(limit or 10), 10)
-                    rows = cur.execute(
-                        "SELECT * FROM \"transaction\" ORDER BY timestamp DESC LIMIT ?", (bounded_tx,)
-                    ).fetchall()
-                else:
-                    rows = []
-                conn.close()
-
-                for r in rows:
-                    row_dict = dict(r)
-                    tx_id = str(row_dict.get("id") or uuid.uuid4().hex)
-                    if tx_id in self._synced_tx_ids:
-                        continue
-                    flow_id = str(row_dict.get("flow_id") or "unknown-flow")
-                    vertex_id = str(row_dict.get("vertex_id") or "vertex")
-                    status_val = str(row_dict.get("status") or "SUCCESS").upper()
-                    inputs_redacted = json.dumps(redact_for_sink(row_dict.get("inputs") or {})).replace("'", "''")[:4000]
-                    outputs_redacted = json.dumps(redact_for_sink(row_dict.get("outputs") or {})).replace("'", "''")[:4000]
-
-                    merge_span = (
-                        f"MERGE INTO {self.spans_table} t "
-                        f"USING (SELECT '{tx_id}' AS span_id) s ON t.span_id = s.span_id "
-                        f"WHEN NOT MATCHED THEN INSERT "
-                        f"(event_id, span_id, run_id, trace_id, project_id, flow_id, component_id, component_name, "
-                        f"authenticated_user, effective_role, execution_mode, start_ts, end_ts, status, "
-                        f"redacted_inputs, redacted_outputs) VALUES "
-                        f"('evt-{tx_id[:16]}', '{tx_id}', 'run-{flow_id[:16]}', 'trc-{flow_id[:16]}', "
-                        f"'default', '{flow_id}', '{vertex_id}', '{vertex_id}', "
-                        f"'{self.authenticated_user}', '{self.active_role}', 'INTERACTIVE_CALLER', "
-                        f"CURRENT_TIMESTAMP(), CURRENT_TIMESTAMP(), '{status_val}', "
-                        f"PARSE_JSON('{inputs_redacted}'), PARSE_JSON('{outputs_redacted}'))"
+        if replicate_sqlite:
+            for db_path in candidate_db_paths:
+                if not db_path.exists():
+                    continue
+                try:
+                    conn = _open_sqlite_conn(db_path, readonly=True, timeout=30.0)
+                    conn.row_factory = sqlite3.Row
+                    cur = conn.cursor()
+                    tables = {
+                        r[0]
+                        for r in cur.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+                    }
+                    bounded_tx = min(int(limit or 25), 25)
+                    tx_rows = (
+                        cur.execute(
+                            'SELECT * FROM "transaction" ORDER BY timestamp DESC LIMIT ?', (bounded_tx,)
+                        ).fetchall()
+                        if "transaction" in tables
+                        else []
                     )
-                    self.execute_sql(merge_span, role="ACCOUNTADMIN", timeout=12)
-                    replicated_spans += 1
-
-                    merge_run = (
-                        f"MERGE INTO {self.runs_table} t "
-                        f"USING (SELECT 'run-{flow_id[:16]}' AS run_id) s ON t.run_id = s.run_id "
-                        f"WHEN NOT MATCHED THEN INSERT "
-                        f"(event_id, run_id, trace_id, project_id, flow_id, authenticated_user, effective_role, "
-                        f"execution_mode, start_ts, end_ts, status, input_payload, output_payload) VALUES "
-                        f"('evr-{flow_id[:16]}', 'run-{flow_id[:16]}', 'trc-{flow_id[:16]}', 'default', '{flow_id}', "
-                        f"'{self.authenticated_user}', '{self.active_role}', 'INTERACTIVE_CALLER', "
-                        f"CURRENT_TIMESTAMP(), CURRENT_TIMESTAMP(), '{status_val}', "
-                        f"PARSE_JSON('{inputs_redacted}'), PARSE_JSON('{outputs_redacted}'))"
+                    vb_rows = (
+                        cur.execute(
+                            'SELECT * FROM "vertex_build" ORDER BY timestamp DESC LIMIT ?', (bounded_tx,)
+                        ).fetchall()
+                        if "vertex_build" in tables
+                        else []
                     )
-                    self.execute_sql(merge_run, role="ACCOUNTADMIN", timeout=12)
-                    replicated_runs += 1
-                    self._synced_tx_ids.add(tx_id)
-            except Exception:  # noqa: BLE001
-                pass
+                    conn.close()
+
+                    for r in tx_rows:
+                        row_dict = dict(r)
+                        tx_id = str(row_dict.get("id") or uuid.uuid4().hex).replace("'", "''")
+                        if tx_id in self._synced_tx_ids:
+                            continue
+                        flow_id = str(row_dict.get("flow_id") or "unknown-flow").replace("'", "''")
+                        vertex_id = str(row_dict.get("vertex_id") or "vertex").replace("'", "''")
+                        status_val = str(row_dict.get("status") or "SUCCESS").upper().replace("'", "''")
+                        inputs_redacted = json.dumps(redact_for_sink(row_dict.get("inputs") or {})).replace("'", "''")[:4000]
+                        outputs_redacted = json.dumps(redact_for_sink(row_dict.get("outputs") or {})).replace("'", "''")[:4000]
+
+                        merge_span = (
+                            f"MERGE INTO {self.spans_table} t "
+                            f"USING (SELECT '{tx_id}' AS span_id) s ON t.span_id = s.span_id "
+                            f"WHEN NOT MATCHED THEN INSERT "
+                            f"(event_id, span_id, run_id, trace_id, project_id, flow_id, component_id, component_name, "
+                            f"authenticated_user, effective_role, execution_mode, start_ts, end_ts, status, "
+                            f"redacted_inputs, redacted_outputs) VALUES "
+                            f"('evt-{tx_id[:16]}', '{tx_id}', 'run-{flow_id[:16]}', 'trc-{flow_id[:16]}', "
+                            f"'default', '{flow_id}', '{vertex_id}', '{vertex_id}', "
+                            f"'{self.authenticated_user}', '{self.active_role}', 'INTERACTIVE_CALLER', "
+                            f"CURRENT_TIMESTAMP(), CURRENT_TIMESTAMP(), '{status_val}', "
+                            f"PARSE_JSON('{inputs_redacted}'), PARSE_JSON('{outputs_redacted}'))"
+                        )
+                        self.execute_sql(merge_span, role="ACCOUNTADMIN", timeout=12)
+                        replicated_spans += 1
+
+                        merge_run = (
+                            f"MERGE INTO {self.runs_table} t "
+                            f"USING (SELECT 'run-{tx_id[:16]}' AS run_id) s ON t.run_id = s.run_id "
+                            f"WHEN NOT MATCHED THEN INSERT "
+                            f"(event_id, run_id, trace_id, project_id, flow_id, authenticated_user, effective_role, "
+                            f"execution_mode, start_ts, end_ts, status, input_payload, output_payload) VALUES "
+                            f"('evr-{tx_id[:16]}', 'run-{tx_id[:16]}', 'trc-{flow_id[:16]}', 'default', '{flow_id}', "
+                            f"'{self.authenticated_user}', '{self.active_role}', 'INTERACTIVE_CALLER', "
+                            f"CURRENT_TIMESTAMP(), CURRENT_TIMESTAMP(), '{status_val}', "
+                            f"PARSE_JSON('{inputs_redacted}'), PARSE_JSON('{outputs_redacted}'))"
+                        )
+                        self.execute_sql(merge_run, role="ACCOUNTADMIN", timeout=12)
+                        replicated_runs += 1
+                        self._synced_tx_ids.add(tx_id)
+
+                    for vb in vb_rows:
+                        vb_dict = dict(vb)
+                        vb_id = str(vb_dict.get("build_id") or vb_dict.get("id") or uuid.uuid4().hex).replace("'", "''")
+                        if vb_id in self._synced_vertex_build_ids:
+                            continue
+                        flow_id = str(vb_dict.get("flow_id") or "unknown-flow").replace("'", "''")
+                        vertex_id = str(vb_dict.get("id") or vb_dict.get("vertex_id") or "vertex").replace("'", "''")
+                        valid_flag = vb_dict.get("valid")
+                        status_val = "SUCCESS" if valid_flag in (True, 1, "1", "true", "TRUE", None) else "ERROR"
+                        params_redacted = json.dumps(redact_for_sink(vb_dict.get("params") or {})).replace("'", "''")[:4000]
+                        data_redacted = json.dumps(redact_for_sink(vb_dict.get("data") or vb_dict.get("artifacts") or {})).replace("'", "''")[:4000]
+
+                        merge_vb_span = (
+                            f"MERGE INTO {self.spans_table} t "
+                            f"USING (SELECT 'vb-{vb_id}' AS span_id) s ON t.span_id = s.span_id "
+                            f"WHEN NOT MATCHED THEN INSERT "
+                            f"(event_id, span_id, run_id, trace_id, project_id, flow_id, component_id, component_name, "
+                            f"authenticated_user, effective_role, execution_mode, start_ts, end_ts, status, "
+                            f"redacted_inputs, redacted_outputs) VALUES "
+                            f"('evb-{vb_id[:16]}', 'vb-{vb_id}', 'run-{flow_id[:16]}', 'trc-{flow_id[:16]}', "
+                            f"'default', '{flow_id}', '{vertex_id}', '{vertex_id}', "
+                            f"'{self.authenticated_user}', '{self.active_role}', 'INTERACTIVE_CALLER', "
+                            f"CURRENT_TIMESTAMP(), CURRENT_TIMESTAMP(), '{status_val}', "
+                            f"PARSE_JSON('{params_redacted}'), PARSE_JSON('{data_redacted}'))"
+                        )
+                        self.execute_sql(merge_vb_span, role="ACCOUNTADMIN", timeout=12)
+                        replicated_spans += 1
+                        self._synced_vertex_build_ids.add(vb_id)
+                except Exception:  # noqa: BLE001
+                    pass
+
+        self.synced_runs_count += replicated_runs
+        self.synced_spans_count += replicated_spans
+        self.last_auto_sync_ts = datetime.now(timezone.utc).isoformat()
 
         q_runs = (
             f"SELECT run_id, trace_id, flow_id, authenticated_user, effective_role, status, start_ts, replicated_at "
@@ -2304,24 +2756,91 @@ class LiveSnowflakeBridge:
 
         return {
             "ok": True,
+            "auto_sync_enabled": self.auto_sync_enabled,
+            "last_auto_sync_ts": self.last_auto_sync_ts,
             "replicated_runs": replicated_runs,
             "replicated_spans": replicated_spans,
+            "synced_runs_count": self.synced_runs_count,
+            "synced_spans_count": self.synced_spans_count,
             "runs": runs_res.get("rows", []),
             "spans": spans_res.get("rows", []),
             "audit_log": audit_res.get("rows", []),
         }
+
+    def start_auto_sync_daemon(self, interval_seconds: float = 15.0) -> bool:
+        """Start a periodic 15s background daemon thread that replicates SQLite runs/spans to Snowflake automatically."""
+        if self._auto_sync_daemon_started:
+            return True
+        self._auto_sync_daemon_started = True
+        self.auto_sync_enabled = True
+
+        def _daemon_loop() -> None:
+            while True:
+                time.sleep(max(5.0, float(interval_seconds)))
+                try:
+                    if self._has_spcs_token():
+                        self.sync_langflow_traces_to_snowflake(limit=25, replicate_sqlite=True)
+                except Exception:  # noqa: BLE001
+                    pass
+
+        daemon_thread = threading.Thread(
+            target=_daemon_loop,
+            name="sflf-auto-trace-sync-daemon",
+            daemon=True,
+        )
+        daemon_thread.start()
+        return True
 
 
 LIVE_BRIDGE = LiveSnowflakeBridge()
 
 
 def register_snowflake_fastapi_routes(app: Any) -> None:
-    """Mount `/api/v1/snowflake/*` endpoints and Flow Activity replication middleware onto Langflow's FastAPI app."""
+    """Mount `/api/v1/snowflake/*` endpoints and automatic Flow Activity replication middleware onto Langflow's FastAPI app."""
     from fastapi import APIRouter, Request
     from fastapi.responses import JSONResponse
 
     ensure_sqlite_wal_and_uv_cache()
+    LIVE_BRIDGE.start_auto_sync_daemon(interval_seconds=15.0)
     sf_router = APIRouter(prefix="/api/v1/snowflake", tags=["SnowflakeLangflow"])
+
+    if hasattr(app, "middleware"):
+        @app.middleware("http")
+        async def snowflake_flow_context_and_trace_middleware(request: Request, call_next: Any) -> Any:
+            path = str(getattr(request.url, "path", "") or "")
+            method = str(getattr(request, "method", "GET") or "GET").upper()
+            header_fid = request.headers.get("X-Snowflake-Flow-Id") or request.query_params.get("flow_id")
+            matched_fid = header_fid
+            if not matched_fid:
+                m_flow = re.search(
+                    r"/api/v1/(?:flows|build|run|monitor/builds|monitor/messages)/([0-9a-fA-F-]{8,64})",
+                    path,
+                )
+                if m_flow:
+                    matched_fid = m_flow.group(1)
+            if matched_fid:
+                norm_fid = LIVE_BRIDGE._normalize_flow_id(matched_fid)
+                if norm_fid and norm_fid != LIVE_BRIDGE.active_flow_id:
+                    LIVE_BRIDGE.set_active_flow(norm_fid)
+
+            response = await call_next(request)
+
+            if method == "DELETE" and "/api/v1/flows/" in path and matched_fid:
+                _AUDIT_EXECUTOR.submit(
+                    LIVE_BRIDGE.record_audit_event,
+                    action="FLOW_DELETED_IN_UI",
+                    outcome="ALLOWED",
+                    target_object=str(matched_fid),
+                    flow_id=LIVE_BRIDGE._normalize_flow_id(matched_fid),
+                    details={"path": path, "method": method, "durable_snowflake_audit_preserved": True},
+                )
+            elif any(seg in path for seg in ("/api/v1/build/", "/api/v1/run/", "/api/v1/webhook/")):
+                _AUDIT_EXECUTOR.submit(
+                    LIVE_BRIDGE.sync_langflow_traces_to_snowflake,
+                    25,
+                    replicate_sqlite=True,
+                )
+            return response
 
     @sf_router.get("/persistence")
     async def get_persistence_status() -> JSONResponse:
@@ -2329,17 +2848,26 @@ def register_snowflake_fastapi_routes(app: Any) -> None:
         return JSONResponse(status_code=200, content=info)
 
     @sf_router.get("/context")
-    async def get_snowflake_context(request: Request) -> JSONResponse:
+    async def get_snowflake_context(request: Request, flow_id: str | None = None) -> JSONResponse:
         await asyncio.to_thread(LIVE_BRIDGE.sync_superuser_credentials)
         await asyncio.to_thread(LIVE_BRIDGE.refresh_roles_from_snowflake)
         sf_header_user = request.headers.get("Sf-Context-Current-User")
         if sf_header_user:
             LIVE_BRIDGE.authenticated_user = sf_header_user
+        req_flow_id = LIVE_BRIDGE._normalize_flow_id(
+            flow_id or request.query_params.get("flow_id") or request.headers.get("X-Snowflake-Flow-Id")
+        )
+        if req_flow_id:
+            active_ctx = await asyncio.to_thread(LIVE_BRIDGE.set_active_flow, req_flow_id)
+        else:
+            active_ctx = LIVE_BRIDGE.selected_context
         return JSONResponse(
             status_code=200,
             content={
                 "status": "ok",
                 "ok": True,
+                "flow_id": req_flow_id,
+                "active_flow_id": LIVE_BRIDGE.active_flow_id,
                 "authenticated_user": LIVE_BRIDGE.authenticated_user,
                 "active_role": LIVE_BRIDGE.active_role,
                 "available_roles": LIVE_BRIDGE.available_roles,
@@ -2349,7 +2877,19 @@ def register_snowflake_fastapi_routes(app: Any) -> None:
                 "schema": LIVE_BRIDGE.schema,
                 "stage_name": f"@{LIVE_BRIDGE.database}.{LIVE_BRIDGE.schema}.{LIVE_BRIDGE.stage_name}",
                 "role_privileges": LIVE_BRIDGE.role_privileges,
-                "selected_context": LIVE_BRIDGE.selected_context,
+                "selected_context": active_ctx,
+                "contexts_by_flow_id": {
+                    fid: {
+                        "database": c.get("database"),
+                        "schema": c.get("schema"),
+                        "databases": c.get("databases", []),
+                    }
+                    for fid, c in LIVE_BRIDGE.contexts_by_flow_id.items()
+                },
+                "auto_sync_enabled": LIVE_BRIDGE.auto_sync_enabled,
+                "last_auto_sync_ts": LIVE_BRIDGE.last_auto_sync_ts,
+                "synced_runs_count": LIVE_BRIDGE.synced_runs_count,
+                "synced_spans_count": LIVE_BRIDGE.synced_spans_count,
                 "traces_tables": {
                     "runs": LIVE_BRIDGE.runs_table,
                     "spans": LIVE_BRIDGE.spans_table,
@@ -2366,9 +2906,19 @@ def register_snowflake_fastapi_routes(app: Any) -> None:
 
     @sf_router.post("/context")
     @sf_router.put("/context")
-    async def post_snowflake_context(request: Request) -> JSONResponse:
+    async def post_snowflake_context(request: Request, flow_id: str | None = None) -> JSONResponse:
         body = await request.json()
-        res = await asyncio.to_thread(LIVE_BRIDGE.update_selected_context, body if isinstance(body, dict) else {})
+        req_flow_id = (
+            flow_id
+            or request.query_params.get("flow_id")
+            or request.headers.get("X-Snowflake-Flow-Id")
+            or (body.get("flow_id") if isinstance(body, dict) else None)
+        )
+        res = await asyncio.to_thread(
+            LIVE_BRIDGE.update_selected_context,
+            body if isinstance(body, dict) else {},
+            req_flow_id,
+        )
         return JSONResponse(status_code=200, content=res)
 
     @sf_router.post("/role")

@@ -916,7 +916,7 @@ def test_w2_r2_14_official_snowflake_blue_29b5e8_and_loading_screen_fix() -> Non
     assert "#29B5E8" in topbar_tsx
     assert "#29B5E8" in hooks_py
     assert 'data-testid="snowflake-official-logo-blue"' in topbar_tsx
-    assert "?v=sflf042" in hooks_py or "?v=sflf043" in hooks_py
+    assert "?v=sflf042" in hooks_py or "?v=sflf043" in hooks_py or "?v=sflf046" in hooks_py
 
     # Verify s4_loading_new in install_live_hooks_in_container.py does NOT contain c6e (3-layer stacked icon)
     s4_idx = hooks_py.index("s4_loading_new = (")
@@ -1282,6 +1282,306 @@ def test_w2_r3_08_verifier_rbac_api_routes_and_custom_embedding_dimensions() -> 
         assert forbidden_live["error"]["code"] == "PERMISSION_DENIED"
     finally:
         LIVE_BRIDGE.active_role = prev_role
+
+
+# ---------------------------------------------------------------------------
+# Wave 2 Round 4 Tests (W2-R4-01 .. W2-R4-04)
+# ---------------------------------------------------------------------------
+def test_w2_r4_01_per_workflow_flow_id_context_isolation_and_sqlite_persistence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Verify W2-R4-01: Per-workflow (flow_id) context isolation, SQLite snowflake_flow_contexts persistence, and component dropdown filtering."""
+    import sqlite3
+
+    from lfx_snowflake.api_routes import SnowflakeAPIRouter
+    from lfx_snowflake.fastapi_live_bridge import LiveSnowflakeBridge
+    from lfx_snowflake.native_category_components.data_source.snowflake_tables import SnowflakeTablesComponent
+
+    monkeypatch.setenv("LANGFLOW_PERSIST_DIR", str(tmp_path))
+    bridge = LiveSnowflakeBridge()
+
+    # Configure isolated context for workflow Alpha (32-char hex normalized to hyphenated UUID)
+    res_alpha = bridge.update_selected_context(
+        {
+            "database": "ALPHA_ANALYTICS_DB",
+            "schema": "GOLD",
+            "databases": ["ALPHA_ANALYTICS_DB"],
+            "schemas_by_db": {"ALPHA_ANALYTICS_DB": ["GOLD", "SILVER"]},
+            "objects_by_db_schema": {
+                "ALPHA_ANALYTICS_DB.GOLD": {"tables": ["ALPHA_REVENUE_TBL", "ALPHA_CUSTOMERS_TBL"]}
+            },
+        },
+        flow_id="flow-alpha-111",
+    )
+    assert res_alpha["ok"] is True
+    assert res_alpha["flow_id"] == "flow-alpha-111"
+
+    # Configure isolated context for workflow Beta
+    res_beta = bridge.update_selected_context(
+        {
+            "database": "BETA_WAREHOUSE_DB",
+            "schema": "RAW",
+            "databases": ["BETA_WAREHOUSE_DB"],
+            "schemas_by_db": {"BETA_WAREHOUSE_DB": ["RAW"]},
+            "objects_by_db_schema": {
+                "BETA_WAREHOUSE_DB.RAW": {"tables": ["BETA_EVENTS_STREAM_TBL"]}
+            },
+        },
+        flow_id="flow-beta-222",
+    )
+    assert res_beta["ok"] is True
+    assert res_beta["flow_id"] == "flow-beta-222"
+
+    # Verify per-workflow dropdown helpers remain strictly isolated
+    assert bridge.get_context_databases(flow_id="flow-alpha-111") == ["ALPHA_ANALYTICS_DB"]
+    assert bridge.get_context_schemas("ALPHA_ANALYTICS_DB", flow_id="flow-alpha-111") == ["GOLD", "SILVER"]
+    assert bridge.get_context_objects("ALPHA_ANALYTICS_DB", "GOLD", "tables", flow_id="flow-alpha-111") == [
+        "ALPHA_REVENUE_TBL",
+        "ALPHA_CUSTOMERS_TBL",
+    ]
+
+    assert bridge.get_context_databases(flow_id="flow-beta-222") == ["BETA_WAREHOUSE_DB"]
+    assert bridge.get_context_schemas("BETA_WAREHOUSE_DB", flow_id="flow-beta-222") == ["RAW"]
+    assert bridge.get_context_objects("BETA_WAREHOUSE_DB", "RAW", "tables", flow_id="flow-beta-222") == [
+        "BETA_EVENTS_STREAM_TBL"
+    ]
+
+    # Verify SQLite persistence in snowflake_flow_contexts survives fresh bridge instantiation
+    db_file = tmp_path / "langflow.db"
+    assert db_file.exists()
+    conn = sqlite3.connect(str(db_file))
+    rows = conn.execute("SELECT flow_id, database_name, schema_name FROM snowflake_flow_contexts").fetchall()
+    conn.close()
+    saved_map = {r[0]: (r[1], r[2]) for r in rows}
+    assert saved_map["flow-alpha-111"] == ("ALPHA_ANALYTICS_DB", "GOLD")
+    assert saved_map["flow-beta-222"] == ("BETA_WAREHOUSE_DB", "RAW")
+
+    rehydrated_bridge = LiveSnowflakeBridge()
+    assert rehydrated_bridge.get_context_databases(flow_id="flow-alpha-111") == ["ALPHA_ANALYTICS_DB"]
+    assert rehydrated_bridge.get_context_databases(flow_id="flow-beta-222") == ["BETA_WAREHOUSE_DB"]
+
+    # Verify SnowflakeAPIRouter per-workflow context isolation
+    router = SnowflakeAPIRouter()
+    router.update_session_context({"databases": ["ROUTER_ALPHA_DB"]}, flow_id="flow-alpha-111")
+    router.update_session_context({"databases": ["ROUTER_BETA_DB"]}, flow_id="flow-beta-222")
+    assert router.get_session_context(flow_id="flow-alpha-111").body["selected_context"]["databases"] == [
+        "ROUTER_ALPHA_DB"
+    ]
+    assert router.get_session_context(flow_id="flow-beta-222").body["selected_context"]["databases"] == [
+        "ROUTER_BETA_DB"
+    ]
+
+    # Verify SnowflakeTablesComponent passes flow_id from component or build_config
+    from lfx_snowflake.fastapi_live_bridge import LIVE_BRIDGE
+
+    LIVE_BRIDGE.update_selected_context(
+        {
+            "database": "ALPHA_ANALYTICS_DB",
+            "schema": "GOLD",
+            "databases": ["ALPHA_ANALYTICS_DB"],
+            "schemas_by_db": {"ALPHA_ANALYTICS_DB": ["GOLD"]},
+            "objects_by_db_schema": {"ALPHA_ANALYTICS_DB.GOLD": {"tables": ["ALPHA_REVENUE_TBL"]}},
+        },
+        flow_id="flow-alpha-111",
+    )
+    comp = SnowflakeTablesComponent()
+    cfg = comp.update_build_config(
+        {
+            "_frontend_node_flow_id": "flow-alpha-111",
+            "database": {"options": [], "value": "ALPHA_ANALYTICS_DB"},
+            "schema_name": {"options": [], "value": "GOLD"},
+            "table_name": {"options": [], "value": ""},
+        },
+        field_value="ALPHA_ANALYTICS_DB",
+        field_name="database",
+    )
+    assert cfg["database"]["options"] == ["ALPHA_ANALYTICS_DB"]
+    assert cfg["table_name"]["options"] == ["ALPHA_REVENUE_TBL"]
+
+
+def test_w2_r4_02_durable_object_removed_from_context_audit_and_empty_collection_clear(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Verify W2-R4-02: Removing/deselecting an object, schema, or database (including the last item) emits OBJECT_REMOVED_FROM_CONTEXT to LANGFLOW_AUDIT_LOG with SQL quote escaping."""
+    from lfx_snowflake.fastapi_live_bridge import LiveSnowflakeBridge
+
+    monkeypatch.setenv("LANGFLOW_PERSIST_DIR", str(tmp_path))
+    bridge = LiveSnowflakeBridge()
+    executed_sql_statements: list[str] = []
+
+    def _capture_sql(statement: str, **kwargs):
+        executed_sql_statements.append(statement)
+        return {"ok": True, "rows": [], "columns": []}
+
+    monkeypatch.setattr(bridge, "execute_sql", _capture_sql)
+
+    bridge.update_selected_context(
+        {
+            "database": "FINANCE_DB",
+            "schema": "LEDGER",
+            "databases": ["FINANCE_DB", "ARCHIVE_DB"],
+            "schemas_by_db": {"FINANCE_DB": ["LEDGER", "STAGING"]},
+            "objects_by_db_schema": {
+                "FINANCE_DB.LEDGER": {"tables": ["GL_ENTRIES", "INVOICES"]}
+            },
+        },
+        flow_id="flow-audit'test-01",
+    )
+    executed_sql_statements.clear()
+
+    # 1. Remove one object via remove_object_from_context
+    bridge.remove_object_from_context(
+        object_name="INVOICES",
+        category="tables",
+        database="FINANCE_DB",
+        schema="LEDGER",
+        flow_id="flow-audit'test-01",
+    )
+    removal_audits = [s for s in executed_sql_statements if "OBJECT_REMOVED_FROM_CONTEXT" in s]
+    assert len(removal_audits) == 1
+    assert "INVOICES" in removal_audits[0]
+    assert "'flow-audit''test-01'" in removal_audits[0]
+
+    # 2. Deselect the LAST object (empty objects_by_db_schema: {}) and verify empty-collection fix clears it and audits
+    executed_sql_statements.clear()
+    res_empty = bridge.update_selected_context(
+        {
+            "database": "FINANCE_DB",
+            "schema": "LEDGER",
+            "databases": ["FINANCE_DB"],
+            "schemas_by_db": {"FINANCE_DB": ["LEDGER"]},
+            "objects_by_db_schema": {},
+        },
+        flow_id="flow-audit'test-01",
+    )
+    assert res_empty["selected_context"]["objects_by_db_schema"] == {}
+    removal_audits_last = [s for s in executed_sql_statements if "OBJECT_REMOVED_FROM_CONTEXT" in s]
+    assert len(removal_audits_last) == 1
+    assert "ARCHIVE_DB" in removal_audits_last[0]
+    assert "FINANCE_DB.STAGING" in removal_audits_last[0]
+    assert "GL_ENTRIES" in removal_audits_last[0]
+
+
+def test_w2_r4_03_automatic_sqlite_transaction_and_vertex_build_replication_and_middleware(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Verify W2-R4-03: sync_langflow_traces_to_snowflake replicates both SQLite transaction and vertex_build rows idempotently, and FastAPI middleware + 15s daemon are registered."""
+    import sqlite3
+
+    from lfx_snowflake.fastapi_live_bridge import LiveSnowflakeBridge, register_snowflake_fastapi_routes
+
+    monkeypatch.setenv("LANGFLOW_PERSIST_DIR", str(tmp_path))
+    db_file = tmp_path / "langflow.db"
+    conn = sqlite3.connect(str(db_file))
+    conn.execute(
+        'CREATE TABLE "transaction" (id TEXT PRIMARY KEY, timestamp TEXT, vertex_id TEXT, inputs TEXT, outputs TEXT, status TEXT, flow_id TEXT)'
+    )
+    conn.execute(
+        'CREATE TABLE "vertex_build" (build_id TEXT PRIMARY KEY, id TEXT, timestamp TEXT, flow_id TEXT, valid INTEGER, params TEXT, data TEXT, artifacts TEXT)'
+    )
+    conn.execute(
+        'INSERT INTO "transaction" VALUES (?, ?, ?, ?, ?, ?, ?)',
+        ("tx-001", "2026-10-17T10:00:00Z", "SnowflakeTables-1", '{"q":"1"}', '{"rows":5}', "SUCCESS", "flow-rep-1"),
+    )
+    conn.execute(
+        'INSERT INTO "vertex_build" VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+        ("vb-001", "CortexAgent-1", "2026-10-17T10:00:01Z", "flow-rep-1", 1, '{"model":"llama"}', '{"ok":true}', "{}"),
+    )
+    conn.commit()
+    conn.close()
+
+    bridge = LiveSnowflakeBridge()
+    executed_merges: list[str] = []
+
+    def _mock_sql(statement: str, **kwargs):
+        if statement.strip().upper().startswith("MERGE INTO"):
+            executed_merges.append(statement)
+        return {"ok": True, "rows": [], "columns": []}
+
+    monkeypatch.setattr(bridge, "execute_sql", _mock_sql)
+
+    sync1 = bridge.sync_langflow_traces_to_snowflake(limit=25, replicate_sqlite=True)
+    assert sync1["ok"] is True
+    assert sync1["replicated_runs"] == 1
+    assert sync1["replicated_spans"] == 2  # 1 from transaction + 1 from vertex_build
+    assert sync1["auto_sync_enabled"] is True
+    assert any("LANGFLOW_FLOW_RUNS" in m for m in executed_merges)
+    assert any("vb-vb-001" in m for m in executed_merges)
+
+    # Idempotency check: second sync without new rows replicates 0 new runs/spans
+    executed_merges.clear()
+    sync2 = bridge.sync_langflow_traces_to_snowflake(limit=25, replicate_sqlite=True)
+    assert sync2["replicated_runs"] == 0
+    assert sync2["replicated_spans"] == 0
+    assert len(executed_merges) == 0
+
+
+def test_w2_r4_04_context_only_hub_ui_preserved_concept_module_and_in_place_tree_checkboxes() -> None:
+    """Verify W2-R4-04: Context-only Snowflake Hub UI, preserved_provisioning_and_memories_concept.js module, workflow-scoped topbar pill lifecycle, and updateTreeCheckboxesInPlace."""
+    preserved_js_path = REPO_ROOT / "frontend_patches" / "preserved_provisioning_and_memories_concept.js"
+    assert preserved_js_path.exists()
+    preserved_js = preserved_js_path.read_text(encoding="utf-8")
+    assert "SNOWFLAKE_PRESERVED_PROVISIONING_AND_MEMORIES_CONCEPT" in preserved_js
+    assert "mountNewMemoryWizardModal" in preserved_js
+    assert "/api/v1/snowflake/provision" in preserved_js
+    assert "/api/v1/snowflake/memories" in preserved_js
+
+    ui_js = (REPO_ROOT / "frontend_patches" / "snowflake-ui-integration.js").read_text(encoding="utf-8")
+    assert 'data-hub-mode="context-only"' in ui_js
+    assert "sflf-auto-sync-status-badge" in ui_js
+    assert "sflf-preserved-sections-compat" in ui_js
+    assert "function getActiveWorkflowFlowId()" in ui_js
+    assert "function updateTreeCheckboxesInPlace(" in ui_js
+    assert "syncCanvasNodesWithSnowflakeContext(sfState)" in ui_js
+
+    hooks_py = (REPO_ROOT / "scripts" / "install_live_hooks_in_container.py").read_text(encoding="utf-8")
+    assert "?v=sflf046" in hooks_py
+    assert "preserved_provisioning_and_memories_concept.js" in hooks_py
+
+
+def test_w2_r4_05_verifier_uuid_normalization_and_role_scoped_workflow_context(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Verify W2-R4-05 (Verifier): 32-char hex vs 36-char hyphenated UUID normalization on flow_id and legacy global context non-bleeding."""
+    from lfx_snowflake.fastapi_live_bridge import LiveSnowflakeBridge
+
+    monkeypatch.setenv("LANGFLOW_PERSIST_DIR", str(tmp_path))
+    bridge = LiveSnowflakeBridge()
+
+    hex_id = "11223344556677889900aabbccddeeff"
+    hyphen_id = "11223344-5566-7788-9900-aabbccddeeff"
+    assert bridge._normalize_flow_id(hex_id) == hyphen_id
+    assert bridge._normalize_flow_id(hyphen_id) == hyphen_id
+
+    # Save using 32-char hex flow_id and retrieve using 36-char hyphenated UUID
+    bridge.update_selected_context(
+        {
+            "database": "UUID_NORM_DB",
+            "schema": "PUBLIC",
+            "databases": ["UUID_NORM_DB"],
+            "schemas_by_db": {"UUID_NORM_DB": ["PUBLIC"]},
+            "objects_by_db_schema": {"UUID_NORM_DB.PUBLIC": {"tables": ["NORM_TBL"]}},
+        },
+        flow_id=hex_id,
+    )
+    assert bridge.get_context_databases(flow_id=hyphen_id) == ["UUID_NORM_DB"]
+    assert bridge.get_context_objects("UUID_NORM_DB", "PUBLIC", "tables", flow_id=hyphen_id) == ["NORM_TBL"]
+
+    # Legacy global call (flow_id=None) updates global context without overwriting hyphen_id's workflow context
+    bridge.update_selected_context(
+        {
+            "database": "GLOBAL_FALLBACK_DB",
+            "schema": "CORE",
+            "databases": ["GLOBAL_FALLBACK_DB"],
+            "schemas_by_db": {"GLOBAL_FALLBACK_DB": ["CORE"]},
+            "objects_by_db_schema": {"GLOBAL_FALLBACK_DB.CORE": {"tables": ["GLOBAL_TBL"]}},
+        },
+        flow_id=None,
+    )
+    assert bridge.get_context_databases(flow_id=None) == ["GLOBAL_FALLBACK_DB"]
+    assert bridge.get_context_databases(flow_id=hyphen_id) == ["UUID_NORM_DB"]
+
+
 
 
 

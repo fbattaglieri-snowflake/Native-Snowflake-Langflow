@@ -198,6 +198,7 @@ export const SNOWSIGHT_TREE_CATEGORIES = [
 
 export interface SnowsightHierarchyTreeProps {
   activeRole: string;
+  flowId?: string | null;
   databases: string[];
   schemasByDb: Record<string, string[]>;
   objectsByDbSchema: Record<string, Record<string, string[]>>;
@@ -210,11 +211,22 @@ export interface SnowsightHierarchyTreeProps {
 }
 
 /**
- * W2-R3-03: Snowsight-Style Hierarchical Expandable Tree Selector with Real-Time Search
+ * W2-R4 Preserved Provisioning & Memories Concept reference (`frontend_patches/preserved_provisioning_and_memories_concept.js`).
+ * The visible Snowflake Hub modal operates in `data-hub-mode="context-only"` (Section 0 + compact auto-sync badge),
+ * while Section 1 (Object Provisioning) and Section 2 (Snowflake Memories) are preserved intact in
+ * `window.SNOWFLAKE_PRESERVED_PROVISIONING_AND_MEMORIES_CONCEPT` for the upcoming Memory round.
+ */
+export const PRESERVED_PROVISIONING_AND_MEMORIES_MODULE =
+  "frontend_patches/preserved_provisioning_and_memories_concept.js";
+
+/**
+ * W2-R3-03 & W2-R4-01..04: Snowsight-Style Hierarchical Expandable Tree Selector with Real-Time Search,
+ * Workflow-Personalized (`flow_id`) Context Scope, Instantaneous O(DOM) `updateTreeCheckboxesInPlace`,
  * and Tri-State Cascading Checkboxes (`checked`, `indeterminate`, `unchecked`).
  */
 export const SnowsightHierarchyTreeSelector: React.FC<SnowsightHierarchyTreeProps> = ({
   activeRole,
+  flowId,
   databases,
   schemasByDb,
   objectsByDbSchema,
@@ -232,6 +244,7 @@ export const SnowsightHierarchyTreeSelector: React.FC<SnowsightHierarchyTreeProp
 
   return (
     <div
+      data-hub-mode="context-only"
       className="flex flex-col gap-2 rounded-lg border border-border bg-background p-3 text-xs"
       style={{
         width: "clamp(320px, 94vw, 980px)",
@@ -239,6 +252,24 @@ export const SnowsightHierarchyTreeSelector: React.FC<SnowsightHierarchyTreeProp
         boxSizing: "border-box",
       }}
     >
+      <div className="flex items-center justify-between gap-2">
+        <span
+          id="sflf-modal-flow-scope-badge"
+          data-testid="hub-workflow-scope-badge"
+          data-flow-id={flowId || ""}
+          className="rounded border px-2 py-0.5 text-[11px] font-semibold"
+          style={{ color: SNOWFLAKE_BLUE, borderColor: SNOWFLAKE_BLUE }}
+        >
+          {flowId ? `Workflow: ${flowId}` : "Scope: Global Default"}
+        </span>
+        <span
+          id="sflf-auto-sync-status-badge"
+          data-testid="hub-auto-sync-status-badge"
+          className="rounded border border-emerald-500/40 bg-zinc-950 px-2 py-0.5 text-[10.5px] text-emerald-200"
+        >
+          Auto-Replicated to Snowflake: LANGFLOW_FLOW_RUNS · LANGFLOW_FLOW_SPANS · LANGFLOW_AUDIT_LOG
+        </span>
+      </div>
       <input
         id="sflf-sec0-tree-search"
         data-testid="snowsight-hierarchy-search"

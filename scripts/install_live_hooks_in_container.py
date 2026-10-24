@@ -631,10 +631,15 @@ def install_all() -> None:
             js_asset.write_text(txt, encoding="utf-8")
             print(f"[install_live_hooks] Patched React bundle {js_asset.name}")
 
-    # 6. Copy snowflake-ui-integration.js into Langflow static frontend and link in index.html + cache-busting query param
+    # 6. Copy snowflake-ui-integration.js & preserved_provisioning_and_memories_concept.js into Langflow static frontend and link in index.html + cache-busting query param
     ui_js_src = SOURCE_ROOT / "frontend_patches" / "snowflake-ui-integration.js"
     ui_js_dest = LANGFLOW_FRONTEND / "snowflake-ui-integration.js"
     shutil.copyfile(ui_js_src, ui_js_dest)
+
+    preserved_js_src = SOURCE_ROOT / "frontend_patches" / "preserved_provisioning_and_memories_concept.js"
+    preserved_js_dest = LANGFLOW_FRONTEND / "preserved_provisioning_and_memories_concept.js"
+    if preserved_js_src.exists():
+        shutil.copyfile(preserved_js_src, preserved_js_dest)
 
     favicon_data_uri = _svg_data_uri("#29B5E8")
     initial_loader_svg = (
@@ -667,10 +672,10 @@ def install_all() -> None:
             count=1,
             flags=re.IGNORECASE,
         )
-    # Bump cache-bust query param to ?v=sflf045
+    # Bump cache-bust query param from ?v=sflf043 / ?v=sflf045 to ?v=sflf046
     html_text = re.sub(
         r'src="(\./assets/index-[^"?]+\.js)(?:\?[^"]*)?"',
-        r'src="\1?v=sflf045"',
+        r'src="\1?v=sflf046"',
         html_text,
     )
     inject_block = (
@@ -713,19 +718,20 @@ def install_all() -> None:
         '        color: #ffffff !important;\n'
         "      }\n"
         "    </style>\n"
-        '    <script defer src="./snowflake-ui-integration.js?v=sflf045"></script>\n'
+        '    <script defer src="./preserved_provisioning_and_memories_concept.js?v=sflf046"></script>\n'
+        '    <script defer src="./snowflake-ui-integration.js?v=sflf046"></script>\n'
         "  </head>"
     )
     if "snowflake-ui-integration.js" not in html_text:
         html_text = html_text.replace("  </head>", inject_block, 1)
     else:
         html_text = re.sub(
-            r"<style(?:\s+id=\"sflf-brand-blue-style\")?>[\s\S]*?</style>\s*<script defer src=\"\./snowflake-ui-integration\.js[^\"]*\"></script>\s*</head>",
+            r"<style(?:\s+id=\"sflf-brand-blue-style\")?>[\s\S]*?</style>\s*(?:<script defer src=\"\./preserved_provisioning_and_memories_concept\.js[^\"]*\"></script>\s*)?<script defer src=\"\./snowflake-ui-integration\.js[^\"]*\"></script>\s*</head>",
             inject_block,
             html_text,
         )
     index_html.write_text(html_text, encoding="utf-8")
-    print("[install_live_hooks] Updated index.html with Snowflake SVG favicon, title, and snowflake-ui-integration.js?v=sflf043")
+    print("[install_live_hooks] Updated index.html with Snowflake SVG favicon, title, and snowflake-ui-integration.js?v=sflf046")
 
     # 7. Verify component_index.json integrity and FastAPI routes
     from langflow.main import create_app

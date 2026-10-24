@@ -154,6 +154,15 @@ class SnowflakeAPIRouter:
         self.memories_registry: dict[str, dict[str, Any]] = {}
         self.a2a_published_flows: dict[str, dict[str, Any]] = {}
         self.messages_store: dict[str, dict[str, Any]] = {}
+        self.contexts_by_flow_id: dict[str, dict[str, Any]] = {}
+        self.active_flow_id: str | None = None
+        self.selected_context: dict[str, Any] = {
+            "databases": ["<DATABASE>"],
+            "schemas_by_db": {"<DATABASE>": ["<SCHEMA>", "PUBLIC"]},
+            "objects_by_db_schema": {},
+            "selected_objects": {},
+            "visible_objects": {},
+        }
         self.global_variables: dict[str, dict[str, Any]] = {
             "SNOWFLAKE_ACTIVE_ROLE": {
                 "name": "SNOWFLAKE_ACTIVE_ROLE",
@@ -268,18 +277,65 @@ class SnowflakeAPIRouter:
     # ------------------------------------------------------------------
     # 1. Context & Active Role Switcher (REQ-02, ADR-003, ADR-004)
     # ------------------------------------------------------------------
-    def get_session_context(self) -> SnowflakeAPIResponse:
+    def get_session_context(self, flow_id: str | None = None) -> SnowflakeAPIResponse:
         """GET /api/v1/snowflake/context"""
+        clean_fid = str(flow_id).strip() if flow_id else None
+        if clean_fid:
+            self.active_flow_id = clean_fid
+            flow_ctx = self.contexts_by_flow_id.setdefault(clean_fid, copy.deepcopy(self.selected_context))
+        else:
+            flow_ctx = self.selected_context
         return SnowflakeAPIResponse(
             status_code=200,
             body={
+                "flow_id": clean_fid,
+                "active_flow_id": self.active_flow_id,
                 "authenticated_user": self.authenticated_user,
                 "active_role": self.active_role,
                 "available_roles": list(self.available_roles),
                 "context_epoch": self.context_epoch,
                 "execution_mode": self.execution_mode,
                 "secondary_roles_mode": self.secondary_roles_mode,
+                "selected_context": copy.deepcopy(flow_ctx),
                 "verified_current_role_sql": "SELECT CURRENT_ROLE()",
+            },
+        )
+
+    def update_session_context(
+        self,
+        payload: dict[str, Any],
+        flow_id: str | None = None,
+    ) -> SnowflakeAPIResponse:
+        """POST|PUT /api/v1/snowflake/context"""
+        clean_fid = str(flow_id or payload.get("flow_id") or "").strip() or None
+        target_ctx = (
+            copy.deepcopy(self.contexts_by_flow_id.get(clean_fid, self.selected_context))
+            if clean_fid
+            else copy.deepcopy(self.selected_context)
+        )
+        for key in ("databases", "schemas_by_db", "objects_by_db_schema", "selected_objects", "visible_objects"):
+            if key in payload:
+                target_ctx[key] = copy.deepcopy(payload[key])
+        self.context_epoch += 1
+        self.selected_context = copy.deepcopy(target_ctx)
+        if clean_fid:
+            self.active_flow_id = clean_fid
+            self.contexts_by_flow_id[clean_fid] = copy.deepcopy(target_ctx)
+        self._record_audit_event(
+            action="UPDATE_CONTEXT",
+            outcome="SUCCESS",
+            target_object=clean_fid or "<DATABASE>.<SCHEMA>",
+            details={"flow_id": clean_fid, "context_epoch": self.context_epoch},
+        )
+        return SnowflakeAPIResponse(
+            status_code=200,
+            body={
+                "ok": True,
+                "flow_id": clean_fid,
+                "active_flow_id": self.active_flow_id,
+                "active_role": self.active_role,
+                "context_epoch": self.context_epoch,
+                "selected_context": copy.deepcopy(target_ctx),
             },
         )
 

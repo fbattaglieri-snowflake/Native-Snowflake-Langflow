@@ -12,16 +12,20 @@ from lfx_snowflake._lfx_compat import Tool
 from lfx_snowflake.fastapi_live_bridge import LIVE_BRIDGE
 
 
-def _table_databases() -> list[str]:
-    return LIVE_BRIDGE.get_context_databases()
+def _table_databases(flow_id: str | None = None) -> list[str]:
+    return LIVE_BRIDGE.get_context_databases(flow_id=flow_id)
 
 
-def _table_schemas(database: str | None = None) -> list[str]:
-    return LIVE_BRIDGE.get_context_schemas(database)
+def _table_schemas(database: str | None = None, flow_id: str | None = None) -> list[str]:
+    return LIVE_BRIDGE.get_context_schemas(database, flow_id=flow_id)
 
 
-def _table_objects(database: str | None = None, schema: str | None = None) -> list[str]:
-    objs = list(LIVE_BRIDGE.get_context_objects(database, schema, "tables"))
+def _table_objects(
+    database: str | None = None,
+    schema: str | None = None,
+    flow_id: str | None = None,
+) -> list[str]:
+    objs = list(LIVE_BRIDGE.get_context_objects(database, schema, "tables", flow_id=flow_id))
     if not objs:
         objs = ["LANGFLOW_FLOW_RUNS", "LANGFLOW_FLOW_SPANS", "LANGFLOW_AUDIT_LOG"]
     return objs
@@ -116,8 +120,16 @@ class SnowflakeTablesComponent(Component):
     def update_build_config(
         self, build_config: dict[str, Any], field_value: Any, field_name: str | None = None
     ) -> dict[str, Any]:
+        cfg_fid = build_config.get("_frontend_node_flow_id")
+        if isinstance(cfg_fid, dict):
+            cfg_fid = cfg_fid.get("value")
+        flow_id = (
+            getattr(self, "flow_id", None)
+            or getattr(self, "_flow_id", None)
+            or (str(cfg_fid).strip() if cfg_fid else None)
+        )
         if "database" in build_config:
-            build_config["database"]["options"] = _table_databases()
+            build_config["database"]["options"] = _table_databases(flow_id=flow_id)
             if field_name == "database" and isinstance(field_value, str):
                 build_config["database"]["value"] = field_value
         db = (
@@ -125,7 +137,7 @@ class SnowflakeTablesComponent(Component):
             if field_name == "database" and isinstance(field_value, str)
             else build_config.get("database", {}).get("value") or LIVE_BRIDGE.database or "SNOWFLAKE_LANGFLOW"
         )
-        schemas = _table_schemas(db)
+        schemas = _table_schemas(db, flow_id=flow_id)
         if "schema_name" in build_config:
             build_config["schema_name"]["options"] = schemas
             cur_sch = build_config["schema_name"].get("value")
@@ -139,7 +151,7 @@ class SnowflakeTablesComponent(Component):
             else build_config.get("schema_name", {}).get("value") or (schemas[0] if schemas else "CORE")
         )
         if "table_name" in build_config:
-            tbl_opts = _table_objects(db, sch)
+            tbl_opts = _table_objects(db, sch, flow_id=flow_id)
             build_config["table_name"]["options"] = tbl_opts
             if tbl_opts and build_config["table_name"].get("value") not in tbl_opts:
                 build_config["table_name"]["value"] = tbl_opts[0]
