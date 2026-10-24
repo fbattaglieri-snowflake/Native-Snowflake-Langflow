@@ -1008,6 +1008,7 @@ class LiveSnowflakeBridge:
         vis_mem = self.selected_context.setdefault("visible_objects", {}).setdefault("memories", [])
         if name and name not in vis_mem:
             vis_mem.append(name)
+        self._persist_memory_in_langflow_sqlite(entry, flow_id=str(body.get("flow_id") or "").strip() or None)
         self.record_audit_event(
             action="MEMORY_CREATE_PHYSICAL" if create_physical else "MEMORY_USE_EXISTING",
             outcome="ALLOWED",
@@ -1015,6 +1016,142 @@ class LiveSnowflakeBridge:
             details=entry,
         )
         return {"ok": True, "status_code": 201, "memory": entry, "ddl": ddl}
+
+    def _persist_memory_in_langflow_sqlite(self, entry: dict[str, Any], flow_id: str | None = None) -> None:
+        """Persist created Snowflake Memory into Langflow's native `knowledge_base` & `memory_base` SQLite tables so it appears & is searchable in the native Memories UI."""
+        persist_dir = Path(os.getenv("LANGFLOW_PERSIST_DIR", "/persist"))
+        db_path = persist_dir / "langflow.db"
+        if not db_path.exists():
+            return
+        try:
+            conn = _open_sqlite_conn(db_path, readonly=False, timeout=30.0)
+            conn.row_factory = sqlite3.Row
+            cur = conn.cursor()
+            tables = {
+                r[0] for r in cur.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+            }
+            if "memory_base" not in tables or "knowledge_base" not in tables:
+                conn.close()
+                return
+
+            user_row = cur.execute("SELECT id FROM user ORDER BY is_superuser DESC LIMIT 1").fetchone()
+            if not user_row:
+                conn.close()
+                return
+            user_id_hex = str(user_row[0]).replace("-", "")
+
+            target_flow_hex = (flow_id or "").replace("-", "").strip()
+            if len(target_flow_hex) != 32:
+                flow_row = cur.execute("SELECT id FROM flow ORDER BY updated_at DESC LIMIT 1").fetchone()
+                if not flow_row:
+                    conn.close()
+                    return
+                target_flow_hex = str(flow_row[0]).replace("-", "")
+
+            mem_name = str(entry.get("name") or "SNOWFLAKE_MEMORY").strip()
+            safe_kb = "".join(c if c.isalnum() or c == "_" else "_" for c in mem_name).lower()
+            kb_name = f"sf_{safe_kb}_{uuid.uuid4().hex[:8]}"
+            now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S.%f")
+
+            is_vec = bool(entry.get("enable_embedding"))
+            emb_provider = str(entry.get("embedding_provider") or ("Snowflake Cortex" if is_vec else "Snowflake Direct SQL"))
+            emb_model = (
+                f"{entry.get('embedding_model')} ({entry.get('dimension')}d)"
+                if is_vec and entry.get("embedding_model")
+                else f"No Embedding ({entry.get('needs_embedding_badge', 'Direct SQL')})"
+            )
+            backend_label = f"Snowflake · {entry.get('vector_database') or 'Hybrid Table'} ({entry.get('table_fqn')})"
+            sql_lookup = str(entry.get("how_to_feed_without_embedding") or "")
+            instructions = (
+                f"[{entry.get('label')}] Store: {entry.get('table_fqn')} | "
+                f"Serve Embedding: {entry.get('needs_embedding_badge')} | "
+                f"Lookup SQL: {sql_lookup}"
+            )
+            model_sel_json = json.dumps(
+                {
+                    "embedding_provider": emb_provider,
+                    "embedding_model": emb_model,
+                    "model": [{"name": emb_model, "provider": emb_provider}],
+                }
+            )
+            backend_cfg_json = json.dumps(
+                {
+                    "mode": "snowflake",
+                    "table_fqn": entry.get("table_fqn"),
+                    "canonical_memory_type": entry.get("canonical_memory_type"),
+                    "enable_embedding": is_vec,
+                }
+            )
+
+            existing_kb = cur.execute(
+                "SELECT id, name FROM knowledge_base WHERE user_id = ? AND name = ?",
+                (user_id_hex, mem_name),
+            ).fetchone()
+            if existing_kb:
+                kb_name = str(existing_kb["name"])
+                cur.execute(
+                    "UPDATE knowledge_base SET model_selection = ?, backend_type = ?, backend_config = ?, updated_at = ? WHERE id = ?",
+                    (model_sel_json, backend_label, backend_cfg_json, now_str, existing_kb["id"]),
+                )
+            else:
+                kb_id_hex = uuid.uuid4().hex
+                kb_name = mem_name
+                cur.execute(
+                    "INSERT INTO knowledge_base "
+                    "(id, name, user_id, model_selection, chunk_size, chunk_overlap, separator, column_config, "
+                    "backend_type, backend_config, chunks, words, characters, size_bytes, source_types, status, "
+                    "failure_reason, created_at, updated_at) "
+                    "VALUES (?, ?, ?, ?, 1000, 200, NULL, '[]', ?, ?, 0, 0, 0, 0, '[\"snowflake\"]', 'ready', NULL, ?, ?)",
+                    (kb_id_hex, kb_name, user_id_hex, model_sel_json, backend_label, backend_cfg_json, now_str, now_str),
+                )
+
+            existing_mb = cur.execute(
+                "SELECT id FROM memory_base WHERE user_id = ? AND name = ?",
+                (user_id_hex, mem_name),
+            ).fetchone()
+            threshold_val = max(1, int(entry.get("batch_size") or 1))
+            preproc_model_val = str(entry.get("summarizer_model") or entry.get("canonical_memory_type") or "snowflake-sql")
+            if existing_mb:
+                cur.execute(
+                    "UPDATE memory_base SET flow_id = ?, threshold = ?, embedding_model = ?, preprocessing = 1, "
+                    "preproc_model = ?, preproc_instructions = ?, kb_name = ? WHERE id = ?",
+                    (
+                        target_flow_hex,
+                        threshold_val,
+                        emb_model,
+                        preproc_model_val,
+                        instructions,
+                        kb_name,
+                        existing_mb["id"],
+                    ),
+                )
+                mb_id_hex = str(existing_mb["id"])
+            else:
+                mb_id_hex = uuid.uuid4().hex
+                cur.execute(
+                    "INSERT INTO memory_base "
+                    "(id, name, flow_id, user_id, threshold, auto_capture, embedding_model, preprocessing, "
+                    "preproc_model, preproc_instructions, preproc_kill_phrase, kb_name, created_at) "
+                    "VALUES (?, ?, ?, ?, ?, 1, ?, 1, ?, ?, 'SKIP', ?, ?)",
+                    (
+                        mb_id_hex,
+                        mem_name,
+                        target_flow_hex,
+                        user_id_hex,
+                        threshold_val,
+                        emb_model,
+                        preproc_model_val,
+                        instructions,
+                        kb_name,
+                        now_str,
+                    ),
+                )
+            conn.commit()
+            conn.close()
+            entry["langflow_memory_id"] = str(uuid.UUID(mb_id_hex))
+            entry["flow_id"] = str(uuid.UUID(target_flow_hex))
+        except Exception:  # noqa: BLE001
+            pass
 
     def get_context_databases(self) -> list[str]:
         """Return active databases in the Hub cone of visibility (`W2-R2-00`)."""

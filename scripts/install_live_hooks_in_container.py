@@ -304,6 +304,12 @@ def install_all() -> None:
         'children:v.jsx("path",{d:"' + OFFICIAL_SNOWFLAKE_PATH + '"})})'
     )
 
+    sf_svg_inline_xs_white = (
+        'v.jsx("svg",{xmlns:"http://www.w3.org/2000/svg",width:14,height:14,viewBox:"0 0 64 64",fill:"#ffffff",'
+        'style:{width:14,height:14,fill:"#ffffff",color:"#ffffff",flexShrink:0},"aria-hidden":"true",'
+        'children:v.jsx("path",{d:"' + OFFICIAL_SNOWFLAKE_PATH + '"})})'
+    )
+
     s1_orig = (
         'v.jsxs("div",{className:"z-30 flex shrink-0 items-center gap-2","data-testid":"header_left_section_wrapper",'
         'children:[v.jsx(qt,{unstyled:!0,onClick:()=>n("/"),className:"mr-1 flex h-8 w-8 items-center",'
@@ -314,10 +320,68 @@ def install_all() -> None:
         'v.jsxs("div",{className:"z-30 flex shrink-0 items-center gap-2","data-testid":"header_left_section_wrapper",'
         'children:[v.jsx(qt,{unstyled:!0,onClick:()=>n("/"),className:"mr-1 flex h-8 items-center gap-2 px-1 cursor-pointer",'
         '"data-testid":"icon-ChevronLeft","aria-label":e("header.home"),'
-        'children:v.jsxs("span",{className:"inline-flex items-center gap-2 text-[#29B5E8]",children:['
+        'children:v.jsxs("span",{className:"inline-flex items-center gap-2 text-[#29B5E8]",style:{color:"#29B5E8"},children:['
         + sf_svg_inline_sm
-        + ',v.jsx(c6e,{className:"h-5 w-5 shrink-0 text-[#29B5E8]","aria-hidden":"true"}),'
-        'v.jsx("span",{className:"text-sm font-semibold tracking-tight text-[#29B5E8] whitespace-nowrap",children:"Snowflake Langflow"})]})}),v.jsx(rki,{})]})'
+        + ',v.jsx(c6e,{className:"h-5 w-5 shrink-0 text-[#29B5E8]",style:{color:"#29B5E8",fill:"#29B5E8"},"aria-hidden":"true"}),'
+        'v.jsx("span",{className:"text-sm font-semibold tracking-tight text-[#29B5E8] whitespace-nowrap",style:{color:"#29B5E8"},children:"Snowflake Langflow"})]})}),v.jsx(rki,{})]})'
+    )
+
+    ttn_orig = (
+        'function TTn({remSize:e}){const{t}=dt();return v.jsxs("div",{role:"status",className:"flex flex-col items-center justify-center",'
+        'children:[v.jsx(c6e,{"aria-hidden":"true",title:t("common.langflowLogo"),className:"animate-pulse text-primary",style:{width:`${e*.25}rem`,height:`${e*.25}rem`}}),'
+        'v.jsx("br",{}),v.jsx("span",{className:"animate-pulse text-lg text-primary",children:t("loading.loading")})]})}'
+    )
+    ttn_new = (
+        'function TTn({remSize:e}){const{t}=dt(),_sz=`${Math.max(2.25,Math.min((e||16)*.18,3.25))}rem`;'
+        'return v.jsxs("div",{role:"status","data-testid":"snowflake-langflow-dual-loading-logo",className:"flex flex-col items-center justify-center",style:{color:"#29B5E8"},'
+        'children:[v.jsxs("div",{className:"animate-pulse flex items-center justify-center gap-3",style:{display:"inline-flex",alignItems:"center",justifyContent:"center",gap:"14px",color:"#29B5E8"},'
+        'children:[v.jsx("svg",{xmlns:"http://www.w3.org/2000/svg",viewBox:"0 0 64 64",fill:"#29B5E8","aria-hidden":"true",style:{width:_sz,height:_sz,color:"#29B5E8",fill:"#29B5E8",flexShrink:0},children:v.jsx("path",{d:"' + OFFICIAL_SNOWFLAKE_PATH + '"})}),'
+        'v.jsx(c6e,{"aria-hidden":"true",title:t("common.langflowLogo"),style:{width:_sz,height:_sz,color:"#29B5E8",fill:"#29B5E8",flexShrink:0}})]}),'
+        'v.jsx("span",{className:"animate-pulse text-lg font-semibold",style:{color:"#29B5E8",marginTop:"12px"},children:t("loading.loading")})]})}'
+    )
+
+    og_orig = (
+        'const Og=({size:e=24,...t})=>v.jsx("svg",{xmlns:"http://www.w3.org/2000/svg",width:e,height:e,viewBox:"0 0 24 24",fill:"none",stroke:"currentColor",strokeWidth:2,strokeLinecap:"round",strokeLinejoin:"round",className:"feather feather-circle","aria-hidden":t["aria-label"]?void 0:!0,focusable:t["aria-label"]?void 0:!1,...t,"data-testid":"loading-icon",children:v.jsxs("circle",{cx:12,cy:12,r:10,strokeDasharray:63,strokeDashoffset:21,children:[v.jsx("animateTransform",{attributeName:"transform",type:"rotate",from:"0 12 12",to:"360 12 12",dur:"2s",repeatCount:"indefinite"}),v.jsx("animate",{attributeName:"stroke-dashoffset",dur:"8s",repeatCount:"indefinite",keyTimes:"0; 0.5; 1",values:"-16; -47; -16",calcMode:"spline",keySplines:"0.4 0 0.2 1; 0.4 0 0.2 1"})]})});'
+    )
+    og_new = (
+        'const Og=({size:e=24,...t})=>v.jsxs("span",{"data-testid":"loading-icon","aria-hidden":t["aria-label"]?void 0:!0,className:"animate-pulse inline-flex items-center justify-center gap-1.5",style:{display:"inline-flex",alignItems:"center",gap:"6px",color:"#29B5E8"},children:['
+        'v.jsx("svg",{xmlns:"http://www.w3.org/2000/svg",width:e,height:e,viewBox:"0 0 64 64",fill:"#29B5E8",style:{width:e,height:e,color:"#29B5E8",fill:"#29B5E8",flexShrink:0},children:v.jsx("path",{d:"' + OFFICIAL_SNOWFLAKE_PATH + '"})}),'
+        'v.jsx(c6e,{"aria-hidden":"true",style:{width:e,height:e,color:"#29B5E8",fill:"#29B5E8",flexShrink:0}})'
+        ']});'
+    )
+
+    login_logo_orig = 'v.jsx(c6e,{title:h("common.langflowLogo"),className:"h-12 w-12 text-foreground"})'
+    login_logo_new = (
+        'v.jsxs("span",{className:"inline-flex items-center gap-3",style:{display:"inline-flex",alignItems:"center",gap:"12px",color:"#29B5E8"},children:['
+        + sf_svg_inline_lg
+        + ',v.jsx(c6e,{title:h("common.langflowLogo"),className:"h-10 w-10",style:{width:40,height:40,color:"#29B5E8",fill:"#29B5E8"}})]})'
+    )
+
+    too_fn_orig = (
+        'function Too({filteredMemories:e,memoriesSearch:t,setMemoriesSearch:n,fetchNextPage:o,hasNextPage:s,'
+        'isFetchingNextPage:a,selectedMemoryId:c,currentFlowId:u,onSelectMemory:h,onCreateMemory:f}){'
+    )
+    too_fn_new = (
+        'function Too({filteredMemories:_origE,memoriesSearch:t,setMemoriesSearch:n,fetchNextPage:o,hasNextPage:s,'
+        'isFetchingNextPage:a,selectedMemoryId:c,currentFlowId:u,onSelectMemory:h,onCreateMemory:f}){'
+        'const _sfMems=(typeof window!=="undefined"&&Array.isArray(window.SNOWFLAKE_MEMORIES_LIST)?window.SNOWFLAKE_MEMORIES_LIST:[])'
+        '.filter(_m=>{const _q=(t||"").trim().toLowerCase();return!_q||`${_m.name||""} ${_m.description||""}`.toLowerCase().includes(_q);});'
+        'const _existingNames=new Set((_origE||[]).map(_x=>(_x.name||"").toUpperCase()));'
+        'const e=[..._sfMems.filter(_m=>!_existingNames.has((_m.name||"").toUpperCase())),...(_origE||[])];'
+    )
+
+    too_orig = (
+        'v.jsxs("div",{className:"border-b border-border px-4 py-3",children:[v.jsxs("div",{className:"flex items-center gap-2",children:[v.jsx(qe,{name:"BrainCog",className:"h-4 w-4 text-muted-foreground"}),v.jsx("h2",{className:"text-sm font-semibold",children:p("memory.sidebarTitle")})]}),'
+        'v.jsxs(qt,{size:"sm",variant:"outline",onClick:f,disabled:!u,className:"mt-3 rounded-[10px]",children:[v.jsx(qe,{name:"Plus",className:"h-3.5 w-3.5"}),p("memory.createButton")]})]})'
+    )
+    too_new = (
+        'v.jsxs("div",{className:"border-b border-border px-4 py-3",children:[v.jsxs("div",{className:"flex items-center gap-2",children:[v.jsx(qe,{name:"BrainCog",className:"h-4 w-4 text-muted-foreground"}),v.jsx("h2",{className:"text-sm font-semibold",children:p("memory.sidebarTitle")})]}),'
+        'v.jsxs("div",{className:"mt-3 flex items-center gap-2 flex-wrap",children:['
+        'v.jsxs(qt,{size:"sm",variant:"outline",onClick:f,disabled:!u,className:"rounded-[10px]",children:[v.jsx(qe,{name:"Plus",className:"h-3.5 w-3.5"}),p("memory.createButton")]}),'
+        'v.jsxs(qt,{size:"sm",variant:"outline","data-testid":"memories-plus-snowflake-btn",onClick:()=>window.openCreateSnowflakeMemoryModal&&window.openCreateSnowflakeMemoryModal(u),style:{backgroundColor:"#29B5E8",borderColor:"#29B5E8",color:"#ffffff"},className:"rounded-[10px] font-semibold flex items-center gap-1.5",children:['
+        + sf_svg_inline_xs_white
+        + ',"+ Snowflake"]})'
+        ']})]})'
     )
 
     s2_orig = (
@@ -453,6 +517,23 @@ def install_all() -> None:
             'case 3:case 4:var On=Q.stateNode.containerInfo,Sr=Tq(I);kq(I,Sr,On);break;default:throw Error(o(161))}}catch(zi){zi&&zi.name==="NotFoundError"||gd(I,I.return,zi)}',
         )
         txt = txt.replace(s1_orig, s1_new)
+        txt = txt.replace(
+            'className:"text-sm font-semibold tracking-tight text-[#29B5E8] whitespace-nowrap",children:"Snowflake Langflow"',
+            'className:"text-sm font-semibold tracking-tight text-[#29B5E8] whitespace-nowrap",style:{color:"#29B5E8"},children:"Snowflake Langflow"',
+        )
+        txt = txt.replace(
+            'v.jsx(c6e,{className:"h-5 w-5 shrink-0 text-[#29B5E8]","aria-hidden":"true"})',
+            'v.jsx(c6e,{className:"h-5 w-5 shrink-0 text-[#29B5E8]",style:{color:"#29B5E8",fill:"#29B5E8"},"aria-hidden":"true"})',
+        )
+        txt = txt.replace(
+            'v.jsx(c6e,{className:"h-9 w-9 shrink-0 text-[#29B5E8]","aria-hidden":"true"})',
+            'v.jsx(c6e,{className:"h-10 w-10 shrink-0 text-[#29B5E8]",style:{width:40,height:40,color:"#29B5E8",fill:"#29B5E8"},"aria-hidden":"true"})',
+        )
+        txt = txt.replace(ttn_orig, ttn_new)
+        txt = txt.replace(og_orig, og_new)
+        txt = txt.replace(login_logo_orig, login_logo_new)
+        txt = txt.replace(too_fn_orig, too_fn_new)
+        txt = txt.replace(too_orig, too_new)
         txt = txt.replace(s2_orig, s2_new)
         txt = txt.replace(s3_orig, s3_new)
         txt = txt.replace(s4_orig, s4_new)
@@ -586,10 +667,10 @@ def install_all() -> None:
             count=1,
             flags=re.IGNORECASE,
         )
-    # Bump cache-bust query param from ?v=sflf042 to ?v=sflf043
+    # Bump cache-bust query param to ?v=sflf045
     html_text = re.sub(
         r'src="(\./assets/index-[^"?]+\.js)(?:\?[^"]*)?"',
-        r'src="\1?v=sflf043"',
+        r'src="\1?v=sflf045"',
         html_text,
     )
     inject_block = (
@@ -600,18 +681,23 @@ def install_all() -> None:
         '      [data-testid="menu_discord_button"],\n'
         '      [data-testid="menu_twitter_button"],\n'
         '      [data-testid="header_right_section_wrapper"] [data-testid="icon-Discord"] { display: none !important; }\n'
+        '      [data-testid="header_left_section_wrapper"],\n'
+        '      [data-testid="header_left_section_wrapper"] span,\n'
         '      [data-testid="header_left_section_wrapper"] svg,\n'
         '      [data-testid="empty_page_logo_light"] svg,\n'
         '      [data-testid="snowflake-langflow-dual-loading-logo"],\n'
+        '      [data-testid="snowflake-langflow-dual-loading-logo"] *,\n'
         '      [data-testid="snowflake-langflow-dual-loading-logo"] svg,\n'
         '      [data-testid="index-initial-snowflake-loader"],\n'
+        '      [data-testid="loading-icon"],\n'
+        '      [data-testid="loading-icon"] svg,\n'
         '      [data-testid="loading_icon"],\n'
         '      [data-testid*="loading"],\n'
         '      [data-testid*="loading"] *,\n'
         '      [data-testid*="loading"] svg,\n'
         '      #root .loading-component,\n'
         '      #root .loading-component *,\n'
-        '      #root .loading-component svg { color: #29B5E8 !important; fill: #29B5E8 !important; stroke: #29B5E8 !important; }\n'
+        '      #root .loading-component svg { color: #29B5E8 !important; fill: #29B5E8 !important; }\n'
         '      [data-testid="mainpage_title"],\n'
         '      [data-testid="welcome-to-snowflake-langflow-title"] { color: #29B5E8 !important; }\n'
         '      [data-testid="new-project-btn"],\n'
@@ -627,7 +713,7 @@ def install_all() -> None:
         '        color: #ffffff !important;\n'
         "      }\n"
         "    </style>\n"
-        '    <script defer src="./snowflake-ui-integration.js?v=sflf043"></script>\n'
+        '    <script defer src="./snowflake-ui-integration.js?v=sflf045"></script>\n'
         "  </head>"
     )
     if "snowflake-ui-integration.js" not in html_text:

@@ -555,29 +555,30 @@
     });
   }
 
-  // UI-W2-01, W2-R2-14 & W2-R3-01: Clean Snowflake Blue (#29B5E8) loading screen overlay mounted on document.body (outside #root)
-  // Uses an immediate read-only MutationObserver on document.documentElement / document.body (never mutating #root children).
+  // UI-W2-01, W2-R2-14 & W2-R3-01: Clean Snowflake Blue (#29B5E8) dual-symbol loading overlay mounted on document.body (outside #root)
+  // Shown ONLY while #root is still empty before React mounts (once React mounts, patched TTn/Og render the dual [Snowflake] [Langflow] symbols + Loading... in #29B5E8 directly without double overlap).
   let _loadingBodyObserverInstalled = false;
+  function buildOfficialLangflowSvg(color, sizePx) {
+    const c = color || "#29B5E8";
+    const s = sizePx || 40;
+    return `<svg xmlns="http://www.w3.org/2000/svg" width="${s}" height="${s}" viewBox="0 0 24 22" fill="${c}" style="width:${s}px;height:${s}px;color:${c};fill:${c};flex-shrink:0;" aria-hidden="true"><path d="M13.0486 0.462158C13.3589 0.462158 13.6565 0.586085 13.8759 0.806669L18.765 5.72232C18.9844 5.94291 19.282 6.06683 19.5923 6.06683H22.3486C22.9949 6.06683 23.5189 6.59362 23.5189 7.24344V9.97223C23.5189 10.6221 22.9949 11.1488 22.3486 11.1488H18.1997C17.8894 11.1488 17.5918 11.0249 17.3724 10.8043L12.4833 5.88868C12.2639 5.6681 11.9663 5.54417 11.656 5.54417H8.89971C8.25337 5.54417 7.72943 5.01738 7.72943 4.36756V1.63877C7.72943 0.988947 8.25337 0.462158 8.89971 0.462158H13.0486ZM5.31886 8.31618C5.62914 8.31618 5.92672 8.44011 6.14612 8.66069L11.0353 13.5763C11.2547 13.7969 11.5522 13.9209 11.8625 13.9209H14.6189C15.2652 13.9209 15.7891 14.4476 15.7891 15.0975V17.8263C15.7891 18.4761 15.2652 19.0029 14.6189 19.0029H10.47C10.1597 19.0029 9.8621 18.8789 9.64269 18.6584L4.75355 13.7427C4.53415 13.5221 4.23657 13.3982 3.92629 13.3982H1.17C0.523656 13.3982 0 12.8714 0 12.2216V9.49279C0 8.84297 0.523656 8.31618 1.17 8.31618H5.31886Z"/></svg>`;
+  }
+
   function ensureDualSymbolLoadingOverlay() {
     const rootEl = document.getElementById("root");
-    const hasHeader = !!document.querySelector('[data-testid="header_left_section_wrapper"]');
-    const rootText = rootEl ? (rootEl.textContent || "").trim() : "";
-    const hasLoadingDom =
-      !!document.querySelector('#root .loading-component, [data-testid*="loading"], [data-testid="loading_icon"]');
-    const isLoadingState =
-      !hasHeader && (hasLoadingDom || rootText === "" || rootText === "Loading..." || rootText.includes("Loading"));
+    const isPreReactEmptyRoot = !rootEl || rootEl.children.length === 0;
     let overlay = document.getElementById("sflf-dual-loading-overlay");
-    if (isLoadingState) {
+    if (isPreReactEmptyRoot) {
       if (!overlay && document.body) {
         overlay = document.createElement("div");
         overlay.id = "sflf-dual-loading-overlay";
         overlay.setAttribute("data-testid", "snowflake_langflow_loading_dual_logo");
         overlay.style.cssText =
-          "position:fixed;top:calc(50% - 58px);left:50%;transform:translate(-50%,-50%);z-index:99990;display:inline-flex;flex-direction:column;align-items:center;justify-content:center;gap:8px;pointer-events:none;user-select:none;color:#29B5E8;font-family:Inter,sans-serif;font-weight:600;font-size:13px;";
-        overlay.innerHTML = `${buildOfficialSnowflakeSvg("#29B5E8", 42)}<span style="color:#29B5E8 !important;">Loading...</span>`;
+          "position:fixed;inset:0;z-index:99990;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;pointer-events:none;user-select:none;color:#29B5E8;font-family:Inter,sans-serif;font-weight:600;font-size:16px;";
+        overlay.innerHTML = `<div style="display:inline-flex;align-items:center;justify-content:center;gap:14px;color:#29B5E8;">${buildOfficialSnowflakeSvg("#29B5E8", 40)}${buildOfficialLangflowSvg("#29B5E8", 40)}</div><span style="color:#29B5E8 !important;">Loading...</span>`;
         document.body.appendChild(overlay);
       } else if (overlay) {
-        overlay.style.display = "inline-flex";
+        overlay.style.display = "flex";
       }
     } else if (overlay) {
       overlay.style.display = "none";
@@ -589,15 +590,10 @@
         ensureSnowflakeBlueBrandStyles();
         styleCreateFirstFlowButtons();
         const rEl = document.getElementById("root");
-        const hdr = !!document.querySelector('[data-testid="header_left_section_wrapper"]');
-        const rTxt = rEl ? (rEl.textContent || "").trim() : "";
-        const lDom = !!document.querySelector(
-          '#root .loading-component, [data-testid*="loading"], [data-testid="loading_icon"]'
-        );
-        const loadingNow = !hdr && (lDom || rTxt === "" || rTxt === "Loading..." || rTxt.includes("Loading"));
+        const emptyNow = !rEl || rEl.children.length === 0;
         const ov = document.getElementById("sflf-dual-loading-overlay");
         if (ov) {
-          ov.style.display = loadingNow ? "inline-flex" : "none";
+          ov.style.display = emptyNow ? "flex" : "none";
         }
         ensureMemoriesPageSnowflakeButton();
       });
@@ -629,21 +625,28 @@
 
   function isStrictMemoriesView() {
     if (typeof document === "undefined" || !document.body) return false;
+    // Never treat the main Flows list (which has 'Search flows...') as the Memories view
+    if (document.querySelector('input[placeholder*="Search flows" i]')) {
+      return false;
+    }
     const path = ((window.location && window.location.pathname) || "").toLowerCase();
-    if (path.includes("/flow/") || path.endsWith("/flows")) {
+    if (path.endsWith("/flows")) {
       return false;
     }
     if (path.includes("/memories")) {
       return true;
     }
-    const hasHeadingMemories = Array.from(document.querySelectorAll("h1, h2, [data-testid='mainpage_title']")).some(
+    const hasSearchMemoriesInput = !!document.querySelector(
+      'input[placeholder*="Search memories" i], [data-testid="search-memories-input"]'
+    );
+    if (hasSearchMemoriesInput) {
+      return true;
+    }
+    const hasHeadingMemories = Array.from(document.querySelectorAll("aside h2, h1, h2, [data-testid='mainpage_title']")).some(
       function (el) {
         const t = (el.textContent || "").trim();
         return t === "Memories" || t === "Manage Memories";
       }
-    );
-    const hasSearchMemoriesInput = !!document.querySelector(
-      'input[placeholder*="Search memories" i], [data-testid="search-memories-input"]'
     );
     const hasActiveSidebarMemories = Array.from(
       document.querySelectorAll(
@@ -654,12 +657,12 @@
     });
     const hasNoMemoriesEmptyState = Array.from(document.querySelectorAll("div, p, h3, span")).some(function (el) {
       const t = (el.textContent || "").trim();
-      return t === "No memories" || t === "No memories found";
+      return t === "No memories" || t === "No memories found" || t === "No memory selected";
     });
-    if (hasHeadingMemories && (hasSearchMemoriesInput || hasNoMemoriesEmptyState || hasActiveSidebarMemories)) {
+    if (hasHeadingMemories && (hasNoMemoriesEmptyState || hasActiveSidebarMemories)) {
       return true;
     }
-    if (hasActiveSidebarMemories && (hasSearchMemoriesInput || hasNoMemoriesEmptyState)) {
+    if (hasActiveSidebarMemories && hasNoMemoriesEmptyState) {
       return true;
     }
     return false;
@@ -672,6 +675,9 @@
     if (!document.body) return;
     const isMemoriesView = isStrictMemoriesView();
     const modalOpen = isAnyModalDialogOpen();
+    const nativeReactBtn = document.querySelector(
+      'aside button[data-testid="memories-plus-snowflake-btn"]:not(#sflf-memories-plus-snowflake-btn)'
+    );
     let btn = document.getElementById("sflf-memories-plus-snowflake-btn");
     if (!btn) {
       btn = document.createElement("button");
@@ -679,15 +685,24 @@
       btn.type = "button";
       btn.setAttribute("data-testid", "memories-plus-snowflake-btn");
       btn.style.cssText =
-        "position:fixed;top:72px;right:128px;z-index:10;display:none;align-items:center;gap:6px;background:#29B5E8;color:#ffffff;border:1px solid #29B5E8;border-radius:6px;padding:6px 12px;font-family:Inter,sans-serif;font-size:12px;font-weight:600;cursor:pointer;box-shadow:0 1px 3px rgba(41,181,232,0.28);white-space:nowrap;";
+        "position:fixed;top:72px;left:132px;z-index:10;display:none;align-items:center;gap:6px;background:#29B5E8;color:#ffffff;border:1px solid #29B5E8;border-radius:10px;padding:6px 12px;font-family:Inter,sans-serif;font-size:12px;font-weight:600;cursor:pointer;box-shadow:0 1px 3px rgba(41,181,232,0.28);white-space:nowrap;";
       btn.innerHTML = `${buildOfficialSnowflakeSvg("#ffffff", 14)}<span>+ Snowflake</span>`;
       btn.onclick = function () {
         openCreateSnowflakeMemoryModal();
       };
       document.body.appendChild(btn);
     }
+    if (nativeReactBtn) {
+      // React Too component already rendered the inline '+ Snowflake' button right next to '+ Create'
+      btn.style.display = "none";
+      btn.style.pointerEvents = "none";
+      if (isMemoriesView) {
+        ensureSnowflakeMemoriesSearchableCards();
+      }
+      return;
+    }
     if (isMemoriesView && !modalOpen) {
-      const createBtnCandidate = Array.from(document.querySelectorAll("button")).find(function (b) {
+      const createBtnCandidate = Array.from(document.querySelectorAll("aside button, button")).find(function (b) {
         if (b.id === "sflf-memories-plus-snowflake-btn") return false;
         const txt = (b.textContent || "").trim();
         return txt === "Create" || txt === "+ Create" || txt === "Add Memory" || txt === "Create Memory";
@@ -695,9 +710,8 @@
       if (createBtnCandidate) {
         const r = createBtnCandidate.getBoundingClientRect();
         if (r && r.width > 0 && r.height > 0) {
-          const btnWidth = btn.offsetWidth || 112;
           btn.style.top = Math.round(r.top) + "px";
-          btn.style.left = Math.max(16, Math.round(r.left - btnWidth - 8)) + "px";
+          btn.style.left = Math.round(r.right + 8) + "px";
           btn.style.height = Math.round(r.height) + "px";
           btn.style.bottom = "auto";
           btn.style.right = "auto";
@@ -2286,7 +2300,18 @@
   }
 
   // W2-R3-05 & W2-R3-06: Dedicated Light-Themed "Create a Snowflake Memory" Modal & Searchable Memory Cards
-  function openCreateSnowflakeMemoryModal() {
+  let _activeMemoryFlowId = null;
+  function extractCurrentFlowId() {
+    if (_activeMemoryFlowId) return _activeMemoryFlowId;
+    const path = (window.location && window.location.pathname) || "";
+    const m = path.match(/\/flow\/([0-9a-fA-F-]{32,36})/);
+    return m ? m[1] : null;
+  }
+
+  function openCreateSnowflakeMemoryModal(flowIdFromReact) {
+    if (flowIdFromReact && typeof flowIdFromReact === "string") {
+      _activeMemoryFlowId = flowIdFromReact;
+    }
     let modal = document.getElementById("sflf-create-memory-modal");
     if (modal) {
       modal.style.display = "flex";
@@ -2517,6 +2542,7 @@
           name: nameVal,
           database: dbVal,
           schema: schVal,
+          flow_id: extractCurrentFlowId(),
           agent_memory_type: chosenType,
           memory_category: enableEmbedding ? "vector_table" : spec.default_category,
           vector_database: targetBackend,
@@ -2533,9 +2559,18 @@
         showDenialOrStatusBanner("error", data.error_code || "AUTHZ_ROLE_DENIED", data.message || "Operazione negata");
       } else {
         sfState.memories = Array.isArray(sfState.memories) ? sfState.memories : [];
-        if (data.memory) sfState.memories.push(data.memory);
+        if (data.memory) {
+          sfState.memories = sfState.memories.filter(function (m) {
+            return (typeof m === "string" ? m : m.name) !== data.memory.name;
+          });
+          sfState.memories.unshift(data.memory);
+        }
         showDenialOrStatusBanner("ok", "MEMORY_CREATED", `Snowflake Memory ${nameVal} (${chosenType}) creata.`);
         ensureSnowflakeMemoriesSearchableCards();
+        window.dispatchEvent(new Event("focus"));
+        setTimeout(function () {
+          closeLightModal();
+        }, 450);
       }
     };
 
@@ -2543,9 +2578,51 @@
     syncLightMemoryEmbeddingProviderModels();
     ensureMemoriesPageSnowflakeButton();
   }
+  window.openCreateSnowflakeMemoryModal = openCreateSnowflakeMemoryModal;
 
+  function syncSnowflakeMemoriesWindowList(rawMemories) {
+    if (typeof window === "undefined") return;
+    window.SNOWFLAKE_MEMORIES_LIST = (rawMemories || []).map(function (m) {
+      const obj = typeof m === "string" ? { name: m, agent_memory_type: "buffer_window_memory" } : m;
+      const spec = resolveCanonicalMemoryTypeSpec(obj.agent_memory_type);
+      const fqn = obj.table_fqn || obj.fqn || `${obj.database || sfState.database}.${obj.schema || sfState.schema}.${obj.name}`;
+      const embBadge = obj.enable_embedding
+        ? `${obj.embedding_provider || "snowflake_cortex"} · ${obj.embedding_model || "AI_EMBED"} (${obj.dimension || 768}d)`
+        : "No Embedding — Direct SQL";
+      return {
+        id: obj.langflow_memory_id || `sf-${obj.name}`,
+        name: obj.name,
+        is_active: true,
+        description: `${spec.label} · ${fqn} · ${embBadge}`,
+      };
+    });
+  }
+
+  async function fetchSnowflakeMemoriesRegistry() {
+    try {
+      const resp = await fetch("/api/v1/snowflake/memories", { headers: { Accept: "application/json" } });
+      if (!resp.ok) return;
+      const data = await resp.json();
+      if (Array.isArray(data.memories_catalog) && data.memories_catalog.length > 0) {
+        sfState.memories = data.memories_catalog;
+      } else if (Array.isArray(data.memories) && data.memories.length > 0) {
+        sfState.memories = data.memories;
+      }
+      syncSnowflakeMemoriesWindowList(sfState.memories);
+    } catch (_e) {
+      // ignore
+    }
+  }
+
+  let _memoriesRegistryFetchedOnce = false;
   function ensureSnowflakeMemoriesSearchableCards() {
     if (!isStrictMemoriesView() || !document.body) return;
+    if (!_memoriesRegistryFetchedOnce) {
+      _memoriesRegistryFetchedOnce = true;
+      fetchSnowflakeMemoriesRegistry().then(function () {
+        ensureSnowflakeMemoriesSearchableCards();
+      });
+    }
     let grid = document.getElementById("sflf-memories-cards-grid");
     const searchInput = document.querySelector(
       'input[placeholder*="Search memories" i], [data-testid="search-memories-input"]'
@@ -2574,22 +2651,26 @@
         }
         return m;
       });
+    syncSnowflakeMemoriesWindowList(rawMemories);
 
+    const hasNativeReactMemoriesBtn = !!document.querySelector(
+      'aside button[data-testid="memories-plus-snowflake-btn"]:not(#sflf-memories-plus-snowflake-btn)'
+    );
     if (!grid) {
       grid = document.createElement("div");
       grid.id = "sflf-memories-cards-grid";
       grid.setAttribute("data-testid", "snowflake-memories-cards-grid");
       grid.style.cssText =
         "margin:12px 24px;display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,280px),1fr));gap:12px;font-family:Inter,sans-serif;";
-      const mainContainer = document.querySelector("main") || document.body;
-      mainContainer.appendChild(grid);
+      document.body.appendChild(grid);
     }
-    grid.style.display = "grid";
+    // When native React Too sidebar is mounted, Too renders SNOWFLAKE_MEMORIES_LIST natively inside <aside>; keep grid hidden on body
+    grid.style.display = hasNativeReactMemoriesBtn ? "none" : "grid";
 
     const filtered = rawMemories.filter(function (m) {
       if (!query) return true;
       const spec = resolveCanonicalMemoryTypeSpec(m.agent_memory_type);
-      const hay = `${m.name || ""} ${m.agent_memory_type || ""} ${spec.label || ""} ${m.fqn || ""} ${
+      const hay = `${m.name || ""} ${m.agent_memory_type || ""} ${spec.label || ""} ${m.table_fqn || m.fqn || ""} ${
         spec.how_to_feed_without_embedding || ""
       }`.toLowerCase();
       return hay.includes(query);
@@ -2598,7 +2679,7 @@
     grid.innerHTML = filtered
       .map(function (m) {
         const spec = resolveCanonicalMemoryTypeSpec(m.agent_memory_type);
-        const fqn = m.fqn || `${m.database || sfState.database}.${m.schema || sfState.schema}.${m.name}`;
+        const fqn = m.table_fqn || m.fqn || `${m.database || sfState.database}.${m.schema || sfState.schema}.${m.name}`;
         const embBadge = m.enable_embedding
           ? `${m.embedding_provider || "snowflake_cortex"} · ${m.embedding_model || "AI_EMBED"} (${
               m.dimension || 768
