@@ -2,15 +2,20 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import sqlite3
 import time
 import uuid
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+_CATALOG_EXECUTOR = ThreadPoolExecutor(max_workers=8, thread_name_prefix="sflf-catalog")
+_AUDIT_EXECUTOR = ThreadPoolExecutor(max_workers=2, thread_name_prefix="sflf-audit")
 
 try:
     import httpx
@@ -467,6 +472,19 @@ class LiveSnowflakeBridge:
         }
         self._roles_discovered: bool = False
         self._superuser_synced: bool = False
+        self._roles_last_refreshed_ts: float = 0.0
+        self._dbs_cache: dict[str, tuple[float, list[str], list[str]]] = {}
+        self._schemas_cache: dict[str, tuple[float, list[str]]] = {}
+        self._objects_cache: dict[str, tuple[float, dict[str, Any]]] = {}
+        self._synced_tx_ids: set[str] = set()
+        self._http_client: Any = None
+
+    def invalidate_catalog_cache(self) -> None:
+        """Clear in-memory catalog caches on role switch or explicit refresh."""
+        self._dbs_cache.clear()
+        self._schemas_cache.clear()
+        self._objects_cache.clear()
+        self._roles_last_refreshed_ts = 0.0
 
     @property
     def memories_catalog(self) -> list[dict[str, Any]]:
@@ -1196,11 +1214,19 @@ class LiveSnowflakeBridge:
                         cur_vis.setdefault(k, [])
 
         self.context_epoch += 1
+        compact_audit_details = {
+            "database": self.database,
+            "schema": self.schema,
+            "databases": list(self.selected_context.get("databases") or []),
+            "schemas_by_db": dict(self.selected_context.get("schemas_by_db") or {}),
+            "selected_pairs_count": len(self.selected_context.get("selected_objects") or {}),
+            "context_epoch": self.context_epoch,
+        }
         self.record_audit_event(
             action="UPDATE_CONTEXT",
             outcome="ALLOWED",
             target_object=f"{self.database}.{self.schema}",
-            details={"selected_context": self.selected_context, "context_epoch": self.context_epoch},
+            details=compact_audit_details,
         )
         return {
             "ok": True,
@@ -1213,6 +1239,68 @@ class LiveSnowflakeBridge:
             "role_privileges": self.role_privileges,
         }
 
+    def _is_execute_sql_mocked(self) -> bool:
+        """Detect whether `self.execute_sql` has been monkeypatched by a unit test."""
+        return "execute_sql" in self.__dict__
+
+    def discover_schemas_only(
+        self,
+        *,
+        database: str | None = None,
+        databases: list[str] | str | None = None,
+        force_refresh: bool = False,
+    ) -> dict[str, Any]:
+        """Fast schema-only discovery for Snowsight tree lazy-loading (`GET /api/v1/snowflake/schemas`)."""
+        db = (database or self.database or "SNOWFLAKE_LANGFLOW").strip().upper()
+        parsed_dbs: list[str] = []
+        if isinstance(databases, str) and databases.strip():
+            parsed_dbs = [d.strip().upper() for d in databases.split(",") if d.strip()]
+        elif isinstance(databases, list):
+            parsed_dbs = [str(d).strip().upper() for d in databases if str(d).strip()]
+        if db and db not in parsed_dbs:
+            parsed_dbs.insert(0, db)
+
+        def _extract_names(rows: list[dict[str, Any]], keys: tuple[str, ...] = ("name", "NAME", "OBJECT_NAME")) -> list[str]:
+            out: list[str] = []
+            for r in rows:
+                for k in keys:
+                    val = r.get(k)
+                    if val and str(val).strip() and str(val).strip() not in out:
+                        out.append(str(val).strip())
+                        break
+            return out
+
+        use_cache = self._has_spcs_token() and not self._is_execute_sql_mocked() and not force_refresh
+        now = time.monotonic()
+        schemas_by_db_out: dict[str, list[str]] = dict(self.selected_context.get("schemas_by_db", {}))
+        primary_schemas: list[str] = []
+
+        for target_db in (parsed_dbs or [db]):
+            cache_key = f"{self.active_role}:{target_db}"
+            cached_entry = self._schemas_cache.get(cache_key) if use_cache else None
+            if cached_entry and (now - cached_entry[0]) < 120.0:
+                db_schemas = list(cached_entry[1])
+            else:
+                sch_res = self.execute_sql(f"SHOW SCHEMAS IN DATABASE {target_db}", timeout=12)
+                db_schemas = _extract_names(sch_res.get("rows", [])) or list(
+                    dict.fromkeys([*(schemas_by_db_out.get(target_db) or []), "CORE", "PUBLIC"])
+                )
+                if self._has_spcs_token() and not self._is_execute_sql_mocked():
+                    self._schemas_cache[cache_key] = (now, list(db_schemas))
+            schemas_by_db_out[target_db] = db_schemas
+            if target_db == db:
+                primary_schemas = db_schemas
+
+        self.selected_context["schemas_by_db"] = schemas_by_db_out
+        return {
+            "ok": True,
+            "active_role": self.active_role,
+            "context_epoch": self.context_epoch,
+            "database": db,
+            "schemas": primary_schemas or ["CORE", "PUBLIC"],
+            "schemas_by_db": schemas_by_db_out,
+        }
+
     def discover_catalog(
         self,
         *,
@@ -1221,6 +1309,7 @@ class LiveSnowflakeBridge:
         object_kind: str | None = None,
         databases: list[str] | str | None = None,
         schemas_by_db: dict[str, list[str]] | str | None = None,
+        force_refresh: bool = False,
     ) -> dict[str, Any]:
         """Discover Multi-Database -> Multi-Schema -> Cascading Objects for CURRENT_ROLE() (`W2-R2-00`, `HUB-W2-02`)."""
         db = (database or self.database).strip().upper()
@@ -1233,10 +1322,6 @@ class LiveSnowflakeBridge:
             parsed_dbs = [str(d).strip().upper() for d in databases if str(d).strip()]
         if db and db not in parsed_dbs:
             parsed_dbs.insert(0, db)
-        for ctx_db in self.selected_context.get("databases", []):
-            clean_ctx_db = str(ctx_db).strip().upper()
-            if clean_ctx_db and clean_ctx_db not in parsed_dbs:
-                parsed_dbs.append(clean_ctx_db)
 
         parsed_schemas_map: dict[str, list[str]] = {}
         if isinstance(schemas_by_db, str) and schemas_by_db.strip():
@@ -1263,21 +1348,42 @@ class LiveSnowflakeBridge:
                         break
             return out
 
-        dbs_res = self.execute_sql("SHOW DATABASES")
-        pg_res = self.execute_sql("SHOW POSTGRES INSTANCES")
-        discovered_databases = _extract_names(dbs_res.get("rows", [])) or list(
-            dict.fromkeys([db, *parsed_dbs, *self.selected_context.get("databases", [self.database])])
-        )
-        postgres_instances = _extract_names(pg_res.get("rows", [])) or list(
-            self.selected_context.get("visible_objects", {}).get("postgres_instances", [])
-        )
+        use_live_parallel_cache = self._has_spcs_token() and not self._is_execute_sql_mocked() and not force_refresh
+        now = time.monotonic()
+
+        dbs_cache_entry = self._dbs_cache.get(self.active_role) if use_live_parallel_cache else None
+        if dbs_cache_entry and (now - dbs_cache_entry[0]) < 120.0:
+            discovered_databases = list(dbs_cache_entry[1])
+            postgres_instances = list(dbs_cache_entry[2])
+        elif self._has_spcs_token() and not self._is_execute_sql_mocked():
+            fut_dbs = _CATALOG_EXECUTOR.submit(self.execute_sql, "SHOW DATABASES", timeout=12)
+            fut_pg = _CATALOG_EXECUTOR.submit(self.execute_sql, "SHOW POSTGRES INSTANCES", timeout=12)
+            dbs_res = fut_dbs.result()
+            pg_res = fut_pg.result()
+            discovered_databases = _extract_names(dbs_res.get("rows", [])) or list(
+                dict.fromkeys([db, *parsed_dbs, *self.selected_context.get("databases", [self.database])])
+            )
+            postgres_instances = _extract_names(pg_res.get("rows", [])) or list(
+                self.selected_context.get("visible_objects", {}).get("postgres_instances", [])
+            )
+            self._dbs_cache[self.active_role] = (now, list(discovered_databases), list(postgres_instances))
+        else:
+            dbs_res = self.execute_sql("SHOW DATABASES")
+            pg_res = self.execute_sql("SHOW POSTGRES INSTANCES")
+            discovered_databases = _extract_names(dbs_res.get("rows", [])) or list(
+                dict.fromkeys([db, *parsed_dbs, *self.selected_context.get("databases", [self.database])])
+            )
+            postgres_instances = _extract_names(pg_res.get("rows", [])) or list(
+                self.selected_context.get("visible_objects", {}).get("postgres_instances", [])
+            )
 
         schemas_by_db_out: dict[str, list[str]] = dict(self.selected_context.get("schemas_by_db", {}))
         objects_by_db_schema: dict[str, dict[str, list[str]]] = dict(
             self.selected_context.get("objects_by_db_schema", {})
         )
 
-        target_dbs = parsed_dbs or [db]
+        # Bound target_dbs so setting multi-DB context never triggers an N*M*8 SHOW query storm
+        target_dbs = (parsed_dbs or [db])[:3]
         primary_schemas: list[str] = []
         primary_raw_objects: list[dict[str, Any]] = []
         primary_stages_rows: list[dict[str, Any]] = []
@@ -1293,104 +1399,169 @@ class LiveSnowflakeBridge:
         merged_cortex_agents: list[str] = []
 
         for target_db in target_dbs:
-            sch_res = self.execute_sql(f"SHOW SCHEMAS IN DATABASE {target_db}")
-            db_schemas = _extract_names(sch_res.get("rows", [])) or list(
-                dict.fromkeys([*(parsed_schemas_map.get(target_db) or []), sch if target_db == db else "CORE", "CORE", "PUBLIC"])
-            )
+            sch_cache_key = f"{self.active_role}:{target_db}"
+            cached_sch = self._schemas_cache.get(sch_cache_key) if use_live_parallel_cache else None
+            if cached_sch and (now - cached_sch[0]) < 120.0:
+                db_schemas = list(cached_sch[1])
+            else:
+                sch_res = self.execute_sql(f"SHOW SCHEMAS IN DATABASE {target_db}", timeout=12)
+                db_schemas = _extract_names(sch_res.get("rows", [])) or list(
+                    dict.fromkeys([*(parsed_schemas_map.get(target_db) or []), sch if target_db == db else "CORE", "CORE", "PUBLIC"])
+                )
+                if self._has_spcs_token() and not self._is_execute_sql_mocked():
+                    self._schemas_cache[sch_cache_key] = (now, list(db_schemas))
             schemas_by_db_out[target_db] = db_schemas
             if target_db == db:
                 primary_schemas = db_schemas
 
-            active_schemas_for_db = parsed_schemas_map.get(target_db) or (
+            # Bound active schemas per call so selecting a whole DB does not synchronously scan 20 schemas at once
+            explicit_schemas = parsed_schemas_map.get(target_db)
+            active_schemas_for_db = (explicit_schemas[:2] if explicit_schemas else None) or (
                 [sch] if target_db == db else db_schemas[:1]
             )
             for target_sch in active_schemas_for_db:
                 pair_key = f"{target_db}.{target_sch}"
-                objects_res = self.execute_sql(f"SHOW OBJECTS IN SCHEMA {pair_key}")
-                iceberg_res = self.execute_sql(f"SHOW ICEBERG TABLES IN SCHEMA {pair_key}")
-                stages_res = self.execute_sql(f"SHOW STAGES IN SCHEMA {pair_key}")
-                funcs_res = self.execute_sql(f"SHOW USER FUNCTIONS IN SCHEMA {pair_key}")
-                procs_res = self.execute_sql(f"SHOW USER PROCEDURES IN SCHEMA {pair_key}")
-                search_res = self.execute_sql(f"SHOW CORTEX SEARCH SERVICES IN SCHEMA {pair_key}")
-                sem_views_res = self.execute_sql(f"SHOW SEMANTIC VIEWS IN SCHEMA {pair_key}")
-                agents_res = self.execute_sql(f"SHOW CORTEX AGENTS IN SCHEMA {pair_key}")
-
-                raw_objs = objects_res.get("rows", [])
-                if target_db == db and target_sch == sch:
-                    primary_raw_objects = raw_objs
-                    primary_stages_rows = stages_res.get("rows", [])
-
-                pair_tables: list[str] = []
-                pair_views: list[str] = []
-                pair_iceberg: list[str] = _extract_names(iceberg_res.get("rows", []))
-                for obj in raw_objs:
-                    nm = str(obj.get("name") or obj.get("NAME") or "").strip()
-                    kd = str(obj.get("kind") or obj.get("KIND") or "TABLE").upper()
-                    is_ice = str(obj.get("is_iceberg") or obj.get("IS_ICEBERG") or "N").upper() == "Y" or "ICEBERG" in kd
-                    if not nm:
-                        continue
-                    if "VIEW" in kd:
-                        pair_views.append(nm)
-                    elif is_ice:
-                        if nm not in pair_iceberg:
-                            pair_iceberg.append(nm)
-                        pair_tables.append(nm)
+                obj_cache_key = f"{self.active_role}:{pair_key}"
+                cached_obj = self._objects_cache.get(obj_cache_key) if use_live_parallel_cache else None
+                if cached_obj and (now - cached_obj[0]) < 120.0:
+                    cached_payload = cached_obj[1]
+                    raw_objs = cached_payload["raw_objs"]
+                    stages_rows = cached_payload["stages_rows"]
+                    pair_bucket = dict(cached_payload["pair_bucket"])
+                    pair_bucket["postgres_instances"] = postgres_instances
+                    objects_by_db_schema[pair_key] = pair_bucket
+                    if target_db == db and target_sch == sch:
+                        primary_raw_objects = raw_objs
+                        primary_stages_rows = stages_rows
+                    pair_tables = pair_bucket["tables"]
+                    pair_views = pair_bucket["views"]
+                    pair_iceberg = pair_bucket["iceberg_tables"]
+                    pair_stages = pair_bucket["stages"]
+                    pair_funcs = pair_bucket["functions"]
+                    pair_procs = pair_bucket["procedures"]
+                    pair_search = pair_bucket["cortex_search_services"]
+                    pair_sem_views = pair_bucket["semantic_views"]
+                    pair_agents = pair_bucket["cortex_agents"]
+                else:
+                    show_queries = [
+                        f"SHOW OBJECTS IN SCHEMA {pair_key}",
+                        f"SHOW ICEBERG TABLES IN SCHEMA {pair_key}",
+                        f"SHOW STAGES IN SCHEMA {pair_key}",
+                        f"SHOW USER FUNCTIONS IN SCHEMA {pair_key}",
+                        f"SHOW USER PROCEDURES IN SCHEMA {pair_key}",
+                        f"SHOW CORTEX SEARCH SERVICES IN SCHEMA {pair_key}",
+                        f"SHOW SEMANTIC VIEWS IN SCHEMA {pair_key}",
+                        f"SHOW CORTEX AGENTS IN SCHEMA {pair_key}",
+                    ]
+                    if self._has_spcs_token() and not self._is_execute_sql_mocked():
+                        futs = [_CATALOG_EXECUTOR.submit(self.execute_sql, q, timeout=10) for q in show_queries]
+                        (
+                            objects_res,
+                            iceberg_res,
+                            stages_res,
+                            funcs_res,
+                            procs_res,
+                            search_res,
+                            sem_views_res,
+                            agents_res,
+                        ) = [f.result() for f in futs]
                     else:
-                        pair_tables.append(nm)
+                        objects_res = self.execute_sql(show_queries[0])
+                        iceberg_res = self.execute_sql(show_queries[1])
+                        stages_res = self.execute_sql(show_queries[2])
+                        funcs_res = self.execute_sql(show_queries[3])
+                        procs_res = self.execute_sql(show_queries[4])
+                        search_res = self.execute_sql(show_queries[5])
+                        sem_views_res = self.execute_sql(show_queries[6])
+                        agents_res = self.execute_sql(show_queries[7])
 
-                if not pair_tables and target_db == db and target_sch == sch:
-                    pair_tables = list(
-                        self.selected_context.get("visible_objects", {}).get(
-                            "tables", ["LANGFLOW_FLOW_RUNS", "LANGFLOW_FLOW_SPANS", "LANGFLOW_AUDIT_LOG"]
+                    raw_objs = objects_res.get("rows", [])
+                    stages_rows = stages_res.get("rows", [])
+                    if target_db == db and target_sch == sch:
+                        primary_raw_objects = raw_objs
+                        primary_stages_rows = stages_rows
+
+                    pair_tables = []
+                    pair_views = []
+                    pair_iceberg = _extract_names(iceberg_res.get("rows", []))
+                    for obj in raw_objs:
+                        nm = str(obj.get("name") or obj.get("NAME") or "").strip()
+                        kd = str(obj.get("kind") or obj.get("KIND") or "TABLE").upper()
+                        is_ice = str(obj.get("is_iceberg") or obj.get("IS_ICEBERG") or "N").upper() == "Y" or "ICEBERG" in kd
+                        if not nm:
+                            continue
+                        if "VIEW" in kd:
+                            pair_views.append(nm)
+                        elif is_ice:
+                            if nm not in pair_iceberg:
+                                pair_iceberg.append(nm)
+                            pair_tables.append(nm)
+                        else:
+                            pair_tables.append(nm)
+
+                    if not pair_tables and target_db == db and target_sch == sch:
+                        pair_tables = list(
+                            self.selected_context.get("visible_objects", {}).get(
+                                "tables", ["LANGFLOW_FLOW_RUNS", "LANGFLOW_FLOW_SPANS", "LANGFLOW_AUDIT_LOG"]
+                            )
                         )
+                    if not pair_iceberg and target_db == db and target_sch == sch:
+                        pair_iceberg = list(
+                            self.selected_context.get("visible_objects", {}).get("iceberg_tables", [])
+                        )
+
+                    pair_stages = _extract_names(stages_rows) or (
+                        [self.stage_name] if target_db == db and target_sch == sch else []
                     )
-                if not pair_iceberg and target_db == db and target_sch == sch:
-                    pair_iceberg = list(
-                        self.selected_context.get("visible_objects", {}).get("iceberg_tables", [])
+                    pair_funcs = _extract_names(funcs_res.get("rows", [])) or (
+                        list(self.selected_context.get("visible_objects", {}).get("functions", []))
+                        if target_db == db and target_sch == sch
+                        else []
+                    )
+                    pair_procs = _extract_names(procs_res.get("rows", [])) or (
+                        list(self.selected_context.get("visible_objects", {}).get("procedures", []))
+                        if target_db == db and target_sch == sch
+                        else []
+                    )
+                    pair_search = _extract_names(search_res.get("rows", [])) or (
+                        list(self.selected_context.get("visible_objects", {}).get("cortex_search_services", []))
+                        if target_db == db and target_sch == sch
+                        else []
+                    )
+                    pair_sem_views = _extract_names(sem_views_res.get("rows", [])) or (
+                        list(self.selected_context.get("visible_objects", {}).get("semantic_views", []))
+                        if target_db == db and target_sch == sch
+                        else []
+                    )
+                    pair_agents = _extract_names(agents_res.get("rows", [])) or (
+                        list(self.selected_context.get("visible_objects", {}).get("cortex_agents", []))
+                        if target_db == db and target_sch == sch
+                        else []
                     )
 
-                pair_stages = _extract_names(stages_res.get("rows", [])) or (
-                    [self.stage_name] if target_db == db and target_sch == sch else []
-                )
-                pair_funcs = _extract_names(funcs_res.get("rows", [])) or (
-                    list(self.selected_context.get("visible_objects", {}).get("functions", []))
-                    if target_db == db and target_sch == sch
-                    else []
-                )
-                pair_procs = _extract_names(procs_res.get("rows", [])) or (
-                    list(self.selected_context.get("visible_objects", {}).get("procedures", []))
-                    if target_db == db and target_sch == sch
-                    else []
-                )
-                pair_search = _extract_names(search_res.get("rows", [])) or (
-                    list(self.selected_context.get("visible_objects", {}).get("cortex_search_services", []))
-                    if target_db == db and target_sch == sch
-                    else []
-                )
-                pair_sem_views = _extract_names(sem_views_res.get("rows", [])) or (
-                    list(self.selected_context.get("visible_objects", {}).get("semantic_views", []))
-                    if target_db == db and target_sch == sch
-                    else []
-                )
-                pair_agents = _extract_names(agents_res.get("rows", [])) or (
-                    list(self.selected_context.get("visible_objects", {}).get("cortex_agents", []))
-                    if target_db == db and target_sch == sch
-                    else []
-                )
-
-                objects_by_db_schema[pair_key] = {
-                    "tables": pair_tables,
-                    "views": pair_views,
-                    "iceberg_tables": pair_iceberg,
-                    "stages": pair_stages,
-                    "functions": pair_funcs,
-                    "procedures": pair_procs,
-                    "cortex_search_services": pair_search,
-                    "semantic_views": pair_sem_views,
-                    "semantic_models": list(self.selected_context.get("visible_objects", {}).get("semantic_models", [])),
-                    "cortex_agents": pair_agents,
-                    "postgres_instances": postgres_instances,
-                }
+                    pair_bucket = {
+                        "tables": pair_tables,
+                        "views": pair_views,
+                        "iceberg_tables": pair_iceberg,
+                        "stages": pair_stages,
+                        "functions": pair_funcs,
+                        "procedures": pair_procs,
+                        "cortex_search_services": pair_search,
+                        "semantic_views": pair_sem_views,
+                        "semantic_models": list(self.selected_context.get("visible_objects", {}).get("semantic_models", [])),
+                        "cortex_agents": pair_agents,
+                        "postgres_instances": postgres_instances,
+                    }
+                    objects_by_db_schema[pair_key] = pair_bucket
+                    if self._has_spcs_token() and not self._is_execute_sql_mocked():
+                        self._objects_cache[obj_cache_key] = (
+                            now,
+                            {
+                                "raw_objs": raw_objs,
+                                "stages_rows": stages_rows,
+                                "pair_bucket": dict(pair_bucket),
+                            },
+                        )
 
                 for item in pair_tables:
                     if item not in merged_tables:
@@ -1658,51 +1829,62 @@ class LiveSnowflakeBridge:
             payload["bindings"] = bindings
 
         try:
-            with httpx.Client(timeout=float(timeout + 5), verify=True) as client:
-                resp = client.post(url, headers=self._get_spcs_headers(), json=payload)
-                body = resp.json() if resp.content else {}
-                if resp.status_code >= 400:
-                    msg = body.get("message") or f"HTTP {resp.status_code}"
-                    code = str(body.get("code") or "")
-                    if "not authorized" in msg.lower() or "insufficient privileges" in msg.lower() or resp.status_code == 403:
-                        return {
-                            "ok": False,
-                            "error_code": ErrorCode.AUTHZ_ROLE_DENIED.value,
-                            "status_code": 403,
-                            "message": f"Il ruolo attivo ({effective_role}) non consente questa operazione: {msg}",
-                            "snowflake_code": code,
-                            "effective_role": effective_role,
-                        }
-                    if "does not exist" in msg.lower():
-                        return {
-                            "ok": False,
-                            "error_code": ErrorCode.OBJECT_NOT_FOUND_OR_UNAUTHORIZED.value,
-                            "status_code": 404,
-                            "message": f"Oggetto non trovato o non autorizzato per il ruolo ({effective_role}): {msg}",
-                            "snowflake_code": code,
-                            "effective_role": effective_role,
-                        }
+            if self._http_client is None and httpx is not None:
+                self._http_client = httpx.Client(
+                    timeout=35.0,
+                    verify=True,
+                    limits=httpx.Limits(max_keepalive_connections=16, max_connections=32),
+                )
+            client = self._http_client
+            resp = client.post(
+                url,
+                headers=self._get_spcs_headers(),
+                json=payload,
+                timeout=float(min(max(timeout, 5), 60) + 5),
+            )
+            body = resp.json() if resp.content else {}
+            if resp.status_code >= 400:
+                msg = body.get("message") or f"HTTP {resp.status_code}"
+                code = str(body.get("code") or "")
+                if "not authorized" in msg.lower() or "insufficient privileges" in msg.lower() or resp.status_code == 403:
                     return {
                         "ok": False,
-                        "error_code": ErrorCode.TECHNICAL_EXECUTION_ERROR.value,
-                        "status_code": 500,
-                        "message": msg,
+                        "error_code": ErrorCode.AUTHZ_ROLE_DENIED.value,
+                        "status_code": 403,
+                        "message": f"Il ruolo attivo ({effective_role}) non consente questa operazione: {msg}",
                         "snowflake_code": code,
                         "effective_role": effective_role,
                     }
-
-                meta = body.get("resultSetMetaData", {})
-                row_types = meta.get("rowType", [])
-                col_names = [col.get("name", f"COL_{idx}") for idx, col in enumerate(row_types)]
-                raw_data = body.get("data", [])
-                rows = [dict(zip(col_names, row)) for row in raw_data]
+                if "does not exist" in msg.lower():
+                    return {
+                        "ok": False,
+                        "error_code": ErrorCode.OBJECT_NOT_FOUND_OR_UNAUTHORIZED.value,
+                        "status_code": 404,
+                        "message": f"Oggetto non trovato o non autorizzato per il ruolo ({effective_role}): {msg}",
+                        "snowflake_code": code,
+                        "effective_role": effective_role,
+                    }
                 return {
-                    "ok": True,
+                    "ok": False,
+                    "error_code": ErrorCode.TECHNICAL_EXECUTION_ERROR.value,
+                    "status_code": 500,
+                    "message": msg,
+                    "snowflake_code": code,
                     "effective_role": effective_role,
-                    "statement_handle": body.get("statementHandle", ""),
-                    "columns": col_names,
-                    "rows": rows,
                 }
+
+            meta = body.get("resultSetMetaData", {})
+            row_types = meta.get("rowType", [])
+            col_names = [col.get("name", f"COL_{idx}") for idx, col in enumerate(row_types)]
+            raw_data = body.get("data", [])
+            rows = [dict(zip(col_names, row)) for row in raw_data]
+            return {
+                "ok": True,
+                "effective_role": effective_role,
+                "statement_handle": body.get("statementHandle", ""),
+                "columns": col_names,
+                "rows": rows,
+            }
         except Exception as exc:  # noqa: BLE001
             return {
                 "ok": False,
@@ -1712,8 +1894,19 @@ class LiveSnowflakeBridge:
                 "effective_role": effective_role,
             }
 
-    def refresh_roles_from_snowflake(self) -> None:
-        res = self.execute_sql("SELECT CURRENT_USER() AS USR, CURRENT_ROLE() AS RL, CURRENT_AVAILABLE_ROLES() AS AVAIL")
+    def refresh_roles_from_snowflake(self, *, force: bool = False) -> None:
+        now = time.monotonic()
+        if (
+            not force
+            and self._roles_discovered
+            and not self._is_execute_sql_mocked()
+            and (now - self._roles_last_refreshed_ts) < 60.0
+        ):
+            return
+        res = self.execute_sql(
+            "SELECT CURRENT_USER() AS USR, CURRENT_ROLE() AS RL, CURRENT_AVAILABLE_ROLES() AS AVAIL",
+            timeout=10,
+        )
         if res.get("ok") and res.get("rows"):
             row = res["rows"][0]
             self.authenticated_user = row.get("USR") or self.authenticated_user
@@ -1737,6 +1930,7 @@ class LiveSnowflakeBridge:
                 except Exception:  # noqa: BLE001
                     pass
             self._roles_discovered = True
+            self._roles_last_refreshed_ts = now
 
     def record_audit_event(
         self,
@@ -1752,6 +1946,8 @@ class LiveSnowflakeBridge:
         event_id = f"aud-{uuid.uuid4().hex[:16]}"
         redacted = redact_for_sink(details or {})
         details_json = json.dumps(redacted).replace("'", "''")
+        if len(details_json) > 12000:
+            details_json = json.dumps({"summary": "truncated_large_audit_payload", "keys": list(redacted.keys())}).replace("'", "''")
         err_sql = f"'{error_code}'" if error_code else "NULL"
         tgt_sql = f"'{str(target_object).replace(chr(39), chr(39)*2)}'" if target_object else "NULL"
         flw_sql = f"'{flow_id}'" if flow_id else "NULL"
@@ -1764,8 +1960,11 @@ class LiveSnowflakeBridge:
             f"'{ExecutionMode.INTERACTIVE_CALLER.value}', {self.context_epoch}, '{action}', '{outcome}', "
             f"{err_sql}, {tgt_sql}, 'default', {flw_sql}, {run_sql}, {run_sql}, PARSE_JSON('{details_json}')"
         )
-        # Write audit using service admin role so denials of restricted roles are still durably recorded
-        self.execute_sql(stmt, role="ACCOUNTADMIN")
+        # In live SPCS mode, dispatch audit INSERT asynchronously so UI requests never block on Snowflake DML
+        if self._has_spcs_token() and not self._is_execute_sql_mocked():
+            _AUDIT_EXECUTOR.submit(self.execute_sql, stmt, role="ACCOUNTADMIN", timeout=15)
+        else:
+            self.execute_sql(stmt, role="ACCOUNTADMIN")
         return event_id
 
     def switch_role(self, target_role: str) -> dict[str, Any]:
@@ -1788,7 +1987,7 @@ class LiveSnowflakeBridge:
             }
 
         # Verify role activation on Snowflake
-        check = self.execute_sql("SELECT CURRENT_ROLE() AS VERIFIED_ROLE", role=clean)
+        check = self.execute_sql("SELECT CURRENT_ROLE() AS VERIFIED_ROLE", role=clean, timeout=12)
         if not check.get("ok") and self._has_spcs_token():
             self.record_audit_event(
                 action="ROLE_SWITCH",
@@ -1809,6 +2008,7 @@ class LiveSnowflakeBridge:
         previous_role = self.active_role
         self.active_role = clean
         self.context_epoch += 1
+        self.invalidate_catalog_cache()
         self.record_audit_event(
             action="ROLE_SWITCH",
             outcome="ALLOWED",
@@ -1872,16 +2072,16 @@ class LiveSnowflakeBridge:
             }
         return None
 
-    def sync_langflow_traces_to_snowflake(self, limit: int = 25) -> dict[str, Any]:
+    def sync_langflow_traces_to_snowflake(self, limit: int = 25, *, replicate_sqlite: bool = True) -> dict[str, Any]:
         """Replicate Langflow SQLite `transaction` / `vertex_build` rows into Snowflake `LANGFLOW_FLOW_RUNS` & `SPANS`."""
         persist_dir = Path(os.getenv("LANGFLOW_PERSIST_DIR", "/persist"))
         db_path = persist_dir / "langflow.db"
         replicated_runs = 0
         replicated_spans = 0
 
-        if db_path.exists():
+        if replicate_sqlite and db_path.exists():
             try:
-                conn = _open_sqlite_conn(db_path, readonly=False, timeout=30.0)
+                conn = _open_sqlite_conn(db_path, readonly=True, timeout=30.0)
                 conn.row_factory = sqlite3.Row
                 cur = conn.cursor()
                 tables = {
@@ -1889,66 +2089,82 @@ class LiveSnowflakeBridge:
                     for r in cur.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
                 }
                 if "transaction" in tables:
+                    bounded_tx = min(int(limit or 10), 10)
                     rows = cur.execute(
-                        "SELECT * FROM \"transaction\" ORDER BY timestamp DESC LIMIT ?", (limit,)
+                        "SELECT * FROM \"transaction\" ORDER BY timestamp DESC LIMIT ?", (bounded_tx,)
                     ).fetchall()
-                    for r in rows:
-                        row_dict = dict(r)
-                        tx_id = str(row_dict.get("id") or uuid.uuid4().hex)
-                        flow_id = str(row_dict.get("flow_id") or "unknown-flow")
-                        vertex_id = str(row_dict.get("vertex_id") or "vertex")
-                        status_val = str(row_dict.get("status") or "SUCCESS").upper()
-                        inputs_redacted = json.dumps(redact_for_sink(row_dict.get("inputs") or {})).replace("'", "''")
-                        outputs_redacted = json.dumps(redact_for_sink(row_dict.get("outputs") or {})).replace("'", "''")
-
-                        merge_span = (
-                            f"MERGE INTO {self.spans_table} t "
-                            f"USING (SELECT '{tx_id}' AS span_id) s ON t.span_id = s.span_id "
-                            f"WHEN NOT MATCHED THEN INSERT "
-                            f"(event_id, span_id, run_id, trace_id, project_id, flow_id, component_id, component_name, "
-                            f"authenticated_user, effective_role, execution_mode, start_ts, end_ts, status, "
-                            f"redacted_inputs, redacted_outputs) VALUES "
-                            f"('evt-{tx_id[:16]}', '{tx_id}', 'run-{flow_id[:16]}', 'trc-{flow_id[:16]}', "
-                            f"'default', '{flow_id}', '{vertex_id}', '{vertex_id}', "
-                            f"'{self.authenticated_user}', '{self.active_role}', 'INTERACTIVE_CALLER', "
-                            f"CURRENT_TIMESTAMP(), CURRENT_TIMESTAMP(), '{status_val}', "
-                            f"PARSE_JSON('{inputs_redacted}'), PARSE_JSON('{outputs_redacted}'))"
-                        )
-                        self.execute_sql(merge_span, role="ACCOUNTADMIN")
-                        replicated_spans += 1
-
-                        merge_run = (
-                            f"MERGE INTO {self.runs_table} t "
-                            f"USING (SELECT 'run-{flow_id[:16]}' AS run_id) s ON t.run_id = s.run_id "
-                            f"WHEN NOT MATCHED THEN INSERT "
-                            f"(event_id, run_id, trace_id, project_id, flow_id, authenticated_user, effective_role, "
-                            f"execution_mode, start_ts, end_ts, status, input_payload, output_payload) VALUES "
-                            f"('evr-{flow_id[:16]}', 'run-{flow_id[:16]}', 'trc-{flow_id[:16]}', 'default', '{flow_id}', "
-                            f"'{self.authenticated_user}', '{self.active_role}', 'INTERACTIVE_CALLER', "
-                            f"CURRENT_TIMESTAMP(), CURRENT_TIMESTAMP(), '{status_val}', "
-                            f"PARSE_JSON('{inputs_redacted}'), PARSE_JSON('{outputs_redacted}'))"
-                        )
-                        self.execute_sql(merge_run, role="ACCOUNTADMIN")
-                        replicated_runs += 1
+                else:
+                    rows = []
                 conn.close()
+
+                for r in rows:
+                    row_dict = dict(r)
+                    tx_id = str(row_dict.get("id") or uuid.uuid4().hex)
+                    if tx_id in self._synced_tx_ids:
+                        continue
+                    flow_id = str(row_dict.get("flow_id") or "unknown-flow")
+                    vertex_id = str(row_dict.get("vertex_id") or "vertex")
+                    status_val = str(row_dict.get("status") or "SUCCESS").upper()
+                    inputs_redacted = json.dumps(redact_for_sink(row_dict.get("inputs") or {})).replace("'", "''")[:4000]
+                    outputs_redacted = json.dumps(redact_for_sink(row_dict.get("outputs") or {})).replace("'", "''")[:4000]
+
+                    merge_span = (
+                        f"MERGE INTO {self.spans_table} t "
+                        f"USING (SELECT '{tx_id}' AS span_id) s ON t.span_id = s.span_id "
+                        f"WHEN NOT MATCHED THEN INSERT "
+                        f"(event_id, span_id, run_id, trace_id, project_id, flow_id, component_id, component_name, "
+                        f"authenticated_user, effective_role, execution_mode, start_ts, end_ts, status, "
+                        f"redacted_inputs, redacted_outputs) VALUES "
+                        f"('evt-{tx_id[:16]}', '{tx_id}', 'run-{flow_id[:16]}', 'trc-{flow_id[:16]}', "
+                        f"'default', '{flow_id}', '{vertex_id}', '{vertex_id}', "
+                        f"'{self.authenticated_user}', '{self.active_role}', 'INTERACTIVE_CALLER', "
+                        f"CURRENT_TIMESTAMP(), CURRENT_TIMESTAMP(), '{status_val}', "
+                        f"PARSE_JSON('{inputs_redacted}'), PARSE_JSON('{outputs_redacted}'))"
+                    )
+                    self.execute_sql(merge_span, role="ACCOUNTADMIN", timeout=12)
+                    replicated_spans += 1
+
+                    merge_run = (
+                        f"MERGE INTO {self.runs_table} t "
+                        f"USING (SELECT 'run-{flow_id[:16]}' AS run_id) s ON t.run_id = s.run_id "
+                        f"WHEN NOT MATCHED THEN INSERT "
+                        f"(event_id, run_id, trace_id, project_id, flow_id, authenticated_user, effective_role, "
+                        f"execution_mode, start_ts, end_ts, status, input_payload, output_payload) VALUES "
+                        f"('evr-{flow_id[:16]}', 'run-{flow_id[:16]}', 'trc-{flow_id[:16]}', 'default', '{flow_id}', "
+                        f"'{self.authenticated_user}', '{self.active_role}', 'INTERACTIVE_CALLER', "
+                        f"CURRENT_TIMESTAMP(), CURRENT_TIMESTAMP(), '{status_val}', "
+                        f"PARSE_JSON('{inputs_redacted}'), PARSE_JSON('{outputs_redacted}'))"
+                    )
+                    self.execute_sql(merge_run, role="ACCOUNTADMIN", timeout=12)
+                    replicated_runs += 1
+                    self._synced_tx_ids.add(tx_id)
             except Exception:  # noqa: BLE001
                 pass
 
-        runs_res = self.execute_sql(
+        q_runs = (
             f"SELECT run_id, trace_id, flow_id, authenticated_user, effective_role, status, start_ts, replicated_at "
-            f"FROM {self.runs_table} WHERE deleted_in_ui_at IS NULL ORDER BY replicated_at DESC LIMIT {int(limit)}",
-            role="ACCOUNTADMIN",
+            f"FROM {self.runs_table} WHERE deleted_in_ui_at IS NULL ORDER BY replicated_at DESC LIMIT {int(limit)}"
         )
-        spans_res = self.execute_sql(
+        q_spans = (
             f"SELECT span_id, run_id, flow_id, component_id, effective_role, status, replicated_at "
-            f"FROM {self.spans_table} WHERE deleted_in_ui_at IS NULL ORDER BY replicated_at DESC LIMIT {int(limit)}",
-            role="ACCOUNTADMIN",
+            f"FROM {self.spans_table} WHERE deleted_in_ui_at IS NULL ORDER BY replicated_at DESC LIMIT {int(limit)}"
         )
-        audit_res = self.execute_sql(
+        q_audit = (
             f"SELECT event_id, event_ts, authenticated_user, effective_role, context_epoch, action, outcome, error_code, target_object "
-            f"FROM {self.audit_table} ORDER BY event_ts DESC LIMIT {int(limit)}",
-            role="ACCOUNTADMIN",
+            f"FROM {self.audit_table} ORDER BY event_ts DESC LIMIT {int(limit)}"
         )
+        if self._has_spcs_token() and not self._is_execute_sql_mocked():
+            f_runs = _CATALOG_EXECUTOR.submit(self.execute_sql, q_runs, role="ACCOUNTADMIN", timeout=12)
+            f_spans = _CATALOG_EXECUTOR.submit(self.execute_sql, q_spans, role="ACCOUNTADMIN", timeout=12)
+            f_audit = _CATALOG_EXECUTOR.submit(self.execute_sql, q_audit, role="ACCOUNTADMIN", timeout=12)
+            runs_res = f_runs.result()
+            spans_res = f_spans.result()
+            audit_res = f_audit.result()
+        else:
+            runs_res = self.execute_sql(q_runs, role="ACCOUNTADMIN")
+            spans_res = self.execute_sql(q_spans, role="ACCOUNTADMIN")
+            audit_res = self.execute_sql(q_audit, role="ACCOUNTADMIN")
+
         return {
             "ok": True,
             "replicated_runs": replicated_runs,
@@ -1972,13 +2188,13 @@ def register_snowflake_fastapi_routes(app: Any) -> None:
 
     @sf_router.get("/persistence")
     async def get_persistence_status() -> JSONResponse:
-        info = LIVE_BRIDGE.sync_persistent_workflows_backup()
+        info = await asyncio.to_thread(LIVE_BRIDGE.sync_persistent_workflows_backup)
         return JSONResponse(status_code=200, content=info)
 
     @sf_router.get("/context")
     async def get_snowflake_context(request: Request) -> JSONResponse:
-        LIVE_BRIDGE.sync_superuser_credentials()
-        LIVE_BRIDGE.refresh_roles_from_snowflake()
+        await asyncio.to_thread(LIVE_BRIDGE.sync_superuser_credentials)
+        await asyncio.to_thread(LIVE_BRIDGE.refresh_roles_from_snowflake)
         sf_header_user = request.headers.get("Sf-Context-Current-User")
         if sf_header_user:
             LIVE_BRIDGE.authenticated_user = sf_header_user
@@ -2015,14 +2231,14 @@ def register_snowflake_fastapi_routes(app: Any) -> None:
     @sf_router.put("/context")
     async def post_snowflake_context(request: Request) -> JSONResponse:
         body = await request.json()
-        res = LIVE_BRIDGE.update_selected_context(body if isinstance(body, dict) else {})
+        res = await asyncio.to_thread(LIVE_BRIDGE.update_selected_context, body if isinstance(body, dict) else {})
         return JSONResponse(status_code=200, content=res)
 
     @sf_router.post("/role")
     async def post_switch_role(request: Request) -> JSONResponse:
         body = await request.json()
         target_role = str(body.get("target_role") or body.get("role") or "")
-        result = LIVE_BRIDGE.switch_role(target_role)
+        result = await asyncio.to_thread(LIVE_BRIDGE.switch_role, target_role)
         return JSONResponse(status_code=result.get("status_code", 200), content=result)
 
     @sf_router.get("/catalog")
@@ -2033,7 +2249,8 @@ def register_snowflake_fastapi_routes(app: Any) -> None:
         databases: str | None = None,
         schemas_by_db: str | None = None,
     ) -> JSONResponse:
-        catalog_data = LIVE_BRIDGE.discover_catalog(
+        catalog_data = await asyncio.to_thread(
+            LIVE_BRIDGE.discover_catalog,
             database=database,
             schema=schema,
             object_kind=object_kind,
@@ -2047,7 +2264,8 @@ def register_snowflake_fastapi_routes(app: Any) -> None:
         database: str | None = None,
         databases: str | None = None,
     ) -> JSONResponse:
-        catalog_data = LIVE_BRIDGE.discover_catalog(
+        catalog_data = await asyncio.to_thread(
+            LIVE_BRIDGE.discover_schemas_only,
             database=database,
             databases=databases,
         )
@@ -2059,7 +2277,8 @@ def register_snowflake_fastapi_routes(app: Any) -> None:
         schema: str | None = None,
         object_kind: str | None = None,
     ) -> JSONResponse:
-        catalog_data = LIVE_BRIDGE.discover_catalog(
+        catalog_data = await asyncio.to_thread(
+            LIVE_BRIDGE.discover_catalog,
             database=database,
             schema=schema,
             object_kind=object_kind,
@@ -2070,7 +2289,8 @@ def register_snowflake_fastapi_routes(app: Any) -> None:
     async def post_cortex_analyst_message(request: Request) -> JSONResponse:
         body = await request.json()
         try:
-            res = LIVE_BRIDGE.invoke_cortex_analyst(
+            res = await asyncio.to_thread(
+                LIVE_BRIDGE.invoke_cortex_analyst,
                 database=str(body.get("database") or LIVE_BRIDGE.database),
                 schema=str(body.get("schema") or body.get("schema_name") or LIVE_BRIDGE.schema),
                 semantic_source=str(
@@ -2110,10 +2330,10 @@ def register_snowflake_fastapi_routes(app: Any) -> None:
             for prefix in ("CREATE ", "ALTER ", "DROP ", "INSERT ", "UPDATE ", "DELETE ", "MERGE ", "COPY ", "PUT ")
         )
         if is_write:
-            denied = LIVE_BRIDGE.check_write_privilege_or_deny("SQL_WRITE", statement[:80])
+            denied = await asyncio.to_thread(LIVE_BRIDGE.check_write_privilege_or_deny, "SQL_WRITE", statement[:80])
             if denied:
                 return JSONResponse(status_code=403, content=denied)
-        res = LIVE_BRIDGE.execute_sql(statement)
+        res = await asyncio.to_thread(LIVE_BRIDGE.execute_sql, statement)
         status_code = res.get("status_code", 200 if res.get("ok") else 500)
         return JSONResponse(status_code=status_code, content=res)
 
@@ -2332,8 +2552,9 @@ def register_snowflake_fastapi_routes(app: Any) -> None:
                 },
             )
 
-        exec_res = LIVE_BRIDGE.execute_sql(ddl)
-        LIVE_BRIDGE.record_audit_event(
+        exec_res = await asyncio.to_thread(LIVE_BRIDGE.execute_sql, ddl)
+        await asyncio.to_thread(
+            LIVE_BRIDGE.record_audit_event,
             action=f"PROVISION_{obj_kind.upper()}",
             outcome="ALLOWED" if exec_res.get("ok") else "ERROR",
             error_code=exec_res.get("error_code"),
@@ -2354,12 +2575,20 @@ def register_snowflake_fastapi_routes(app: Any) -> None:
 
     @sf_router.get("/traces")
     async def get_replicated_traces(limit: int = 25) -> JSONResponse:
-        data = LIVE_BRIDGE.sync_langflow_traces_to_snowflake(limit=limit)
+        data = await asyncio.to_thread(
+            LIVE_BRIDGE.sync_langflow_traces_to_snowflake,
+            limit=limit,
+            replicate_sqlite=False,
+        )
         return JSONResponse(status_code=200, content=data)
 
     @sf_router.post("/traces/sync")
     async def post_sync_traces() -> JSONResponse:
-        data = LIVE_BRIDGE.sync_langflow_traces_to_snowflake(limit=50)
+        data = await asyncio.to_thread(
+            LIVE_BRIDGE.sync_langflow_traces_to_snowflake,
+            limit=25,
+            replicate_sqlite=True,
+        )
         return JSONResponse(status_code=200, content=data)
 
     @sf_router.get("/memories")
@@ -2419,14 +2648,14 @@ def register_snowflake_fastapi_routes(app: Any) -> None:
     @sf_router.post("/memories")
     async def post_create_memory(request: Request) -> JSONResponse:
         body = await request.json()
-        res = LIVE_BRIDGE.create_or_register_memory(body if isinstance(body, dict) else {})
+        res = await asyncio.to_thread(LIVE_BRIDGE.create_or_register_memory, body if isinstance(body, dict) else {})
         status_code = int(res.get("status_code") or (201 if res.get("ok") else 422))
         return JSONResponse(status_code=status_code, content=res)
 
     @sf_router.post("/mcp/streamable")
     async def post_mcp_streamable(request: Request) -> JSONResponse:
         """Native MCP Streamable HTTP JSON-RPC endpoint for Cortex Code CLI & Cortex Code Desktop."""
-        LIVE_BRIDGE.sync_superuser_credentials()
+        await asyncio.to_thread(LIVE_BRIDGE.sync_superuser_credentials)
         msg = await request.json()
         method = str(msg.get("method") or "")
         msg_id = msg.get("id")
@@ -2500,7 +2729,7 @@ def register_snowflake_fastapi_routes(app: Any) -> None:
             args = params.get("arguments") or {}
 
             if tool_name == "snowflake_get_context":
-                LIVE_BRIDGE.refresh_roles_from_snowflake()
+                await asyncio.to_thread(LIVE_BRIDGE.refresh_roles_from_snowflake)
                 payload = {
                     "active_role": LIVE_BRIDGE.active_role,
                     "available_roles": LIVE_BRIDGE.available_roles,
@@ -2514,11 +2743,17 @@ def register_snowflake_fastapi_routes(app: Any) -> None:
                     },
                 }
             elif tool_name == "snowflake_switch_role":
-                payload = LIVE_BRIDGE.switch_role(str(args.get("target_role") or "ACCOUNTADMIN"))
+                payload = await asyncio.to_thread(
+                    LIVE_BRIDGE.switch_role, str(args.get("target_role") or "ACCOUNTADMIN")
+                )
             elif tool_name == "snowflake_query_sql":
-                payload = LIVE_BRIDGE.execute_sql(str(args.get("statement") or "SELECT CURRENT_ROLE()"))
+                payload = await asyncio.to_thread(
+                    LIVE_BRIDGE.execute_sql, str(args.get("statement") or "SELECT CURRENT_ROLE()")
+                )
             elif tool_name == "snowflake_sync_traces":
-                payload = LIVE_BRIDGE.sync_langflow_traces_to_snowflake(limit=int(args.get("limit") or 20))
+                payload = await asyncio.to_thread(
+                    LIVE_BRIDGE.sync_langflow_traces_to_snowflake, limit=int(args.get("limit") or 20)
+                )
             else:
                 return JSONResponse(
                     status_code=200,

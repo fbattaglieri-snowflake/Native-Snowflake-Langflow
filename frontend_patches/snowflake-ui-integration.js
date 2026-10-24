@@ -897,12 +897,7 @@
       sfState = Object.assign(sfState, data);
       window.SNOWFLAKE_LANGFLOW_CONTEXT = sfState;
       updateTopbarWidgets();
-      await fetchSnowflakeCatalog(
-        sfState.database,
-        sfState.schema,
-        sfState.selected_context && sfState.selected_context.databases,
-        sfState.selected_context && sfState.selected_context.schemas_by_db
-      );
+      await fetchSnowflakeCatalog(sfState.database, sfState.schema);
       refreshHubModalPrivilegeAndContextViews();
       syncCanvasNodesWithSnowflakeContext(sfState);
     } catch (_e) {
@@ -1392,7 +1387,16 @@
     syncDatabaseListFromSchemas(db);
   }
 
-  async function lazyLoadSchemasForDatabase(db) {
+  async function lazyLoadSchemasForDatabase(db, forceRefresh) {
+    if (
+      !forceRefresh &&
+      sfState.catalog &&
+      sfState.catalog.schemas_by_db &&
+      Array.isArray(sfState.catalog.schemas_by_db[db]) &&
+      sfState.catalog.schemas_by_db[db].length > 0
+    ) {
+      return sfState.catalog.schemas_by_db[db];
+    }
     try {
       const resp = await fetch(`/api/v1/snowflake/schemas?database=${encodeURIComponent(db)}`, {
         headers: { Accept: "application/json" },
@@ -1407,14 +1411,21 @@
         }
       }
     } catch (_e) {
-      // Fallback to catalog endpoint
+      // Return cached/default schemas on transient error
     }
-    await fetchSnowflakeCatalog(db, "");
     return getCatalogSchemasForDb(db, sfState.catalog);
   }
 
-  async function lazyLoadObjectsForSchema(db, sch) {
+  async function lazyLoadObjectsForSchema(db, sch, forceRefresh) {
     const pairKey = `${db}.${sch}`;
+    if (
+      !forceRefresh &&
+      sfState.catalog &&
+      sfState.catalog.objects_by_db_schema &&
+      sfState.catalog.objects_by_db_schema[pairKey]
+    ) {
+      return sfState.catalog.objects_by_db_schema[pairKey];
+    }
     try {
       const resp = await fetch(
         `/api/v1/snowflake/objects?database=${encodeURIComponent(db)}&schema=${encodeURIComponent(sch)}`,
@@ -1432,9 +1443,8 @@
         return sfState.catalog.objects_by_db_schema[pairKey];
       }
     } catch (_e) {
-      // Fallback to catalog endpoint
+      // Return cached/default objects on transient error
     }
-    await fetchSnowflakeCatalog(db, sch);
     return (sfState.catalog && sfState.catalog.objects_by_db_schema && sfState.catalog.objects_by_db_schema[pairKey]) || {};
   }
 
@@ -1794,8 +1804,8 @@
     let modal = document.getElementById("sflf-hub-modal");
     if (modal) {
       modal.style.display = "flex";
-      fetchSnowflakeContext();
-      refreshTracesInModal();
+      refreshHubModalPrivilegeAndContextViews();
+      refreshTracesInModal(false);
       if (focusSection === "memories") {
         const sec2El = document.getElementById("sflf-sec2");
         if (sec2El && typeof sec2El.scrollIntoView === "function") {
@@ -2097,16 +2107,24 @@
         if (!cb || !cb.classList) return;
         if (cb.classList.contains("sflf-tree-db-cb")) {
           const db = cb.getAttribute("data-db") || cb.value;
-          await lazyLoadSchemasForDatabase(db);
-          toggleTreeDatabaseSelection(db, !!cb.checked);
+          const isChecked = !!cb.checked;
+          toggleTreeDatabaseSelection(db, isChecked);
           refreshHubModalPrivilegeAndContextViews();
+          lazyLoadSchemasForDatabase(db).then(function () {
+            toggleTreeDatabaseSelection(db, isChecked);
+            refreshHubModalPrivilegeAndContextViews();
+          });
         } else if (cb.classList.contains("sflf-tree-schema-cb")) {
           const db = cb.getAttribute("data-db");
           const sch = cb.getAttribute("data-schema");
           if (db && sch) {
-            await lazyLoadObjectsForSchema(db, sch);
-            toggleTreeSchemaSelection(db, sch, !!cb.checked);
+            const isChecked = !!cb.checked;
+            toggleTreeSchemaSelection(db, sch, isChecked);
             refreshHubModalPrivilegeAndContextViews();
+            lazyLoadObjectsForSchema(db, sch).then(function () {
+              toggleTreeSchemaSelection(db, sch, isChecked);
+              refreshHubModalPrivilegeAndContextViews();
+            });
           }
         } else if (cb.classList.contains("sflf-tree-cat-cb")) {
           const pairKey = cb.getAttribute("data-pair");
@@ -2253,11 +2271,11 @@
       runCreateMemoryCall();
     };
     document.getElementById("sflf-btn-sync-traces").onclick = function () {
-      refreshTracesInModal();
+      refreshTracesInModal(true);
     };
 
     refreshHubModalPrivilegeAndContextViews();
-    refreshTracesInModal();
+    refreshTracesInModal(false);
     ensureMemoriesPageSnowflakeButton();
     if (focusSection === "memories") {
       const sec2El = document.getElementById("sflf-sec2");
@@ -2731,17 +2749,21 @@
     }
   }
 
-  async function refreshTracesInModal() {
+  async function refreshTracesInModal(doFullSync) {
     const out = document.getElementById("sflf-traces-out");
     const roleSpan = document.getElementById("sflf-modal-role");
     if (roleSpan) roleSpan.textContent = sfState.active_role;
     if (!out) return;
     try {
-      const resp = await fetch("/api/v1/snowflake/traces/sync", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: "{}",
-      });
+      const resp = doFullSync
+        ? await fetch("/api/v1/snowflake/traces/sync", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: "{}",
+          })
+        : await fetch("/api/v1/snowflake/traces?limit=15", {
+            headers: { Accept: "application/json" },
+          });
       const data = await resp.json();
       out.textContent = JSON.stringify(data, null, 2);
     } catch (e) {
