@@ -3483,33 +3483,56 @@ class LiveSnowflakeBridge:
             self._roles_discovered = True
             self._roles_last_refreshed_ts = now
 
+    @staticmethod
+    def _safe_sql_json_str(value: Any, max_chars: int = 4000, default_empty: str = "{}") -> str:
+        """Serialize `value` to valid JSON and escape both backslashes and single quotes for Snowflake `PARSE_JSON('...')`."""
+        parsed = value
+        if isinstance(parsed, str):
+            s = parsed.strip()
+            if (s.startswith("{") and s.endswith("}")) or (s.startswith("[") and s.endswith("]")):
+                try:
+                    parsed = json.loads(s)
+                except Exception:  # noqa: BLE001
+                    parsed = {"raw": s[: max(256, max_chars // 2)]}
+            else:
+                parsed = {"raw": s[: max(256, max_chars // 2)]}
+        redacted = redact_for_sink(parsed if parsed is not None else ({} if default_empty == "{}" else []))
+        raw_json = json.dumps(redacted, default=str)
+        if len(raw_json) > max_chars:
+            raw_json = json.dumps(
+                {"truncated": True, "preview": raw_json[: max(256, max_chars - 120)]}
+                if default_empty == "{}"
+                else [{"truncated": True, "preview": raw_json[: max(256, max_chars - 120)]}]
+            )
+        return raw_json.replace("\\", "\\\\").replace("'", "''")
+
     def _build_activity_merge_sql(self, record: dict[str, Any]) -> str:
         """Build an idempotent `MERGE INTO <activity_table>` statement preserving `deleted_in_ui_at` (`CTX-ARCH-06`)."""
-        act_id = str(record.get("activity_id") or record.get("id") or uuid.uuid4().hex).replace("'", "''")
-        trc_id = str(record.get("trace_id") or act_id).replace("'", "''")
-        ev_type = str(record.get("event_type") or "FLOW_RUN").replace("'", "''")
-        flw_id = str(record.get("flow_id") or "unknown-flow").replace("'", "''")
-        flw_name = str(record.get("flow_name") or flw_id).replace("'", "''")[:250]
-        prj_id = str(record.get("project_id") or "default").replace("'", "''")[:120]
-        prj_name = str(record.get("project_name") or "Default Project").replace("'", "''")[:250]
-        sess_id = str(record.get("session_id") or flw_id).replace("'", "''")[:250]
-        status_v = str(record.get("status") or "SUCCESS").upper().replace("'", "''")[:32]
+        act_id = str(record.get("activity_id") or record.get("id") or uuid.uuid4().hex).replace("\\", "\\\\").replace("'", "''")
+        trc_id = str(record.get("trace_id") or act_id).replace("\\", "\\\\").replace("'", "''")
+        ev_type = str(record.get("event_type") or "FLOW_RUN").replace("\\", "\\\\").replace("'", "''")
+        flw_id = str(record.get("flow_id") or "unknown-flow").replace("\\", "\\\\").replace("'", "''")
+        flw_name = str(record.get("flow_name") or flw_id).replace("\\", "\\\\").replace("'", "''")[:250]
+        prj_id = str(record.get("project_id") or "default").replace("\\", "\\\\").replace("'", "''")[:120]
+        prj_name = str(record.get("project_name") or "Default Project").replace("\\", "\\\\").replace("'", "''")[:250]
+        sess_id = str(record.get("session_id") or flw_id).replace("\\", "\\\\").replace("'", "''")[:250]
+        status_v = str(record.get("status") or "SUCCESS").upper().replace("\\", "\\\\").replace("'", "''")[:32]
         lat_ms = float(record.get("latency_ms") or 0.0)
-        in_txt = str(record.get("input_text") if record.get("input_text") is not None else str(record.get("input") or "")).replace("'", "''")[:4000]
-        out_txt = str(record.get("output_text") if record.get("output_text") is not None else str(record.get("output") or "")).replace("'", "''")[:4000]
+        in_txt = str(record.get("input_text") if record.get("input_text") is not None else str(record.get("input") or "")).replace("\\", "\\\\").replace("'", "''")[:4000]
+        out_txt = str(record.get("output_text") if record.get("output_text") is not None else str(record.get("output") or "")).replace("\\", "\\\\").replace("'", "''")[:4000]
         err_msg = record.get("error_message")
-        err_sql = f"'{str(err_msg).replace(chr(39), chr(39)*2)[:2000]}'" if err_msg else "NULL"
+        err_sql = f"'{str(err_msg).replace(chr(92), chr(92)*2).replace(chr(39), chr(39)*2)[:2000]}'" if err_msg else "NULL"
         p_tok = int(record.get("prompt_tokens") or 0)
         c_tok = int(record.get("completion_tokens") or 0)
         t_tok = int(record.get("total_tokens") or (p_tok + c_tok))
-        usr_id = str(record.get("user_identity") or self.authenticated_user).replace("'", "''")
-        act_role = str(record.get("active_role") or self.active_role).replace("'", "''")
+        usr_id = str(record.get("user_identity") or self.authenticated_user).replace("\\", "\\\\").replace("'", "''")
+        act_role = str(record.get("active_role") or self.active_role).replace("\\", "\\\\").replace("'", "''")
         ctx_ep = int(record.get("context_epoch") or self.context_epoch)
-        ctx_json = json.dumps(redact_for_sink(record.get("flow_context_json") or {})).replace("'", "''")[:8000]
-        in_pay = json.dumps(redact_for_sink(record.get("input_payload") or {})).replace("'", "''")[:4000]
-        out_pay = json.dumps(redact_for_sink(record.get("output_payload") or {})).replace("'", "''")[:4000]
-        spans_json = json.dumps(redact_for_sink(record.get("node_spans_json") or [])).replace("'", "''")[:8000]
-        q_ids_json = json.dumps(list(record.get("snowflake_query_ids") or [])).replace("'", "''")[:2000]
+        ctx_json = self._safe_sql_json_str(record.get("flow_context_json") or {}, max_chars=8000, default_empty="{}")
+        in_pay = self._safe_sql_json_str(record.get("input_payload") or {}, max_chars=4000, default_empty="{}")
+        out_pay = self._safe_sql_json_str(record.get("output_payload") or {}, max_chars=4000, default_empty="{}")
+        spans_json = self._safe_sql_json_str(record.get("node_spans_json") or [], max_chars=8000, default_empty="[]")
+        q_ids_json = self._safe_sql_json_str(list(record.get("snowflake_query_ids") or []), max_chars=2000, default_empty="[]")
         return (
             f"MERGE INTO {self.activity_table} t "
             f"USING (SELECT '{act_id}' AS activity_id) s ON t.activity_id = s.activity_id "
@@ -3954,8 +3977,8 @@ class LiveSnowflakeBridge:
                         status_val = str(row_dict.get("status") or "SUCCESS").upper().replace("'", "''")
                         raw_in = row_dict.get("inputs") or {}
                         raw_out = row_dict.get("outputs") or {}
-                        inputs_redacted = json.dumps(redact_for_sink(raw_in)).replace("'", "''")[:4000]
-                        outputs_redacted = json.dumps(redact_for_sink(raw_out)).replace("'", "''")[:4000]
+                        inputs_redacted = self._safe_sql_json_str(raw_in, max_chars=4000, default_empty="{}")
+                        outputs_redacted = self._safe_sql_json_str(raw_out, max_chars=4000, default_empty="{}")
 
                         merge_span = (
                             f"MERGE INTO {self.spans_table} t "
@@ -4046,8 +4069,8 @@ class LiveSnowflakeBridge:
                         status_val = "SUCCESS" if valid_flag in (True, 1, "1", "true", "TRUE", None) else "ERROR"
                         raw_params = vb_dict.get("params") or {}
                         raw_data = vb_dict.get("data") or vb_dict.get("artifacts") or {}
-                        params_redacted = json.dumps(redact_for_sink(raw_params)).replace("'", "''")[:4000]
-                        data_redacted = json.dumps(redact_for_sink(raw_data)).replace("'", "''")[:4000]
+                        params_redacted = self._safe_sql_json_str(raw_params, max_chars=4000, default_empty="{}")
+                        data_redacted = self._safe_sql_json_str(raw_data, max_chars=4000, default_empty="{}")
 
                         merge_vb_span = (
                             f"MERGE INTO {self.spans_table} t "
