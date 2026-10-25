@@ -18,10 +18,44 @@ from typing import Any
 import uuid
 
 
+CANONICAL_FLOW_ACTIVITY_TABLE = "LANGFLOW_FLOW_ACTIVITY"
 CANONICAL_FLOW_RUNS_TABLE = "LANGFLOW_FLOW_RUNS"
 CANONICAL_FLOW_SPANS_TABLE = "LANGFLOW_FLOW_SPANS"
 CANONICAL_AUDIT_LOG_TABLE = "LANGFLOW_AUDIT_LOG"
 CANONICAL_ROW_ACCESS_POLICY = "LANGFLOW_TRACE_RAP"
+CANONICAL_ACTIVE_FLOW_ACTIVITY_VIEW = "V_LANGFLOW_ACTIVE_FLOW_ACTIVITY"
+CANONICAL_ACTIVE_FLOW_RUNS_VIEW = "V_LANGFLOW_ACTIVE_FLOW_RUNS"
+
+FLOW_ACTIVITY_GOVERNED_COLUMNS: tuple[str, ...] = (
+    "ACTIVITY_ID",
+    "TRACE_ID",
+    "EVENT_TYPE",
+    "FLOW_ID",
+    "FLOW_NAME",
+    "PROJECT_ID",
+    "PROJECT_NAME",
+    "SESSION_ID",
+    "RUN_TIMESTAMP",
+    "STATUS",
+    "LATENCY_MS",
+    "INPUT_TEXT",
+    "OUTPUT_TEXT",
+    "ERROR_MESSAGE",
+    "PROMPT_TOKENS",
+    "COMPLETION_TOKENS",
+    "TOTAL_TOKENS",
+    "USER_IDENTITY",
+    "ACTIVE_ROLE",
+    "CONTEXT_EPOCH",
+    "FLOW_CONTEXT_JSON",
+    "INPUT_PAYLOAD",
+    "OUTPUT_PAYLOAD",
+    "NODE_SPANS_JSON",
+    "SNOWFLAKE_QUERY_IDS",
+    "DELETED_IN_UI_AT",
+    "PURGED_FOR_RETENTION_AT",
+    "REPLICATED_AT",
+)
 
 _IDENTIFIER_RE = re.compile(r"^(?:<[A-Z0-9_]+>|[A-Za-z_][A-Za-z0-9_$]*)$")
 
@@ -63,9 +97,18 @@ class ErrorTaxonomyCode(str, Enum):
     TECHNICAL_EXECUTION_ERROR = "TECHNICAL_EXECUTION_ERROR"
 
 
+class FlowActivityEventType(str, Enum):
+    """Canonical event types stored in LANGFLOW_FLOW_ACTIVITY (CTX-ARCH-06)."""
+
+    FLOW_RUN = "FLOW_RUN"
+    NODE_BUILD = "NODE_BUILD"
+    CONTEXT_CHANGE = "CONTEXT_CHANGE"
+    GOVERNANCE_AUDIT = "GOVERNANCE_AUDIT"
+
+
 @dataclass(frozen=True)
 class ObservabilityTableConfig:
-    """Parametric configuration for canonical Snowflake observability tables ([G-A1])."""
+    """Parametric configuration for canonical Snowflake observability tables ([G-A1], CTX-ARCH-06)."""
 
     database: str = "<DATABASE>"
     schema: str = "<SCHEMA>"
@@ -77,6 +120,18 @@ class ObservabilityTableConfig:
     @property
     def prefix(self) -> str:
         return f"{self.database}.{self.schema}"
+
+    @property
+    def flow_activity_fqn(self) -> str:
+        return f"{self.prefix}.{CANONICAL_FLOW_ACTIVITY_TABLE}"
+
+    @property
+    def active_flow_activity_view_fqn(self) -> str:
+        return f"{self.prefix}.{CANONICAL_ACTIVE_FLOW_ACTIVITY_VIEW}"
+
+    @property
+    def active_flow_runs_view_fqn(self) -> str:
+        return f"{self.prefix}.{CANONICAL_ACTIVE_FLOW_RUNS_VIEW}"
 
     @property
     def flow_runs_fqn(self) -> str:
@@ -384,3 +439,172 @@ class AuditEventRecord:
             "proxy_request_ids": list(dict.fromkeys(self.proxy_request_ids)),
             "details": self.details,
         }
+
+
+@dataclass
+class FlowActivityRecord:
+    """Unified Flow Activity record for <DB>.<SCHEMA>.LANGFLOW_FLOW_ACTIVITY (CTX-ARCH-06)."""
+
+    activity_id: str
+    flow_id: str
+    user_identity: str
+    active_role: str
+    trace_id: str | None = None
+    event_type: str = FlowActivityEventType.FLOW_RUN.value
+    flow_name: str | None = "Flow"
+    project_id: str | None = None
+    project_name: str | None = None
+    session_id: str | None = None
+    run_timestamp: str = field(default_factory=utc_now_iso)
+    status: str = "SUCCESS"
+    latency_ms: float | None = None
+    input_text: str | None = None
+    output_text: str | None = None
+    error_message: str | None = None
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    total_tokens: int = 0
+    context_epoch: int | None = None
+    flow_context_json: dict[str, Any] = field(default_factory=dict)
+    input_payload: dict[str, Any] = field(default_factory=dict)
+    output_payload: dict[str, Any] = field(default_factory=dict)
+    node_spans_json: list[dict[str, Any]] | dict[str, Any] = field(default_factory=list)
+    snowflake_query_ids: list[str] = field(default_factory=list)
+    deleted_in_ui_at: str | None = None
+    purged_for_retention_at: str | None = None
+    replicated_at: str = field(default_factory=utc_now_iso)
+
+    @classmethod
+    def from_flow_run(
+        cls,
+        run: FlowRunRecord,
+        *,
+        project_name: str | None = None,
+        context_epoch: int | None = None,
+        flow_context_json: dict[str, Any] | None = None,
+        node_spans_json: list[dict[str, Any]] | dict[str, Any] | None = None,
+    ) -> FlowActivityRecord:
+        """Create a unified FlowActivityRecord from a FlowRunRecord."""
+        in_text = None
+        if isinstance(run.input_payload, dict):
+            in_text = str(
+                run.input_payload.get("input_value")
+                or run.input_payload.get("text")
+                or run.input_payload.get("value")
+                or (run.input_payload if run.input_payload else "")
+            )
+        out_text = None
+        if isinstance(run.output_payload, dict):
+            out_text = str(
+                run.output_payload.get("output_value")
+                or run.output_payload.get("text")
+                or run.output_payload.get("value")
+                or (run.output_payload if run.output_payload else "")
+            )
+        p_tokens = int(run.input_tokens or 0)
+        c_tokens = int(run.output_tokens or 0)
+        r_tokens = int(run.reasoning_tokens or 0)
+        tot_tokens = int(run.total_tokens if run.total_tokens is not None else (p_tokens + c_tokens + r_tokens))
+        return cls(
+            activity_id=run.run_id,
+            trace_id=run.trace_id,
+            event_type=FlowActivityEventType.FLOW_RUN.value,
+            flow_id=run.flow_id,
+            flow_name=run.flow_name,
+            project_id=run.project_id,
+            project_name=project_name or run.project_id,
+            session_id=run.session_id,
+            run_timestamp=run.start_ts,
+            status=run.status,
+            latency_ms=run.latency_ms,
+            input_text=in_text,
+            output_text=out_text,
+            error_message=run.error_message,
+            prompt_tokens=p_tokens,
+            completion_tokens=c_tokens,
+            total_tokens=tot_tokens,
+            user_identity=run.authenticated_user,
+            active_role=run.effective_role,
+            context_epoch=context_epoch,
+            flow_context_json=dict(flow_context_json or {}),
+            input_payload=dict(run.input_payload or {}),
+            output_payload=dict(run.output_payload or {}),
+            node_spans_json=list(node_spans_json) if isinstance(node_spans_json, list) else (node_spans_json or []),
+            snowflake_query_ids=list(dict.fromkeys(run.snowflake_query_ids)),
+            deleted_in_ui_at=run.deleted_in_ui_at,
+        )
+
+    def to_snowflake_row(self) -> dict[str, Any]:
+        """Format record with all 25+ governed columns for <DB>.<SCHEMA>.LANGFLOW_FLOW_ACTIVITY."""
+        ev_type = (
+            self.event_type.value
+            if isinstance(self.event_type, FlowActivityEventType)
+            else str(self.event_type or FlowActivityEventType.FLOW_RUN.value)
+        )
+        return {
+            "activity_id": self.activity_id,
+            "trace_id": self.trace_id or self.activity_id,
+            "event_type": ev_type,
+            "flow_id": self.flow_id,
+            "flow_name": self.flow_name,
+            "project_id": self.project_id,
+            "project_name": self.project_name,
+            "session_id": self.session_id,
+            "run_timestamp": self.run_timestamp,
+            "status": self.status,
+            "latency_ms": self.latency_ms,
+            "input_text": self.input_text,
+            "output_text": self.output_text,
+            "error_message": self.error_message,
+            "prompt_tokens": int(self.prompt_tokens or 0),
+            "completion_tokens": int(self.completion_tokens or 0),
+            "total_tokens": int(
+                self.total_tokens
+                if self.total_tokens is not None
+                else (int(self.prompt_tokens or 0) + int(self.completion_tokens or 0))
+            ),
+            "user_identity": self.user_identity,
+            "active_role": self.active_role,
+            "context_epoch": self.context_epoch,
+            "flow_context_json": self.flow_context_json,
+            "input_payload": self.input_payload,
+            "output_payload": self.output_payload,
+            "node_spans_json": self.node_spans_json,
+            "snowflake_query_ids": list(dict.fromkeys(self.snowflake_query_ids)),
+            "deleted_in_ui_at": self.deleted_in_ui_at,
+            "purged_for_retention_at": self.purged_for_retention_at,
+            "replicated_at": self.replicated_at,
+        }
+
+    def to_v2_trace_item(self) -> dict[str, Any]:
+        """Format record for Langflow v1.12.5 GET /api/v2/traces (Flow Activity -> Runs)."""
+        return {
+            "id": self.activity_id,
+            "trace_id": self.trace_id or self.activity_id,
+            "name": self.flow_name or self.flow_id,
+            "flow_id": self.flow_id,
+            "flow_name": self.flow_name or self.flow_id,
+            "project_id": self.project_id,
+            "project_name": self.project_name,
+            "session_id": self.session_id or self.flow_id,
+            "timestamp": self.run_timestamp,
+            "start_time": self.run_timestamp,
+            "status": self.status,
+            "latency_ms": self.latency_ms,
+            "total_latency_ms": self.latency_ms,
+            "input": self.input_payload if self.input_payload else (self.input_text or ""),
+            "output": self.output_payload if self.output_payload else (self.output_text or ""),
+            "input_text": self.input_text,
+            "output_text": self.output_text,
+            "error_message": self.error_message,
+            "prompt_tokens": int(self.prompt_tokens or 0),
+            "completion_tokens": int(self.completion_tokens or 0),
+            "total_tokens": int(self.total_tokens or 0),
+            "user_identity": self.user_identity,
+            "active_role": self.active_role,
+            "context_epoch": self.context_epoch,
+            "flow_context_json": self.flow_context_json,
+            "spans": self.node_spans_json if isinstance(self.node_spans_json, list) else [self.node_spans_json],
+            "deleted_in_ui_at": self.deleted_in_ui_at,
+        }
+

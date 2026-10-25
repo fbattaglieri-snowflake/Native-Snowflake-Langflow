@@ -361,6 +361,11 @@
     selected_context: {
       databases: ["SNOWFLAKE_LANGFLOW"],
       schemas_by_db: { SNOWFLAKE_LANGFLOW: ["CORE"] },
+      full_databases: [],
+      full_schemas: [],
+      postgres_instances: [],
+      postgres_tables_by_instance: {},
+      inaccessible_objects: [],
       objects_by_db_schema: {
         "SNOWFLAKE_LANGFLOW.CORE": {
           tables: ["LANGFLOW_FLOW_RUNS", "LANGFLOW_FLOW_SPANS", "LANGFLOW_AUDIT_LOG"],
@@ -373,7 +378,6 @@
           cortex_agents: [],
           functions: [],
           procedures: [],
-          postgres_instances: [],
         },
       },
       visible_objects: {
@@ -406,7 +410,6 @@
           cortex_agents: [],
           functions: [],
           procedures: [],
-          postgres_instances: [],
         },
       },
       tables: ["LANGFLOW_FLOW_RUNS", "LANGFLOW_FLOW_SPANS", "LANGFLOW_AUDIT_LOG"],
@@ -421,6 +424,7 @@
       functions: [],
       procedures: [],
       postgres_instances: [],
+      postgres_tables_by_instance: {},
     },
   };
 
@@ -754,7 +758,175 @@
   window.getActiveWorkflowFlowId = getActiveWorkflowFlowId;
   window.extractCurrentFlowId = extractCurrentFlowId;
 
-  // W2-R2-00, W2-R2-04A, W2-R2-14 & W2-R4-01: Live Canvas Node Auto-Sync when Snowflake context or active role changes
+  // CTX-ARCH-05B, W2-R2-00, W2-R2-04A, W2-R2-14 & W2-R4-01:
+  // 3-Level Live Canvas Node Auto-Sync (Backend updated_node_templates + React Fiber template mutation + Radix combobox DOM sync)
+  function _resolveFieldCategoryAndOptions(fieldName, dbs, primaryDb, schemasForDb, primarySchema, vis, pgInstances, pgTablesMap, activeCtx) {
+    const key = String(fieldName || "").toLowerCase();
+    if (key === "database" || key.endsWith("_database") || key.includes("input-database") || key.includes("dropdown-database")) {
+      return { options: dbs, fallbackValue: primaryDb, isDb: true };
+    }
+    if (key === "schema_name" || key === "schema" || key.includes("input-schema") || key.includes("dropdown-schema")) {
+      return { options: schemasForDb, fallbackValue: primarySchema, isSchema: true };
+    }
+    if (key.includes("postgres_instance") || key === "instance_name") {
+      const insts = Array.isArray(pgInstances) ? pgInstances : [];
+      return { options: insts, fallbackValue: insts[0] || "" };
+    }
+    if (key.includes("iceberg_table") || key.includes("iceberg")) {
+      const list = vis.iceberg_tables || [];
+      return { options: list, fallbackValue: list[0] || "" };
+    }
+    if (key.includes("semantic_view") || key.includes("semantic_model")) {
+      const list = vis.semantic_views || [];
+      return { options: list, fallbackValue: list[0] || "" };
+    }
+    if (key.includes("search_service_name") || key.includes("search_service")) {
+      const list = vis.cortex_search_services || [];
+      return { options: list, fallbackValue: list[0] || "" };
+    }
+    if (key.includes("agent_name") || key.includes("cortex_agent")) {
+      const list = vis.cortex_agents || [];
+      return { options: list, fallbackValue: list[0] || "" };
+    }
+    if (key.includes("view_name") || (key.includes("view") && !key.includes("semantic"))) {
+      const list = vis.views || [];
+      return { options: list, fallbackValue: list[0] || "" };
+    }
+    if (key.includes("stage_name") || key.includes("stage")) {
+      const list = vis.stages || [];
+      return { options: list, fallbackValue: list[0] || "" };
+    }
+    if (key.includes("procedure")) {
+      const list = vis.procedures || [];
+      return { options: list, fallbackValue: list[0] || "" };
+    }
+    if (key.includes("function")) {
+      const list = vis.functions || [];
+      return { options: list, fallbackValue: list[0] || "" };
+    }
+    if (key.includes("table_name") || key.includes("table")) {
+      const list = vis.tables || [];
+      return { options: list, fallbackValue: list[0] || "" };
+    }
+    if (key.includes("role")) {
+      const roles = (activeCtx && activeCtx.available_roles) || [(activeCtx && activeCtx.active_role) || "ACCOUNTADMIN"];
+      return { options: roles, fallbackValue: (activeCtx && activeCtx.active_role) || "ACCOUNTADMIN" };
+    }
+    return null;
+  }
+
+  function _syncReactFiberNodeTemplate(nodeEl, dbs, primaryDb, schemasMap, schemasForDb, primarySchema, vis, pgInstances, pgTablesMap, activeCtx, updatedNodeTemplates) {
+    if (!nodeEl || typeof nodeEl !== "object") return 0;
+    let mutatedFields = 0;
+    const keys = Object.keys(nodeEl);
+    const fiberKey = keys.find(function (k) {
+      return k.indexOf("__reactFiber$") === 0 || k.indexOf("__reactInternalInstance$") === 0;
+    });
+    const propsKey = keys.find(function (k) {
+      return k.indexOf("__reactProps$") === 0;
+    });
+
+    const candidateTemplates = [];
+    const seenTemplates = [];
+    function collectTemplateFromProps(propsObj) {
+      if (!propsObj || typeof propsObj !== "object") return;
+      const dataObj = propsObj.data || (propsObj.node && propsObj.node.data);
+      const tmpl =
+        (dataObj && dataObj.node && dataObj.node.template) ||
+        (propsObj.node && propsObj.node.template) ||
+        propsObj.template;
+      if (tmpl && typeof tmpl === "object" && seenTemplates.indexOf(tmpl) === -1) {
+        seenTemplates.push(tmpl);
+        candidateTemplates.push({
+          template: tmpl,
+          nodeId: (dataObj && dataObj.id) || propsObj.id || nodeEl.getAttribute("data-id") || "",
+          nodeType: (dataObj && dataObj.type) || "",
+        });
+      }
+    }
+
+    if (propsKey && nodeEl[propsKey]) {
+      collectTemplateFromProps(nodeEl[propsKey]);
+    }
+    if (fiberKey && nodeEl[fiberKey]) {
+      let cur = nodeEl[fiberKey];
+      let depth = 0;
+      while (cur && depth < 16) {
+        collectTemplateFromProps(cur.memoizedProps);
+        collectTemplateFromProps(cur.pendingProps);
+        cur = cur.return;
+        depth += 1;
+      }
+    }
+
+    candidateTemplates.forEach(function (entry) {
+      const tmpl = entry.template;
+      const nodeId = entry.nodeId;
+      const backendNodePatch =
+        updatedNodeTemplates && nodeId && updatedNodeTemplates[nodeId] ? updatedNodeTemplates[nodeId] : null;
+      const isPostgresNode = Boolean(tmpl.postgres_instance && !tmpl.database);
+      const nodeDb =
+        (tmpl.database && tmpl.database.value && dbs.indexOf(tmpl.database.value) !== -1
+          ? tmpl.database.value
+          : primaryDb) || primaryDb;
+      const nodeSchemas =
+        (Array.isArray(schemasMap[nodeDb]) && schemasMap[nodeDb].length > 0 ? schemasMap[nodeDb] : schemasForDb) ||
+        schemasForDb;
+      const nodeSch =
+        (tmpl.schema_name && tmpl.schema_name.value && nodeSchemas.indexOf(tmpl.schema_name.value) !== -1
+          ? tmpl.schema_name.value
+          : primarySchema) || primarySchema;
+
+      Object.keys(tmpl).forEach(function (fieldKey) {
+        const fieldObj = tmpl[fieldKey];
+        if (!fieldObj || typeof fieldObj !== "object") return;
+        if (backendNodePatch && backendNodePatch[fieldKey]) {
+          if (Array.isArray(backendNodePatch[fieldKey].options)) {
+            fieldObj.options = backendNodePatch[fieldKey].options.slice();
+          }
+          if (backendNodePatch[fieldKey].value !== undefined) {
+            fieldObj.value = backendNodePatch[fieldKey].value;
+          }
+          mutatedFields += 1;
+          return;
+        }
+        if (isPostgresNode && fieldKey === "table_name") {
+          const chosenInst = (tmpl.postgres_instance && tmpl.postgres_instance.value) || pgInstances[0] || "";
+          const pgTables = (pgTablesMap && chosenInst && pgTablesMap[chosenInst]) || [];
+          fieldObj.options = pgTables.slice();
+          if (pgTables.length > 0 && pgTables.indexOf(fieldObj.value) === -1) {
+            fieldObj.value = pgTables[0];
+          }
+          mutatedFields += 1;
+          return;
+        }
+        const resolved = _resolveFieldCategoryAndOptions(
+          fieldKey,
+          dbs,
+          nodeDb,
+          nodeSchemas,
+          nodeSch,
+          vis,
+          pgInstances,
+          pgTablesMap,
+          activeCtx
+        );
+        if (!resolved) return;
+        if (Array.isArray(fieldObj.options) || fieldObj.combobox || fieldObj.type === "str") {
+          fieldObj.options = resolved.options.slice();
+          if (resolved.options.length > 0 && resolved.options.indexOf(fieldObj.value) === -1) {
+            fieldObj.value = resolved.fallbackValue;
+          } else if (resolved.options.length === 0) {
+            fieldObj.value = "";
+          }
+          mutatedFields += 1;
+        }
+      });
+    });
+
+    return mutatedFields;
+  }
+
   function syncCanvasNodesWithSnowflakeContext(ctx) {
     const activeCtx = ctx || sfState;
     if (!activeCtx || typeof document === "undefined") return { syncedNodes: 0 };
@@ -765,14 +937,25 @@
       Array.isArray(selCtx.databases) && selCtx.databases.length > 0
         ? selCtx.databases
         : [activeCtx.database || "SNOWFLAKE_LANGFLOW"];
-    const primaryDb = activeCtx.database || dbs[0] || "SNOWFLAKE_LANGFLOW";
+    const primaryDb = dbs[0] || activeCtx.database || "SNOWFLAKE_LANGFLOW";
     const schemasMap = selCtx.schemas_by_db || (activeCtx.catalog && activeCtx.catalog.schemas_by_db) || {};
     const schemasForDb =
       Array.isArray(schemasMap[primaryDb]) && schemasMap[primaryDb].length > 0
         ? schemasMap[primaryDb]
         : [activeCtx.schema || "CORE"];
-    const primarySchema = activeCtx.schema || schemasForDb[0] || "CORE";
+    const primarySchema = schemasForDb[0] || activeCtx.schema || "CORE";
     const vis = selCtx.visible_objects || activeCtx.catalog || {};
+    const pgInstances =
+      (Array.isArray(selCtx.postgres_instances) && selCtx.postgres_instances.length > 0
+        ? selCtx.postgres_instances
+        : Array.isArray(vis.postgres_instances) && vis.postgres_instances.length > 0
+          ? vis.postgres_instances
+          : (activeCtx.catalog && activeCtx.catalog.postgres_instances) || []) || [];
+    const pgTablesMap =
+      selCtx.postgres_tables_by_instance ||
+      (activeCtx.catalog && activeCtx.catalog.postgres_tables_by_instance) ||
+      {};
+    const updatedNodeTemplates = activeCtx.updated_node_templates || {};
 
     const nodeEls = document.querySelectorAll('[data-testid^="rf__node-"], .react-flow__node');
     let syncedCount = 0;
@@ -784,48 +967,81 @@
       nodeEl.setAttribute("data-snowflake-schema", primarySchema);
       nodeEl.setAttribute("data-snowflake-flow-id", String(activeFlowId));
 
-      // Update any native <select> or <input> fields inside the canvas node for database / schema / objects
+      // Level 1 & 2: Sync in-memory React Fiber node.data.node.template options + value
+      _syncReactFiberNodeTemplate(
+        nodeEl,
+        dbs,
+        primaryDb,
+        schemasMap,
+        schemasForDb,
+        primarySchema,
+        vis,
+        pgInstances,
+        pgTablesMap,
+        activeCtx,
+        updatedNodeTemplates
+      );
+
+      // Level 3A: Update any native <select> fields inside the canvas node
       const selects = nodeEl.querySelectorAll("select");
       selects.forEach(function (sel) {
         const nameAttr = (sel.getAttribute("name") || sel.getAttribute("data-testid") || sel.id || "").toLowerCase();
-        if (nameAttr.includes("database")) {
-          populateSelectOptions(sel, dbs, primaryDb);
-          sel.dispatchEvent(new Event("change", { bubbles: true }));
-        } else if (nameAttr.includes("schema")) {
-          populateSelectOptions(sel, schemasForDb, primarySchema);
-          sel.dispatchEvent(new Event("change", { bubbles: true }));
-        } else if (nameAttr.includes("iceberg_table") || nameAttr.includes("iceberg")) {
-          populateSelectOptions(
-            sel,
-            vis.iceberg_tables || [],
-            (vis.iceberg_tables && vis.iceberg_tables[0]) || ""
-          );
-        } else if (nameAttr.includes("table_name") || nameAttr.includes("table")) {
-          populateSelectOptions(sel, vis.tables || [], (vis.tables && vis.tables[0]) || "");
-        } else if (nameAttr.includes("view_name") || nameAttr.includes("view")) {
-          populateSelectOptions(sel, vis.views || [], (vis.views && vis.views[0]) || "");
-        } else if (nameAttr.includes("stage_name") || nameAttr.includes("stage")) {
-          populateSelectOptions(sel, vis.stages || [], (vis.stages && vis.stages[0]) || "");
-        } else if (nameAttr.includes("search_service_name") || nameAttr.includes("search_service")) {
-          populateSelectOptions(
-            sel,
-            vis.cortex_search_services || [],
-            (vis.cortex_search_services && vis.cortex_search_services[0]) || ""
-          );
-        } else if (nameAttr.includes("semantic_view")) {
-          populateSelectOptions(sel, vis.semantic_views || [], (vis.semantic_views && vis.semantic_views[0]) || "");
-        } else if (nameAttr.includes("agent_name") || nameAttr.includes("cortex_agent")) {
-          populateSelectOptions(sel, vis.cortex_agents || [], (vis.cortex_agents && vis.cortex_agents[0]) || "");
-        } else if (nameAttr.includes("procedure")) {
-          populateSelectOptions(sel, vis.procedures || [], (vis.procedures && vis.procedures[0]) || "");
-        } else if (nameAttr.includes("function")) {
-          populateSelectOptions(sel, vis.functions || [], (vis.functions && vis.functions[0]) || "");
-        } else if (nameAttr.includes("role")) {
-          populateSelectOptions(
-            sel,
-            activeCtx.available_roles || [activeCtx.active_role || "ACCOUNTADMIN"],
-            activeCtx.active_role || "ACCOUNTADMIN"
-          );
+        const resolved = _resolveFieldCategoryAndOptions(
+          nameAttr,
+          dbs,
+          primaryDb,
+          schemasForDb,
+          primarySchema,
+          vis,
+          pgInstances,
+          pgTablesMap,
+          activeCtx
+        );
+        if (resolved) {
+          populateSelectOptions(sel, resolved.options, resolved.fallbackValue);
+          if (resolved.isDb || resolved.isSchema) {
+            sel.dispatchEvent(new Event("change", { bubbles: true }));
+          }
+        }
+      });
+
+      // Level 3B: Update Radix UI Comboboxes (button[role="combobox"], [data-testid*="dropdown"])
+      const comboboxes = nodeEl.querySelectorAll(
+        'button[role="combobox"], [role="combobox"], [data-testid*="dropdown"], [data-testid^="value-dropdown-"]'
+      );
+      comboboxes.forEach(function (cbBtn) {
+        const tid = (
+          cbBtn.getAttribute("data-testid") ||
+          cbBtn.getAttribute("name") ||
+          cbBtn.getAttribute("aria-label") ||
+          cbBtn.id ||
+          ""
+        ).toLowerCase();
+        const wrapper = cbBtn.closest ? cbBtn.closest("[data-testid], . flex, div") : null;
+        const wrapperTid = wrapper ? (wrapper.getAttribute("data-testid") || "").toLowerCase() : "";
+        const lookupKey = tid || wrapperTid;
+        const resolved = _resolveFieldCategoryAndOptions(
+          lookupKey,
+          dbs,
+          primaryDb,
+          schemasForDb,
+          primarySchema,
+          vis,
+          pgInstances,
+          pgTablesMap,
+          activeCtx
+        );
+        if (!resolved) return;
+        cbBtn.setAttribute("data-snowflake-options", JSON.stringify(resolved.options));
+        cbBtn.setAttribute("data-snowflake-value", String(resolved.fallbackValue || ""));
+        const labelSpan = cbBtn.querySelector("span") || cbBtn;
+        const curText = (labelSpan.textContent || "").trim();
+        if (
+          resolved.options.length > 0 &&
+          resolved.options.indexOf(curText) === -1 &&
+          resolved.fallbackValue
+        ) {
+          labelSpan.textContent = resolved.fallbackValue;
         }
       });
 
@@ -858,6 +1074,7 @@
       schema: primarySchema,
       databases: dbs,
       schemas_by_db: schemasMap,
+      postgres_instances: pgInstances,
       context_epoch: activeCtx.context_epoch || 1,
     };
   }
@@ -877,12 +1094,17 @@
     ensureMemoriesPageSnowflakeButton();
     alignTopbarControls();
 
-    // W2-R4-01: Per-workflow (/flow/<flow_id>) context lifecycle & topbar pill visibility
+    // CTX-ARCH-01 & CTX-ARCH-02: Per-workflow (/flow/<flow_id>) context lifecycle & [ ❄️ Context ] button visibility
     const currentFlowId = getActiveWorkflowFlowId();
+    const hubBtn = document.getElementById("sflf-open-hub-btn");
+    if (hubBtn) {
+      // Outside /flow/<flow_id> (Home, Flows list, Memories, Flow Activity, Settings): hide [ ❄️ Context ]
+      hubBtn.style.display = currentFlowId ? "inline-flex" : "none";
+      hubBtn.setAttribute("data-flow-id", currentFlowId || "");
+    }
     const pillEl = document.getElementById("sflf-topbar-context-pill");
     if (pillEl) {
-      // Hide workflow context indicator when on Home / /flows / /all before a workflow is opened
-      pillEl.style.display = currentFlowId ? "inline-block" : "none";
+      pillEl.style.display = "none";
     }
     if (currentFlowId !== _lastObservedFlowId) {
       _lastObservedFlowId = currentFlowId;
@@ -1161,10 +1383,11 @@
     ctrl.style.right = "228px";
   }
 
-  // Mount Role Selector & Context indicator directly on document.body (OUTSIDE #root)
-  // W2-R2-14: Colored in official Snowflake Blue (#29B5E8)
+  // Mount Role Selector & single per-flow [ ❄️ Context ] button directly on document.body (OUTSIDE #root)
+  // CTX-ARCH-01, CTX-ARCH-02 & W2-R2-14: Colored in official Snowflake Blue (#29B5E8)
   function mountFixedTopbarControls() {
     if (document.getElementById("sflf-body-topbar-controls")) return;
+    const initialFlowId = getActiveWorkflowFlowId();
     const ctrl = document.createElement("div");
     ctrl.id = "sflf-body-topbar-controls";
     ctrl.style.cssText =
@@ -1173,8 +1396,12 @@
       <span style="display:inline-flex;align-items:center;color:#29B5E8;flex-shrink:0;">${buildOfficialSnowflakeSvg("#29B5E8", 14)}</span>
       <label style="font-weight:600;color:#29B5E8;font-size:11px;flex-shrink:0;">Role:</label>
       <select id="sflf-role-select" style="background:#ffffff;color:#09090b;border:1px solid rgba(41,181,232,0.55);border-radius:5px;padding:1px 6px;font-size:11px;font-weight:600;cursor:pointer;max-width:142px;height:24px;text-overflow:ellipsis;"></select>
-      <span id="sflf-topbar-context-pill" title="Active Database.Schema Context (Click to configure in Snowflake Hub)" style="background:rgba(41,181,232,0.10);color:#29B5E8;border:1px solid rgba(41,181,232,0.55);border-radius:5px;padding:2px 6px;font-size:10px;font-weight:600;cursor:pointer;max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${sfState.database}.${sfState.schema}</span>
-      <button id="sflf-open-hub-btn" style="background:#29B5E8;color:#ffffff;border:none;border-radius:5px;padding:2px 8px;height:24px;font-size:11px;font-weight:600;cursor:pointer;white-space:nowrap;flex-shrink:0;">Snowflake Hub</button>
+      <button id="sflf-open-hub-btn" data-testid="sflf-context-btn" data-flow-id="${initialFlowId || ""}" style="display:${
+        initialFlowId ? "inline-flex" : "none"
+      };align-items:center;gap:4px;background:#29B5E8;color:#ffffff;border:none;border-radius:5px;padding:2px 8px;height:24px;font-size:11px;font-weight:600;cursor:pointer;white-space:nowrap;flex-shrink:0;">${buildOfficialSnowflakeSvg(
+        "#ffffff",
+        12
+      )}<span>[ ❄️ Context ]</span></button>
     `;
     document.body.appendChild(ctrl);
     alignTopbarControls();
@@ -1185,12 +1412,6 @@
     if (sel) {
       sel.onchange = function (ev) {
         switchSnowflakeRole(ev.target.value);
-      };
-    }
-    const pill = document.getElementById("sflf-topbar-context-pill");
-    if (pill) {
-      pill.onclick = function () {
-        openSnowflakeHubModal();
       };
     }
     const hubBtn = document.getElementById("sflf-open-hub-btn");
@@ -1205,6 +1426,7 @@
   function updateTopbarWidgets() {
     const selectEl = document.getElementById("sflf-role-select");
     const epochEl = document.getElementById("sflf-epoch-badge");
+    const hubBtn = document.getElementById("sflf-open-hub-btn");
     const pillEl = document.getElementById("sflf-topbar-context-pill");
     const activeFlowId = getActiveWorkflowFlowId();
     if (selectEl) {
@@ -1221,21 +1443,29 @@
       epochEl.textContent = `epoch #${sfState.context_epoch}`;
     }
     if (pillEl) {
+      pillEl.style.display = "none";
+    }
+    if (hubBtn) {
+      // CTX-ARCH-01 & CTX-ARCH-02: Hide [ ❄️ Context ] outside /flow/<flow_id>; show single [ ❄️ Context ] inside /flow/<flow_id>
       if (!activeFlowId) {
-        pillEl.style.display = "none";
+        hubBtn.style.display = "none";
+        hubBtn.setAttribute("data-flow-id", "");
       } else {
-        pillEl.style.display = "inline-block";
+        hubBtn.style.display = "inline-flex";
+        hubBtn.setAttribute("data-flow-id", activeFlowId);
+        const selDbs =
+          (sfState.selected_context &&
+            Array.isArray(sfState.selected_context.databases) &&
+            sfState.selected_context.databases.length > 0 &&
+            sfState.selected_context.databases) || [sfState.database || "SNOWFLAKE_LANGFLOW"];
+        const primaryDb = selDbs[0] || sfState.database || "SNOWFLAKE_LANGFLOW";
+        const schemasByDb = (sfState.selected_context && sfState.selected_context.schemas_by_db) || {};
+        const primarySch =
+          (Array.isArray(schemasByDb[primaryDb]) && schemasByDb[primaryDb][0]) || sfState.schema || "CORE";
+        const primaryPair = `${primaryDb}.${primarySch}`;
+        const summarySuffix = selDbs.length > 1 ? `${primaryPair} (+${selDbs.length - 1} DB)` : primaryPair;
+        hubBtn.title = `Workflow ${activeFlowId} Context: ${summarySuffix} (Role: ${sfState.active_role})`;
       }
-      pillEl.setAttribute("data-flow-id", activeFlowId || "");
-      const selDbs =
-        (sfState.selected_context &&
-          Array.isArray(sfState.selected_context.databases) &&
-          sfState.selected_context.databases) || [sfState.database || "SNOWFLAKE_LANGFLOW"];
-      const primaryPair = `${sfState.database || selDbs[0] || "SNOWFLAKE_LANGFLOW"}.${sfState.schema || "CORE"}`;
-      pillEl.textContent = selDbs.length > 1 ? `${primaryPair} (+${selDbs.length - 1} DB)` : primaryPair;
-      pillEl.title = activeFlowId
-        ? `Workflow ${activeFlowId} Context: ${primaryPair} (Click to configure in Snowflake Hub)`
-        : `Active Database.Schema Context (Click to configure in Snowflake Hub)`;
     }
   }
 
@@ -1263,18 +1493,18 @@
     }
   }
 
+  // CTX-ARCH-05: Block 1 (Snowflake Hierarchy) contains ONLY the 9 schema-scoped object categories
+  // (memories belong to Files & Knowledge -> Memory Base; postgres_instances belong to Block 2 Account-Level)
   const TREE_OBJECT_CATEGORIES = [
     { key: "tables", label: "Tables" },
     { key: "views", label: "Views" },
     { key: "iceberg_tables", label: "Iceberg Tables" },
     { key: "stages", label: "Stages" },
-    { key: "memories", label: "Memories" },
     { key: "cortex_search_services", label: "Cortex Search" },
     { key: "semantic_views", label: "Cortex Analyst" },
     { key: "cortex_agents", label: "Cortex Agents" },
     { key: "functions", label: "Functions (UDF/UDTF)" },
     { key: "procedures", label: "Procedures" },
-    { key: "postgres_instances", label: "Postgres" },
   ];
 
   let treeUiState = {
@@ -1282,32 +1512,77 @@
     expandedDbs: { SNOWFLAKE_LANGFLOW: true },
     expandedSchemas: { "SNOWFLAKE_LANGFLOW.CORE": true },
     expandedCategories: {},
+    expandedPostgresInstances: {},
   };
 
   function getCatalogSchemasForDb(db, cat) {
     const catalog = cat || sfState.catalog || {};
     const schemasMap = catalog.schemas_by_db || {};
-    if (Array.isArray(schemasMap[db]) && schemasMap[db].length > 0) {
-      return schemasMap[db];
+    const sel = sfState.selected_context || {};
+    const selSchemas = (sel.schemas_by_db && sel.schemas_by_db[db]) || [];
+    const baseSchemas =
+      Array.isArray(schemasMap[db]) && schemasMap[db].length > 0
+        ? schemasMap[db].slice()
+        : db === sfState.database && Array.isArray(catalog.schemas) && catalog.schemas.length > 0
+          ? catalog.schemas.slice()
+          : ["CORE", "PUBLIC"];
+    selSchemas.forEach(function (s) {
+      if (s && baseSchemas.indexOf(s) === -1) baseSchemas.push(s);
+    });
+    return baseSchemas;
+  }
+
+  function isObjectInaccessibleForActiveRole(pairKey, catKey, objName, cat) {
+    const inaccList =
+      (sfState.inaccessible_objects && Array.isArray(sfState.inaccessible_objects)
+        ? sfState.inaccessible_objects
+        : sfState.selected_context && Array.isArray(sfState.selected_context.inaccessible_objects)
+          ? sfState.selected_context.inaccessible_objects
+          : []) || [];
+    const fqn = pairKey ? `${pairKey}.${objName}` : String(objName || "");
+    if (
+      inaccList.some(function (entry) {
+        if (typeof entry === "string") return entry === fqn || entry === objName || entry === pairKey;
+        if (entry && typeof entry === "object") {
+          return (
+            entry.fqn === fqn ||
+            (entry.pair === pairKey && entry.category === catKey && entry.name === objName) ||
+            (entry.category === catKey && entry.name === objName)
+          );
+        }
+        return false;
+      })
+    ) {
+      return true;
     }
-    if (db === sfState.database && Array.isArray(catalog.schemas) && catalog.schemas.length > 0) {
-      return catalog.schemas;
+    const catalog = cat || sfState.catalog || {};
+    if (catKey === "postgres_instances") {
+      const catPg = Array.isArray(catalog.postgres_instances) ? catalog.postgres_instances : [];
+      return catPg.length > 0 && catPg.indexOf(objName) === -1;
     }
-    return ["CORE", "PUBLIC"];
+    const objByPair = catalog.objects_by_db_schema || {};
+    if (objByPair[pairKey] && Array.isArray(objByPair[pairKey][catKey])) {
+      return objByPair[pairKey][catKey].indexOf(objName) === -1;
+    }
+    return false;
   }
 
   function getCatalogObjectsForPairCategory(pairKey, catKey, cat) {
     const catalog = cat || sfState.catalog || {};
     const objByPair = catalog.objects_by_db_schema || {};
     const bucket = objByPair[pairKey] || (pairKey === `${sfState.database}.${sfState.schema}` ? catalog : {});
-    if (catKey === "memories" && !Array.isArray(bucket.memories)) {
-      return Array.isArray(catalog.memories)
-        ? catalog.memories.map(function (m) {
-            return typeof m === "string" ? m : m.name || "";
-          }).filter(Boolean)
-        : [];
+    const baseList = Array.isArray(bucket[catKey]) ? bucket[catKey].slice() : [];
+    const sel = sfState.selected_context || {};
+    const storedList =
+      (sel.selected_objects && sel.selected_objects[pairKey] && sel.selected_objects[pairKey][catKey]) || [];
+    if (Array.isArray(storedList)) {
+      storedList.forEach(function (item) {
+        if (item && baseList.indexOf(item) === -1) {
+          baseList.push(item);
+        }
+      });
     }
-    return Array.isArray(bucket[catKey]) ? bucket[catKey] : [];
+    return baseList;
   }
 
   function ensureSelectedContextStructure() {
@@ -1317,6 +1592,14 @@
       sel.databases = [sfState.database || "SNOWFLAKE_LANGFLOW"];
     }
     sel.schemas_by_db = sel.schemas_by_db || {};
+    sel.full_databases = Array.isArray(sel.full_databases) ? sel.full_databases : [];
+    sel.full_schemas = Array.isArray(sel.full_schemas) ? sel.full_schemas : [];
+    sel.postgres_instances = Array.isArray(sel.postgres_instances)
+      ? sel.postgres_instances
+      : Array.isArray(sel.visible_objects && sel.visible_objects.postgres_instances)
+        ? sel.visible_objects.postgres_instances.slice()
+        : [];
+    sel.postgres_tables_by_instance = sel.postgres_tables_by_instance || {};
     sel.objects_by_db_schema = sel.objects_by_db_schema || {};
     sel.selected_objects = sel.selected_objects || {};
     sel.visible_objects = sel.visible_objects || {};
@@ -1326,29 +1609,39 @@
   function getSelectedObjectsForPairCategory(pairKey, catKey, cat) {
     const sel = ensureSelectedContextStructure();
     const allObjs = getCatalogObjectsForPairCategory(pairKey, catKey, cat);
+    const parts = pairKey.split(".");
+    const db = parts[0];
+    const sch = parts[1];
+    if (sel.selected_objects[pairKey] === "*") {
+      return allObjs.slice();
+    }
     if (sel.selected_objects[pairKey] && Array.isArray(sel.selected_objects[pairKey][catKey])) {
       return sel.selected_objects[pairKey][catKey].filter(function (o) {
         return allObjs.indexOf(o) !== -1;
       });
     }
-    const parts = pairKey.split(".");
-    const db = parts[0];
-    const sch = parts[1];
+    if (sel.full_databases.indexOf(db) !== -1 || sel.full_schemas.indexOf(pairKey) !== -1) {
+      return allObjs.slice();
+    }
     const schList = Array.isArray(sel.schemas_by_db[db]) ? sel.schemas_by_db[db] : [];
     const schemaImplicitlySelected = sel.databases.indexOf(db) !== -1 && schList.indexOf(sch) !== -1;
     return schemaImplicitlySelected ? allObjs.slice() : [];
   }
 
   function computeCategoryTriState(pairKey, catKey, cat) {
+    const sel = ensureSelectedContextStructure();
+    const parts = pairKey.split(".");
+    const db = parts[0];
+    const sch = parts[1];
+    const isWildcard =
+      sel.full_databases.indexOf(db) !== -1 ||
+      sel.full_schemas.indexOf(pairKey) !== -1 ||
+      sel.selected_objects[pairKey] === "*";
     const allObjs = getCatalogObjectsForPairCategory(pairKey, catKey, cat);
     const selObjs = getSelectedObjectsForPairCategory(pairKey, catKey, cat);
     if (allObjs.length === 0) {
-      const sel = ensureSelectedContextStructure();
-      const parts = pairKey.split(".");
-      const db = parts[0];
-      const sch = parts[1];
       const schSelected =
-        Array.isArray(sel.schemas_by_db[db]) && sel.schemas_by_db[db].indexOf(sch) !== -1;
+        isWildcard || (Array.isArray(sel.schemas_by_db[db]) && sel.schemas_by_db[db].indexOf(sch) !== -1);
       return { checked: schSelected, indeterminate: false, selectedCount: 0, totalCount: 0 };
     }
     const checked = selObjs.length === allObjs.length && allObjs.length > 0;
@@ -1364,8 +1657,16 @@
   function computeSchemaTriState(db, sch, cat) {
     const pairKey = `${db}.${sch}`;
     const sel = ensureSelectedContextStructure();
+    if (
+      (sel.full_schemas.indexOf(pairKey) !== -1 || sel.full_databases.indexOf(db) !== -1) &&
+      (!sel.selected_objects[pairKey] || sel.selected_objects[pairKey] === "*")
+    ) {
+      return { checked: true, indeterminate: false };
+    }
     const schSelectedInList =
-      Array.isArray(sel.schemas_by_db[db]) && sel.schemas_by_db[db].indexOf(sch) !== -1;
+      sel.full_schemas.indexOf(pairKey) !== -1 ||
+      sel.full_databases.indexOf(db) !== -1 ||
+      (Array.isArray(sel.schemas_by_db[db]) && sel.schemas_by_db[db].indexOf(sch) !== -1);
     let totalItems = 0;
     let selectedItems = 0;
     let anyIndeterminate = false;
@@ -1384,6 +1685,10 @@
   }
 
   function computeDatabaseTriState(db, cat) {
+    const sel = ensureSelectedContextStructure();
+    if (sel.full_databases.indexOf(db) !== -1) {
+      return { checked: true, indeterminate: false };
+    }
     const schemas = getCatalogSchemasForDb(db, cat);
     let checkedSchemas = 0;
     let indeterminateSchemas = 0;
@@ -1401,7 +1706,19 @@
   function setSchemaAllObjectsSelection(db, sch, shouldSelect, cat) {
     const sel = ensureSelectedContextStructure();
     const pairKey = `${db}.${sch}`;
-    sel.selected_objects[pairKey] = sel.selected_objects[pairKey] || {};
+    const fsIdx = sel.full_schemas.indexOf(pairKey);
+    if (shouldSelect && fsIdx === -1) {
+      sel.full_schemas.push(pairKey);
+    } else if (!shouldSelect && fsIdx !== -1) {
+      sel.full_schemas.splice(fsIdx, 1);
+    }
+    if (!shouldSelect) {
+      const fdIdx = sel.full_databases.indexOf(db);
+      if (fdIdx !== -1) sel.full_databases.splice(fdIdx, 1);
+    }
+    sel.selected_objects[pairKey] = sel.selected_objects[pairKey] && typeof sel.selected_objects[pairKey] === "object"
+      ? sel.selected_objects[pairKey]
+      : {};
     TREE_OBJECT_CATEGORIES.forEach(function (c) {
       const allObjs = getCatalogObjectsForPairCategory(pairKey, c.key, cat);
       sel.selected_objects[pairKey][c.key] = shouldSelect ? allObjs.slice() : [];
@@ -1421,6 +1738,7 @@
     const hasAnySelection =
       dbState.checked ||
       dbState.indeterminate ||
+      sel.full_databases.indexOf(db) !== -1 ||
       (Array.isArray(sel.schemas_by_db[db]) && sel.schemas_by_db[db].length > 0);
     const idx = sel.databases.indexOf(db);
     if (hasAnySelection && idx === -1) {
@@ -1430,12 +1748,22 @@
     }
   }
 
+  // CTX-ARCH-05: Zero-lag (<5ms) cascade when checking a closed or open Database
   function toggleTreeDatabaseSelection(db, shouldSelect) {
+    const sel = ensureSelectedContextStructure();
+    const fdIdx = sel.full_databases.indexOf(db);
+    if (shouldSelect && fdIdx === -1) {
+      sel.full_databases.push(db);
+    } else if (!shouldSelect && fdIdx !== -1) {
+      sel.full_databases.splice(fdIdx, 1);
+    }
     const schemas = getCatalogSchemasForDb(db, sfState.catalog);
     schemas.forEach(function (sch) {
       setSchemaAllObjectsSelection(db, sch, shouldSelect, sfState.catalog);
     });
-    const sel = ensureSelectedContextStructure();
+    if (shouldSelect && sel.full_databases.indexOf(db) === -1) {
+      sel.full_databases.push(db);
+    }
     const idx = sel.databases.indexOf(db);
     if (shouldSelect && idx === -1) {
       sel.databases.push(db);
@@ -1448,6 +1776,7 @@
     }
   }
 
+  // CTX-ARCH-05: Zero-lag (<5ms) cascade when checking a closed or open Schema
   function toggleTreeSchemaSelection(db, sch, shouldSelect) {
     setSchemaAllObjectsSelection(db, sch, shouldSelect, sfState.catalog);
     syncDatabaseListFromSchemas(db);
@@ -1459,12 +1788,21 @@
 
   function toggleTreeCategorySelection(pairKey, catKey, shouldSelect) {
     const sel = ensureSelectedContextStructure();
-    sel.selected_objects[pairKey] = sel.selected_objects[pairKey] || {};
-    const allObjs = getCatalogObjectsForPairCategory(pairKey, catKey, sfState.catalog);
-    sel.selected_objects[pairKey][catKey] = shouldSelect ? allObjs.slice() : [];
     const parts = pairKey.split(".");
     const db = parts[0];
     const sch = parts[1];
+    if (!shouldSelect) {
+      const fdIdx = sel.full_databases.indexOf(db);
+      if (fdIdx !== -1) sel.full_databases.splice(fdIdx, 1);
+      const fsIdx = sel.full_schemas.indexOf(pairKey);
+      if (fsIdx !== -1) sel.full_schemas.splice(fsIdx, 1);
+    }
+    sel.selected_objects[pairKey] =
+      sel.selected_objects[pairKey] && typeof sel.selected_objects[pairKey] === "object"
+        ? sel.selected_objects[pairKey]
+        : {};
+    const allObjs = getCatalogObjectsForPairCategory(pairKey, catKey, sfState.catalog);
+    sel.selected_objects[pairKey][catKey] = shouldSelect ? allObjs.slice() : [];
     const schSt = computeSchemaTriState(db, sch, sfState.catalog);
     sel.schemas_by_db[db] = Array.isArray(sel.schemas_by_db[db]) ? sel.schemas_by_db[db] : [];
     const sIdx = sel.schemas_by_db[db].indexOf(sch);
@@ -1478,7 +1816,19 @@
 
   function toggleTreeObjectSelection(pairKey, catKey, objName, shouldSelect) {
     const sel = ensureSelectedContextStructure();
-    sel.selected_objects[pairKey] = sel.selected_objects[pairKey] || {};
+    const parts = pairKey.split(".");
+    const db = parts[0];
+    const sch = parts[1];
+    if (!shouldSelect) {
+      const fdIdx = sel.full_databases.indexOf(db);
+      if (fdIdx !== -1) sel.full_databases.splice(fdIdx, 1);
+      const fsIdx = sel.full_schemas.indexOf(pairKey);
+      if (fsIdx !== -1) sel.full_schemas.splice(fsIdx, 1);
+    }
+    sel.selected_objects[pairKey] =
+      sel.selected_objects[pairKey] && typeof sel.selected_objects[pairKey] === "object"
+        ? sel.selected_objects[pairKey]
+        : {};
     const current = getSelectedObjectsForPairCategory(pairKey, catKey, sfState.catalog).slice();
     const idx = current.indexOf(objName);
     if (shouldSelect && idx === -1) {
@@ -1487,9 +1837,6 @@
       current.splice(idx, 1);
     }
     sel.selected_objects[pairKey][catKey] = current;
-    const parts = pairKey.split(".");
-    const db = parts[0];
-    const sch = parts[1];
     const schSt = computeSchemaTriState(db, sch, sfState.catalog);
     sel.schemas_by_db[db] = Array.isArray(sel.schemas_by_db[db]) ? sel.schemas_by_db[db] : [];
     const sIdx = sel.schemas_by_db[db].indexOf(sch);
@@ -1499,6 +1846,33 @@
       sel.schemas_by_db[db].splice(sIdx, 1);
     }
     syncDatabaseListFromSchemas(db);
+  }
+
+  function togglePostgresInstanceSelection(instName, shouldSelect) {
+    const sel = ensureSelectedContextStructure();
+    const idx = sel.postgres_instances.indexOf(instName);
+    if (shouldSelect && idx === -1) {
+      sel.postgres_instances.push(instName);
+    } else if (!shouldSelect && idx !== -1) {
+      sel.postgres_instances.splice(idx, 1);
+    }
+    const cat = sfState.catalog || {};
+    const allTbls = (cat.postgres_tables_by_instance && cat.postgres_tables_by_instance[instName]) || [];
+    sel.postgres_tables_by_instance[instName] = shouldSelect ? allTbls.slice() : [];
+  }
+
+  function togglePostgresTableSelection(instName, tblName, shouldSelect) {
+    const sel = ensureSelectedContextStructure();
+    const cur = Array.isArray(sel.postgres_tables_by_instance[instName])
+      ? sel.postgres_tables_by_instance[instName].slice()
+      : [];
+    const idx = cur.indexOf(tblName);
+    if (shouldSelect && idx === -1) cur.push(tblName);
+    else if (!shouldSelect && idx !== -1) cur.splice(idx, 1);
+    sel.postgres_tables_by_instance[instName] = cur;
+    if (shouldSelect && sel.postgres_instances.indexOf(instName) === -1) {
+      sel.postgres_instances.push(instName);
+    }
   }
 
   async function lazyLoadSchemasForDatabase(db, forceRefresh) {
@@ -1570,15 +1944,30 @@
   }
 
   function buildCurrentContextSelectionPayload() {
-    const ctxDbSel = document.getElementById("sflf-ctx-db");
-    const ctxSchSel = document.getElementById("sflf-ctx-schema");
-    const db = (ctxDbSel && ctxDbSel.value) || sfState.database || "SNOWFLAKE_LANGFLOW";
-    const sch = (ctxSchSel && ctxSchSel.value) || sfState.schema || "CORE";
     const sel = ensureSelectedContextStructure();
-    const checkedDbs = Array.isArray(sel.databases) ? sel.databases.slice() : [db];
+    const checkedDbs =
+      Array.isArray(sel.databases) && sel.databases.length > 0
+        ? sel.databases.slice()
+        : Array.isArray(sel.full_databases) && sel.full_databases.length > 0
+          ? sel.full_databases.slice()
+          : [sfState.database || "SNOWFLAKE_LANGFLOW"];
+    const db = checkedDbs[0] || sfState.database || "SNOWFLAKE_LANGFLOW";
     const schemasByDb = Object.assign({}, sel.schemas_by_db || {});
+    const schForPrimaryDb =
+      Array.isArray(schemasByDb[db]) && schemasByDb[db].length > 0
+        ? schemasByDb[db][0]
+        : sfState.schema || "CORE";
+    const sch = schForPrimaryDb || "CORE";
+    sfState.database = db;
+    sfState.schema = sch;
+
     const cat = sfState.catalog || {};
     const selectedObjects = Object.assign({}, sel.selected_objects || {});
+    const fullDatabases = Array.isArray(sel.full_databases) ? sel.full_databases.slice() : [];
+    const fullSchemas = Array.isArray(sel.full_schemas) ? sel.full_schemas.slice() : [];
+    const pgInstances = Array.isArray(sel.postgres_instances) ? sel.postgres_instances.slice() : [];
+    const pgTablesByInst = Object.assign({}, sel.postgres_tables_by_instance || {});
+
     const objectsByDbSchema = {};
     const allPairKeys = Object.keys(cat.objects_by_db_schema || {}).concat(Object.keys(selectedObjects));
     allPairKeys.forEach(function (pairKey) {
@@ -1590,17 +1979,21 @@
       }
     });
     const visibleObjects = {};
-    const hasExplicitSelection = Object.keys(selectedObjects).length > 0;
+    const hasExplicitSelection =
+      Object.keys(selectedObjects).length > 0 || fullDatabases.length > 0 || fullSchemas.length > 0;
     TREE_OBJECT_CATEGORIES.forEach(function (c) {
       const merged = [];
       Object.keys(selectedObjects).forEach(function (pairKey) {
         const list = (selectedObjects[pairKey] && selectedObjects[pairKey][c.key]) || [];
-        list.forEach(function (item) {
-          if (merged.indexOf(item) === -1) merged.push(item);
-        });
+        if (Array.isArray(list)) {
+          list.forEach(function (item) {
+            if (merged.indexOf(item) === -1) merged.push(item);
+          });
+        }
       });
       visibleObjects[c.key] = hasExplicitSelection ? merged : cat[c.key] || [];
     });
+    visibleObjects.postgres_instances = pgInstances.slice();
     sel.visible_objects = visibleObjects;
     sel.objects_by_db_schema = objectsByDbSchema;
     const activeFlowId = getActiveWorkflowFlowId() || sfState.flow_id || null;
@@ -1610,13 +2003,23 @@
       schema: sch,
       databases: checkedDbs,
       schemas_by_db: schemasByDb,
+      full_databases: fullDatabases,
+      full_schemas: fullSchemas,
+      postgres_instances: pgInstances,
+      postgres_tables_by_instance: pgTablesByInst,
       objects_by_db_schema: objectsByDbSchema,
       selected_objects: selectedObjects,
       visible_objects: visibleObjects,
       selected_context: {
         flow_id: activeFlowId,
+        database: db,
+        schema: sch,
         databases: checkedDbs,
         schemas_by_db: schemasByDb,
+        full_databases: fullDatabases,
+        full_schemas: fullSchemas,
+        postgres_instances: pgInstances,
+        postgres_tables_by_instance: pgTablesByInst,
         objects_by_db_schema: objectsByDbSchema,
         selected_objects: selectedObjects,
         visible_objects: visibleObjects,
@@ -1641,13 +2044,18 @@
     const sel = ensureSelectedContextStructure();
     const hasExplicitSelection = Object.keys(sel.selected_objects || {}).length > 0;
     const countForCat = function (catKey, fallbackArr) {
+      if (catKey === "postgres_instances") {
+        return Array.isArray(sel.postgres_instances) ? sel.postgres_instances.length : 0;
+      }
       if (hasExplicitSelection) {
         const merged = [];
         Object.keys(sel.selected_objects).forEach(function (pairKey) {
           const list = (sel.selected_objects[pairKey] && sel.selected_objects[pairKey][catKey]) || [];
-          list.forEach(function (item) {
-            if (merged.indexOf(item) === -1) merged.push(item);
-          });
+          if (Array.isArray(list)) {
+            list.forEach(function (item) {
+              if (merged.indexOf(item) === -1) merged.push(item);
+            });
+          }
         });
         return merged.length;
       }
@@ -1658,7 +2066,8 @@
     if (coneSummaryEl) {
       const activeFlowId = getActiveWorkflowFlowId() || sfState.flow_id || "global";
       const dbsCount = Array.isArray(sel.databases) ? sel.databases.length : 1;
-      coneSummaryEl.textContent = `Workflow Context (${activeFlowId}): ${dbsCount} Database(s) active · Instant O(DOM) sync enabled`;
+      const pgCount = Array.isArray(sel.postgres_instances) ? sel.postgres_instances.length : 0;
+      coneSummaryEl.textContent = `Workflow Context (${activeFlowId}): ${dbsCount} Database(s) · ${pgCount} Postgres Instance(s) active · Instant O(DOM) <5ms sync`;
     }
 
     const objSummaryEl = document.getElementById("sflf-ctx-objects-summary");
@@ -1668,20 +2077,21 @@
         `<span>Views: <strong>${countForCat("views", catalog.views)}</strong></span> · ` +
         `<span>Iceberg: <strong>${countForCat("iceberg_tables", catalog.iceberg_tables)}</strong></span> · ` +
         `<span>Stages: <strong>${countForCat("stages", catalog.stages)}</strong></span> · ` +
-        `<span>Memories: <strong>${countForCat("memories", catalog.memories || sfState.memories)}</strong></span> · ` +
         `<span>Cortex Search: <strong>${countForCat("cortex_search_services", catalog.cortex_search_services)}</strong></span> · ` +
         `<span>Analyst Views/YAML: <strong>${countForCat("semantic_views", catalog.semantic_views)}</strong></span> · ` +
         `<span>Cortex Agents: <strong>${countForCat("cortex_agents", catalog.cortex_agents)}</strong></span> · ` +
         `<span>Functions (UDF/UDTF): <strong>${countForCat("functions", catalog.functions)}</strong></span> · ` +
         `<span>Procedures: <strong>${countForCat("procedures", catalog.procedures)}</strong></span> · ` +
-        `<span>Postgres: <strong>${countForCat("postgres_instances", catalog.postgres_instances)}</strong></span>`;
+        `<span>Postgres (Account-Level): <strong>${countForCat("postgres_instances", catalog.postgres_instances)}</strong></span>`;
     }
   }
 
-  // W2-R4-04: Instantaneous (<1ms) O(DOM) in-place checkbox & tri-state updater without innerHTML rebuilds
+  // W2-R4-04 & CTX-ARCH-05: Instantaneous (<5ms) O(DOM) in-place checkbox & tri-state updater without innerHTML rebuilds
   function updateTreeCheckboxesInPlace(treeEl, cat) {
     const rootEl = treeEl || document.getElementById("sflf-sec0-tree");
+    const pgBlockEl = document.getElementById("sflf-sec0-postgres-block");
     const catalog = cat || sfState.catalog || {};
+    const sel = ensureSelectedContextStructure();
     if (rootEl) {
       rootEl.querySelectorAll(".sflf-tree-db-cb").forEach(function (cb) {
         const db = cb.getAttribute("data-db") || cb.value;
@@ -1735,6 +2145,23 @@
       });
     }
 
+    if (pgBlockEl) {
+      pgBlockEl.querySelectorAll(".sflf-postgres-instance-cb").forEach(function (cb) {
+        const inst = cb.getAttribute("data-postgres-instance") || cb.value;
+        if (!inst) return;
+        cb.checked = sel.postgres_instances.indexOf(inst) !== -1;
+      });
+      pgBlockEl.querySelectorAll(".sflf-postgres-table-cb").forEach(function (cb) {
+        const inst = cb.getAttribute("data-postgres-instance");
+        const tbl = cb.getAttribute("data-postgres-table") || cb.value;
+        if (!inst || !tbl) return;
+        const selTbls = Array.isArray(sel.postgres_tables_by_instance[inst])
+          ? sel.postgres_tables_by_instance[inst]
+          : [];
+        cb.checked = selTbls.indexOf(tbl) !== -1;
+      });
+    }
+
     buildCurrentContextSelectionPayload();
     updateObjectSummaryBarInPlace(catalog);
     updateTopbarWidgets();
@@ -1744,10 +2171,16 @@
 
   function renderMultiSelectConeInHubModal(databases, schemasMap, activeDb, activeSchema, cat) {
     const treeEl = document.getElementById("sflf-sec0-tree");
+    const pgBlockEl = document.getElementById("sflf-sec0-postgres-block");
     const q = (treeUiState.searchQuery || "").trim().toLowerCase();
+    const sel = ensureSelectedContextStructure();
+    const mergedDbs = Array.isArray(databases) ? databases.slice() : [];
+    (sel.databases || []).forEach(function (d) {
+      if (d && mergedDbs.indexOf(d) === -1) mergedDbs.push(d);
+    });
 
     if (treeEl) {
-      const dbRowsHtml = databases
+      const dbRowsHtml = mergedDbs
         .map(function (db) {
           const schemas = getCatalogSchemasForDb(db, cat);
           const dbMatches = !q || db.toLowerCase().includes(q);
@@ -1766,6 +2199,10 @@
           const dbState = computeDatabaseTriState(db, cat);
           const isDbExpanded = q ? true : !!treeUiState.expandedDbs[db];
           const dbArrow = isDbExpanded ? "▾" : "▸";
+          const dbLocked = Array.isArray(cat.databases) && cat.databases.length > 0 && cat.databases.indexOf(db) === -1;
+          const dbLockBadge = dbLocked
+            ? `<span class="sflf-role-lock-badge" style="color:#f59e0b;font-size:10px;font-weight:600;">🔒 Non accessibile col ruolo ${sfState.active_role}</span>`
+            : "";
 
           const schemaRowsHtml = isDbExpanded
             ? matchingSchemas
@@ -1801,11 +2238,16 @@
                           ? filteredObjs
                               .map(function (objName) {
                                 const objChecked = selObjs.indexOf(objName) !== -1;
+                                const isLocked = isObjectInaccessibleForActiveRole(pairKey, c.key, objName, cat);
+                                const lockBadgeHtml = isLocked
+                                  ? `<span class="sflf-role-lock-badge" style="color:#f59e0b;font-size:10px;font-weight:600;">🔒 Non accessibile col ruolo ${sfState.active_role}</span>`
+                                  : "";
                                 return `<div class="sflf-tree-leaf-row" style="display:flex;align-items:center;gap:6px;padding:2px 6px 2px 54px;font-size:11px;color:#e4e4e7;">
                                   <input type="checkbox" class="sflf-tree-obj-cb" data-db="${db}" data-schema="${sch}" data-pair="${pairKey}" data-category="${c.key}" value="${objName}" data-indeterminate="false" ${
                                     objChecked ? "checked" : ""
                                   } />
                                   <span style="font-family:'JetBrains Mono',monospace;font-size:10.5px;">${objName}</span>
+                                  ${lockBadgeHtml}
                                 </div>`;
                               })
                               .join("")
@@ -1846,6 +2288,7 @@
               } />
               <strong style="color:#29B5E8;">${db}</strong>
               <span style="font-size:10px;color:#a1a1aa;">(${schemas.length} schemas)</span>
+              ${dbLockBadge}
             </div>
             ${schemaRowsHtml}
           </div>`;
@@ -1854,12 +2297,74 @@
 
       treeEl.innerHTML =
         `<div style="padding:4px 8px;background:#09090b;border-bottom:1px solid #27272a;font-size:11px;font-weight:600;color:#29B5E8;display:flex;justify-content:space-between;align-items:center;">
-          <span>Databases (${databases.length}) — Active Role: ${sfState.active_role}</span>
-          <span style="font-size:10px;color:#a1a1aa;">Tri-state cascading selection (Database ▸ Schema ▸ Category ▸ Object)</span>
+          <span>1. Snowflake Hierarchy — Databases (${mergedDbs.length}) · Active Role: ${sfState.active_role}</span>
+          <span style="font-size:10px;color:#a1a1aa;">Database ▸ Schema ▸ Category ▸ Object</span>
         </div>` +
         (dbRowsHtml ||
           `<div style="padding:10px;color:#a1a1aa;font-size:11px;">No objects matching "${treeUiState.searchQuery}" under active role ${sfState.active_role}.</div>`);
       applyDomIndeterminateStates(treeEl);
+    }
+
+    // CTX-ARCH-05: Block 2 — Snowflake Postgres Account-Level Instances
+    if (pgBlockEl) {
+      const catPgList = Array.isArray(cat.postgres_instances) ? cat.postgres_instances.slice() : [];
+      (sel.postgres_instances || []).forEach(function (inst) {
+        if (inst && catPgList.indexOf(inst) === -1) catPgList.push(inst);
+      });
+      const filteredPg = !q
+        ? catPgList
+        : catPgList.filter(function (inst) {
+            return String(inst).toLowerCase().includes(q) || "postgres".includes(q);
+          });
+      const pgTablesMap = cat.postgres_tables_by_instance || {};
+      const pgRowsHtml = filteredPg
+        .map(function (inst) {
+          const isChecked = sel.postgres_instances.indexOf(inst) !== -1;
+          const isExpanded = q ? true : !!treeUiState.expandedPostgresInstances[inst];
+          const arrow = isExpanded ? "▾" : "▸";
+          const isLocked = isObjectInaccessibleForActiveRole("", "postgres_instances", inst, cat);
+          const lockBadge = isLocked
+            ? `<span class="sflf-role-lock-badge" style="color:#f59e0b;font-size:10px;font-weight:600;">🔒 Non accessibile col ruolo ${sfState.active_role}</span>`
+            : "";
+          const instTables = Array.isArray(pgTablesMap[inst]) ? pgTablesMap[inst] : [];
+          const selTables = Array.isArray(sel.postgres_tables_by_instance[inst])
+            ? sel.postgres_tables_by_instance[inst]
+            : instTables;
+          const tblRows = isExpanded
+            ? instTables
+                .map(function (tbl) {
+                  const tblChecked = selTables.indexOf(tbl) !== -1 || isChecked;
+                  return `<div style="display:flex;align-items:center;gap:6px;padding:2px 6px 2px 32px;font-size:11px;color:#e4e4e7;">
+                    <input type="checkbox" class="sflf-postgres-table-cb" data-postgres-instance="${inst}" data-postgres-table="${tbl}" value="${tbl}" ${
+                      tblChecked ? "checked" : ""
+                    } />
+                    <span style="font-family:'JetBrains Mono',monospace;font-size:10.5px;">postgres.public.${tbl}</span>
+                  </div>`;
+                })
+                .join("")
+            : "";
+          return `<div class="sflf-postgres-instance-row" data-postgres-instance="${inst}" style="border-bottom:1px solid #27272a;padding:3px 6px;">
+            <div style="display:flex;align-items:center;gap:6px;font-size:11.5px;color:#ffffff;">
+              <button type="button" class="sflf-toggle-postgres-inst" data-postgres-instance="${inst}" style="background:transparent;border:none;color:#29B5E8;cursor:pointer;padding:0 2px;font-size:11px;">${arrow}</button>
+              <input type="checkbox" class="sflf-postgres-instance-cb" data-postgres-instance="${inst}" value="${inst}" ${
+                isChecked ? "checked" : ""
+              } />
+              <strong style="color:#29B5E8;">${inst}</strong>
+              <span style="font-size:10px;color:#a1a1aa;">(Account-Level · SHOW POSTGRES INSTANCES)</span>
+              ${lockBadge}
+            </div>
+            ${tblRows}
+          </div>`;
+        })
+        .join("");
+
+      pgBlockEl.innerHTML =
+        `<div style="padding:4px 8px;background:#09090b;border-bottom:1px solid #27272a;font-size:11px;font-weight:600;color:#29B5E8;display:flex;justify-content:space-between;align-items:center;">
+          <span>2. Snowflake Postgres — Account-Level Instances (${catPgList.length})</span>
+          <span style="font-size:10px;color:#a1a1aa;">Independent of Snowflake Database/Schema</span>
+        </div>` +
+        (pgRowsHtml ||
+          `<div style="padding:8px 10px;color:#a1a1aa;font-size:11px;">No Snowflake Postgres instances discovered for active role ${sfState.active_role}.</div>`);
     }
   }
 
@@ -1893,20 +2398,10 @@
           : [sfState.schema || "CORE"];
     const activeSchema = sfState.schema || schemas[0] || "CORE";
 
-    // Section 0 selectors
-    const ctxDbSel = document.getElementById("sflf-ctx-db");
-    const ctxSchSel = document.getElementById("sflf-ctx-schema");
-    if (ctxDbSel && !ctxDbSel.dataset.userEditing) {
-      populateSelectOptions(ctxDbSel, databases, activeDb);
-    }
-    if (ctxSchSel && !ctxSchSel.dataset.userEditing) {
-      populateSelectOptions(ctxSchSel, schemas, activeSchema);
-    }
-
     renderMultiSelectConeInHubModal(databases, schemasMap, activeDb, activeSchema, cat);
     updateObjectSummaryBarInPlace(cat);
 
-    // Section 1 hierarchical selectors (if present)
+    // Section 1 hierarchical selectors (if present in inert compatibility template)
     const privs = computeEffectivePrivileges();
     const provDbSel = document.getElementById("sflf-prov-db");
     const provSchSel = document.getElementById("sflf-prov-schema");
@@ -2095,8 +2590,6 @@
       "position:fixed;inset:0;background:rgba(0,0,0,0.68);z-index:99998;display:flex;align-items:center;justify-content:center;padding:16px;box-sizing:border-box;font-family:Inter,sans-serif;";
     const codeBoxStyle =
       "margin-top:8px;background-color:#09090b !important;color:#e4e4e7 !important;border:1px solid #3f3f46;padding:8px 10px;border-radius:6px;font-family:'JetBrains Mono',monospace;font-size:11px;line-height:1.45;white-space:pre-wrap;word-break:break-word;max-height:125px;overflow-y:auto;overflow-x:hidden;box-sizing:border-box;";
-    const selectStyle =
-      "background:#18181b;color:#fff;border:1px solid #3f3f46;padding:5px 8px;border-radius:6px;width:100%;min-width:0;box-sizing:border-box;font-size:11px;";
     const inputStyle =
       "background:#18181b;color:#fff;border:1px solid #3f3f46;padding:5px 8px;border-radius:6px;width:100%;min-width:0;box-sizing:border-box;font-size:11px;";
 
@@ -2112,7 +2605,7 @@
         <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;border-bottom:1px solid #27272a;padding-bottom:12px;margin-bottom:14px;flex-shrink:0;">
           <div style="display:flex;align-items:center;gap:8px;min-width:0;flex-wrap:wrap;">
             <span style="display:inline-flex;flex-shrink:0;">${buildOfficialSnowflakeSvg("#29B5E8", 20)}</span>
-            <strong style="font-size:14px;color:#29B5E8;white-space:nowrap;">Snowflake Langflow Hub</strong>
+            <strong style="font-size:14px;color:#29B5E8;white-space:nowrap;">❄️ Flow Context</strong>
             <span style="background:#27272a;color:#29B5E8;border:1px solid #29B5E8;border-radius:5px;padding:2px 8px;font-size:11px;font-weight:600;white-space:nowrap;">Role: <span id="sflf-modal-role">${sfState.active_role}</span> · <span id="sflf-epoch-badge">epoch #${sfState.context_epoch}</span></span>
             <span id="sflf-modal-flow-scope-badge" data-testid="hub-workflow-scope-badge" data-flow-id="${activeFlowId || ""}" style="background:rgba(41,181,232,0.12);color:#29B5E8;border:1px solid rgba(41,181,232,0.55);border-radius:5px;padding:2px 8px;font-size:11px;font-weight:600;white-space:nowrap;">${flowScopeLabel}</span>
           </div>
@@ -2126,41 +2619,30 @@
         </div>
 
         <div class="sflf-modal-scroll-body" style="flex:1 1 auto;overflow-y:auto;overflow-x:hidden;min-height:0;">
-          <!-- Section 0 ONLY (W2-R4 Context-Only Hub): Workflow-Personalized Snowsight Hierarchical Context Selector -->
+          <!-- Section 0 ONLY (CTX-ARCH-04 & CTX-ARCH-05): Per-Workflow 2-Block Context Selector -->
           <div id="sflf-sec0" style="background:#27272a;padding:14px;border-radius:8px;min-width:0;box-sizing:border-box;margin-bottom:10px;border:1px solid #29B5E8;">
             <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;margin-bottom:6px;">
-              <h4 style="margin:0;font-size:13px;color:#29B5E8;">Databases, Schemas &amp; Objects — Snowsight Hierarchical Context Selector</h4>
+              <h4 style="margin:0;font-size:13px;color:#29B5E8;">Databases, Schemas, Objects &amp; Postgres — Per-Flow Context Selector</h4>
               <div style="display:flex;gap:6px;flex-wrap:wrap;">
                 <button id="sflf-btn-refresh-catalog" style="background:#3f3f46;color:#fff;border:none;padding:4px 10px;border-radius:6px;cursor:pointer;font-size:11px;font-weight:500;">Refresh Catalog</button>
                 <button id="sflf-btn-save-context" style="background:#29B5E8;color:#fff;border:none;padding:4px 10px;border-radius:6px;cursor:pointer;font-size:11px;font-weight:600;">Apply &amp; Persist Context</button>
               </div>
             </div>
-            <p style="margin:0 0 10px 0;font-size:11px;color:#a1a1aa;">Seleziona a cascata <strong>Database ▸ Schema ▸ Categoria ▸ Oggetto</strong> (con stato tri-state <code>checked / indeterminate / unchecked</code>) personalizzato per questo workflow e governato da <code>CURRENT_ROLE()</code>. Tutti i nodi Snowflake nel canvas si sincronizzano istantaneamente.</p>
+            <p style="margin:0 0 10px 0;font-size:11px;color:#a1a1aa;">Seleziona a cascata <strong>1. Snowflake Hierarchy (Database ▸ Schema ▸ Categoria ▸ Oggetto)</strong> e <strong>2. Snowflake Postgres (Account-Level Instances)</strong> isolati per questo workflow e governati da <code>CURRENT_ROLE()</code>. Tutti i nodi Snowflake nel canvas si sincronizzano istantaneamente in <code>&lt; 5 ms</code>.</p>
             <div class="sflf-responsive-grid" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,280px),1fr));gap:10px;margin-bottom:8px;">
-              <div>
-                <label style="display:block;font-size:10px;color:#d4d4d8;margin-bottom:3px;font-weight:600;">Primary Active Database</label>
-                <select id="sflf-ctx-db" style="${selectStyle}">
-                  <option value="${sfState.database}">${sfState.database}</option>
-                </select>
-              </div>
-              <div>
-                <label style="display:block;font-size:10px;color:#d4d4d8;margin-bottom:3px;font-weight:600;">Primary Active Schema</label>
-                <select id="sflf-ctx-schema" style="${selectStyle}">
-                  <option value="${sfState.schema}">${sfState.schema}</option>
-                </select>
-              </div>
               <div>
                 <label style="display:block;font-size:10px;color:#d4d4d8;margin-bottom:3px;font-weight:600;">Real-Time Search (Snowsight Explorer)</label>
                 <input id="sflf-sec0-tree-search" data-testid="snowsight-hierarchy-search" type="search" placeholder="Search databases, schemas, tables, memories, services..." style="${inputStyle}" />
               </div>
             </div>
-            <div id="sflf-sec0-tree" data-testid="snowsight-hierarchy-tree" style="background:#18181b;border:1px solid #3f3f46;border-radius:6px;max-height:320px;overflow-y:auto;overflow-x:hidden;margin-bottom:8px;"></div>
+            <div id="sflf-sec0-tree" data-testid="snowsight-hierarchy-tree" style="background:#18181b;border:1px solid #3f3f46;border-radius:6px;max-height:280px;overflow-y:auto;overflow-x:hidden;margin-bottom:8px;"></div>
+            <div id="sflf-sec0-postgres-block" data-testid="snowflake-postgres-account-block" style="background:#18181b;border:1px solid #3f3f46;border-radius:6px;max-height:160px;overflow-y:auto;overflow-x:hidden;margin-bottom:8px;"></div>
             <div id="sflf-cone-summary-bar" style="font-size:10.5px;color:#29B5E8;font-weight:600;margin-bottom:6px;"></div>
             <div id="sflf-ctx-objects-summary" style="font-size:10px;color:#a1a1aa;background:#18181b;padding:6px 10px;border-radius:6px;border:1px solid #3f3f46;"></div>
           </div>
 
           <div id="sflf-auto-sync-status-badge" data-testid="hub-auto-sync-status-badge" style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;background:#09090b;border:1px solid rgba(16,185,129,0.45);color:#a7f3d0;padding:6px 10px;border-radius:6px;font-size:10.5px;">
-            <span><strong>Auto-Replicated to Snowflake:</strong> <code>LANGFLOW_FLOW_RUNS</code> · <code>LANGFLOW_FLOW_SPANS</code> · <code>LANGFLOW_AUDIT_LOG</code></span>
+            <span><strong>Auto-Replicated to Snowflake:</strong> <code>LANGFLOW_FLOW_ACTIVITY</code> · <code>LANGFLOW_FLOW_RUNS</code> · <code>LANGFLOW_FLOW_SPANS</code> · <code>LANGFLOW_AUDIT_LOG</code></span>
             <span id="sflf-auto-sync-detail" style="color:#6ee7b7;font-family:'JetBrains Mono',monospace;">Active</span>
           </div>
         </div>
@@ -2218,32 +2700,11 @@
       };
     }
 
-    // Section 0 Snowsight Hierarchical Tree & Search event listeners
-    const ctxDbSel = document.getElementById("sflf-ctx-db");
-    const ctxSchSel = document.getElementById("sflf-ctx-schema");
+    // Section 0 Snowsight Hierarchical Tree (Block 1), Postgres Account-Level (Block 2) & Search event listeners
     const treeSearchInput = document.getElementById("sflf-sec0-tree-search");
     const treeContainer = document.getElementById("sflf-sec0-tree");
+    const pgContainer = document.getElementById("sflf-sec0-postgres-block");
 
-    if (ctxDbSel) {
-      ctxDbSel.onchange = async function () {
-        const chosenDb = ctxDbSel.value;
-        sfState.database = chosenDb;
-        treeUiState.expandedDbs[chosenDb] = true;
-        const schemasForDb = await lazyLoadSchemasForDatabase(chosenDb);
-        sfState.schema = (schemasForDb && schemasForDb[0]) || "CORE";
-        treeUiState.expandedSchemas[`${chosenDb}.${sfState.schema}`] = true;
-        await lazyLoadObjectsForSchema(chosenDb, sfState.schema);
-        refreshHubModalPrivilegeAndContextViews();
-      };
-    }
-    if (ctxSchSel) {
-      ctxSchSel.onchange = async function () {
-        sfState.schema = ctxSchSel.value;
-        treeUiState.expandedSchemas[`${sfState.database}.${sfState.schema}`] = true;
-        await lazyLoadObjectsForSchema(sfState.database, sfState.schema);
-        refreshHubModalPrivilegeAndContextViews();
-      };
-    }
     if (treeSearchInput) {
       treeSearchInput.addEventListener("input", function () {
         treeUiState.searchQuery = treeSearchInput.value || "";
@@ -2280,7 +2741,7 @@
         }
       });
 
-      // W2-R4-04: Instantaneous (<1ms) in-place checkbox updates via updateTreeCheckboxesInPlace
+      // CTX-ARCH-05 & W2-R4-04: Zero-lag (<5ms) in-place checkbox updates via full_databases / full_schemas & updateTreeCheckboxesInPlace
       treeContainer.addEventListener("change", function (ev) {
         const cb = ev.target;
         if (!cb || !cb.classList) return;
@@ -2290,36 +2751,14 @@
           toggleTreeDatabaseSelection(db, isChecked);
           updateTreeCheckboxesInPlace(treeContainer, sfState.catalog);
           scheduleDebouncedContextPersist();
-          const hasCachedSchemas =
-            sfState.catalog &&
-            sfState.catalog.schemas_by_db &&
-            Array.isArray(sfState.catalog.schemas_by_db[db]) &&
-            sfState.catalog.schemas_by_db[db].length > 0;
-          if (!hasCachedSchemas) {
-            lazyLoadSchemasForDatabase(db).then(function () {
-              toggleTreeDatabaseSelection(db, isChecked);
-              updateTreeCheckboxesInPlace(treeContainer, sfState.catalog);
-            });
-          }
         } else if (cb.classList.contains("sflf-tree-schema-cb")) {
           const db = cb.getAttribute("data-db");
           const sch = cb.getAttribute("data-schema");
           if (db && sch) {
             const isChecked = !!cb.checked;
-            const pairKey = `${db}.${sch}`;
             toggleTreeSchemaSelection(db, sch, isChecked);
             updateTreeCheckboxesInPlace(treeContainer, sfState.catalog);
             scheduleDebouncedContextPersist();
-            const hasCachedObjs =
-              sfState.catalog &&
-              sfState.catalog.objects_by_db_schema &&
-              sfState.catalog.objects_by_db_schema[pairKey];
-            if (!hasCachedObjs) {
-              lazyLoadObjectsForSchema(db, sch).then(function () {
-                toggleTreeSchemaSelection(db, sch, isChecked);
-                updateTreeCheckboxesInPlace(treeContainer, sfState.catalog);
-              });
-            }
           }
         } else if (cb.classList.contains("sflf-tree-cat-cb")) {
           const pairKey = cb.getAttribute("data-pair");
@@ -2342,12 +2781,43 @@
       });
     }
 
+    if (pgContainer) {
+      pgContainer.addEventListener("click", function (ev) {
+        const target = ev.target;
+        if (!target || !target.classList) return;
+        if (target.classList.contains("sflf-toggle-postgres-inst")) {
+          const inst = target.getAttribute("data-postgres-instance");
+          if (!inst) return;
+          treeUiState.expandedPostgresInstances[inst] = !treeUiState.expandedPostgresInstances[inst];
+          refreshHubModalPrivilegeAndContextViews();
+        }
+      });
+      pgContainer.addEventListener("change", function (ev) {
+        const cb = ev.target;
+        if (!cb || !cb.classList) return;
+        if (cb.classList.contains("sflf-postgres-instance-cb")) {
+          const inst = cb.getAttribute("data-postgres-instance") || cb.value;
+          if (inst) {
+            togglePostgresInstanceSelection(inst, !!cb.checked);
+            updateTreeCheckboxesInPlace(treeContainer, sfState.catalog);
+            scheduleDebouncedContextPersist();
+          }
+        } else if (cb.classList.contains("sflf-postgres-table-cb")) {
+          const inst = cb.getAttribute("data-postgres-instance");
+          const tbl = cb.getAttribute("data-postgres-table") || cb.value;
+          if (inst && tbl) {
+            togglePostgresTableSelection(inst, tbl, !!cb.checked);
+            updateTreeCheckboxesInPlace(treeContainer, sfState.catalog);
+            scheduleDebouncedContextPersist();
+          }
+        }
+      });
+    }
+
     const refreshCatBtn = document.getElementById("sflf-btn-refresh-catalog");
     if (refreshCatBtn) {
       refreshCatBtn.onclick = async function () {
-        const db = (ctxDbSel && ctxDbSel.value) || sfState.database;
-        const sch = (ctxSchSel && ctxSchSel.value) || sfState.schema;
-        await fetchSnowflakeCatalog(db, sch);
+        await fetchSnowflakeCatalog(sfState.database, sfState.schema);
         refreshHubModalPrivilegeAndContextViews();
       };
     }

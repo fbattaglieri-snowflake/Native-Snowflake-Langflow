@@ -25,6 +25,7 @@ from .fastapi_live_bridge import (
     EMBEDDING_PROVIDERS_CATALOG,
     EXTERNAL_EMBEDDING_PROVIDERS,
     LEGACY_MEMORY_TYPE_ALIASES,
+    get_current_snowflake_flow_id,
     resolve_canonical_memory_type,
     resolve_memory_embedding_dimension,
 )
@@ -149,20 +150,17 @@ class SnowflakeAPIRouter:
 
         # State stores invalidated or scoped by context_epoch / role
         self.role_scoped_cache: dict[str, Any] = {}
+        self.role_accessible_catalog: dict[str, dict[str, Any]] = {}
         self.audit_outbox: list[dict[str, Any]] = []
+        self.activity_outbox: list[dict[str, Any]] = []
+        self.soft_deleted_activity_ids: set[str] = set()
         self.imported_flows: dict[str, dict[str, Any]] = {}
         self.memories_registry: dict[str, dict[str, Any]] = {}
         self.a2a_published_flows: dict[str, dict[str, Any]] = {}
         self.messages_store: dict[str, dict[str, Any]] = {}
         self.contexts_by_flow_id: dict[str, dict[str, Any]] = {}
         self.active_flow_id: str | None = None
-        self.selected_context: dict[str, Any] = {
-            "databases": ["<DATABASE>"],
-            "schemas_by_db": {"<DATABASE>": ["<SCHEMA>", "PUBLIC"]},
-            "objects_by_db_schema": {},
-            "selected_objects": {},
-            "visible_objects": {},
-        }
+        self.selected_context: dict[str, Any] = self._default_context_template()
         self.global_variables: dict[str, dict[str, Any]] = {
             "SNOWFLAKE_ACTIVE_ROLE": {
                 "name": "SNOWFLAKE_ACTIVE_ROLE",
@@ -189,6 +187,234 @@ class SnowflakeAPIRouter:
                 "source": "project_settings",
             },
         }
+
+    @staticmethod
+    def _default_context_template() -> dict[str, Any]:
+        return {
+            "database": "<DATABASE>",
+            "schema": "<SCHEMA>",
+            "databases": ["<DATABASE>"],
+            "schemas_by_db": {"<DATABASE>": ["<SCHEMA>", "PUBLIC"]},
+            "full_databases": [],
+            "full_schemas": [],
+            "postgres_instances": [],
+            "selected_postgres_instances": [],
+            "postgres_tables_by_instance": {},
+            "objects_by_db_schema": {},
+            "selected_objects": {},
+            "visible_objects": {},
+        }
+
+    def compute_role_effective_context(
+        self,
+        flow_id: str | None = None,
+        role: str | None = None,
+    ) -> dict[str, Any]:
+        """Compute non-destructive intersection `Effective Context = Stored Flow Context ∩ Active Role Accessible Catalog` (`CTX-ARCH-07` #1)."""
+        clean_fid = str(flow_id or get_current_snowflake_flow_id() or "").strip() or None
+        stored_ctx = copy.deepcopy(
+            self.contexts_by_flow_id.get(clean_fid, self._default_context_template())
+            if clean_fid
+            else self.selected_context
+        )
+        target_role = (role or self.active_role or "PUBLIC").strip().upper()
+        role_cat = self.role_accessible_catalog.get(target_role)
+        is_restricted_public = target_role in ("PUBLIC", "VIEWER_ROLE", "ROLE_VIEWER", "SNOWFLAKE_LANGFLOW_VIEWER_ROLE")
+
+        allowed_dbs: set[str] | None = None
+        allowed_schemas_by_db: dict[str, set[str]] = {}
+        allowed_objs_by_pair: dict[str, dict[str, set[str]]] = {}
+        allowed_pg: set[str] | None = None
+
+        if isinstance(role_cat, dict):
+            if "databases" in role_cat and isinstance(role_cat["databases"], (list, set, tuple)):
+                allowed_dbs = {str(d).strip().upper() for d in role_cat["databases"] if str(d).strip()}
+            if isinstance(role_cat.get("schemas_by_db"), dict):
+                for k, v in role_cat["schemas_by_db"].items():
+                    if isinstance(v, (list, set, tuple)):
+                        allowed_schemas_by_db[str(k).strip().upper()] = {str(s).strip().upper() for s in v if str(s).strip()}
+            if isinstance(role_cat.get("objects_by_db_schema"), dict):
+                for pk, pv in role_cat["objects_by_db_schema"].items():
+                    if isinstance(pv, dict):
+                        allowed_objs_by_pair[str(pk).strip().upper()] = {
+                            str(ck).strip().lower(): {str(it).strip().upper() for it in cv if str(it).strip()}
+                            for ck, cv in pv.items()
+                            if isinstance(cv, (list, set, tuple))
+                        }
+            if "postgres_instances" in role_cat and isinstance(role_cat["postgres_instances"], (list, set, tuple)):
+                allowed_pg = {str(p).strip().upper() for p in role_cat["postgres_instances"] if str(p).strip()}
+
+        inaccessible: list[dict[str, Any]] = []
+        retained_count = 0
+        effective_ctx = copy.deepcopy(stored_ctx)
+
+        stored_dbs = [str(d).strip().upper() for d in (stored_ctx.get("databases") or []) if str(d).strip()]
+        if allowed_dbs is not None:
+            eff_dbs = []
+            for d in stored_dbs:
+                if d in allowed_dbs:
+                    eff_dbs.append(d)
+                else:
+                    inaccessible.append(
+                        {
+                            "fqn": d,
+                            "category": "database",
+                            "role": target_role,
+                            "locked_badge": f"🔒 Non accessibile col ruolo {target_role}",
+                        }
+                    )
+            effective_ctx["databases"] = eff_dbs
+
+        eff_schemas_map: dict[str, list[str]] = {}
+        for db_k, sch_list in (stored_ctx.get("schemas_by_db") or {}).items():
+            db_u = str(db_k).strip().upper()
+            if allowed_dbs is not None and db_u not in allowed_dbs:
+                continue
+            if not isinstance(sch_list, list):
+                continue
+            kept_sch: list[str] = []
+            for s in sch_list:
+                s_u = str(s).strip().upper()
+                sch_allowed = True
+                if db_u in allowed_schemas_by_db and s_u not in allowed_schemas_by_db[db_u]:
+                    sch_allowed = False
+                elif is_restricted_public and s_u != "PUBLIC" and not role_cat:
+                    sch_allowed = False
+                if sch_allowed:
+                    kept_sch.append(s_u)
+                else:
+                    inaccessible.append(
+                        {
+                            "fqn": f"{db_u}.{s_u}",
+                            "category": "schema",
+                            "role": target_role,
+                            "locked_badge": f"🔒 Non accessibile col ruolo {target_role}",
+                        }
+                    )
+            eff_schemas_map[db_u] = kept_sch
+        effective_ctx["schemas_by_db"] = eff_schemas_map
+
+        for map_key in ("objects_by_db_schema", "selected_objects"):
+            src_map = stored_ctx.get(map_key)
+            if not isinstance(src_map, dict):
+                continue
+            new_map: dict[str, Any] = {}
+            for pair_k, pair_v in src_map.items():
+                pair_u = str(pair_k).strip().upper()
+                parts = pair_u.split(".", 1)
+                db_u = parts[0] if parts else ""
+                sch_u = parts[1] if len(parts) > 1 else ""
+                pair_allowed = True
+                if allowed_dbs is not None and db_u not in allowed_dbs:
+                    pair_allowed = False
+                elif db_u in allowed_schemas_by_db and sch_u not in allowed_schemas_by_db[db_u]:
+                    pair_allowed = False
+                elif is_restricted_public and sch_u != "PUBLIC" and not role_cat:
+                    pair_allowed = False
+                if not isinstance(pair_v, dict):
+                    if pair_allowed:
+                        new_map[pair_u] = copy.deepcopy(pair_v)
+                    continue
+                new_bucket: dict[str, list[str]] = {}
+                for cat_k, items in pair_v.items():
+                    cat_l = str(cat_k).strip().lower()
+                    if not isinstance(items, list):
+                        continue
+                    kept_items: list[str] = []
+                    for item in items:
+                        item_str = str(item).strip()
+                        item_u = item_str.upper()
+                        obj_allowed = pair_allowed
+                        if obj_allowed and pair_u in allowed_objs_by_pair and cat_l in allowed_objs_by_pair[pair_u]:
+                            obj_allowed = item_u in allowed_objs_by_pair[pair_u][cat_l]
+                        if obj_allowed:
+                            kept_items.append(item_str)
+                            if map_key == "objects_by_db_schema":
+                                retained_count += 1
+                        else:
+                            if map_key == "objects_by_db_schema":
+                                inaccessible.append(
+                                    {
+                                        "fqn": f"{pair_u}.{item_str}",
+                                        "database": db_u,
+                                        "schema": sch_u,
+                                        "name": item_str,
+                                        "category": cat_l,
+                                        "role": target_role,
+                                        "locked_badge": f"🔒 Non accessibile col ruolo {target_role}",
+                                    }
+                                )
+                    new_bucket[cat_l] = kept_items
+                new_map[pair_u] = new_bucket
+            effective_ctx[map_key] = new_map
+
+        stored_pg = [str(p).strip() for p in (stored_ctx.get("postgres_instances") or []) if str(p).strip()]
+        if allowed_pg is not None:
+            kept_pg = []
+            for p in stored_pg:
+                if p.upper() in allowed_pg:
+                    kept_pg.append(p)
+                else:
+                    inaccessible.append(
+                        {
+                            "fqn": p,
+                            "name": p,
+                            "category": "postgres_instances",
+                            "role": target_role,
+                            "locked_badge": f"🔒 Non accessibile col ruolo {target_role}",
+                        }
+                    )
+            effective_ctx["postgres_instances"] = kept_pg
+            effective_ctx["selected_postgres_instances"] = list(kept_pg)
+
+        return {
+            "stored_context": stored_ctx,
+            "effective_context": effective_ctx,
+            "inaccessible_objects": inaccessible,
+            "retained_objects_count": retained_count,
+            "hidden_by_role_count": len(inaccessible),
+        }
+
+    def register_object_in_context(
+        self,
+        database: str | None = None,
+        schema: str | None = None,
+        category: str = "tables",
+        object_name: str = "",
+        flow_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Auto-register a provisioned Snowflake object in the flow's isolated context (`CTX-ARCH-07` #2)."""
+        clean_fid = str(flow_id or get_current_snowflake_flow_id() or "").strip() or None
+        target_ctx = (
+            self.contexts_by_flow_id.setdefault(clean_fid, self._default_context_template())
+            if clean_fid
+            else self.selected_context
+        )
+        db = str(database or target_ctx.get("database") or "<DATABASE>").strip().upper()
+        sch = str(schema or target_ctx.get("schema") or "<SCHEMA>").strip().upper()
+        cat = str(category or "tables").strip().lower()
+        clean_name = str(object_name or "").strip()
+        if not clean_name:
+            return target_ctx
+        if cat in ("postgres", "postgres_instance", "postgres_instances"):
+            for pg_k in ("postgres_instances", "selected_postgres_instances"):
+                pg_list = target_ctx.setdefault(pg_k, [])
+                if clean_name not in pg_list:
+                    pg_list.append(clean_name)
+        else:
+            dbs = target_ctx.setdefault("databases", [])
+            if db not in dbs:
+                dbs.append(db)
+            sch_list = target_ctx.setdefault("schemas_by_db", {}).setdefault(db, [])
+            if sch not in sch_list:
+                sch_list.append(sch)
+            pair_key = f"{db}.{sch}"
+            cat_list = target_ctx.setdefault("objects_by_db_schema", {}).setdefault(pair_key, {}).setdefault(cat, [])
+            if clean_name not in cat_list:
+                cat_list.append(clean_name)
+        self.context_epoch += 1
+        self.role_scoped_cache.clear()
+        return copy.deepcopy(target_ctx)
 
     # ------------------------------------------------------------------
     # Audit & Explicit 4-Code Denial Builders
@@ -275,16 +501,30 @@ class SnowflakeAPIRouter:
         return permission_key in granted or "*" in granted
 
     # ------------------------------------------------------------------
-    # 1. Context & Active Role Switcher (REQ-02, ADR-003, ADR-004)
+    # 1. Context & Active Role Switcher (REQ-02, ADR-003, ADR-004, CTX-ARCH-03..07)
     # ------------------------------------------------------------------
     def get_session_context(self, flow_id: str | None = None) -> SnowflakeAPIResponse:
         """GET /api/v1/snowflake/context"""
-        clean_fid = str(flow_id).strip() if flow_id else None
+        clean_fid = str(flow_id or get_current_snowflake_flow_id() or "").strip() or None
         if clean_fid:
             self.active_flow_id = clean_fid
-            flow_ctx = self.contexts_by_flow_id.setdefault(clean_fid, copy.deepcopy(self.selected_context))
+            if clean_fid not in self.contexts_by_flow_id:
+                imp = self.imported_flows.get(clean_fid)
+                emb = (imp.get("data") or {}).get("snowflake_context") if isinstance(imp, dict) else None
+                if isinstance(emb, dict) and emb:
+                    tpl = self._default_context_template()
+                    tpl.update(copy.deepcopy(emb))
+                    tpl["flow_id"] = clean_fid
+                    self.contexts_by_flow_id[clean_fid] = tpl
+                else:
+                    fresh = self._default_context_template()
+                    fresh["flow_id"] = clean_fid
+                    self.contexts_by_flow_id[clean_fid] = fresh
+            flow_ctx = self.contexts_by_flow_id[clean_fid]
         else:
             flow_ctx = self.selected_context
+
+        intersection = self.compute_role_effective_context(clean_fid, self.active_role)
         return SnowflakeAPIResponse(
             status_code=200,
             body={
@@ -297,6 +537,16 @@ class SnowflakeAPIRouter:
                 "execution_mode": self.execution_mode,
                 "secondary_roles_mode": self.secondary_roles_mode,
                 "selected_context": copy.deepcopy(flow_ctx),
+                "effective_context": intersection["effective_context"],
+                "inaccessible_objects": intersection["inaccessible_objects"],
+                "retained_objects_count": intersection["retained_objects_count"],
+                "hidden_by_role_count": intersection["hidden_by_role_count"],
+                "traces_tables": {
+                    "activity": "<DATABASE>.<SCHEMA>.LANGFLOW_FLOW_ACTIVITY",
+                    "runs": "<DATABASE>.<SCHEMA>.LANGFLOW_FLOW_RUNS",
+                    "spans": "<DATABASE>.<SCHEMA>.LANGFLOW_FLOW_SPANS",
+                    "audit": "<DATABASE>.<SCHEMA>.LANGFLOW_AUDIT_LOG",
+                },
                 "verified_current_role_sql": "SELECT CURRENT_ROLE()",
             },
         )
@@ -307,20 +557,69 @@ class SnowflakeAPIRouter:
         flow_id: str | None = None,
     ) -> SnowflakeAPIResponse:
         """POST|PUT /api/v1/snowflake/context"""
-        clean_fid = str(flow_id or payload.get("flow_id") or "").strip() or None
+        incoming_ctx = payload.get("selected_context") if isinstance(payload.get("selected_context"), dict) else {}
+        clean_fid = str(
+            flow_id
+            or payload.get("flow_id")
+            or incoming_ctx.get("flow_id")
+            or get_current_snowflake_flow_id()
+            or ""
+        ).strip() or None
         target_ctx = (
-            copy.deepcopy(self.contexts_by_flow_id.get(clean_fid, self.selected_context))
+            copy.deepcopy(self.contexts_by_flow_id.get(clean_fid, self._default_context_template()))
             if clean_fid
             else copy.deepcopy(self.selected_context)
         )
-        for key in ("databases", "schemas_by_db", "objects_by_db_schema", "selected_objects", "visible_objects"):
+        for key in (
+            "database",
+            "schema",
+            "databases",
+            "schemas_by_db",
+            "full_databases",
+            "full_schemas",
+            "postgres_instances",
+            "selected_postgres_instances",
+            "postgres_tables_by_instance",
+            "objects_by_db_schema",
+            "selected_objects",
+            "visible_objects",
+        ):
             if key in payload:
                 target_ctx[key] = copy.deepcopy(payload[key])
+            elif key in incoming_ctx:
+                target_ctx[key] = copy.deepcopy(incoming_ctx[key])
+
+        if target_ctx.get("postgres_instances") and not target_ctx.get("selected_postgres_instances"):
+            target_ctx["selected_postgres_instances"] = list(target_ctx["postgres_instances"])
+        elif target_ctx.get("selected_postgres_instances") and not target_ctx.get("postgres_instances"):
+            target_ctx["postgres_instances"] = list(target_ctx["selected_postgres_instances"])
+
+        for fd in target_ctx.get("full_databases") or []:
+            fd_u = str(fd).strip().upper()
+            if fd_u and fd_u not in (target_ctx.get("databases") or []):
+                target_ctx.setdefault("databases", []).append(fd_u)
+        for fs in target_ctx.get("full_schemas") or []:
+            parts = str(fs).strip().upper().split(".", 1)
+            if len(parts) == 2 and parts[0] and parts[1]:
+                if parts[0] not in (target_ctx.get("databases") or []):
+                    target_ctx.setdefault("databases", []).append(parts[0])
+                sch_l = target_ctx.setdefault("schemas_by_db", {}).setdefault(parts[0], [])
+                if parts[1] not in sch_l:
+                    sch_l.append(parts[1])
+
         self.context_epoch += 1
-        self.selected_context = copy.deepcopy(target_ctx)
+        target_ctx["active_role"] = self.active_role
+        target_ctx["context_epoch"] = self.context_epoch
         if clean_fid:
+            target_ctx["flow_id"] = clean_fid
             self.active_flow_id = clean_fid
             self.contexts_by_flow_id[clean_fid] = copy.deepcopy(target_ctx)
+            if clean_fid in self.imported_flows and isinstance(self.imported_flows[clean_fid].get("data"), dict):
+                self.imported_flows[clean_fid]["data"]["snowflake_context"] = copy.deepcopy(target_ctx)
+        else:
+            self.selected_context = copy.deepcopy(target_ctx)
+
+        intersection = self.compute_role_effective_context(clean_fid, self.active_role)
         self._record_audit_event(
             action="UPDATE_CONTEXT",
             outcome="SUCCESS",
@@ -336,6 +635,10 @@ class SnowflakeAPIRouter:
                 "active_role": self.active_role,
                 "context_epoch": self.context_epoch,
                 "selected_context": copy.deepcopy(target_ctx),
+                "effective_context": intersection["effective_context"],
+                "inaccessible_objects": intersection["inaccessible_objects"],
+                "retained_objects_count": intersection["retained_objects_count"],
+                "hidden_by_role_count": intersection["hidden_by_role_count"],
             },
         )
 
@@ -344,6 +647,7 @@ class SnowflakeAPIRouter:
         requested_role: str,
         use_secondary_roles_all: bool = False,
         allow_service_role_fallback: bool = False,
+        flow_id: str | None = None,
     ) -> SnowflakeAPIResponse:
         """POST /api/v1/snowflake/role"""
         if use_secondary_roles_all:
@@ -370,15 +674,23 @@ class SnowflakeAPIRouter:
         previous_role = self.active_role
         self.active_role = clean_role
         self.context_epoch += 1
-        # Invalidate all role-scoped caches immediately on role switch
+        # Invalidate all role-scoped caches immediately on role switch without destroying stored flow context (`CTX-ARCH-07` #1)
         self.role_scoped_cache.clear()
         self.global_variables["SNOWFLAKE_ACTIVE_ROLE"]["value"] = self.active_role
+        eff_fid = str(flow_id or get_current_snowflake_flow_id() or self.active_flow_id or "").strip() or None
+        intersection = self.compute_role_effective_context(eff_fid, self.active_role)
 
         self._record_audit_event(
             action="SWITCH_ACTIVE_ROLE",
             outcome="SUCCESS",
             target_object=self.active_role,
-            details={"previous_role": previous_role, "new_role": self.active_role},
+            details={
+                "previous_role": previous_role,
+                "new_role": self.active_role,
+                "flow_id": eff_fid,
+                "retained_objects_count": intersection["retained_objects_count"],
+                "hidden_by_role_count": intersection["hidden_by_role_count"],
+            },
         )
         return SnowflakeAPIResponse(
             status_code=200,
@@ -386,8 +698,43 @@ class SnowflakeAPIRouter:
                 "previous_role": previous_role,
                 "active_role": self.active_role,
                 "context_epoch": self.context_epoch,
+                "flow_id": eff_fid,
+                "selected_context": intersection["stored_context"],
+                "effective_context": intersection["effective_context"],
+                "inaccessible_objects": intersection["inaccessible_objects"],
+                "retained_objects_count": intersection["retained_objects_count"],
+                "hidden_by_role_count": intersection["hidden_by_role_count"],
                 "cache_invalidated": True,
                 "verified_via": "SELECT CURRENT_ROLE()",
+            },
+        )
+
+    def soft_delete_flow_activity(
+        self,
+        activity_ids: list[str] | str,
+        flow_id: str | None = None,
+    ) -> SnowflakeAPIResponse:
+        """Soft-delete Flow Activity items (`DELETED_IN_UI_AT = CURRENT_TIMESTAMP()`) without deleting from Snowflake (`CTX-ARCH-07` #5)."""
+        ids = (
+            [x.strip() for x in activity_ids.split(",") if x.strip()]
+            if isinstance(activity_ids, str)
+            else [str(x).strip() for x in activity_ids if str(x).strip()]
+        )
+        now_iso = datetime.now(timezone.utc).isoformat()
+        for item_id in ids:
+            self.soft_deleted_activity_ids.add(item_id)
+        for item in self.activity_outbox:
+            if str(item.get("activity_id") or item.get("id") or "") in self.soft_deleted_activity_ids:
+                item["deleted_in_ui_at"] = now_iso
+        return SnowflakeAPIResponse(
+            status_code=200,
+            body={
+                "ok": True,
+                "soft_deleted_ids": ids,
+                "flow_id": flow_id,
+                "deleted_in_ui_at": now_iso,
+                "physical_delete_executed": False,
+                "snowflake_retained": True,
             },
         )
 
@@ -488,6 +835,19 @@ class SnowflakeAPIRouter:
 
         flow_id = str(sanitized.get("id") or uuid.uuid4())
         sanitized["id"] = flow_id
+        sanitized_data = sanitized.get("data")
+        if isinstance(sanitized_data, dict):
+            emb_ctx = sanitized_data.get("snowflake_context")
+            if isinstance(emb_ctx, dict) and emb_ctx:
+                tpl = self._default_context_template()
+                tpl.update(copy.deepcopy(emb_ctx))
+                tpl["flow_id"] = flow_id
+                tpl["active_role"] = self.active_role
+                tpl["context_epoch"] = self.context_epoch
+                self.contexts_by_flow_id[flow_id] = copy.deepcopy(tpl)
+                sanitized_data["snowflake_context"] = copy.deepcopy(tpl)
+            elif flow_id in self.contexts_by_flow_id:
+                sanitized_data["snowflake_context"] = copy.deepcopy(self.contexts_by_flow_id[flow_id])
         sanitized["snowflake_import_metadata"] = {
             **redact_secrets_in_obj(source_metadata),
             "imported_by_role": self.active_role,
@@ -495,6 +855,49 @@ class SnowflakeAPIRouter:
             "custom_code_executed_on_import": False,
         }
         return sanitized, None
+
+    def duplicate_flow(
+        self,
+        source_flow_id: str,
+        new_flow_id: str | None = None,
+        new_name: str | None = None,
+    ) -> SnowflakeAPIResponse:
+        """Duplicate a flow and preserve its isolated `snowflake_context` (`CTX-ARCH-07` #3)."""
+        src_fid = str(source_flow_id or "").strip()
+        dst_fid = str(new_flow_id or uuid.uuid4()).strip()
+        src_ctx = copy.deepcopy(
+            self.contexts_by_flow_id.get(src_fid, self._default_context_template())
+        )
+        src_ctx["flow_id"] = dst_fid
+        src_ctx["active_role"] = self.active_role
+        self.context_epoch += 1
+        src_ctx["context_epoch"] = self.context_epoch
+        self.contexts_by_flow_id[dst_fid] = copy.deepcopy(src_ctx)
+
+        src_flow = copy.deepcopy(
+            self.imported_flows.get(
+                src_fid,
+                {
+                    "id": src_fid,
+                    "name": f"Flow {src_fid}",
+                    "data": {"nodes": [], "edges": [], "snowflake_context": copy.deepcopy(src_ctx)},
+                },
+            )
+        )
+        src_flow["id"] = dst_fid
+        src_flow["name"] = new_name or f"{src_flow.get('name', 'Flow')} (Copy)"
+        src_flow.setdefault("data", {})["snowflake_context"] = copy.deepcopy(src_ctx)
+        self.imported_flows[dst_fid] = src_flow
+        return SnowflakeAPIResponse(
+            status_code=201,
+            body={
+                "ok": True,
+                "source_flow_id": src_fid,
+                "flow_id": dst_fid,
+                "flow": src_flow,
+                "selected_context": copy.deepcopy(src_ctx),
+            },
+        )
 
     def import_flow_from_upload(
         self,

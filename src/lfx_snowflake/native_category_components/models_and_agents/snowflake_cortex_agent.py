@@ -9,18 +9,26 @@ from lfx.io import DropdownInput, MessageTextInput, Output, StrInput
 from lfx.schema.message import Message
 
 from lfx_snowflake.fastapi_live_bridge import LIVE_BRIDGE
+from lfx_snowflake.native_category_components.llm_operations.snowflake_object_provisioner import (
+    _resolve_flow_id,
+)
 
 
-def _agent_databases() -> list[str]:
-    return LIVE_BRIDGE.get_context_databases()
+def _agent_databases(flow_id: str | None = None) -> list[str]:
+    return LIVE_BRIDGE.get_context_databases(flow_id=flow_id or _resolve_flow_id())
 
 
-def _agent_schemas(database: str | None = None) -> list[str]:
-    return LIVE_BRIDGE.get_context_schemas(database)
+def _agent_schemas(database: str | None = None, flow_id: str | None = None) -> list[str]:
+    return LIVE_BRIDGE.get_context_schemas(database, flow_id=flow_id or _resolve_flow_id())
 
 
-def _cortex_agents(database: str = "SNOWFLAKE_LANGFLOW", schema: str = "CORE") -> list[str]:
-    agents = list(LIVE_BRIDGE.get_context_objects(database, schema, "cortex_agents"))
+def _cortex_agents(
+    database: str = "SNOWFLAKE_LANGFLOW",
+    schema: str = "CORE",
+    flow_id: str | None = None,
+) -> list[str]:
+    eff_fid = flow_id or _resolve_flow_id()
+    agents = list(LIVE_BRIDGE.get_context_objects(database, schema, "cortex_agents", flow_id=eff_fid))
     if not agents:
         agents = [f"{database}.{schema}.EXAMPLE_AGENT", "EXAMPLE_AGENT"]
     return agents
@@ -99,8 +107,9 @@ class SnowflakeCortexAgentA2AComponent(Component):
     def update_build_config(
         self, build_config: dict[str, Any], field_value: Any, field_name: str | None = None
     ) -> dict[str, Any]:
+        flow_id = _resolve_flow_id(self, build_config)
         if "database" in build_config:
-            build_config["database"]["options"] = _agent_databases()
+            build_config["database"]["options"] = _agent_databases(flow_id=flow_id)
             if field_name == "database" and isinstance(field_value, str):
                 build_config["database"]["value"] = field_value
         db = (
@@ -108,7 +117,7 @@ class SnowflakeCortexAgentA2AComponent(Component):
             if field_name == "database" and isinstance(field_value, str)
             else build_config.get("database", {}).get("value") or LIVE_BRIDGE.database or "SNOWFLAKE_LANGFLOW"
         )
-        schemas = _agent_schemas(db)
+        schemas = _agent_schemas(db, flow_id=flow_id)
         if "schema_name" in build_config:
             build_config["schema_name"]["options"] = schemas
             cur_sch = build_config["schema_name"].get("value")
@@ -122,7 +131,7 @@ class SnowflakeCortexAgentA2AComponent(Component):
             else build_config.get("schema_name", {}).get("value") or (schemas[0] if schemas else "CORE")
         )
         if "cortex_agent" in build_config:
-            agent_opts = _cortex_agents(db, sch)
+            agent_opts = _cortex_agents(db, sch, flow_id=flow_id)
             build_config["cortex_agent"]["options"] = agent_opts
             if agent_opts and build_config["cortex_agent"].get("value") not in agent_opts:
                 build_config["cortex_agent"]["value"] = agent_opts[0]

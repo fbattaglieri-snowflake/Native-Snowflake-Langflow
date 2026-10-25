@@ -16,14 +16,19 @@ from lfx_snowflake.fastapi_live_bridge import LIVE_BRIDGE
 from lfx_snowflake.native_category_components.files_and_knowledge.snowflake_cortex_search_parse_document import (
     CORTEX_SEARCH_PIPELINE_GUIDE_STEP_1,
 )
+from lfx_snowflake.native_category_components.files_and_knowledge.snowflake_stage_files import (
+    _ddl_succeeded,
+    _register_created_object,
+    _resolve_flow_id,
+)
 
 
-def _database_options() -> list[str]:
-    return LIVE_BRIDGE.get_context_databases()
+def _database_options(flow_id: str | None = None) -> list[str]:
+    return LIVE_BRIDGE.get_context_databases(flow_id=flow_id or _resolve_flow_id())
 
 
-def _schema_options(database: str | None = None) -> list[str]:
-    return LIVE_BRIDGE.get_context_schemas(database)
+def _schema_options(database: str | None = None, flow_id: str | None = None) -> list[str]:
+    return LIVE_BRIDGE.get_context_schemas(database, flow_id=flow_id or _resolve_flow_id())
 
 
 class SnowflakeCortexSearchSplitTextComponent(Component):
@@ -141,15 +146,24 @@ class SnowflakeCortexSearchSplitTextComponent(Component):
     def update_build_config(
         self, build_config: dict[str, Any], field_value: Any, field_name: str | None = None
     ) -> dict[str, Any]:
+        flow_id = _resolve_flow_id(self, build_config)
         if "database" in build_config:
-            build_config["database"]["options"] = _database_options()
+            build_config["database"]["options"] = _database_options(flow_id=flow_id)
+            if field_name == "database" and isinstance(field_value, str):
+                build_config["database"]["value"] = field_value
         db_val = (
             field_value
             if field_name == "database" and isinstance(field_value, str)
             else build_config.get("database", {}).get("value") or "SNOWFLAKE_LANGFLOW"
         )
+        schemas = _schema_options(db_val, flow_id=flow_id)
         if "schema_name" in build_config:
-            build_config["schema_name"]["options"] = _schema_options(db_val)
+            build_config["schema_name"]["options"] = schemas
+            cur_sch = build_config["schema_name"].get("value")
+            if field_name == "schema_name" and isinstance(field_value, str):
+                build_config["schema_name"]["value"] = field_value
+            elif schemas and cur_sch not in schemas:
+                build_config["schema_name"]["value"] = schemas[0]
         return build_config
 
     def _build_spec_and_builder(self) -> tuple[CortexSearchSplitTextSpec, CortexSearchSplitTextBuilder]:
@@ -249,9 +263,25 @@ class SnowflakeCortexSearchSplitTextComponent(Component):
             denied = LIVE_BRIDGE.check_write_privilege_or_deny("SPLIT_TEXT_INSERT", spec.target_table_fqn)
             if denied:
                 raise ValueError(denied["message"])
-            LIVE_BRIDGE.execute_sql(table_ddl)
+            tbl_res = LIVE_BRIDGE.execute_sql(table_ddl)
+            if _ddl_succeeded(tbl_res):
+                _register_created_object(
+                    database=spec.database,
+                    schema=spec.schema,
+                    category="tables",
+                    object_name=spec.target_table,
+                    flow_id=_resolve_flow_id(self),
+                )
             if udf_ddl:
-                LIVE_BRIDGE.execute_sql(udf_ddl)
+                udf_res = LIVE_BRIDGE.execute_sql(udf_ddl)
+                if _ddl_succeeded(udf_res):
+                    _register_created_object(
+                        database=spec.database,
+                        schema=spec.schema,
+                        category="functions",
+                        object_name="LANGCHAIN_RECURSIVE_SPLIT_UDTF",
+                        flow_id=_resolve_flow_id(self),
+                    )
             LIVE_BRIDGE.execute_sql(insert_sql)
 
         dist_res = LIVE_BRIDGE.execute_sql(stats_sql["distribution_sql"])

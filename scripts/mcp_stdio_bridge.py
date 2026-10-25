@@ -73,6 +73,9 @@ class SnowflakeLangflowMCPBridge:
         api_key = os.environ.get("LANGFLOW_API_KEY", "").strip()
         if api_key:
             headers["x-api-key"] = api_key
+        flow_id = os.environ.get("SNOWFLAKE_FLOW_ID", "").strip()
+        if flow_id:
+            headers["X-Snowflake-Flow-Id"] = flow_id
         if self.session_id:
             headers["Mcp-Session-Id"] = self.session_id
         if self.protocol_version:

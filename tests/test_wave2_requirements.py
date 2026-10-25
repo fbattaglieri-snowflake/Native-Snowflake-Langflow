@@ -1610,6 +1610,46 @@ def test_proxy_components_ast_top_level_imports_and_origin_resolution(monkeypatc
     assert standard_langflow._get_base("ollama") == "http://ollama-unit-test.internal:11434/v1"
 
 
+def test_w2_r4_06b_and_ctx_arch_05_data_sources_purity_and_account_level_postgres() -> None:
+    """Verify W2-R4-06B & CTX-ARCH-05: Data Sources exclude technical memory tables and SnowflakePostgres starts at account-level postgres_instance."""
+    from lfx_snowflake.components.data_sources import (
+        SnowflakeDataSourcesComponent,
+        filter_business_data_source_objects,
+        is_technical_memory_table,
+    )
+    from lfx_snowflake.native_category_components.data_source.snowflake_postgres import SnowflakePostgresComponent
+    from lfx_snowflake.native_category_components.data_source.snowflake_tables import SnowflakeTablesComponent
+
+    assert is_technical_memory_table("MEM_GRAPH_STATE_CHECKPOINTS") is True
+    assert is_technical_memory_table("LANGFLOW_MEM_SUPPORT_TICKETS") is True
+    assert is_technical_memory_table("CUSTOMERS") is False
+
+    filtered = filter_business_data_source_objects(
+        ["ORDERS", "MEM_CHAT_WINDOW_HISTORY", "CUSTOMERS", "LANGFLOW_MEM_VEC_01"],
+        category="tables",
+    )
+    assert filtered == ["ORDERS", "CUSTOMERS"]
+
+    ds_comp = SnowflakeDataSourcesComponent()
+    cat_entries = ds_comp.browse_catalog(
+        active_role="ANALYST_ROLE",
+        available_objects=[
+            {"object_type": "STANDARD_TABLE", "object_fqn": "<DATABASE>.<SCHEMA>.ORDERS", "allowed_roles": ["ANALYST_ROLE"]},
+            {"object_type": "STANDARD_TABLE", "object_fqn": "<DATABASE>.<SCHEMA>.MEM_RUNNING_SUMMARIES", "allowed_roles": ["ANALYST_ROLE"]},
+        ],
+    )
+    assert len(cat_entries) == 1
+    assert cat_entries[0]["object_fqn"] == "<DATABASE>.<SCHEMA>.ORDERS"
+
+    # Data Sources components must not expose memory_catalog_ref input
+    tbl_input_names = [inp.name for inp in SnowflakeTablesComponent.inputs]
+    pg_input_names = [inp.name for inp in SnowflakePostgresComponent.inputs]
+    assert "memory_catalog_ref" not in tbl_input_names
+    assert "memory_catalog_ref" not in pg_input_names
+    assert pg_input_names[0] == "postgres_instance"
+
+
+
 
 
 

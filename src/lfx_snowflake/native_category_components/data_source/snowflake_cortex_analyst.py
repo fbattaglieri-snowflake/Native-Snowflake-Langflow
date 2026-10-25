@@ -13,21 +13,61 @@ from lfx_snowflake._lfx_compat import Tool
 from lfx_snowflake.fastapi_live_bridge import LIVE_BRIDGE
 
 
-def _analyst_databases() -> list[str]:
-    return LIVE_BRIDGE.get_context_databases()
+def _resolve_flow_id(component: Any = None, build_config: dict[str, Any] | None = None) -> str | None:
+    resolver = getattr(LIVE_BRIDGE, "_resolve_component_flow_id", None) or getattr(
+        LIVE_BRIDGE, "resolve_component_flow_id", None
+    )
+    if callable(resolver):
+        res = resolver(component, build_config)
+        if res:
+            return str(res).strip()
+    if isinstance(build_config, dict):
+        cfg_fid = build_config.get("_frontend_node_flow_id") or build_config.get("flow_id")
+        if isinstance(cfg_fid, dict):
+            cfg_fid = cfg_fid.get("value")
+        if cfg_fid and str(cfg_fid).strip():
+            return str(cfg_fid).strip()
+    if component is not None:
+        for attr in ("flow_id", "_flow_id"):
+            val = getattr(component, attr, None)
+            if val and str(val).strip():
+                return str(val).strip()
+        graph = getattr(component, "graph", None)
+        if graph is not None:
+            g_fid = getattr(graph, "flow_id", None) or getattr(graph, "_flow_id", None)
+            if g_fid and str(g_fid).strip():
+                return str(g_fid).strip()
+    cur_fn = getattr(LIVE_BRIDGE, "get_current_flow_id", None) or getattr(
+        LIVE_BRIDGE, "get_current_snowflake_flow_id", None
+    )
+    if callable(cur_fn):
+        cur = cur_fn()
+        if cur and str(cur).strip():
+            return str(cur).strip()
+    return None
 
 
-def _analyst_schemas(database: str | None = None) -> list[str]:
-    return LIVE_BRIDGE.get_context_schemas(database)
+def _analyst_databases(flow_id: str | None = None) -> list[str]:
+    return LIVE_BRIDGE.get_context_databases(flow_id=flow_id or _resolve_flow_id())
 
 
-def _analyst_sources(database: str, schema: str, source_mode: str) -> list[str]:
+def _analyst_schemas(database: str | None = None, flow_id: str | None = None) -> list[str]:
+    return LIVE_BRIDGE.get_context_schemas(database, flow_id=flow_id or _resolve_flow_id())
+
+
+def _analyst_sources(
+    database: str,
+    schema: str,
+    source_mode: str,
+    flow_id: str | None = None,
+) -> list[str]:
+    eff_fid = flow_id or _resolve_flow_id()
     if source_mode in ("Stage YAML", "Stage YAML Model"):
-        models = list(LIVE_BRIDGE.get_context_objects(database, schema, "semantic_models"))
+        models = list(LIVE_BRIDGE.get_context_objects(database, schema, "semantic_models", flow_id=eff_fid))
         if not models:
             models = [f"@{database}.{schema}.SNOWFLAKE_LANGFLOW_STAGE/semantic_model.yaml"]
         return models
-    views = list(LIVE_BRIDGE.get_context_objects(database, schema, "semantic_views"))
+    views = list(LIVE_BRIDGE.get_context_objects(database, schema, "semantic_views", flow_id=eff_fid))
     if not views:
         views = [f"{database}.{schema}.EXAMPLE_SEMANTIC_VIEW"]
     return views
@@ -79,15 +119,6 @@ class SnowflakeCortexAnalystComponent(Component):
             real_time_refresh=True,
             combobox=True,
         ),
-        DropdownInput(
-            name="memory_catalog_ref",
-            display_name="Snowflake Memory Recall (Optional)",
-            options=_memory_catalog_options(),
-            value="None",
-            real_time_refresh=True,
-            combobox=True,
-            advanced=True,
-        ),
         MessageTextInput(
             name="question",
             display_name="Analytical Question",
@@ -116,8 +147,9 @@ class SnowflakeCortexAnalystComponent(Component):
     def update_build_config(
         self, build_config: dict[str, Any], field_value: Any, field_name: str | None = None
     ) -> dict[str, Any]:
+        flow_id = _resolve_flow_id(self, build_config)
         if "database" in build_config:
-            build_config["database"]["options"] = _analyst_databases()
+            build_config["database"]["options"] = _analyst_databases(flow_id=flow_id)
             if field_name == "database" and isinstance(field_value, str):
                 build_config["database"]["value"] = field_value
         db = (
@@ -125,7 +157,7 @@ class SnowflakeCortexAnalystComponent(Component):
             if field_name == "database" and isinstance(field_value, str)
             else build_config.get("database", {}).get("value") or LIVE_BRIDGE.database or "SNOWFLAKE_LANGFLOW"
         )
-        schemas = _analyst_schemas(db)
+        schemas = _analyst_schemas(db, flow_id=flow_id)
         if "schema_name" in build_config:
             build_config["schema_name"]["options"] = schemas
             cur_sch = build_config["schema_name"].get("value")
@@ -143,7 +175,7 @@ class SnowflakeCortexAnalystComponent(Component):
             if field_name == "source_mode" and isinstance(field_value, str)
             else build_config.get("source_mode", {}).get("value") or "Semantic View"
         )
-        src_opts = _analyst_sources(db, sch, mode)
+        src_opts = _analyst_sources(db, sch, mode, flow_id=flow_id)
         if "semantic_source" in build_config:
             build_config["semantic_source"]["options"] = src_opts
             if src_opts and build_config["semantic_source"].get("value") not in src_opts:

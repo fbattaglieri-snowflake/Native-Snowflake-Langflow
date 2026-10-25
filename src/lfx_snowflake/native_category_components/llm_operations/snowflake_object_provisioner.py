@@ -38,14 +38,105 @@ def _can_create_schema() -> bool:
     return LIVE_BRIDGE.active_role.upper() not in ("PUBLIC", "SNOWFLAKE_LANGFLOW_VIEWER_ROLE", "VIEWER_ROLE")
 
 
-def _database_options() -> list[str]:
-    dbs = LIVE_BRIDGE.get_context_databases()
+def _resolve_flow_id(component: Any = None, build_config: dict[str, Any] | None = None) -> str | None:
+    resolver = getattr(LIVE_BRIDGE, "_resolve_component_flow_id", None) or getattr(
+        LIVE_BRIDGE, "resolve_component_flow_id", None
+    )
+    if callable(resolver):
+        res = resolver(component, build_config)
+        if res:
+            return str(res).strip()
+    if isinstance(build_config, dict):
+        cfg_fid = build_config.get("_frontend_node_flow_id") or build_config.get("flow_id")
+        if isinstance(cfg_fid, dict):
+            cfg_fid = cfg_fid.get("value")
+        if cfg_fid and str(cfg_fid).strip():
+            return str(cfg_fid).strip()
+    if component is not None:
+        for attr in ("flow_id", "_flow_id"):
+            val = getattr(component, attr, None)
+            if val and str(val).strip():
+                return str(val).strip()
+        graph = getattr(component, "graph", None)
+        if graph is not None:
+            g_fid = getattr(graph, "flow_id", None) or getattr(graph, "_flow_id", None)
+            if g_fid and str(g_fid).strip():
+                return str(g_fid).strip()
+    cur_fn = getattr(LIVE_BRIDGE, "get_current_flow_id", None) or getattr(
+        LIVE_BRIDGE, "get_current_snowflake_flow_id", None
+    )
+    if callable(cur_fn):
+        cur = cur_fn()
+        if cur and str(cur).strip():
+            return str(cur).strip()
+    return None
+
+
+def _ddl_succeeded(res: dict[str, Any] | None) -> bool:
+    if not isinstance(res, dict):
+        return False
+    if res.get("ok", False):
+        return True
+    return res.get("mode") == "offline" and not res.get("error") and not res.get("error_code")
+
+
+def _register_created_object(
+    database: str,
+    schema: str,
+    category: str,
+    object_name: str,
+    flow_id: str | None = None,
+) -> None:
+    eff_fid = flow_id or _resolve_flow_id()
+    reg_fn = getattr(LIVE_BRIDGE, "register_object_in_context", None)
+    if callable(reg_fn):
+        reg_fn(
+            database=database,
+            schema=schema,
+            category=category,
+            object_name=object_name,
+            flow_id=eff_fid,
+        )
+    ctx = (
+        LIVE_BRIDGE.get_flow_context(eff_fid)
+        if eff_fid and hasattr(LIVE_BRIDGE, "get_flow_context")
+        else getattr(LIVE_BRIDGE, "selected_context", None)
+    )
+    if isinstance(ctx, dict):
+        db_u = (database or "").strip().upper()
+        sch_u = (schema or "").strip().upper()
+        obj_u = (object_name or "").strip()
+        if category == "postgres_instances":
+            pg_list = ctx.setdefault("postgres_instances", [])
+            if obj_u and obj_u not in pg_list:
+                pg_list.append(obj_u)
+        if db_u and db_u not in ctx.setdefault("databases", []):
+            ctx["databases"].append(db_u)
+        if db_u and sch_u:
+            sch_list = ctx.setdefault("schemas_by_db", {}).setdefault(db_u, [])
+            if sch_u not in sch_list:
+                sch_list.append(sch_u)
+            if category != "postgres_instances":
+                key = f"{db_u}.{sch_u}"
+                for map_name in ("objects_by_db_schema", "selected_objects"):
+                    m = ctx.setdefault(map_name, {})
+                    bucket = m.get(key)
+                    if isinstance(bucket, dict):
+                        arr = bucket.setdefault(category, [])
+                        if obj_u and obj_u not in arr:
+                            arr.append(obj_u)
+                    elif bucket is None:
+                        m[key] = {category: [obj_u] if obj_u else []}
+
+
+def _database_options(flow_id: str | None = None) -> list[str]:
+    dbs = list(LIVE_BRIDGE.get_context_databases(flow_id=flow_id or _resolve_flow_id()))
     dbs.append(CREATE_NEW_DB_OPTION if _can_create_database() else CREATE_NEW_DB_DISABLED_OPTION)
     return dbs
 
 
-def _schema_options(database: str | None = None) -> list[str]:
-    schemas = LIVE_BRIDGE.get_context_schemas(database)
+def _schema_options(database: str | None = None, flow_id: str | None = None) -> list[str]:
+    schemas = list(LIVE_BRIDGE.get_context_schemas(database, flow_id=flow_id or _resolve_flow_id()))
     schemas.append(CREATE_NEW_SCHEMA_OPTION if _can_create_schema() else CREATE_NEW_SCHEMA_DISABLED_OPTION)
     return schemas
 
@@ -241,17 +332,18 @@ class SnowflakeObjectProvisionerSidebarComponent(Component):
     def update_build_config(
         self, build_config: dict[str, Any], field_value: Any, field_name: str | None = None
     ) -> dict[str, Any]:
+        flow_id = _resolve_flow_id(self, build_config)
         if field_name and field_name in build_config and isinstance(build_config[field_name], dict):
             build_config[field_name]["value"] = field_value
         if "database" in build_config:
-            build_config["database"]["options"] = _database_options()
+            build_config["database"]["options"] = _database_options(flow_id=flow_id)
         db_val = (
             field_value
             if field_name == "database" and isinstance(field_value, str)
             else build_config.get("database", {}).get("value") or "SNOWFLAKE_LANGFLOW"
         )
         if "schema_name" in build_config:
-            build_config["schema_name"]["options"] = _schema_options(db_val)
+            build_config["schema_name"]["options"] = _schema_options(db_val, flow_id=flow_id)
         sch_val = (
             field_value
             if field_name == "schema_name" and isinstance(field_value, str)
@@ -436,9 +528,22 @@ class SnowflakeObjectProvisionerSidebarComponent(Component):
                 }
             )
         res = LIVE_BRIDGE.execute_sql(ddl)
+        if _ddl_succeeded(res):
+            eff_fid = _resolve_flow_id(self)
+            if kind == "stage" or subtype in ("INTERNAL_STAGE", "EXTERNAL_STAGE"):
+                _register_created_object(db, sch, "stages", nm, flow_id=eff_fid)
+            elif kind == "view":
+                _register_created_object(db, sch, "views", nm, flow_id=eff_fid)
+            elif kind == "postgres" or subtype == "POSTGRES_INSTANCE":
+                pg_inst = (getattr(self, "postgres_instance_name", "") or nm).strip()
+                _register_created_object(db, sch, "postgres_instances", pg_inst, flow_id=eff_fid)
+            elif subtype == "ICEBERG":
+                _register_created_object(db, sch, "iceberg_tables", nm, flow_id=eff_fid)
+            else:
+                _register_created_object(db, sch, "tables", nm, flow_id=eff_fid)
         return Data(
             data={
-                "ok": res.get("ok", False),
+                "ok": _ddl_succeeded(res),
                 "dry_run": False,
                 "active_role": LIVE_BRIDGE.active_role,
                 "database": db,

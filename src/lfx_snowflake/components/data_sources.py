@@ -45,6 +45,73 @@ DATA_SOURCE_HIERARCHY_ORDER: tuple[str, ...] = (
     "max_rows",
 )
 
+TECHNICAL_MEMORY_TABLE_NAMES: frozenset[str] = frozenset(
+    {
+        "MEM_GRAPH_STATE_CHECKPOINTS",
+        "MEM_CHAT_WINDOW_HISTORY",
+        "MEM_RUNNING_SUMMARIES",
+        "MEM_USER_ENTITY_PROFILES",
+        "MEM_EPISODIC_EXPERIENCES",
+        "AGENT_EPISODIC_MEMORY",
+        "AGENT_EPISODIC_TURNS",
+        "AGENT_SEMANTIC_VEC",
+        "AGENT_LONG_TERM_FACTS",
+        "CHAT_MESSAGE_HISTORY",
+        "LANGGRAPH_CHECKPOINTS",
+        "SNOWFLAKE_KB_MEM",
+    }
+)
+
+TECHNICAL_MEMORY_TABLE_PREFIXES: tuple[str, ...] = (
+    "LANGFLOW_MEM_",
+    "MEM_GRAPH_STATE_",
+    "MEM_CHAT_WINDOW_",
+    "MEM_RUNNING_SUMMAR",
+    "MEM_USER_ENTITY_",
+    "MEM_EPISODIC_",
+)
+
+
+def is_technical_memory_table(
+    object_name: str,
+    memories_registry: list[dict[str, Any]] | None = None,
+) -> bool:
+    """Return True if `object_name` is an agent-memory backing table (`CTX-ARCH-07` #4 / `W2-R4-06B`)."""
+    raw = (object_name or "").strip()
+    if not raw:
+        return False
+    short_upper = raw.split(".")[-1].strip().strip('"').upper()
+    full_upper = raw.replace('"', "").upper()
+    if short_upper in TECHNICAL_MEMORY_TABLE_NAMES:
+        return True
+    if any(short_upper.startswith(prefix) for prefix in TECHNICAL_MEMORY_TABLE_PREFIXES):
+        return True
+    for entry in memories_registry or []:
+        if not isinstance(entry, dict):
+            continue
+        for key in ("name", "table_name", "target_table", "backing_table", "qualified_name", "table_fqn"):
+            val = str(entry.get(key) or "").strip()
+            if not val:
+                continue
+            val_upper = val.replace('"', "").upper()
+            val_short = val_upper.split(".")[-1]
+            if short_upper == val_short or full_upper == val_upper:
+                return True
+    return False
+
+
+def filter_business_data_source_objects(
+    objects: list[str],
+    memories_registry: list[dict[str, Any]] | None = None,
+    *,
+    category: str | None = None,
+) -> list[str]:
+    """Filter out technical agent-memory tables so `Data Sources` remains strictly business data (`W2-R4-06B`)."""
+    cat = (category or "tables").strip().lower()
+    if cat not in ("tables", "views", "iceberg_tables", "postgres_tables", "all", ""):
+        return list(objects)
+    return [obj for obj in objects if not is_technical_memory_table(obj, memories_registry=memories_registry)]
+
 
 @dataclass(frozen=True)
 class DataSourceObjectStatus:
@@ -223,10 +290,34 @@ class SnowflakeDataSourcesComponent:
         schema: str | None = None,
         object_type: str | None = None,
         search: str | None = None,
+        exclude_memory_tables: bool = True,
+        active_role: str | None = None,
+        available_objects: list[dict[str, Any]] | None = None,
     ) -> list[dict[str, Any]]:
+        eff_role = (active_role or self.active_role or "PUBLIC").strip()
+        if available_objects is not None:
+            adhoc_results: list[dict[str, Any]] = []
+            for item in available_objects:
+                if not isinstance(item, dict):
+                    continue
+                fqn = str(item.get("object_fqn") or item.get("qualified_name") or item.get("name") or "").strip()
+                if exclude_memory_tables and is_technical_memory_table(fqn):
+                    continue
+                allowed = item.get("allowed_roles")
+                if isinstance(allowed, (list, tuple, set)) and eff_role not in allowed and "PUBLIC" not in allowed:
+                    continue
+                if object_type and item.get("object_type") != object_type:
+                    continue
+                if search and search.lower() not in fqn.lower():
+                    continue
+                adhoc_results.append(dict(item))
+            return adhoc_results
+
         results: list[dict[str, Any]] = []
         for obj in self._catalog.values():
-            status = obj.evaluate_for_role(self.active_role)
+            if exclude_memory_tables and is_technical_memory_table(obj.name):
+                continue
+            status = obj.evaluate_for_role(eff_role)
             if not status["catalog_visible"]:
                 continue
             if database and obj.database != database:

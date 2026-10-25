@@ -21,24 +21,43 @@ export interface SnowflakeRoleSelectorProps {
   availableRoles: string[];
   contextEpoch: number;
   isSwitching?: boolean;
+  flowId?: string | null;
   onSelectRole: (newRole: string) => Promise<void> | void;
+  onOpenContextModal?: () => void;
 }
 
 /**
- * Active Snowflake Role Selector placed in both the Home topbar and Flow Editor topbar (REQ-02).
- * Functionally inspired by Snowsight's role switcher, rendered with Langflow's native UI styling.
+ * Route helper (`CTX-ARCH-01` & `CTX-ARCH-02`):
+ * Returns the active workflow `flow_id` when inside `/flow/<flow_id>`, or `null` on global pages
+ * (Home, Flows list, Memories, Flow Activity, Settings) where `[ ❄️ Context ]` must stay hidden.
+ */
+export function extractWorkflowFlowIdFromPath(pathname = "", hash = ""): string | null {
+  const mPath = pathname.match(/\/flow\/([^/?#]+)/i);
+  if (mPath && mPath[1]) return decodeURIComponent(mPath[1]);
+  const mHash = hash.match(/\/flow\/([^/?#]+)/i);
+  if (mHash && mHash[1]) return decodeURIComponent(mHash[1]);
+  return null;
+}
+
+/**
+ * Active Snowflake Role Selector placed in both the Home topbar and Flow Editor topbar (REQ-02, CTX-ARCH-01/02).
+ * Outside `/flow/<flow_id>`: displays ONLY `Role: [ <ROLE> ▾ ]`.
+ * Inside `/flow/<flow_id>`: displays `Role: [ <ROLE> ▾ ]` + single `[ ❄️ Context ]` button in `#29B5E8`.
  */
 export const SnowflakeRoleSelector: React.FC<SnowflakeRoleSelectorProps> = ({
   activeRole,
   availableRoles,
   contextEpoch,
   isSwitching = false,
+  flowId = null,
   onSelectRole,
+  onOpenContextModal,
 }) => {
   return (
     <div
       data-testid="snowflake-role-selector"
       data-context-epoch={contextEpoch}
+      data-flow-id={flowId || ""}
       className="flex items-center gap-2 rounded-md border border-border bg-muted/40 px-2.5 py-1 text-xs"
     >
       <span className="font-medium text-muted-foreground">Role:</span>
@@ -56,6 +75,19 @@ export const SnowflakeRoleSelector: React.FC<SnowflakeRoleSelectorProps> = ({
           </option>
         ))}
       </select>
+      {flowId && onOpenContextModal && (
+        <button
+          id="sflf-open-hub-btn"
+          type="button"
+          data-testid="sflf-context-btn"
+          data-flow-id={flowId}
+          onClick={onOpenContextModal}
+          className="inline-flex items-center gap-1 rounded px-2 py-0.5 text-xs font-semibold text-white"
+          style={{ backgroundColor: "#29B5E8", color: "#ffffff" }}
+        >
+          [ ❄️ Context ]
+        </button>
+      )}
     </div>
   );
 };

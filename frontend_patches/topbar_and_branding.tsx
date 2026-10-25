@@ -3,9 +3,11 @@ import { SnowflakeRoleSelector, SnowflakeRoleSelectorProps } from "./role_select
 
 export interface TopbarBrandingProps {
   surface: "home" | "flow_editor";
+  flowId?: string | null;
   flowTitle?: string;
   roleSelectorProps: SnowflakeRoleSelectorProps;
   keepNativeLangflowDocsLink?: boolean;
+  onOpenFlowContextModal?: () => void;
 }
 
 /**
@@ -147,10 +149,14 @@ export const SnowflakeWelcomeBanner: React.FC = () => (
  */
 export const SnowflakeLangflowTopbar: React.FC<TopbarBrandingProps> = ({
   surface,
+  flowId,
   flowTitle,
   roleSelectorProps,
   keepNativeLangflowDocsLink = true,
+  onOpenFlowContextModal,
 }) => {
+  const isInsideFlow = surface === "flow_editor" || Boolean(flowId);
+
   return (
     <header
       data-testid={`langflow-topbar-${surface}`}
@@ -185,7 +191,7 @@ export const SnowflakeLangflowTopbar: React.FC<TopbarBrandingProps> = ({
         )}
       </div>
 
-      {/* Top-Right Controls: Active Role Selector (#29B5E8) + Snowflake Hub Button (#29B5E8) + Profile Menu */}
+      {/* Top-Right Controls: Active Role Selector (#29B5E8) + Per-Flow [ ❄️ Context ] Button (#29B5E8, visible ONLY inside /flow/<flow_id>) + Profile Menu */}
       <div className="flex items-center gap-3">
         <div
           data-testid="topbar-role-badge"
@@ -197,14 +203,19 @@ export const SnowflakeLangflowTopbar: React.FC<TopbarBrandingProps> = ({
           <SnowflakeRoleSelector {...roleSelectorProps} />
         </div>
 
-        <button
-          type="button"
-          data-testid="topbar-snowflake-hub-button"
-          className="rounded px-2.5 py-1 text-xs font-semibold text-white"
-          style={{ backgroundColor: SNOWFLAKE_BLUE, color: "#ffffff" }}
-        >
-          Snowflake Hub
-        </button>
+        {isInsideFlow && (
+          <button
+            id="sflf-open-hub-btn"
+            type="button"
+            data-testid="sflf-context-btn"
+            data-flow-id={flowId || ""}
+            onClick={onOpenFlowContextModal}
+            className="inline-flex items-center gap-1.5 rounded px-2.5 py-1 text-xs font-semibold text-white"
+            style={{ backgroundColor: SNOWFLAKE_BLUE, color: "#ffffff" }}
+          >
+            <span>[ ❄️ Context ]</span>
+          </button>
+        )}
 
         <nav
           aria-label="User Profile Menu"

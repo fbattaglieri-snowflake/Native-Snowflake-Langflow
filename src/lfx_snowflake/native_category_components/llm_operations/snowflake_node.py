@@ -10,20 +10,28 @@ from lfx.schema import Data, DataFrame
 from lfx.schema.message import Message
 
 from lfx_snowflake.fastapi_live_bridge import LIVE_BRIDGE
+from lfx_snowflake.native_category_components.llm_operations.snowflake_object_provisioner import (
+    _resolve_flow_id,
+)
 
 
-def _node_databases() -> list[str]:
-    return LIVE_BRIDGE.get_context_databases()
+def _node_databases(flow_id: str | None = None) -> list[str]:
+    return LIVE_BRIDGE.get_context_databases(flow_id=flow_id or _resolve_flow_id())
 
 
-def _node_schemas(database: str | None = None) -> list[str]:
-    return LIVE_BRIDGE.get_context_schemas(database)
+def _node_schemas(database: str | None = None, flow_id: str | None = None) -> list[str]:
+    return LIVE_BRIDGE.get_context_schemas(database, flow_id=flow_id or _resolve_flow_id())
 
 
-def _node_targets(database: str | None = None, schema: str | None = None) -> list[str]:
+def _node_targets(
+    database: str | None = None,
+    schema: str | None = None,
+    flow_id: str | None = None,
+) -> list[str]:
+    eff_fid = flow_id or _resolve_flow_id()
     items: list[str] = []
     for k in ("tables", "views", "procedures", "functions"):
-        for item in LIVE_BRIDGE.get_context_objects(database, schema, k):
+        for item in LIVE_BRIDGE.get_context_objects(database, schema, k, flow_id=eff_fid):
             if item not in items:
                 items.append(item)
     for fallback in ("LANGFLOW_FLOW_RUNS", "LANGFLOW_FLOW_SPANS", "LANGFLOW_AUDIT_LOG"):
@@ -95,22 +103,34 @@ class SnowflakeLLMOperationComponent(Component):
     def update_build_config(
         self, build_config: dict[str, Any], field_value: Any, field_name: str | None = None
     ) -> dict[str, Any]:
+        flow_id = _resolve_flow_id(self, build_config)
         if "database" in build_config:
-            build_config["database"]["options"] = _node_databases()
+            build_config["database"]["options"] = _node_databases(flow_id=flow_id)
+            if field_name == "database" and isinstance(field_value, str):
+                build_config["database"]["value"] = field_value
         db = (
             field_value
             if field_name == "database" and isinstance(field_value, str)
             else build_config.get("database", {}).get("value") or "SNOWFLAKE_LANGFLOW"
         )
+        schemas = _node_schemas(db, flow_id=flow_id)
         if "schema_name" in build_config:
-            build_config["schema_name"]["options"] = _node_schemas(db)
+            build_config["schema_name"]["options"] = schemas
+            cur_sch = build_config["schema_name"].get("value")
+            if field_name == "schema_name" and isinstance(field_value, str):
+                build_config["schema_name"]["value"] = field_value
+            elif schemas and cur_sch not in schemas:
+                build_config["schema_name"]["value"] = schemas[0]
         sch = (
             field_value
             if field_name == "schema_name" and isinstance(field_value, str)
-            else build_config.get("schema_name", {}).get("value") or "CORE"
+            else build_config.get("schema_name", {}).get("value") or (schemas[0] if schemas else "CORE")
         )
         if "target_object" in build_config:
-            build_config["target_object"]["options"] = _node_targets(db, sch)
+            tgt_opts = _node_targets(db, sch, flow_id=flow_id)
+            build_config["target_object"]["options"] = tgt_opts
+            if tgt_opts and build_config["target_object"].get("value") not in tgt_opts:
+                build_config["target_object"]["value"] = tgt_opts[0]
         return build_config
 
     def _build_sql(self) -> str:

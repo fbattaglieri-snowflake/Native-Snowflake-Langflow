@@ -827,6 +827,7 @@ def install_all() -> None:
         "/api/v1/snowflake/catalog",
         "/api/v1/snowflake/provision",
         "/api/v1/snowflake/memories",
+        "/api/v1/snowflake/traces",
     ):
         assert req_route in sf_paths, f"Missing route {req_route} in {sf_paths}"
     print("[install_live_hooks] Verification passed: 26 components merged into 5 native categories + 0 bottom bundles.")

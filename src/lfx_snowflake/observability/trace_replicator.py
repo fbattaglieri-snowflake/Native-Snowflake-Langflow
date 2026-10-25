@@ -19,11 +19,17 @@ from typing import Any, Callable
 
 from .models import (
     AuditEventRecord,
+    CANONICAL_ACTIVE_FLOW_ACTIVITY_VIEW,
+    CANONICAL_ACTIVE_FLOW_RUNS_VIEW,
     CANONICAL_AUDIT_LOG_TABLE,
+    CANONICAL_FLOW_ACTIVITY_TABLE,
     CANONICAL_FLOW_RUNS_TABLE,
     CANONICAL_FLOW_SPANS_TABLE,
     ErrorTaxonomyCode,
     ExecutionMode,
+    FLOW_ACTIVITY_GOVERNED_COLUMNS,
+    FlowActivityEventType,
+    FlowActivityRecord,
     FlowRunRecord,
     FlowSpanRecord,
     ObservabilityTableConfig,
@@ -68,9 +74,41 @@ class TraceAuthorizationError(PermissionError):
 def generate_canonical_observability_ddl(
     table_config: ObservabilityTableConfig | None = None,
 ) -> str:
-    """Generate canonical account-agnostic Snowflake DDL for the 3 observability tables ([G-A1])."""
+    """Generate canonical account-agnostic Snowflake DDL for observability tables ([G-A1], CTX-ARCH-06)."""
     cfg = table_config or ObservabilityTableConfig()
-    return f"""-- Canonical SnowflakeLangflow Observability & Governance Audit DDL ([G-A1], ADR-007)
+    return f"""-- Canonical SnowflakeLangflow Observability & Governance Audit DDL ([G-A1], ADR-007, CTX-ARCH-06)
+CREATE TABLE IF NOT EXISTS {cfg.flow_activity_fqn} (
+    ACTIVITY_ID VARCHAR(128) NOT NULL,
+    TRACE_ID VARCHAR(128),
+    EVENT_TYPE VARCHAR(32) NOT NULL,
+    FLOW_ID VARCHAR(128) NOT NULL,
+    FLOW_NAME VARCHAR(256),
+    PROJECT_ID VARCHAR(128),
+    PROJECT_NAME VARCHAR(256),
+    SESSION_ID VARCHAR(256),
+    RUN_TIMESTAMP TIMESTAMP_TZ NOT NULL DEFAULT CURRENT_TIMESTAMP(),
+    STATUS VARCHAR(32) NOT NULL,
+    LATENCY_MS FLOAT,
+    INPUT_TEXT VARCHAR,
+    OUTPUT_TEXT VARCHAR,
+    ERROR_MESSAGE VARCHAR,
+    PROMPT_TOKENS INTEGER DEFAULT 0,
+    COMPLETION_TOKENS INTEGER DEFAULT 0,
+    TOTAL_TOKENS INTEGER DEFAULT 0,
+    USER_IDENTITY VARCHAR(256) NOT NULL,
+    ACTIVE_ROLE VARCHAR(128) NOT NULL,
+    CONTEXT_EPOCH INTEGER,
+    FLOW_CONTEXT_JSON VARIANT,
+    INPUT_PAYLOAD VARIANT,
+    OUTPUT_PAYLOAD VARIANT,
+    NODE_SPANS_JSON VARIANT,
+    SNOWFLAKE_QUERY_IDS ARRAY,
+    DELETED_IN_UI_AT TIMESTAMP_TZ,
+    PURGED_FOR_RETENTION_AT TIMESTAMP_TZ,
+    REPLICATED_AT TIMESTAMP_TZ DEFAULT CURRENT_TIMESTAMP(),
+    PRIMARY KEY (ACTIVITY_ID)
+);
+
 CREATE TABLE IF NOT EXISTS {cfg.flow_runs_fqn} (
     event_id VARCHAR NOT NULL,
     run_id VARCHAR NOT NULL PRIMARY KEY,
@@ -169,19 +207,135 @@ AS (row_effective_role VARCHAR, row_authenticated_user VARCHAR) RETURNS BOOLEAN 
     CURRENT_ROLE() = row_effective_role
     OR CURRENT_USER() = row_authenticated_user;
 
+ALTER TABLE {cfg.flow_activity_fqn}
+    ADD ROW ACCESS POLICY {cfg.row_access_policy_fqn} ON (ACTIVE_ROLE);
+
 ALTER TABLE {cfg.flow_runs_fqn}
     ADD ROW ACCESS POLICY {cfg.row_access_policy_fqn} ON (effective_role, authenticated_user);
 
 ALTER TABLE {cfg.flow_spans_fqn}
     ADD ROW ACCESS POLICY {cfg.row_access_policy_fqn} ON (effective_role, authenticated_user);
+
+CREATE OR REPLACE SECURE VIEW {cfg.active_flow_activity_view_fqn} AS
+SELECT *
+FROM {cfg.flow_activity_fqn}
+WHERE DELETED_IN_UI_AT IS NULL
+  AND PURGED_FOR_RETENTION_AT IS NULL;
+
+CREATE OR REPLACE SECURE VIEW {cfg.active_flow_runs_view_fqn} AS
+SELECT *
+FROM {cfg.flow_runs_fqn}
+WHERE deleted_in_ui_at IS NULL;
 """
 
 
+def build_flow_activity_merge_sql(
+    table_config: ObservabilityTableConfig | None = None,
+) -> str:
+    """Build canonical idempotent MERGE INTO <DB>.<SCHEMA>.LANGFLOW_FLOW_ACTIVITY statement (CTX-ARCH-06)."""
+    cfg = table_config or ObservabilityTableConfig()
+    fqn = cfg.flow_activity_fqn
+    return (
+        f"MERGE INTO {fqn} AS target "
+        "USING (SELECT "
+        ":activity_id AS activity_id, "
+        ":trace_id AS trace_id, "
+        ":event_type AS event_type, "
+        ":flow_id AS flow_id, "
+        ":flow_name AS flow_name, "
+        ":project_id AS project_id, "
+        ":project_name AS project_name, "
+        ":session_id AS session_id, "
+        ":run_timestamp AS run_timestamp, "
+        ":status AS status, "
+        ":latency_ms AS latency_ms, "
+        ":input_text AS input_text, "
+        ":output_text AS output_text, "
+        ":error_message AS error_message, "
+        ":prompt_tokens AS prompt_tokens, "
+        ":completion_tokens AS completion_tokens, "
+        ":total_tokens AS total_tokens, "
+        ":user_identity AS user_identity, "
+        ":active_role AS active_role, "
+        ":context_epoch AS context_epoch, "
+        "PARSE_JSON(:flow_context_json) AS flow_context_json, "
+        "PARSE_JSON(:input_payload) AS input_payload, "
+        "PARSE_JSON(:output_payload) AS output_payload, "
+        "PARSE_JSON(:node_spans_json) AS node_spans_json, "
+        "PARSE_JSON(:snowflake_query_ids) AS snowflake_query_ids, "
+        ":deleted_in_ui_at AS deleted_in_ui_at, "
+        ":purged_for_retention_at AS purged_for_retention_at"
+        ") AS source "
+        "ON target.activity_id = source.activity_id "
+        "WHEN MATCHED AND target.deleted_in_ui_at IS NULL THEN UPDATE SET "
+        "target.trace_id = COALESCE(source.trace_id, target.trace_id), "
+        "target.event_type = COALESCE(source.event_type, target.event_type), "
+        "target.flow_id = COALESCE(source.flow_id, target.flow_id), "
+        "target.flow_name = COALESCE(source.flow_name, target.flow_name), "
+        "target.project_id = COALESCE(source.project_id, target.project_id), "
+        "target.project_name = COALESCE(source.project_name, target.project_name), "
+        "target.session_id = COALESCE(source.session_id, target.session_id), "
+        "target.status = source.status, "
+        "target.latency_ms = COALESCE(source.latency_ms, target.latency_ms), "
+        "target.input_text = COALESCE(source.input_text, target.input_text), "
+        "target.output_text = COALESCE(source.output_text, target.output_text), "
+        "target.error_message = COALESCE(source.error_message, target.error_message), "
+        "target.prompt_tokens = COALESCE(source.prompt_tokens, target.prompt_tokens), "
+        "target.completion_tokens = COALESCE(source.completion_tokens, target.completion_tokens), "
+        "target.total_tokens = COALESCE(source.total_tokens, target.total_tokens), "
+        "target.user_identity = COALESCE(source.user_identity, target.user_identity), "
+        "target.active_role = COALESCE(source.active_role, target.active_role), "
+        "target.context_epoch = COALESCE(source.context_epoch, target.context_epoch), "
+        "target.flow_context_json = COALESCE(source.flow_context_json, target.flow_context_json), "
+        "target.input_payload = COALESCE(source.input_payload, target.input_payload), "
+        "target.output_payload = COALESCE(source.output_payload, target.output_payload), "
+        "target.node_spans_json = COALESCE(source.node_spans_json, target.node_spans_json), "
+        "target.snowflake_query_ids = COALESCE(source.snowflake_query_ids, target.snowflake_query_ids), "
+        "target.deleted_in_ui_at = COALESCE(target.deleted_in_ui_at, source.deleted_in_ui_at), "
+        "target.purged_for_retention_at = COALESCE(target.purged_for_retention_at, source.purged_for_retention_at), "
+        "target.replicated_at = CURRENT_TIMESTAMP() "
+        "WHEN NOT MATCHED THEN INSERT ("
+        "activity_id, trace_id, event_type, flow_id, flow_name, project_id, project_name, "
+        "session_id, run_timestamp, status, latency_ms, input_text, output_text, error_message, "
+        "prompt_tokens, completion_tokens, total_tokens, user_identity, active_role, "
+        "context_epoch, flow_context_json, input_payload, output_payload, node_spans_json, "
+        "snowflake_query_ids, deleted_in_ui_at, purged_for_retention_at, replicated_at"
+        ") VALUES ("
+        "source.activity_id, source.trace_id, source.event_type, source.flow_id, source.flow_name, "
+        "source.project_id, source.project_name, source.session_id, source.run_timestamp, source.status, "
+        "source.latency_ms, source.input_text, source.output_text, source.error_message, "
+        "source.prompt_tokens, source.completion_tokens, source.total_tokens, source.user_identity, "
+        "source.active_role, source.context_epoch, source.flow_context_json, source.input_payload, "
+        "source.output_payload, source.node_spans_json, source.snowflake_query_ids, "
+        "source.deleted_in_ui_at, source.purged_for_retention_at, CURRENT_TIMESTAMP()"
+        ")"
+    )
+
+
+def build_flow_activity_soft_delete_sql(
+    table_config: ObservabilityTableConfig | None = None,
+    *,
+    by_flow_id: bool = False,
+) -> str:
+    """Build non-destructive soft-delete UPDATE statement for LANGFLOW_FLOW_ACTIVITY (CTX-ARCH-07 #5).
+
+    Never executes a physical DELETE on LANGFLOW_FLOW_ACTIVITY; sets DELETED_IN_UI_AT = CURRENT_TIMESTAMP().
+    """
+    cfg = table_config or ObservabilityTableConfig()
+    fqn = cfg.flow_activity_fqn
+    predicate = "FLOW_ID = :flow_id" if by_flow_id else "ACTIVITY_ID = :activity_id"
+    return (
+        f"UPDATE {fqn} "
+        "SET DELETED_IN_UI_AT = CURRENT_TIMESTAMP() "
+        f"WHERE {predicate} AND DELETED_IN_UI_AT IS NULL"
+    )
+
+
 class SnowflakeReplicaStore:
-    """Idempotent MERGE target representing the Snowflake SQL tables (`LANGFLOW_FLOW_RUNS`, `LANGFLOW_FLOW_SPANS`, `LANGFLOW_AUDIT_LOG`).
+    """Idempotent MERGE target representing the Snowflake SQL tables (`LANGFLOW_FLOW_ACTIVITY`, `LANGFLOW_FLOW_RUNS`, `LANGFLOW_FLOW_SPANS`, `LANGFLOW_AUDIT_LOG`).
 
     Supports an optional external `sql_executor(merge_sql, payload)` while maintaining
-    exact MERGE state keyed by (`run_id`, `span_id`, `event_id`) for verification and parity checks.
+    exact MERGE state keyed by (`activity_id`, `run_id`, `span_id`, `event_id`) for verification and parity checks.
     """
 
     def __init__(
@@ -191,15 +345,36 @@ class SnowflakeReplicaStore:
     ) -> None:
         self.table_config = table_config or ObservabilityTableConfig()
         self.sql_executor = sql_executor
+        self.activity_table: dict[str, dict[str, Any]] = {}
         self.runs_table: dict[str, dict[str, Any]] = {}
         self.spans_table: dict[str, dict[str, Any]] = {}
         self.audit_table: dict[str, dict[str, Any]] = {}
         self.executed_merge_statements: list[tuple[str, str, str]] = []
+        self.executed_soft_delete_statements: list[tuple[str, str]] = []
         self._Transient_failure_remaining: int = 0
 
     def simulate_transient_failures(self, count: int) -> None:
         """Configure the sink to fail the next `count` write attempts with a transient error."""
         self._Transient_failure_remaining = max(0, count)
+
+    def soft_delete_activity_row(
+        self,
+        activity_id: str,
+        *,
+        deleted_ts: str | None = None,
+    ) -> dict[str, Any] | None:
+        """Mark an activity row with DELETED_IN_UI_AT without physically deleting it from LANGFLOW_FLOW_ACTIVITY."""
+        ts = deleted_ts or utc_now_iso()
+        soft_delete_sql = build_flow_activity_soft_delete_sql(self.table_config, by_flow_id=False)
+        if self.sql_executor is not None:
+            self.sql_executor(soft_delete_sql, {"activity_id": activity_id, "deleted_in_ui_at": ts})
+        self.executed_soft_delete_statements.append((activity_id, soft_delete_sql))
+        existing = self.activity_table.get(activity_id)
+        if existing is not None:
+            if existing.get("deleted_in_ui_at") is None:
+                existing["deleted_in_ui_at"] = ts
+            return copy.deepcopy(existing)
+        return None
 
     def write_merged_row(
         self,
@@ -218,6 +393,40 @@ class SnowflakeReplicaStore:
 
         self.executed_merge_statements.append((table_kind, idempotency_key, merge_sql))
         row_copy = copy.deepcopy(payload)
+
+        if table_kind == CANONICAL_FLOW_ACTIVITY_TABLE:
+            existing = self.activity_table.get(idempotency_key)
+            if existing is None:
+                self.activity_table[idempotency_key] = row_copy
+            else:
+                merged = dict(existing)
+                terminal_statuses = {"SUCCESS", "ERROR", "FAILED", "CANCELLED"}
+                existing_terminal = existing.get("status") in terminal_statuses
+                incoming_running = row_copy.get("status") == "RUNNING"
+                for k, v in row_copy.items():
+                    if k in {"deleted_in_ui_at", "purged_for_retention_at"}:
+                        # Soft-delete / retention timestamps are sticky once set
+                        merged[k] = existing.get(k) if existing.get(k) is not None else v
+                    elif k in {
+                        "latency_ms",
+                        "input_text",
+                        "output_text",
+                        "error_message",
+                        "context_epoch",
+                    }:
+                        merged[k] = v if v is not None else existing.get(k)
+                    elif k in {"prompt_tokens", "completion_tokens", "total_tokens"}:
+                        merged[k] = v if (v is not None and v != 0) else (existing.get(k) or 0)
+                    elif k == "status" and existing_terminal and incoming_running:
+                        merged[k] = existing.get(k)
+                    elif k in {"flow_context_json", "input_payload", "output_payload", "node_spans_json"}:
+                        merged[k] = v if v else existing.get(k)
+                    elif k == "snowflake_query_ids":
+                        merged[k] = list(dict.fromkeys([*(existing.get(k) or []), *(v or [])]))
+                    else:
+                        merged[k] = v
+                self.activity_table[idempotency_key] = merged
+            return
 
         if table_kind == CANONICAL_FLOW_RUNS_TABLE:
             existing = self.runs_table.get(idempotency_key)
@@ -312,8 +521,86 @@ class SnowflakeTraceReplicator:
         # Plane 1: SPCS structured JSON / OTLP stream
         self.spcs_logs: list[dict[str, Any]] = []
         # Plane 2: Local Flow Activity UI state
+        self._ui_activities: dict[str, FlowActivityRecord] = {}
         self._ui_runs: dict[str, FlowRunRecord] = {}
         self._ui_spans: dict[str, FlowSpanRecord] = {}
+
+    def _sync_flow_run_to_activity(
+        self,
+        run: FlowRunRecord,
+        *,
+        context: dict[str, Any] | None = None,
+    ) -> FlowActivityRecord:
+        """Build or update a unified FlowActivityRecord from a FlowRunRecord and its spans."""
+        spans_for_run = [
+            sp.to_snowflake_row()
+            for sp in self._ui_spans.values()
+            if sp.run_id == run.run_id
+        ]
+        ctx_dict = dict(context or {})
+        ctx_epoch = ctx_dict.get("context_epoch") if isinstance(ctx_dict.get("context_epoch"), int) else None
+        project_name = str(ctx_dict.get("project_name") or run.project_id)
+        activity = FlowActivityRecord.from_flow_run(
+            run,
+            project_name=project_name,
+            context_epoch=ctx_epoch,
+            flow_context_json=ctx_dict,
+            node_spans_json=spans_for_run,
+        )
+        self._ui_activities[activity.activity_id] = activity
+        return activity
+
+    def upsert_flow_activity(
+        self,
+        activity: FlowActivityRecord,
+        *,
+        context: dict[str, Any] | None = None,
+        sync_immediately: bool = True,
+    ) -> FlowActivityRecord:
+        """Sanitize and upsert a unified FlowActivityRecord into LANGFLOW_FLOW_ACTIVITY via idempotent MERGE."""
+        if self.outbox.is_purged_by_retention(CANONICAL_FLOW_ACTIVITY_TABLE, activity.activity_id):
+            return activity
+
+        redacted_in = redact_payload_for_sink(activity.input_payload, context=context)
+        redacted_out = redact_payload_for_sink(activity.output_payload, context=context)
+        redacted_ctx = redact_payload_for_sink(activity.flow_context_json, context=context)
+        redacted_spans = redact_payload_for_sink(activity.node_spans_json, context=context)
+        redacted_in_txt = (
+            str(redact_payload_for_sink(activity.input_text, context=context))
+            if activity.input_text is not None
+            else None
+        )
+        redacted_out_txt = (
+            str(redact_payload_for_sink(activity.output_text, context=context))
+            if activity.output_text is not None
+            else None
+        )
+        redacted_err = (
+            str(redact_payload_for_sink(activity.error_message, context=context))
+            if activity.error_message is not None
+            else None
+        )
+
+        sanitized = replace(
+            activity,
+            input_text=redacted_in_txt,
+            output_text=redacted_out_txt,
+            error_message=redacted_err,
+            flow_context_json=redacted_ctx if isinstance(redacted_ctx, dict) else {"value": redacted_ctx},
+            input_payload=redacted_in if isinstance(redacted_in, dict) else {"value": redacted_in},
+            output_payload=redacted_out if isinstance(redacted_out, dict) else {"value": redacted_out},
+            node_spans_json=redacted_spans if isinstance(redacted_spans, (list, dict)) else [redacted_spans],
+        )
+        self._ui_activities[sanitized.activity_id] = sanitized
+        if sync_immediately:
+            merge_sql = build_flow_activity_merge_sql(self.table_config)
+            self.replica_store.write_merged_row(
+                CANONICAL_FLOW_ACTIVITY_TABLE,
+                sanitized.activity_id,
+                sanitized.to_snowflake_row(),
+                merge_sql,
+            )
+        return sanitized
 
     # ------------------------------------------------------------------
     # Plane 1: SPCS Container JSON & OTLP Event Table Telemetry
@@ -375,6 +662,7 @@ class SnowflakeTraceReplicator:
             error_message=str(redacted_err) if redacted_err is not None else None,
         )
         self._ui_runs[sanitized_run.run_id] = sanitized_run
+        self._sync_flow_run_to_activity(sanitized_run, context=context)
         self.outbox.enqueue_flow_run(sanitized_run, context=context)
         return sanitized_run
 
@@ -443,6 +731,7 @@ class SnowflakeTraceReplicator:
             a2a_task_id=a2a_task_id or existing.a2a_task_id,
         )
         self._ui_runs[run_id] = updated
+        self._sync_flow_run_to_activity(updated, context=context)
         self.outbox.enqueue_flow_run(updated, context=context)
         return updated
 
@@ -474,12 +763,27 @@ class SnowflakeTraceReplicator:
             error_message=str(redacted_err) if redacted_err is not None else None,
         )
         self._ui_spans[sanitized_span.span_id] = sanitized_span
+        parent_run = self._ui_runs.get(sanitized_span.run_id)
+        if parent_run is not None:
+            self._sync_flow_run_to_activity(parent_run, context=context)
         self.outbox.enqueue_flow_span(sanitized_span, context=context)
         return sanitized_span
 
     def sync_to_snowflake(self) -> OutboxFlushSummary:
         """Flush pending outbox events to the Snowflake SQL replica using idempotent MERGE."""
-        return self.outbox.flush_pending(self.replica_store.write_merged_row)
+        summary = self.outbox.flush_pending(self.replica_store.write_merged_row)
+        if summary.failed == 0 and self.replica_store._Transient_failure_remaining == 0:
+            merge_sql = build_flow_activity_merge_sql(self.table_config)
+            for act_id, act in list(self._ui_activities.items()):
+                if self.outbox.is_purged_by_retention(CANONICAL_FLOW_ACTIVITY_TABLE, act_id):
+                    continue
+                self.replica_store.write_merged_row(
+                    CANONICAL_FLOW_ACTIVITY_TABLE,
+                    act_id,
+                    act.to_snowflake_row(),
+                    merge_sql,
+                )
+        return summary
 
     # ------------------------------------------------------------------
     # Authorization Enforcement on UI & SQL Trace / Audit Access
@@ -789,6 +1093,8 @@ class SnowflakeTraceReplicator:
         deleted_ts = utc_now_iso()
         soft_deleted_run = replace(run, deleted_in_ui_at=deleted_ts)
         self._ui_runs[run_id] = soft_deleted_run
+        self._sync_flow_run_to_activity(soft_deleted_run)
+        self.replica_store.soft_delete_activity_row(run_id, deleted_ts=deleted_ts)
         self.outbox.enqueue_flow_run(soft_deleted_run)
 
         for span_id, span in list(self._ui_spans.items()):
@@ -816,6 +1122,100 @@ class SnowflakeTraceReplicator:
         )
         return soft_deleted_run
 
+    def soft_delete_flow_activity_in_ui(
+        self,
+        activity_id: str,
+        *,
+        caller_role: str,
+        caller_user: str,
+    ) -> dict[str, Any]:
+        """Soft-delete a unified Flow Activity entry in UI (UPDATE DELETED_IN_UI_AT = CURRENT_TIMESTAMP()) without deleting it in Snowflake."""
+        self._verify_role_for_trace_operation(
+            caller_role=caller_role,
+            caller_user=caller_user,
+            operation="SOFT_DELETE_FLOW_ACTIVITY_UI",
+            required_privilege=f"UPDATE ON {self.table_config.flow_activity_fqn}",
+            run_id=activity_id,
+        )
+        deleted_ts = utc_now_iso()
+        act = self._ui_activities.get(activity_id)
+        if act is not None:
+            if not self._can_role_see_row(
+                caller_role=caller_role,
+                caller_user=caller_user,
+                row_role=act.active_role,
+                row_user=act.user_identity,
+            ):
+                self.outbox.record_authz_denial(
+                    operation="SOFT_DELETE_FLOW_ACTIVITY_UI",
+                    authenticated_user=caller_user,
+                    effective_role=caller_role,
+                    required_privilege="OWNERSHIP OR MATCHING ACTIVE_ROLE",
+                    target_object_fqn=self.table_config.flow_activity_fqn,
+                    run_id=activity_id,
+                )
+                raise TraceAuthorizationError(
+                    active_role=caller_role,
+                    operation="SOFT_DELETE_FLOW_ACTIVITY_UI",
+                    required_privilege="OWNERSHIP OR MATCHING ACTIVE_ROLE",
+                )
+            self._ui_activities[activity_id] = replace(act, deleted_in_ui_at=deleted_ts)
+
+        if activity_id in self._ui_runs:
+            self.delete_run_in_ui(activity_id, caller_role=caller_role, caller_user=caller_user)
+            return {
+                "activity_id": activity_id,
+                "deleted_in_ui_at": self._ui_runs[activity_id].deleted_in_ui_at,
+                "soft_delete_sql": build_flow_activity_soft_delete_sql(self.table_config),
+            }
+
+        updated_row = self.replica_store.soft_delete_activity_row(activity_id, deleted_ts=deleted_ts)
+        return {
+            "activity_id": activity_id,
+            "deleted_in_ui_at": (updated_row or {}).get("deleted_in_ui_at", deleted_ts),
+            "soft_delete_sql": build_flow_activity_soft_delete_sql(self.table_config),
+        }
+
+    def query_snowflake_flow_activity(
+        self,
+        *,
+        caller_role: str,
+        caller_user: str,
+        flow_id: str | None = None,
+        project_id: str | None = None,
+        event_type: str | None = None,
+        include_deleted: bool = False,
+    ) -> list[dict[str, Any]]:
+        """Query replicated `<DB>.<SCHEMA>.LANGFLOW_FLOW_ACTIVITY` enforcing RBAC/RAP and soft-delete rules."""
+        self._verify_role_for_trace_operation(
+            caller_role=caller_role,
+            caller_user=caller_user,
+            operation="QUERY_SNOWFLAKE_FLOW_ACTIVITY_SQL",
+            required_privilege=f"SELECT ON {self.table_config.flow_activity_fqn}",
+            project_id=project_id,
+        )
+        results: list[dict[str, Any]] = []
+        for row in self.replica_store.activity_table.values():
+            if not include_deleted and row.get("deleted_in_ui_at") is not None:
+                continue
+            if row.get("purged_for_retention_at") is not None:
+                continue
+            if flow_id is not None and row.get("flow_id") != flow_id:
+                continue
+            if event_type is not None and row.get("event_type") != event_type:
+                continue
+            if not self._can_role_see_row(
+                caller_role=caller_role,
+                caller_user=caller_user,
+                row_role=str(row.get("active_role", "")),
+                row_user=str(row.get("user_identity", "")),
+                project_id=project_id,
+                row_project_id=row.get("project_id"),
+            ):
+                continue
+            results.append(copy.deepcopy(row))
+        return results
+
     def purge_runs_for_retention(self, run_ids: list[str]) -> dict[str, int]:
         """Permanently purge runs and their spans for retention and register anti-resurrection tombstones.
 
@@ -832,6 +1232,9 @@ class SnowflakeTraceReplicator:
         ]
         unique_span_ids = list(dict.fromkeys(span_ids_to_purge))
 
+        self.outbox.register_retention_purge(
+            CANONICAL_FLOW_ACTIVITY_TABLE, run_ids, reason="RETENTION_POLICY"
+        )
         purged_runs = self.outbox.register_retention_purge(
             CANONICAL_FLOW_RUNS_TABLE, run_ids, reason="RETENTION_POLICY"
         )
@@ -840,7 +1243,9 @@ class SnowflakeTraceReplicator:
         )
 
         for rid in run_ids:
+            self._ui_activities.pop(rid, None)
             self._ui_runs.pop(rid, None)
+            self.replica_store.activity_table.pop(rid, None)
             self.replica_store.runs_table.pop(rid, None)
         for sid in unique_span_ids:
             self._ui_spans.pop(sid, None)

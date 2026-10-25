@@ -12,6 +12,11 @@ from lfx.schema.message import Message
 
 from lfx_snowflake.components.llm_operations import StoredProcedureEngine
 from lfx_snowflake.fastapi_live_bridge import LIVE_BRIDGE
+from lfx_snowflake.native_category_components.llm_operations.snowflake_object_provisioner import (
+    _ddl_succeeded,
+    _register_created_object,
+    _resolve_flow_id,
+)
 
 
 CREATE_REPLACE_PROC_OPTION = "+ Create / Replace Procedure..."
@@ -23,16 +28,21 @@ DEFAULT_PYTHON_PROC_BODY = (
 )
 
 
-def _proc_databases() -> list[str]:
-    return LIVE_BRIDGE.get_context_databases()
+def _proc_databases(flow_id: str | None = None) -> list[str]:
+    return LIVE_BRIDGE.get_context_databases(flow_id=flow_id or _resolve_flow_id())
 
 
-def _proc_schemas(database: str | None = None) -> list[str]:
-    return LIVE_BRIDGE.get_context_schemas(database)
+def _proc_schemas(database: str | None = None, flow_id: str | None = None) -> list[str]:
+    return LIVE_BRIDGE.get_context_schemas(database, flow_id=flow_id or _resolve_flow_id())
 
 
-def _proc_options(database: str | None = None, schema: str | None = None) -> list[str]:
-    procs = list(LIVE_BRIDGE.get_context_objects(database, schema, "procedures"))
+def _proc_options(
+    database: str | None = None,
+    schema: str | None = None,
+    flow_id: str | None = None,
+) -> list[str]:
+    eff_fid = flow_id or _resolve_flow_id()
+    procs = list(LIVE_BRIDGE.get_context_objects(database, schema, "procedures", flow_id=eff_fid))
     if CREATE_REPLACE_PROC_OPTION not in procs:
         procs.insert(0, CREATE_REPLACE_PROC_OPTION)
     return procs
@@ -158,22 +168,31 @@ class SnowflakeStoredProcedureComponent(Component):
     def update_build_config(
         self, build_config: dict[str, Any], field_value: Any, field_name: str | None = None
     ) -> dict[str, Any]:
+        flow_id = _resolve_flow_id(self, build_config)
         if "database" in build_config:
-            build_config["database"]["options"] = _proc_databases()
+            build_config["database"]["options"] = _proc_databases(flow_id=flow_id)
+            if field_name == "database" and isinstance(field_value, str):
+                build_config["database"]["value"] = field_value
         db = (
             field_value
             if field_name == "database" and isinstance(field_value, str)
             else build_config.get("database", {}).get("value") or getattr(self, "database", "SNOWFLAKE_LANGFLOW")
         )
+        schemas = _proc_schemas(db, flow_id=flow_id)
         if "schema_name" in build_config:
-            build_config["schema_name"]["options"] = _proc_schemas(db)
+            build_config["schema_name"]["options"] = schemas
+            cur_sch = build_config["schema_name"].get("value")
+            if field_name == "schema_name" and isinstance(field_value, str):
+                build_config["schema_name"]["value"] = field_value
+            elif schemas and cur_sch not in schemas:
+                build_config["schema_name"]["value"] = schemas[0]
         sch = (
             field_value
             if field_name == "schema_name" and isinstance(field_value, str)
-            else build_config.get("schema_name", {}).get("value") or getattr(self, "schema_name", "CORE")
+            else build_config.get("schema_name", {}).get("value") or (schemas[0] if schemas else getattr(self, "schema_name", "CORE"))
         )
         if "procedure_selector" in build_config:
-            build_config["procedure_selector"]["options"] = _proc_options(db, sch)
+            build_config["procedure_selector"]["options"] = _proc_options(db, sch, flow_id=flow_id)
 
         mode = (
             field_value
@@ -295,7 +314,15 @@ class SnowflakeStoredProcedureComponent(Component):
             denied = LIVE_BRIDGE.check_write_privilege_or_deny("CREATE_PROCEDURE", f"{db}.{sch}.{nm}")
             if denied:
                 raise ValueError(denied["message"])
-            LIVE_BRIDGE.execute_sql(ddl)
+            ddl_res = LIVE_BRIDGE.execute_sql(ddl)
+            if _ddl_succeeded(ddl_res):
+                _register_created_object(
+                    database=db,
+                    schema=sch,
+                    category="procedures",
+                    object_name=nm,
+                    flow_id=_resolve_flow_id(self),
+                )
 
         exec_res = LIVE_BRIDGE.execute_sql(call_sql)
         return Message(

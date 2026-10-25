@@ -15,18 +15,28 @@ from lfx_snowflake.fastapi_live_bridge import LIVE_BRIDGE
 from lfx_snowflake.native_category_components.files_and_knowledge.snowflake_cortex_search_parse_document import (
     CORTEX_SEARCH_PIPELINE_GUIDE_STEP_1,
 )
+from lfx_snowflake.native_category_components.files_and_knowledge.snowflake_stage_files import (
+    _ddl_succeeded,
+    _register_created_object,
+    _resolve_flow_id,
+)
 
 
-def _database_options() -> list[str]:
-    return LIVE_BRIDGE.get_context_databases()
+def _database_options(flow_id: str | None = None) -> list[str]:
+    return LIVE_BRIDGE.get_context_databases(flow_id=flow_id or _resolve_flow_id())
 
 
-def _schema_options(database: str | None = None) -> list[str]:
-    return LIVE_BRIDGE.get_context_schemas(database)
+def _schema_options(database: str | None = None, flow_id: str | None = None) -> list[str]:
+    return LIVE_BRIDGE.get_context_schemas(database, flow_id=flow_id or _resolve_flow_id())
 
 
-def _stage_options(database: str | None = None, schema: str | None = None) -> list[str]:
-    stages = list(LIVE_BRIDGE.get_context_objects(database, schema, "stages"))
+def _stage_options(
+    database: str | None = None,
+    schema: str | None = None,
+    flow_id: str | None = None,
+) -> list[str]:
+    eff_fid = flow_id or _resolve_flow_id()
+    stages = list(LIVE_BRIDGE.get_context_objects(database, schema, "stages", flow_id=eff_fid))
     if "SNOWFLAKE_LANGFLOW_STAGE" not in stages:
         stages.insert(0, "SNOWFLAKE_LANGFLOW_STAGE")
     return stages
@@ -163,22 +173,34 @@ class SnowflakeCortexSearchStreamTaskComponent(Component):
     def update_build_config(
         self, build_config: dict[str, Any], field_value: Any, field_name: str | None = None
     ) -> dict[str, Any]:
+        flow_id = _resolve_flow_id(self, build_config)
         if "database" in build_config:
-            build_config["database"]["options"] = _database_options()
+            build_config["database"]["options"] = _database_options(flow_id=flow_id)
+            if field_name == "database" and isinstance(field_value, str):
+                build_config["database"]["value"] = field_value
         db_val = (
             field_value
             if field_name == "database" and isinstance(field_value, str)
             else build_config.get("database", {}).get("value") or "SNOWFLAKE_LANGFLOW"
         )
+        schemas = _schema_options(db_val, flow_id=flow_id)
         if "schema_name" in build_config:
-            build_config["schema_name"]["options"] = _schema_options(db_val)
+            build_config["schema_name"]["options"] = schemas
+            cur_sch = build_config["schema_name"].get("value")
+            if field_name == "schema_name" and isinstance(field_value, str):
+                build_config["schema_name"]["value"] = field_value
+            elif schemas and cur_sch not in schemas:
+                build_config["schema_name"]["value"] = schemas[0]
         sch_val = (
             field_value
             if field_name == "schema_name" and isinstance(field_value, str)
-            else build_config.get("schema_name", {}).get("value") or "CORE"
+            else build_config.get("schema_name", {}).get("value") or (schemas[0] if schemas else "CORE")
         )
         if "stage_name" in build_config:
-            build_config["stage_name"]["options"] = _stage_options(db_val, sch_val)
+            stg_opts = _stage_options(db_val, sch_val, flow_id=flow_id)
+            build_config["stage_name"]["options"] = stg_opts
+            if stg_opts and build_config["stage_name"].get("value") not in stg_opts:
+                build_config["stage_name"]["value"] = stg_opts[0]
         return build_config
 
     def _build_spec_and_builder(
@@ -325,6 +347,29 @@ class SnowflakeCortexSearchStreamTaskComponent(Component):
             LIVE_BRIDGE.execute_sql(stage_dir_ddl)
             stream_res = LIVE_BRIDGE.execute_sql(stream_ddl)
             task_res = LIVE_BRIDGE.execute_sql(task_ddl)
+            if _ddl_succeeded(stream_res) or _ddl_succeeded(task_res):
+                eff_fid = _resolve_flow_id(self)
+                _register_created_object(
+                    database=spec.database,
+                    schema=spec.schema,
+                    category="stages",
+                    object_name=spec.stage_name,
+                    flow_id=eff_fid,
+                )
+                _register_created_object(
+                    database=spec.database,
+                    schema=spec.schema,
+                    category="tables",
+                    object_name=spec.parsed_table,
+                    flow_id=eff_fid,
+                )
+                _register_created_object(
+                    database=spec.database,
+                    schema=spec.schema,
+                    category="tables",
+                    object_name=spec.chunks_table,
+                    flow_id=eff_fid,
+                )
             payload.update(
                 {
                     "action": "PROVISION_STREAM_AND_TASK",

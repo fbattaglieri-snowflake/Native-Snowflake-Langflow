@@ -7,12 +7,17 @@ import pytest
 from lfx_snowflake.observability import (
     AuditEventRecord,
     AuditOutboxWriteError,
+    CANONICAL_ACTIVE_FLOW_ACTIVITY_VIEW,
     CANONICAL_AUDIT_LOG_TABLE,
+    CANONICAL_FLOW_ACTIVITY_TABLE,
     CANONICAL_FLOW_RUNS_TABLE,
     CANONICAL_FLOW_SPANS_TABLE,
     CANONICAL_ROW_ACCESS_POLICY,
     ErrorTaxonomyCode,
     ExecutionMode,
+    FLOW_ACTIVITY_GOVERNED_COLUMNS,
+    FlowActivityEventType,
+    FlowActivityRecord,
     FlowRunRecord,
     FlowSpanRecord,
     ObservabilityPlane,
@@ -25,6 +30,8 @@ from lfx_snowflake.observability import (
     SnowflakeTraceReplicator,
     TraceAuthorizationError,
     TransactionalOutbox,
+    build_flow_activity_merge_sql,
+    build_flow_activity_soft_delete_sql,
     build_idempotent_merge_sql,
     generate_canonical_observability_ddl,
     mask_ai_redact_detect_spans,
@@ -397,3 +404,121 @@ def test_ui_soft_delete_and_retention_anti_resurrection() -> None:
     flush_after = replicator.sync_to_snowflake()
     assert "run-del-1" not in replicator.replica_store.runs_table
     assert flush_after.delivered == 0
+
+
+def test_unified_langflow_flow_activity_ddl_merge_and_soft_delete() -> None:
+    """Verify CTX-ARCH-06 & CTX-ARCH-07 #5: Unified LANGFLOW_FLOW_ACTIVITY table, 25+ governed columns, MERGE, and UI soft-delete."""
+    cfg = ObservabilityTableConfig(database="<DATABASE>", schema="<SCHEMA>")
+    assert cfg.flow_activity_fqn == f"<DATABASE>.<SCHEMA>.{CANONICAL_FLOW_ACTIVITY_TABLE}"
+    assert cfg.active_flow_activity_view_fqn == f"<DATABASE>.<SCHEMA>.{CANONICAL_ACTIVE_FLOW_ACTIVITY_VIEW}"
+    assert len(FLOW_ACTIVITY_GOVERNED_COLUMNS) >= 25
+
+    ddl = generate_canonical_observability_ddl(cfg)
+    assert "CREATE TABLE IF NOT EXISTS <DATABASE>.<SCHEMA>.LANGFLOW_FLOW_ACTIVITY" in ddl
+    assert "CREATE OR REPLACE SECURE VIEW <DATABASE>.<SCHEMA>.V_LANGFLOW_ACTIVE_FLOW_ACTIVITY" in ddl
+    for col in (
+        "ACTIVITY_ID",
+        "TRACE_ID",
+        "EVENT_TYPE",
+        "FLOW_ID",
+        "FLOW_NAME",
+        "PROJECT_ID",
+        "PROJECT_NAME",
+        "SESSION_ID",
+        "RUN_TIMESTAMP",
+        "STATUS",
+        "LATENCY_MS",
+        "INPUT_TEXT",
+        "OUTPUT_TEXT",
+        "ERROR_MESSAGE",
+        "PROMPT_TOKENS",
+        "COMPLETION_TOKENS",
+        "TOTAL_TOKENS",
+        "USER_IDENTITY",
+        "ACTIVE_ROLE",
+        "CONTEXT_EPOCH",
+        "FLOW_CONTEXT_JSON",
+        "INPUT_PAYLOAD",
+        "OUTPUT_PAYLOAD",
+        "NODE_SPANS_JSON",
+        "SNOWFLAKE_QUERY_IDS",
+        "DELETED_IN_UI_AT",
+        "PURGED_FOR_RETENTION_AT",
+        "REPLICATED_AT",
+    ):
+        assert col in ddl
+        assert col in FLOW_ACTIVITY_GOVERNED_COLUMNS
+
+    merge_sql = build_flow_activity_merge_sql(cfg)
+    assert "MERGE INTO <DATABASE>.<SCHEMA>.LANGFLOW_FLOW_ACTIVITY" in merge_sql
+    assert "deleted_in_ui_at is null" in merge_sql.lower()
+
+    soft_delete_sql = build_flow_activity_soft_delete_sql(cfg)
+    assert "UPDATE <DATABASE>.<SCHEMA>.LANGFLOW_FLOW_ACTIVITY" in soft_delete_sql
+    assert "SET DELETED_IN_UI_AT = CURRENT_TIMESTAMP()" in soft_delete_sql
+
+    replicator = SnowflakeTraceReplicator(table_config=cfg)
+    act = FlowActivityRecord(
+        activity_id="act-flow-run-1",
+        trace_id="trace-flow-run-1",
+        event_type=FlowActivityEventType.FLOW_RUN.value,
+        flow_id="flow-ctx-01",
+        flow_name="Customer Analytics Flow",
+        project_id="proj-01",
+        project_name="Retail Project",
+        session_id="sess-01",
+        user_identity="ALICE",
+        active_role="ROLE_ANALYST",
+        context_epoch=3,
+        flow_context_json={"databases": ["<DATABASE>"], "schemas_by_db": {"<DATABASE>": ["<SCHEMA>"]}},
+        input_text="Analyze Q4 orders",
+        output_text="Total orders: 1,240",
+        prompt_tokens=40,
+        completion_tokens=20,
+        total_tokens=60,
+        latency_ms=88.5,
+        node_spans_json=[{"node_id": "SnowflakeTables-1", "status": "SUCCESS"}],
+        snowflake_query_ids=["01c9-query-01"],
+    )
+    replicator.upsert_flow_activity(act)
+    replicator.sync_to_snowflake()
+
+    active_rows = replicator.query_snowflake_flow_activity(
+        caller_role="ROLE_ANALYST",
+        caller_user="ALICE",
+        flow_id="flow-ctx-01",
+    )
+    assert len(active_rows) == 1
+    assert active_rows[0]["activity_id"] == "act-flow-run-1"
+    assert active_rows[0]["flow_context_json"]["databases"] == ["<DATABASE>"]
+
+    # Soft-delete in UI sets DELETED_IN_UI_AT without deleting the row from Snowflake
+    sd_res = replicator.soft_delete_flow_activity_in_ui(
+        "act-flow-run-1",
+        caller_role="ROLE_ANALYST",
+        caller_user="ALICE",
+    )
+    assert sd_res["deleted_in_ui_at"] is not None
+    assert "SET DELETED_IN_UI_AT = CURRENT_TIMESTAMP()" in sd_res["soft_delete_sql"]
+
+    # Hidden from active UI query, retained in Snowflake when include_deleted=True
+    assert (
+        len(
+            replicator.query_snowflake_flow_activity(
+                caller_role="ROLE_ANALYST",
+                caller_user="ALICE",
+                flow_id="flow-ctx-01",
+                include_deleted=False,
+            )
+        )
+        == 0
+    )
+    retained_rows = replicator.query_snowflake_flow_activity(
+        caller_role="ROLE_ANALYST",
+        caller_user="ALICE",
+        flow_id="flow-ctx-01",
+        include_deleted=True,
+    )
+    assert len(retained_rows) == 1
+    assert retained_rows[0]["deleted_in_ui_at"] is not None
+

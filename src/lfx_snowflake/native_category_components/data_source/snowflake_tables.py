@@ -9,15 +9,50 @@ from lfx.io import DataInput, DropdownInput, IntInput, MessageTextInput, Output
 from lfx.schema import Data, DataFrame
 
 from lfx_snowflake._lfx_compat import Tool
+from lfx_snowflake.components.data_sources import filter_business_data_source_objects
 from lfx_snowflake.fastapi_live_bridge import LIVE_BRIDGE
 
 
+def _resolve_flow_id(component: Any = None, build_config: dict[str, Any] | None = None) -> str | None:
+    resolver = getattr(LIVE_BRIDGE, "_resolve_component_flow_id", None) or getattr(
+        LIVE_BRIDGE, "resolve_component_flow_id", None
+    )
+    if callable(resolver):
+        res = resolver(component, build_config)
+        if res:
+            return str(res).strip()
+    if isinstance(build_config, dict):
+        cfg_fid = build_config.get("_frontend_node_flow_id") or build_config.get("flow_id")
+        if isinstance(cfg_fid, dict):
+            cfg_fid = cfg_fid.get("value")
+        if cfg_fid and str(cfg_fid).strip():
+            return str(cfg_fid).strip()
+    if component is not None:
+        for attr in ("flow_id", "_flow_id"):
+            val = getattr(component, attr, None)
+            if val and str(val).strip():
+                return str(val).strip()
+        graph = getattr(component, "graph", None)
+        if graph is not None:
+            g_fid = getattr(graph, "flow_id", None) or getattr(graph, "_flow_id", None)
+            if g_fid and str(g_fid).strip():
+                return str(g_fid).strip()
+    cur_fn = getattr(LIVE_BRIDGE, "get_current_flow_id", None) or getattr(
+        LIVE_BRIDGE, "get_current_snowflake_flow_id", None
+    )
+    if callable(cur_fn):
+        cur = cur_fn()
+        if cur and str(cur).strip():
+            return str(cur).strip()
+    return None
+
+
 def _table_databases(flow_id: str | None = None) -> list[str]:
-    return LIVE_BRIDGE.get_context_databases(flow_id=flow_id)
+    return LIVE_BRIDGE.get_context_databases(flow_id=flow_id or _resolve_flow_id())
 
 
 def _table_schemas(database: str | None = None, flow_id: str | None = None) -> list[str]:
-    return LIVE_BRIDGE.get_context_schemas(database, flow_id=flow_id)
+    return LIVE_BRIDGE.get_context_schemas(database, flow_id=flow_id or _resolve_flow_id())
 
 
 def _table_objects(
@@ -25,7 +60,12 @@ def _table_objects(
     schema: str | None = None,
     flow_id: str | None = None,
 ) -> list[str]:
-    objs = list(LIVE_BRIDGE.get_context_objects(database, schema, "tables", flow_id=flow_id))
+    eff_fid = flow_id or _resolve_flow_id()
+    objs = list(LIVE_BRIDGE.get_context_objects(database, schema, "tables", flow_id=eff_fid))
+    objs = filter_business_data_source_objects(
+        objs,
+        memories_registry=getattr(LIVE_BRIDGE, "memories_registry", None),
+    )
     if not objs:
         objs = ["LANGFLOW_FLOW_RUNS", "LANGFLOW_FLOW_SPANS", "LANGFLOW_AUDIT_LOG"]
     return objs
@@ -39,8 +79,7 @@ class SnowflakeTablesComponent(Component):
     display_name = "Tables"
     description = (
         "Governed Snowflake Tables Data Source (Standard Table, Hybrid Table, Interactive Table, Dynamic Table) "
-        "with cascading Database -> Schema -> Table selection, input ports, Read/Write Tool Mode for Agents, "
-        "and optional Snowflake Memory catalog recall."
+        "with cascading Database -> Schema -> Table selection, input ports, and Read/Write Tool Mode for Agents."
     )
     icon = "Snowflake"
     name = "SnowflakeTables"
@@ -74,14 +113,6 @@ class SnowflakeTablesComponent(Component):
             display_name="Table Name",
             options=_table_objects("SNOWFLAKE_LANGFLOW", "CORE"),
             value="LANGFLOW_FLOW_RUNS",
-            real_time_refresh=True,
-            combobox=True,
-        ),
-        DropdownInput(
-            name="memory_catalog_ref",
-            display_name="Snowflake Memory Recall (Optional)",
-            options=_memory_catalog_options(),
-            value="None",
             real_time_refresh=True,
             combobox=True,
         ),
@@ -120,14 +151,7 @@ class SnowflakeTablesComponent(Component):
     def update_build_config(
         self, build_config: dict[str, Any], field_value: Any, field_name: str | None = None
     ) -> dict[str, Any]:
-        cfg_fid = build_config.get("_frontend_node_flow_id")
-        if isinstance(cfg_fid, dict):
-            cfg_fid = cfg_fid.get("value")
-        flow_id = (
-            getattr(self, "flow_id", None)
-            or getattr(self, "_flow_id", None)
-            or (str(cfg_fid).strip() if cfg_fid else None)
-        )
+        flow_id = _resolve_flow_id(self, build_config)
         if "database" in build_config:
             build_config["database"]["options"] = _table_databases(flow_id=flow_id)
             if field_name == "database" and isinstance(field_value, str):
