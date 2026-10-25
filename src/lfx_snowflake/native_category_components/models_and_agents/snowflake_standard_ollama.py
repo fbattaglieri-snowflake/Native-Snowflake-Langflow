@@ -2,11 +2,7 @@ import lfx_snowflake._lfx_compat  # noqa: F401
 from lfx.base.models.model import LCModelComponent
 from lfx.io import DropdownInput, IntInput
 from lfx.field_typing import LanguageModel
-
-try:
-    import standard_langflow
-except ImportError:  # pragma: no cover
-    from lfx_snowflake import standard_langflow
+from lfx_snowflake import standard_langflow
 
 
 class PrivateOllama(LCModelComponent):
@@ -24,7 +20,11 @@ class PrivateOllama(LCModelComponent):
         return False
 
     def update_build_config(self, build_config, field_value, field_name=None):
-        return standard_langflow.refresh(build_config, "ollama")
+        from lfx_snowflake import standard_langflow as _std_lf
+
+        return _std_lf.refresh(build_config, "ollama")
 
     def build_model(self) -> LanguageModel:
-        return standard_langflow.build("ollama", self.model_id, self.stream, max_tokens=self.max_tokens)
+        from lfx_snowflake import standard_langflow as _std_lf
+
+        return _std_lf.build("ollama", self.model_id, self.stream, max_tokens=self.max_tokens)

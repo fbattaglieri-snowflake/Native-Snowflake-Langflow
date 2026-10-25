@@ -2,11 +2,7 @@ import lfx_snowflake._lfx_compat  # noqa: F401
 from lfx.base.models.model import LCModelComponent
 from lfx.io import DropdownInput, IntInput
 from lfx.field_typing import LanguageModel
-
-try:
-    import standard_langflow
-except ImportError:  # pragma: no cover
-    from lfx_snowflake import standard_langflow
+from lfx_snowflake import standard_langflow
 
 
 class StandardChat(LCModelComponent):
@@ -38,10 +34,14 @@ class StandardChat(LCModelComponent):
         return False
 
     def update_build_config(self, build_config, field_value, field_name=None):
-        return standard_langflow.refresh(build_config, "chat")
+        from lfx_snowflake import standard_langflow as _std_lf
+
+        return _std_lf.refresh(build_config, "chat")
 
     def build_model(self) -> LanguageModel:
-        return standard_langflow.build(
+        from lfx_snowflake import standard_langflow as _std_lf
+
+        return _std_lf.build(
             "chat",
             self.model_id,
             self.stream,

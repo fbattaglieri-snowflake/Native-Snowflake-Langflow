@@ -377,7 +377,18 @@ def _open_sqlite_conn(
 
 
 def ensure_sqlite_wal_and_uv_cache() -> dict[str, Any]:
-    """Ensure writable UV_CACHE_DIR (/tmp/uv-cache) and configure SQLite WAL + busy_timeout=30000 on /persist/langflow.db."""
+    """Ensure writable UV_CACHE_DIR (/tmp/uv-cache), bind `standard_langflow` in builtins/sys.modules, and configure SQLite WAL + busy_timeout=30000 on /persist/langflow.db."""
+    import builtins
+    import sys
+
+    try:
+        from lfx_snowflake import standard_langflow as _std_lf
+
+        sys.modules["standard_langflow"] = _std_lf
+        setattr(builtins, "standard_langflow", _std_lf)
+    except Exception:  # noqa: BLE001
+        pass
+
     os.environ.setdefault("UV_CACHE_DIR", "/tmp/uv-cache")
     os.environ.setdefault("XDG_CACHE_HOME", "/tmp/.cache")
     os.environ.setdefault("SQLITE_TMPDIR", "/tmp")
@@ -403,11 +414,30 @@ def ensure_sqlite_wal_and_uv_cache() -> dict[str, Any]:
             if p not in candidate_dbs:
                 candidate_dbs.append(p)
 
+    old_try_import_snippet = (
+        "try:\\n    import standard_langflow\\nexcept ImportError:  # pragma: no cover\\n"
+        "    from lfx_snowflake import standard_langflow"
+    )
+    new_top_import_snippet = "from lfx_snowflake import standard_langflow"
+
     wal_configured: list[str] = []
     for db_file in candidate_dbs:
         if db_file.exists():
             try:
                 conn = _open_sqlite_conn(db_file, readonly=False, timeout=30.0)
+                try:
+                    cur = conn.cursor()
+                    tables = {
+                        r[0] for r in cur.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+                    }
+                    if "flow" in tables:
+                        cur.execute(
+                            "UPDATE flow SET data = REPLACE(data, ?, ?) WHERE data LIKE '%import standard_langflow%'",
+                            (old_try_import_snippet, new_top_import_snippet),
+                        )
+                        conn.commit()
+                except Exception:  # noqa: BLE001
+                    pass
                 conn.close()
                 wal_configured.append(str(db_file))
             except Exception:  # noqa: BLE001

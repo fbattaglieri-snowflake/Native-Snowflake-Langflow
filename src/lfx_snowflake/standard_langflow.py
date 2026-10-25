@@ -76,20 +76,68 @@ try:
 except ImportError:  # pragma: no cover
     anthropic = None  # type: ignore[assignment]
 
-ORIGIN = os.environ.get(
-    'SNOWFLAKE_STANDARD_PROXY_ORIGIN',
-    'http://<PROXY_SERVICE>.<DNS_NAMESPACE>:8080',
-)
-OLLAMA_ORIGIN = os.environ.get(
-    'SNOWFLAKE_OLLAMA_ORIGIN',
-    'http://<OLLAMA_SERVICE>.<DNS_NAMESPACE>:11434/v1',
-)
+def _resolve_proxy_origin() -> str:
+    for env_key in ("SNOWFLAKE_STANDARD_PROXY_ORIGIN", "LLM_PROXY_BASE_URL", "SNOWFLAKE_PROXY_BASE_URL"):
+        val = (os.environ.get(env_key) or "").strip().rstrip("/")
+        if val and "<PROXY_SERVICE>" not in val:
+            if val.endswith("/v1"):
+                val = val[:-3].rstrip("/")
+            return val
+    allowed = (os.environ.get("LANGFLOW_SSRF_ALLOWED_HOSTS") or "").strip()
+    if allowed:
+        for candidate in (p.strip() for p in allowed.split(",") if p.strip()):
+            if "ollama" not in candidate.lower() and "<" not in candidate:
+                if "://" in candidate:
+                    return candidate.rstrip("/")
+                port = ":8080" if ":" not in candidate else ""
+                return f"http://{candidate}{port}"
+    return "http://<PROXY_SERVICE>.<DNS_NAMESPACE>:8080"
+
+
+def _resolve_ollama_origin() -> str:
+    for env_key in ("SNOWFLAKE_OLLAMA_ORIGIN", "OLLAMA_BASE_URL", "SNOWFLAKE_OLLAMA_BASE_URL"):
+        val = (os.environ.get(env_key) or "").strip().rstrip("/")
+        if val and "<OLLAMA_SERVICE>" not in val:
+            return val if val.endswith("/v1") else f"{val}/v1"
+    allowed = (os.environ.get("LANGFLOW_SSRF_ALLOWED_HOSTS") or "").strip()
+    if allowed:
+        for candidate in (p.strip() for p in allowed.split(",") if p.strip()):
+            if "ollama" in candidate.lower() and "<" not in candidate:
+                base = (
+                    candidate.rstrip("/")
+                    if "://" in candidate
+                    else f"http://{candidate}{':11434' if ':' not in candidate else ''}"
+                )
+                return base if base.endswith("/v1") else f"{base}/v1"
+    return "http://<OLLAMA_SERVICE>.<DNS_NAMESPACE>:11434/v1"
+
+
+ORIGIN = _resolve_proxy_origin()
+OLLAMA_ORIGIN = _resolve_ollama_origin()
 BASES = {
     'chat': ORIGIN + '/chat/v1',
     'responses': ORIGIN + '/responses/v1',
     'messages': ORIGIN + '/messages',
     'ollama': OLLAMA_ORIGIN,
 }
+
+
+def _get_base(protocol: str) -> str:
+    """Resolve and synchronize `BASES[protocol]` dynamically from environment variables if placeholders were present at import time."""
+    global ORIGIN, OLLAMA_ORIGIN
+    cur_base = BASES.get(protocol, "")
+    if not cur_base or "<PROXY_SERVICE>" in cur_base or "<OLLAMA_SERVICE>" in cur_base:
+        new_origin = _resolve_proxy_origin()
+        new_ollama = _resolve_ollama_origin()
+        if "<PROXY_SERVICE>" not in new_origin:
+            ORIGIN = new_origin
+            BASES["chat"] = ORIGIN + "/chat/v1"
+            BASES["responses"] = ORIGIN + "/responses/v1"
+            BASES["messages"] = ORIGIN + "/messages"
+        if "<OLLAMA_SERVICE>" not in new_ollama:
+            OLLAMA_ORIGIN = new_ollama
+            BASES["ollama"] = OLLAMA_ORIGIN
+    return BASES[protocol]
 
 CHAT_REASONING_REQUIRED_MODELS = ('openai-gpt-6-luna', 'openai-gpt-6-sol')
 CHAT_REASONING_UNSUPPORTED_MODELS = ('grok-4.6', 'grok-4.7', 'kimi-k3', 'glm-5.3')
@@ -110,7 +158,7 @@ def close_clients(clients):
 
 @contextmanager
 def discovery_transport(protocol):
-    clients = provider_httpx_clients(BASES[protocol])
+    clients = provider_httpx_clients(_get_base(protocol))
     if not {'http_client', 'http_async_client'} <= clients.keys():
         raise ValueError('STANDARD_PROTECTED_TRANSPORT_REQUIRED')
     try:
@@ -120,7 +168,7 @@ def discovery_transport(protocol):
 
 
 def catalog(protocol, *, stream=False):
-    base = BASES[protocol]
+    base = _get_base(protocol)
     path = '/v1/models' if protocol == 'messages' else '/models'
     with discovery_transport(protocol) as client:
         response = client.get(
@@ -264,13 +312,14 @@ def build(
     )
     if identifier not in (catalog(protocol, stream=True) if stream else catalog(protocol)):
         raise ValueError('STANDARD_SELECTED_MODEL_UNAVAILABLE: no automatic replacement')
-    clients = provider_httpx_clients(BASES[protocol])
+    base_url = _get_base(protocol)
+    clients = provider_httpx_clients(base_url)
     if not {'http_client', 'http_async_client'} <= clients.keys():
         raise ValueError('STANDARD_PROTECTED_TRANSPORT_REQUIRED')
     common = dict(
         model=identifier,
         api_key='private-spcs',
-        base_url=BASES[protocol],
+        base_url=base_url,
         max_tokens=resolved['max_tokens'],
         max_retries=0,
         timeout=180,

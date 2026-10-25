@@ -110,7 +110,20 @@ def install_all() -> None:
     # 0a. Configure writable UV_CACHE_DIR (0777) and SQLite WAL + busy_timeout=30000 on /persist/langflow.db
     ensure_container_stability_and_sqlite_wal()
 
-    # 0. Install lfx_snowflake package into site-packages so all runtime/live bridge imports resolve
+    # 0. Capture any existing non-placeholder proxy/ollama origin before overwriting site-packages
+    prev_text = ""
+    for existing_std in (
+        SITE_PACKAGES / "standard_langflow.py",
+        Path("/app/standard_langflow.py"),
+        SITE_PACKAGES / "lfx_snowflake" / "standard_langflow.py",
+    ):
+        if existing_std.exists():
+            txt = existing_std.read_text(encoding="utf-8", errors="ignore")
+            if "<PROXY_SERVICE>" not in txt and "ORIGIN" in txt:
+                prev_text = txt
+                break
+
+    # Install lfx_snowflake package into site-packages so all runtime/live bridge imports resolve
     pkg_src = SOURCE_ROOT / "src" / "lfx_snowflake"
     pkg_dst = SITE_PACKAGES / "lfx_snowflake"
     if pkg_src.exists():
@@ -119,21 +132,15 @@ def install_all() -> None:
         shutil.copytree(pkg_src, pkg_dst)
         print(f"[install_live_hooks] Installed lfx_snowflake package into {pkg_dst}")
 
-    # 0b. Copy or vendor updated standard_langflow.py if present so W2-R2-07 reasoning fixes are active in container
+    # 0b. Copy or vendor updated standard_langflow.py if present so W2-R2-07 & proxy origin resolution are active in all 3 locations
     for std_candidate in (
+        SOURCE_ROOT / "src" / "lfx_snowflake" / "standard_langflow.py",
         Path("/tmp/standard_langflow.py"),
         Path("/opt/llm-proxy-standard/langflow/standard_langflow.py"),
         SOURCE_ROOT / "standard_langflow.py",
-        SOURCE_ROOT / "src" / "lfx_snowflake" / "standard_langflow.py",
     ):
         if std_candidate.exists():
             cand_text = std_candidate.read_text(encoding="utf-8")
-            prev_text = ""
-            for existing_std in (SITE_PACKAGES / "standard_langflow.py", Path("/app/standard_langflow.py")):
-                if existing_std.exists():
-                    prev_text = existing_std.read_text(encoding="utf-8", errors="ignore")
-                    if "<PROXY_SERVICE>" not in prev_text:
-                        break
             if prev_text and "<PROXY_SERVICE>" in cand_text:
                 m_orig = re.search(r"ORIGIN\s*=\s*['\"](http[^'\"]+)['\"]", prev_text)
                 m_ollama = re.search(r"['\"]ollama['\"]\s*:\s*['\"](http[^'\"]+)['\"]", prev_text)
@@ -147,7 +154,11 @@ def install_all() -> None:
                         "http://<OLLAMA_SERVICE>.<DNS_NAMESPACE>:11434/v1",
                         m_ollama.group(1),
                     )
-            for std_target in (SITE_PACKAGES / "standard_langflow.py", Path("/app/standard_langflow.py")):
+            for std_target in (
+                SITE_PACKAGES / "lfx_snowflake" / "standard_langflow.py",
+                SITE_PACKAGES / "standard_langflow.py",
+                Path("/app/standard_langflow.py"),
+            ):
                 if std_target.parent.exists():
                     std_target.write_text(cand_text, encoding="utf-8")
                     print(f"[install_live_hooks] Installed standard_langflow.py into {std_target}")
@@ -791,6 +802,23 @@ def install_all() -> None:
 
     assert "SnowflakeToolGuardPolicies" in idx_cats["utilities"]
     assert "SnowflakePythonInterpreterPyPI" not in idx_cats["utilities"]
+
+    from lfx.custom.eval import eval_custom_component_code
+
+    for proxy_fname in (
+        "snowflake_standard_chat.py",
+        "snowflake_standard_messages.py",
+        "snowflake_standard_responses.py",
+        "snowflake_standard_ollama.py",
+    ):
+        proxy_path = LFX_COMPONENTS_DIR / "models_and_agents" / proxy_fname
+        compiled_cls = eval_custom_component_code(proxy_path.read_text(encoding="utf-8"))
+        assert "standard_langflow" in compiled_cls.build_model.__globals__, (
+            f"Missing standard_langflow in {proxy_fname} build_model globals"
+        )
+        assert "standard_langflow" in compiled_cls.update_build_config.__globals__, (
+            f"Missing standard_langflow in {proxy_fname} update_build_config globals"
+        )
 
     app = create_app()
     sf_paths = sorted({path for path, _m in _get_route_keys(app) if "/api/v1/snowflake" in path})

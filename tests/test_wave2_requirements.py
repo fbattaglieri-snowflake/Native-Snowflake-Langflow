@@ -1582,6 +1582,35 @@ def test_w2_r4_05_verifier_uuid_normalization_and_role_scoped_workflow_context(
     assert bridge.get_context_databases(flow_id=hyphen_id) == ["UUID_NORM_DB"]
 
 
+def test_proxy_components_ast_top_level_imports_and_origin_resolution(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify that all 26 native category components avoid module-level ast.Try imports and resolve LLM_PROXY_BASE_URL."""
+    import ast
+    import builtins
+
+    comp_root = REPO_ROOT / "src" / "lfx_snowflake" / "native_category_components"
+    for py_file in sorted(comp_root.rglob("*.py")):
+        if py_file.name == "__init__.py":
+            continue
+        tree = ast.parse(py_file.read_text(encoding="utf-8"), filename=str(py_file))
+        top_try_nodes = [node for node in tree.body if isinstance(node, ast.Try)]
+        assert not top_try_nodes, (
+            f"{py_file.name} contains module-level try/except which Langflow's AST component loader strips"
+        )
+
+    assert hasattr(builtins, "standard_langflow")
+
+    monkeypatch.setenv("LLM_PROXY_BASE_URL", "http://proxy-unit-test.internal:8080")
+    monkeypatch.setenv("OLLAMA_BASE_URL", "http://ollama-unit-test.internal:11434")
+    standard_langflow.BASES["chat"] = "http://<PROXY_SERVICE>.<DNS_NAMESPACE>:8080/chat/v1"
+    standard_langflow.BASES["ollama"] = "http://<OLLAMA_SERVICE>.<DNS_NAMESPACE>:11434/v1"
+
+    assert standard_langflow._get_base("chat") == "http://proxy-unit-test.internal:8080/chat/v1"
+    assert standard_langflow._get_base("responses") == "http://proxy-unit-test.internal:8080/responses/v1"
+    assert standard_langflow._get_base("messages") == "http://proxy-unit-test.internal:8080/messages"
+    assert standard_langflow._get_base("ollama") == "http://ollama-unit-test.internal:11434/v1"
+
+
+
 
 
 

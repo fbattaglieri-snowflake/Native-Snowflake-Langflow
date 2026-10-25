@@ -247,3 +247,21 @@ def ensure_lfx_shim_installed() -> None:
 
 ensure_lfx_shim_installed()
 
+
+def ensure_standard_langflow_bound() -> None:
+    """Bind `standard_langflow` in `sys.modules` and `builtins` so canvas-serialized nodes never fail with NameError."""
+    import builtins
+    import sys
+
+    try:
+        from lfx_snowflake import standard_langflow as _std_lf
+
+        sys.modules["standard_langflow"] = _std_lf
+        setattr(builtins, "standard_langflow", _std_lf)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+ensure_standard_langflow_bound()
+
+
