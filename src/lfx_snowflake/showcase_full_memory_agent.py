@@ -23,6 +23,8 @@ from .native_category_components.models_and_agents.snowflake_message_history imp
 )
 
 SHOWCASE_FLOW_ID = "snowflake-full-memory-enterprise-agent-001"
+SHOWCASE_FLOW_UUID = "50700000-0000-4000-8000-000000000507"
+SHOWCASE_FLOW_UUID_HEX = "50700000000040008000000000000507"
 SHOWCASE_FLOW_NAME = "Snowflake_Full_Memory_Enterprise_Agent"
 
 SHOWCASE_FLOW_CONTEXT: dict[str, Any] = {
@@ -591,9 +593,10 @@ def export_showcase_flow_json(target_path: str | Path | None = None) -> Path:
 
 
 def _persist_showcase_flow_in_sqlite(flow_payload: dict[str, Any]) -> bool:
-    """Persist `Snowflake_Full_Memory_Enterprise_Agent` into `/persist/langflow.db` `flow` table if present."""
+    """Persist `Snowflake_Full_Memory_Enterprise_Agent` into `/persist/langflow.db` `flow` table with a valid 32-char hex UUID."""
     import os
     import sqlite3
+    import uuid
     from datetime import datetime, timezone
 
     persist_dir = Path(os.getenv("LANGFLOW_PERSIST_DIR", "/persist"))
@@ -601,10 +604,11 @@ def _persist_showcase_flow_in_sqlite(flow_payload: dict[str, Any]) -> bool:
     if not db_path.exists():
         return False
     try:
-        from .fastapi_live_bridge import _open_sqlite_conn
+        from .fastapi_live_bridge import _open_sqlite_conn, heal_sqlite_invalid_uuid_rows
 
         conn = _open_sqlite_conn(db_path, readonly=False, timeout=30.0)
         conn.row_factory = sqlite3.Row
+        heal_sqlite_invalid_uuid_rows(conn)
         cur = conn.cursor()
         tables = {r[0] for r in cur.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
         if "flow" not in tables:
@@ -613,49 +617,87 @@ def _persist_showcase_flow_in_sqlite(flow_payload: dict[str, Any]) -> bool:
 
         cols_info = cur.execute("PRAGMA table_info(flow)").fetchall()
         col_names = {str(c[1]) for c in cols_info}
-        flow_hex = SHOWCASE_FLOW_ID.replace("-", "")
+        flow_hex = SHOWCASE_FLOW_UUID_HEX
+        flow_dashed = SHOWCASE_FLOW_UUID
         now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S.%f")
         data_json = json.dumps(flow_payload.get("data") or {}, ensure_ascii=False)
         desc_str = str(flow_payload.get("description") or "")
 
+        sample_row = cur.execute(
+            "SELECT * FROM flow WHERE id NOT IN (?, ?) LIMIT 1",
+            (flow_hex, flow_dashed),
+        ).fetchone()
+        if not sample_row:
+            sample_row = cur.execute("SELECT * FROM flow LIMIT 1").fetchone()
+        sample_dict = dict(sample_row) if sample_row else {}
+        use_hex_id = True
+        if sample_dict.get("id") and "-" in str(sample_dict["id"]):
+            use_hex_id = False
+        target_id = flow_hex if use_hex_id else flow_dashed
+
+        def _valid_uuid_for_sqlite(raw_val: Any) -> str | None:
+            if not raw_val:
+                return None
+            try:
+                u = uuid.UUID(str(raw_val).strip())
+                return str(u) if not use_hex_id else u.hex
+            except Exception:
+                return None
+
+        user_id_val = _valid_uuid_for_sqlite(sample_dict.get("user_id"))
+        if not user_id_val and "user" in tables:
+            for u_row in cur.execute("SELECT id FROM user ORDER BY is_superuser DESC").fetchall():
+                cand = _valid_uuid_for_sqlite(u_row[0])
+                if cand:
+                    user_id_val = cand
+                    break
+
+        folder_id_val = _valid_uuid_for_sqlite(sample_dict.get("folder_id"))
+        if not folder_id_val and "folder" in tables:
+            for f_row in cur.execute("SELECT id FROM folder").fetchall():
+                cand = _valid_uuid_for_sqlite(f_row[0])
+                if cand:
+                    folder_id_val = cand
+                    break
+
+        workspace_id_val = _valid_uuid_for_sqlite(sample_dict.get("workspace_id")) or user_id_val
+
         existing = cur.execute(
             "SELECT id FROM flow WHERE id IN (?, ?) OR name = ? LIMIT 1",
-            (flow_hex, SHOWCASE_FLOW_ID, SHOWCASE_FLOW_NAME),
+            (flow_hex, flow_dashed, SHOWCASE_FLOW_NAME),
         ).fetchone()
         if existing:
             row_id = str(existing[0])
-            upd_cols = ["name = ?", "data = ?"]
-            upd_vals: list[Any] = [SHOWCASE_FLOW_NAME, data_json]
+            valid_row_id = _valid_uuid_for_sqlite(row_id) or target_id
+            upd_cols = ["id = ?", "name = ?", "data = ?"]
+            upd_vals: list[Any] = [valid_row_id, SHOWCASE_FLOW_NAME, data_json]
             if "description" in col_names:
                 upd_cols.append("description = ?")
                 upd_vals.append(desc_str)
             if "updated_at" in col_names:
                 upd_cols.append("updated_at = ?")
                 upd_vals.append(now_str)
+            if "user_id" in col_names and user_id_val:
+                upd_cols.append("user_id = ?")
+                upd_vals.append(user_id_val)
+            if "folder_id" in col_names and folder_id_val:
+                upd_cols.append("folder_id = ?")
+                upd_vals.append(folder_id_val)
+            if "workspace_id" in col_names and workspace_id_val:
+                upd_cols.append("workspace_id = ?")
+                upd_vals.append(workspace_id_val)
             upd_vals.append(row_id)
             cur.execute(f"UPDATE flow SET {', '.join(upd_cols)} WHERE id = ?", tuple(upd_vals))
             conn.commit()
             conn.close()
             return True
 
-        sample_row = cur.execute("SELECT * FROM flow LIMIT 1").fetchone()
-        sample_dict = dict(sample_row) if sample_row else {}
-        use_hex_id = True
-        if sample_dict.get("id") and "-" in str(sample_dict["id"]):
-            use_hex_id = False
-        target_id = flow_hex if use_hex_id else SHOWCASE_FLOW_ID
-
-        user_id_val = sample_dict.get("user_id")
-        if not user_id_val and "user" in tables:
-            u_row = cur.execute("SELECT id FROM user ORDER BY is_superuser DESC LIMIT 1").fetchone()
-            if u_row:
-                user_id_val = str(u_row[0])
-
-        folder_id_val = sample_dict.get("folder_id")
-        if not folder_id_val and "folder" in tables:
-            f_row = cur.execute("SELECT id FROM folder LIMIT 1").fetchone()
-            if f_row:
-                folder_id_val = str(f_row[0])
+        access_type_val = str(sample_dict.get("access_type") or "PRIVATE").upper()
+        if access_type_val not in ("PRIVATE", "PUBLIC"):
+            access_type_val = "PRIVATE"
+        flow_type_val = str(sample_dict.get("flow_type") or "workflow").lower()
+        if flow_type_val not in ("workflow", "agent"):
+            flow_type_val = "workflow"
 
         candidate_values: dict[str, Any] = {
             "id": target_id,
@@ -669,11 +711,11 @@ def _persist_showcase_flow_in_sqlite(flow_payload: dict[str, Any]) -> bool:
             "mcp_enabled": 1,
             "action_name": SHOWCASE_FLOW_NAME,
             "action_description": desc_str,
-            "access_type": sample_dict.get("access_type") or "PRIVATE",
-            "flow_type": sample_dict.get("flow_type") or "workflow",
+            "access_type": access_type_val,
+            "flow_type": flow_type_val,
             "user_id": user_id_val,
             "folder_id": folder_id_val,
-            "workspace_id": sample_dict.get("workspace_id") or user_id_val,
+            "workspace_id": workspace_id_val,
             "icon": "Snowflake",
             "icon_bg_color": "#29B5E8",
             "tags": json.dumps(["snowflake", "memories", "enterprise-agent", "W2-R4-07"]),
@@ -707,7 +749,7 @@ def _persist_showcase_execution_and_activity(
     now_dt = datetime.now(timezone.utc)
     now_iso = now_dt.isoformat()
     now_sql = now_dt.strftime("%Y-%m-%d %H:%M:%S.%f")
-    flow_hex = SHOWCASE_FLOW_ID.replace("-", "")
+    flow_hex = SHOWCASE_FLOW_UUID_HEX
     tx_id = "50700000000040008000000000000507"
     turn_3 = turns[-1] if turns else {}
 
@@ -747,10 +789,11 @@ def _persist_showcase_execution_and_activity(
     db_path = persist_dir / "langflow.db"
     if db_path.exists():
         try:
-            from .fastapi_live_bridge import _open_sqlite_conn
+            from .fastapi_live_bridge import _open_sqlite_conn, heal_sqlite_invalid_uuid_rows
 
             conn = _open_sqlite_conn(db_path, readonly=False, timeout=30.0)
             conn.row_factory = sqlite3.Row
+            heal_sqlite_invalid_uuid_rows(conn)
             cur = conn.cursor()
             tables = {r[0] for r in cur.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
             if "transaction" in tables:
@@ -863,13 +906,14 @@ def bootstrap_full_memory_showcase_flow(
         bridge = _bridge
 
     upd_ctx_fn = getattr(bridge, "update_selected_context", None)
-    if callable(upd_ctx_fn):
-        upd_ctx_fn(dict(SHOWCASE_FLOW_CONTEXT), flow_id=SHOWCASE_FLOW_ID)
-    set_ctx_fn = getattr(bridge, "set_flow_context", None)
-    if callable(set_ctx_fn):
-        set_ctx_fn(SHOWCASE_FLOW_ID, dict(SHOWCASE_FLOW_CONTEXT))
-    elif hasattr(bridge, "flow_contexts") and isinstance(bridge.flow_contexts, dict):
-        bridge.flow_contexts[SHOWCASE_FLOW_ID] = dict(SHOWCASE_FLOW_CONTEXT)
+    for alias_fid in (SHOWCASE_FLOW_ID, SHOWCASE_FLOW_UUID, SHOWCASE_FLOW_UUID_HEX):
+        if callable(upd_ctx_fn):
+            upd_ctx_fn(dict(SHOWCASE_FLOW_CONTEXT), flow_id=alias_fid)
+        set_ctx_fn = getattr(bridge, "set_flow_context", None)
+        if callable(set_ctx_fn):
+            set_ctx_fn(alias_fid, dict(SHOWCASE_FLOW_CONTEXT))
+        elif hasattr(bridge, "flow_contexts") and isinstance(bridge.flow_contexts, dict):
+            bridge.flow_contexts[alias_fid] = dict(SHOWCASE_FLOW_CONTEXT)
 
     flow_payload = build_snowflake_full_memory_enterprise_agent_flow()
     flow_persisted_sqlite = _persist_showcase_flow_in_sqlite(flow_payload)

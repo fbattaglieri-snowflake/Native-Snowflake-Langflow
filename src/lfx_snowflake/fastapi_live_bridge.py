@@ -640,6 +640,182 @@ def _open_sqlite_conn(
     return conn
 
 
+def _normalize_sqlite_uuid_val(raw_val: Any, *, use_hex: bool = True) -> str | None:
+    """Return a valid UUID string (32-char hex or 36-char dashed) or None if `raw_val` is not a valid UUID."""
+    s = str(raw_val or "").strip()
+    if not s:
+        return None
+    if s in (
+        "snowflake-full-memory-enterprise-agent-001",
+        "snowflakefullmemoryenterpriseagent001",
+    ):
+        s = "50700000-0000-4000-8000-000000000507"
+    try:
+        u = uuid.UUID(s)
+        return u.hex if use_hex else str(u)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def heal_sqlite_invalid_uuid_rows(conn: Any) -> int:
+    """Self-heal any non-hexadecimal UUID values in SQLite tables (`flow`, `transaction`, `memory_base`, `knowledge_base`, `message`, `trace`) so SQLAlchemy `Uuid` processors never raise `ValueError: badly formed hexadecimal UUID string`."""
+    repaired = 0
+    try:
+        cur = conn.cursor()
+        tables = {
+            str(r[0]) for r in cur.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+        }
+        use_hex = True
+        if "flow" in tables:
+            for r in cur.execute("SELECT id FROM flow LIMIT 20").fetchall():
+                rid = str(r[0] or "").strip()
+                try:
+                    uuid.UUID(rid)
+                    if "-" in rid:
+                        use_hex = False
+                    break
+                except Exception:  # noqa: BLE001
+                    continue
+
+        showcase_uuid = "50700000000040008000000000000507" if use_hex else "50700000-0000-4000-8000-000000000507"
+        valid_user_id: str | None = None
+        if "user" in tables:
+            for ur in cur.execute("SELECT id FROM user ORDER BY is_superuser DESC").fetchall():
+                cand = _normalize_sqlite_uuid_val(ur[0], use_hex=use_hex)
+                if cand:
+                    valid_user_id = cand
+                    break
+        valid_folder_id: str | None = None
+        if "folder" in tables:
+            for fr in cur.execute("SELECT id FROM folder").fetchall():
+                cand = _normalize_sqlite_uuid_val(fr[0], use_hex=use_hex)
+                if cand:
+                    valid_folder_id = cand
+                    break
+
+        if "flow" in tables:
+            flow_cols = {str(c[1]) for c in cur.execute("PRAGMA table_info(flow)").fetchall()}
+            select_cols = ["rowid", "id"] + [
+                c
+                for c in ("name", "user_id", "folder_id", "workspace_id", "access_type", "flow_type")
+                if c in flow_cols
+            ]
+            rows = cur.execute(f"SELECT {', '.join(select_cols)} FROM flow").fetchall()
+            existing_ids = {str(r[1]) for r in rows}
+            for r in rows:
+                row_map = dict(zip(select_cols, r))
+                rowid = row_map["rowid"]
+                raw_id = str(row_map.get("id") or "")
+                norm_id = _normalize_sqlite_uuid_val(raw_id, use_hex=use_hex)
+                if norm_id is None:
+                    if str(row_map.get("name") or "") == "Snowflake_Full_Memory_Enterprise_Agent":
+                        norm_id = showcase_uuid
+                    else:
+                        norm_id = (
+                            uuid.uuid5(uuid.NAMESPACE_DNS, raw_id or f"flow-{rowid}").hex
+                            if use_hex
+                            else str(uuid.uuid5(uuid.NAMESPACE_DNS, raw_id or f"flow-{rowid}"))
+                        )
+                if norm_id != raw_id:
+                    if norm_id in existing_ids:
+                        cur.execute("DELETE FROM flow WHERE rowid = ?", (rowid,))
+                        repaired += 1
+                        continue
+                    cur.execute("UPDATE flow SET id = ? WHERE rowid = ?", (norm_id, rowid))
+                    existing_ids.add(norm_id)
+                    repaired += 1
+
+                updates: list[str] = []
+                vals: list[Any] = []
+                for ucol, fallback in (
+                    ("user_id", valid_user_id),
+                    ("folder_id", valid_folder_id),
+                    ("workspace_id", valid_user_id),
+                ):
+                    if ucol in row_map and row_map[ucol] is not None:
+                        if _normalize_sqlite_uuid_val(row_map[ucol], use_hex=use_hex) is None:
+                            updates.append(f"{ucol} = ?")
+                            vals.append(fallback)
+                if "access_type" in row_map:
+                    at = str(row_map.get("access_type") or "").upper()
+                    if at not in ("PRIVATE", "PUBLIC"):
+                        updates.append("access_type = ?")
+                        vals.append("PRIVATE")
+                if "flow_type" in row_map:
+                    ft = str(row_map.get("flow_type") or "").lower()
+                    if ft not in ("workflow", "agent"):
+                        updates.append("flow_type = ?")
+                        vals.append("workflow")
+                if updates:
+                    vals.append(rowid)
+                    cur.execute(f"UPDATE flow SET {', '.join(updates)} WHERE rowid = ?", tuple(vals))
+                    repaired += 1
+
+        table_uuid_cols: list[tuple[str, tuple[str, ...]]] = [
+            ("transaction", ("id", "flow_id")),
+            ("memory_base", ("id", "flow_id", "user_id")),
+            ("knowledge_base", ("id", "user_id")),
+            ("message", ("id", "flow_id", "run_id", "user_id")),
+            ("trace", ("id", "flow_id")),
+            ("span", ("id", "trace_id", "parent_span_id")),
+        ]
+        for tbl_name, ucols in table_uuid_cols:
+            if tbl_name not in tables:
+                continue
+            existing_tcols = {
+                str(c[1]) for c in cur.execute(f'PRAGMA table_info("{tbl_name}")').fetchall()
+            }
+            active_ucols = [c for c in ucols if c in existing_tcols]
+            if not active_ucols:
+                continue
+            sel = ["rowid"] + active_ucols
+            trows = cur.execute(f'SELECT {", ".join(sel)} FROM "{tbl_name}"').fetchall()
+            seen_pks = {str(tr[1]) for tr in trows if len(tr) > 1 and tr[1] is not None}
+            for tr in trows:
+                tmap = dict(zip(sel, tr))
+                t_rowid = tmap["rowid"]
+                t_updates: list[str] = []
+                t_vals: list[Any] = []
+                delete_row = False
+                for uc in active_ucols:
+                    raw_v = tmap.get(uc)
+                    if raw_v is None:
+                        continue
+                    norm_v = _normalize_sqlite_uuid_val(raw_v, use_hex=use_hex)
+                    if norm_v is None:
+                        if uc == "user_id" and valid_user_id:
+                            norm_v = valid_user_id
+                        elif uc == "flow_id":
+                            norm_v = showcase_uuid
+                        else:
+                            seed = f"{tbl_name}:{uc}:{raw_v}:{t_rowid}"
+                            u_gen = uuid.uuid5(uuid.NAMESPACE_DNS, seed)
+                            norm_v = u_gen.hex if use_hex else str(u_gen)
+                    if norm_v != str(raw_v):
+                        if uc == "id" and norm_v in seen_pks:
+                            delete_row = True
+                            break
+                        t_updates.append(f"{uc} = ?")
+                        t_vals.append(norm_v)
+                        if uc == "id":
+                            seen_pks.add(norm_v)
+                if delete_row:
+                    cur.execute(f'DELETE FROM "{tbl_name}" WHERE rowid = ?', (t_rowid,))
+                    repaired += 1
+                elif t_updates:
+                    t_vals.append(t_rowid)
+                    cur.execute(
+                        f'UPDATE "{tbl_name}" SET {", ".join(t_updates)} WHERE rowid = ?',
+                        tuple(t_vals),
+                    )
+                    repaired += 1
+        if repaired > 0:
+            conn.commit()
+    except Exception:  # noqa: BLE001
+        pass
+    return repaired
+
+
 def ensure_sqlite_wal_and_uv_cache() -> dict[str, Any]:
     """Ensure writable UV_CACHE_DIR (/tmp/uv-cache), bind `standard_langflow` in builtins/sys.modules, and configure SQLite WAL + busy_timeout=30000 on /persist/langflow.db."""
     import builtins
@@ -700,6 +876,7 @@ def ensure_sqlite_wal_and_uv_cache() -> dict[str, Any]:
                             (old_try_import_snippet, new_top_import_snippet),
                         )
                         conn.commit()
+                    heal_sqlite_invalid_uuid_rows(conn)
                 except Exception:  # noqa: BLE001
                     pass
                 conn.close()
@@ -2132,6 +2309,7 @@ class LiveSnowflakeBridge:
         try:
             conn = _open_sqlite_conn(db_path, readonly=False, timeout=30.0)
             conn.row_factory = sqlite3.Row
+            heal_sqlite_invalid_uuid_rows(conn)
             cur = conn.cursor()
             tables = {
                 r[0] for r in cur.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
@@ -2140,19 +2318,25 @@ class LiveSnowflakeBridge:
                 conn.close()
                 return
 
-            user_row = cur.execute("SELECT id FROM user ORDER BY is_superuser DESC LIMIT 1").fetchone()
-            if not user_row:
+            user_id_hex: str | None = None
+            for u_row in cur.execute("SELECT id FROM user ORDER BY is_superuser DESC").fetchall():
+                cand_u = _normalize_sqlite_uuid_val(u_row[0], use_hex=True)
+                if cand_u:
+                    user_id_hex = cand_u
+                    break
+            if not user_id_hex:
                 conn.close()
                 return
-            user_id_hex = str(user_row[0]).replace("-", "")
 
-            target_flow_hex = (flow_id or "").replace("-", "").strip()
-            if len(target_flow_hex) != 32:
-                flow_row = cur.execute("SELECT id FROM flow ORDER BY updated_at DESC LIMIT 1").fetchone()
-                if not flow_row:
-                    conn.close()
-                    return
-                target_flow_hex = str(flow_row[0]).replace("-", "")
+            target_flow_hex = _normalize_sqlite_uuid_val(flow_id, use_hex=True)
+            if not target_flow_hex and "flow" in tables:
+                for f_row in cur.execute("SELECT id FROM flow ORDER BY updated_at DESC").fetchall():
+                    cand_f = _normalize_sqlite_uuid_val(f_row[0], use_hex=True)
+                    if cand_f:
+                        target_flow_hex = cand_f
+                        break
+            if not target_flow_hex:
+                target_flow_hex = "50700000000040008000000000000507"
 
             mem_name = str(entry.get("name") or "SNOWFLAKE_MEMORY").strip()
             safe_kb = "".join(c if c.isalnum() or c == "_" else "_" for c in mem_name).lower()
@@ -5353,6 +5537,9 @@ def register_snowflake_fastapi_routes(app: Any) -> None:
         async def snowflake_flow_context_and_trace_middleware(request: Request, call_next: Any) -> Any:
             path = str(getattr(request.url, "path", "") or "")
             method = str(getattr(request, "method", "GET") or "GET").upper()
+            if not getattr(LIVE_BRIDGE, "_sqlite_uuid_healed_at_request", False) and path.startswith("/api/"):
+                LIVE_BRIDGE._sqlite_uuid_healed_at_request = True
+                await asyncio.to_thread(ensure_sqlite_wal_and_uv_cache)
             header_fid = (
                 request.headers.get("X-Snowflake-Flow-Id")
                 or request.query_params.get("flow_id")

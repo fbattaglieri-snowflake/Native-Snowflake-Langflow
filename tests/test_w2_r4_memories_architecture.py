@@ -882,6 +882,17 @@ def test_verifier_showcase_sqlite_flow_and_transaction_persistence(tmp_path: Pat
         "vertex_id VARCHAR NOT NULL, target_id VARCHAR, inputs JSON, outputs JSON, "
         "status VARCHAR NOT NULL, error VARCHAR, flow_id CHAR(32) NOT NULL)"
     )
+    # Seed a legacy non-hexadecimal UUID row to verify automatic self-healing on startup
+    conn.execute(
+        "INSERT INTO flow (id, name, data, access_type, flow_type) VALUES (?, ?, ?, ?, ?)",
+        (
+            "snowflakefullmemoryenterpriseagent001",
+            "Snowflake_Full_Memory_Enterprise_Agent",
+            "{}",
+            "PRIVATE",
+            "workflow",
+        ),
+    )
     conn.commit()
     conn.close()
 
@@ -897,19 +908,25 @@ def test_verifier_showcase_sqlite_flow_and_transaction_persistence(tmp_path: Pat
         for ev in bridge._recent_activity_events
     )
 
+    import uuid as _uuid
+
     conn = sqlite3.connect(str(db_file))
-    flow_row = conn.execute(
-        "SELECT name, access_type, flow_type FROM flow WHERE name = ?",
-        ("Snowflake_Full_Memory_Enterprise_Agent",),
-    ).fetchone()
-    assert flow_row is not None
-    assert flow_row[1] == "PRIVATE"
-    assert flow_row[2] == "workflow"
+    all_flows = conn.execute("SELECT id, name, access_type, flow_type, user_id, folder_id FROM flow").fetchall()
+    assert len(all_flows) == 1
+    flow_row = all_flows[0]
+    assert _uuid.UUID(str(flow_row[0])).hex == "50700000000040008000000000000507"
+    assert flow_row[1] == "Snowflake_Full_Memory_Enterprise_Agent"
+    assert flow_row[2] == "PRIVATE"
+    assert flow_row[3] == "workflow"
+    for uval in (flow_row[4], flow_row[5]):
+        if uval is not None:
+            _uuid.UUID(str(uval))
     tx_row = conn.execute(
-        'SELECT vertex_id, status FROM "transaction" WHERE id = ?',
+        'SELECT vertex_id, status, flow_id FROM "transaction" WHERE id = ?',
         ("50700000000040008000000000000507",),
     ).fetchone()
-    assert tx_row == ("Node_Agent_Orchestrator", "SUCCESS")
+    assert tx_row == ("Node_Agent_Orchestrator", "SUCCESS", "50700000000040008000000000000507")
+    assert _uuid.UUID(str(tx_row[2])).hex == "50700000000040008000000000000507"
     conn.close()
 
 
