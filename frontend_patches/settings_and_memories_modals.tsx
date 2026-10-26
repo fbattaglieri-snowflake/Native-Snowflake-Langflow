@@ -405,7 +405,7 @@ export const SNOWFLAKE_AGENT_MEMORY_TYPES = [
     id: "graph_state_checkpointer",
     label: "#1 Short-Term: Graph State & Checkpointer",
     category: "short_term",
-    needsEmbeddingBadge: "NO (Mai / Never)",
+    needsEmbeddingBadge: "NO (Never)",
     recommendedSnowflakeObjects: [
       "Snowflake Postgres (PostgresSaver)",
       "Hybrid Table",
@@ -414,7 +414,7 @@ export const SNOWFLAKE_AGENT_MEMORY_TYPES = [
     howToFeedWithoutEmbedding:
       "SELECT state_blob, checkpoint_ns, step_id FROM <fqn> WHERE thread_id = :thread_id ORDER BY step_id DESC LIMIT 1",
     whenEmbeddingUseful:
-      "Mai: lo stato del grafo viene recuperato sempre per chiave primaria thread_id.",
+      "Never: graph execution state is always retrieved by primary key thread_id.",
     requiredInputs: ["thread_id", "checkpoint_ns", "ttl_hours"],
     defaultEnableEmbedding: false,
     description:
@@ -427,7 +427,7 @@ export const SNOWFLAKE_AGENT_MEMORY_TYPES = [
   },
   {
     id: "buffer_window_memory",
-    label: "#2 Short-Term: Buffer / Window Memory (Storico Chat)",
+    label: "#2 Short-Term: Buffer / Window Memory (Chat History)",
     category: "short_term",
     needsEmbeddingBadge: "NO",
     recommendedSnowflakeObjects: [
@@ -438,7 +438,7 @@ export const SNOWFLAKE_AGENT_MEMORY_TYPES = [
     howToFeedWithoutEmbedding:
       "SELECT sender, message_text, created_at FROM <fqn> WHERE session_id = :session_id ORDER BY created_at DESC LIMIT :window_k",
     whenEmbeddingUseful:
-      "Utile solo per recuperare messaggi detti 500+ turni fa fuori dalla finestra K.",
+      "Only useful when retrieving messages from 500+ turns ago outside the sliding K window.",
     requiredInputs: ["session_id", "window_k", "retention_days"],
     defaultEnableEmbedding: false,
     description:
@@ -451,18 +451,18 @@ export const SNOWFLAKE_AGENT_MEMORY_TYPES = [
   },
   {
     id: "summary_memory",
-    label: "#3 Short-Term: Summary Memory (Riassunto)",
+    label: "#3 Short-Term: Summary Memory (Conversation Summary)",
     category: "short_term",
-    needsEmbeddingBadge: "NO (Mai / Never)",
+    needsEmbeddingBadge: "NO (Never)",
     recommendedSnowflakeObjects: [
       "Hybrid Table + AI_COMPLETE / AI_SUMMARIZE_AGG",
       "Standard Table + AI_COMPLETE",
       "Snowflake Postgres",
     ],
     howToFeedWithoutEmbedding:
-      "SELECT running_summary, last_turn_id FROM <fqn> WHERE session_id = :session_id LIMIT 1 -- iniettato nel System Prompt",
+      "SELECT running_summary, last_turn_id FROM <fqn> WHERE session_id = :session_id LIMIT 1 -- injected into the System Prompt",
     whenEmbeddingUseful:
-      "Mai: è un riassunto di 1 riga letto direttamente e aggiornato in background con AI_COMPLETE / AI_SUMMARIZE_AGG.",
+      "Never: a compact rolling summary read directly and updated in the background via AI_COMPLETE / AI_SUMMARIZE_AGG.",
     requiredInputs: ["session_id", "summarizer_model", "max_summary_tokens"],
     defaultEnableEmbedding: false,
     description:
@@ -477,16 +477,16 @@ export const SNOWFLAKE_AGENT_MEMORY_TYPES = [
     id: "user_profile_entity_memory",
     label: "#4 Long-Term Semantic: User Profile & Entity Memory",
     category: "long_term_semantic",
-    needsEmbeddingBadge: "OPZIONALE (90% NO)",
+    needsEmbeddingBadge: "OPTIONAL (Default OFF)",
     recommendedSnowflakeObjects: [
       "Snowflake Postgres (PostgresStore)",
       "Hybrid Table (VARIANT)",
       "Standard Table (VARIANT)",
     ],
     howToFeedWithoutEmbedding:
-      "SELECT profile_json FROM <fqn> WHERE user_id = :user_id AND entity_namespace = :entity_namespace LIMIT 1 -- caricato a inizio sessione",
+      "SELECT profile_json FROM <fqn> WHERE user_id = :user_id AND entity_namespace = :entity_namespace LIMIT 1 -- loaded at session start",
     whenEmbeddingUseful:
-      "Solo se l'utente accumula centinaia di fatti distinti e non entrano tutti nel prompt.",
+      "Only when a user accumulates hundreds of distinct facts that no longer fit in the prompt.",
     requiredInputs: ["user_id", "entity_namespace", "schema_keys"],
     defaultEnableEmbedding: false,
     description:
@@ -499,9 +499,9 @@ export const SNOWFLAKE_AGENT_MEMORY_TYPES = [
   },
   {
     id: "episodic_memory",
-    label: "#5 Long-Term Semantic: Episodic Memory (Esperienze / Few-shot)",
+    label: "#5 Long-Term Semantic: Episodic Memory (Few-Shot Experiences)",
     category: "long_term_semantic",
-    needsEmbeddingBadge: "OPZIONALE",
+    needsEmbeddingBadge: "OPTIONAL",
     recommendedSnowflakeObjects: [
       "Hybrid Table",
       "Standard Table",
@@ -510,7 +510,7 @@ export const SNOWFLAKE_AGENT_MEMORY_TYPES = [
     howToFeedWithoutEmbedding:
       "SELECT topic, tool_used, outcome_score, episode_text FROM <fqn> WHERE topic = :topic ORDER BY outcome_score DESC, created_at DESC LIMIT :few_shot_k",
     whenEmbeddingUseful:
-      "Utile quando i task passati non hanno categorie fisse e serve similarity search per trovare episodi simili.",
+      "Useful when past tasks lack fixed categories and vector similarity search is needed to find related episodes.",
     requiredInputs: ["topic_column", "tool_used_column", "outcome_score_threshold", "few_shot_k"],
     defaultEnableEmbedding: false,
     description:
@@ -530,7 +530,7 @@ export const COMING_SOON_MEMORY_TYPES = [
     category: "long_term_ontology",
     enabled: false,
     badge: "Coming Soon",
-    needsEmbeddingBadge: "OPZIONALE — Gestito da Cortex Sense",
+    needsEmbeddingBadge: "COMING SOON (Cortex Sense)",
     recommendedSnowflakeObjects: [
       "Cortex Sense Context",
       "Business Ontology Graph",
@@ -772,7 +772,7 @@ export const CreateMemoryDialog: React.FC<CreateMemoryDialogProps> = ({
                     {memType.label}
                   </span>
                   <span className="rounded-full bg-sky-100 px-2 py-0.5 text-[10px] font-bold text-sky-800">
-                    Serve Embedding? {memType.needsEmbeddingBadge}
+                    Embedding Required? {memType.needsEmbeddingBadge}
                   </span>
                 </div>
                 <span className="text-[11px] text-slate-600">{memType.description}</span>
@@ -787,17 +787,17 @@ export const CreateMemoryDialog: React.FC<CreateMemoryDialogProps> = ({
           className="flex flex-col gap-1.5 rounded-lg border border-sky-200 bg-slate-50 p-3 text-xs"
         >
           <div>
-            <strong>Oggetto Snowflake Consigliato:</strong>{" "}
+            <strong>Recommended Snowflake Object:</strong>{" "}
             {activeSpec.recommendedSnowflakeObjects.join(" · ")}
           </div>
           <div>
-            <strong>Come si passa all&apos;Agente SENZA Embedding:</strong>
+            <strong>How It Feeds the Agent WITHOUT Embedding:</strong>
             <code className="mt-1 block rounded bg-slate-900 p-2 font-mono text-[11px] text-slate-100">
               {activeSpec.howToFeedWithoutEmbedding}
             </code>
           </div>
           <div>
-            <strong>Quando l&apos;Embedding diventa utile:</strong>{" "}
+            <strong>When Embedding Is Useful:</strong>{" "}
             {activeSpec.whenEmbeddingUseful}
           </div>
         </div>

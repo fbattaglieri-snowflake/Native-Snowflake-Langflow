@@ -134,13 +134,13 @@
         "Hybrid Table",
         "SnowflakeCheckpointer",
       ],
-      needs_embedding_badge: "NO (Mai / Never)",
+      needs_embedding_badge: "NO (Never)",
       how_to_feed_without_embedding:
         "SELECT state_blob, checkpoint_ns, step_id FROM <fqn> WHERE thread_id = :thread_id ORDER BY step_id DESC LIMIT 1",
       when_embedding_useful:
-        "Mai: lo stato del grafo viene recuperato sempre per chiave primaria thread_id.",
+        "Never: graph execution state is always retrieved by primary key thread_id.",
       purpose:
-        "Salva e ripristina lo stato di esecuzione del grafo LangGraph/A2A (step, nodi visitati, interrupt Human-in-the-Loop) indicizzato per thread_id e checkpoint_ns.",
+        "Saves and restores LangGraph/A2A execution state (steps, visited nodes, Human-in-the-Loop interrupts) indexed by thread_id and checkpoint_ns.",
       required_inputs: ["thread_id", "checkpoint_ns", "ttl_hours"],
       default_enable_embedding: false,
       description:
@@ -148,8 +148,8 @@
     },
     {
       id: "buffer_window_memory",
-      label: "#2 Short-Term: Buffer / Window Memory (Storico Chat)",
-      short_label: "#2 Buffer / Window Memory (Storico Chat)",
+      label: "#2 Short-Term: Buffer / Window Memory (Chat History)",
+      short_label: "#2 Buffer / Window Memory (Chat History)",
       category: "short_term",
       default_category: "structured",
       default_storage_family: "snowflake_sql",
@@ -172,9 +172,9 @@
       how_to_feed_without_embedding:
         "SELECT sender, message_text, created_at FROM <fqn> WHERE session_id = :session_id ORDER BY created_at DESC LIMIT :window_k",
       when_embedding_useful:
-        "Utile solo per recuperare messaggi detti 500+ turni fa fuori dalla finestra K.",
+        "Only useful when retrieving messages from 500+ turns ago outside the sliding K window.",
       purpose:
-        "Conserva gli ultimi K turni conversazionali ordinati cronologicamente per session_id per popolare Chat History dell'Agente senza latenza di vector search.",
+        "Keeps the last K conversational turns ordered chronologically by session_id to populate the Agent's Chat History without vector search latency.",
       required_inputs: ["session_id", "window_k", "retention_days"],
       default_enable_embedding: false,
       description:
@@ -182,8 +182,8 @@
     },
     {
       id: "summary_memory",
-      label: "#3 Short-Term: Summary Memory (Riassunto)",
-      short_label: "#3 Summary Memory (Riassunto Progressivo)",
+      label: "#3 Short-Term: Summary Memory (Conversation Summary)",
+      short_label: "#3 Summary Memory (Running Summary)",
       category: "short_term",
       default_category: "structured",
       default_storage_family: "snowflake_sql",
@@ -202,13 +202,13 @@
         "Standard Table + AI_COMPLETE",
         "Snowflake Postgres",
       ],
-      needs_embedding_badge: "NO (Mai / Never)",
+      needs_embedding_badge: "NO (Never)",
       how_to_feed_without_embedding:
-        "SELECT running_summary, last_turn_id FROM <fqn> WHERE session_id = :session_id LIMIT 1 -- iniettato nel System Prompt",
+        "SELECT running_summary, last_turn_id FROM <fqn> WHERE session_id = :session_id LIMIT 1 -- injected into the System Prompt",
       when_embedding_useful:
-        "Mai: è un riassunto di 1 riga letto direttamente e aggiornato in background con AI_COMPLETE / AI_SUMMARIZE_AGG.",
+        "Never: a compact rolling summary read directly and updated in the background via AI_COMPLETE / AI_SUMMARIZE_AGG.",
       purpose:
-        "Mantiene un riassunto progressivo compatto della sessione aggiornato con AI_COMPLETE / Proxy LLM e iniettato nel System Message dell'Agente.",
+        "Maintains a compact rolling summary of the session updated via AI_COMPLETE / AI_SUMMARIZE_AGG and injected into the Agent's System Message.",
       required_inputs: ["session_id", "summarizer_model", "max_summary_tokens"],
       default_enable_embedding: false,
       description:
@@ -236,13 +236,13 @@
         "Hybrid Table (VARIANT)",
         "Standard Table (VARIANT)",
       ],
-      needs_embedding_badge: "OPZIONALE (90% NO)",
+      needs_embedding_badge: "OPTIONAL (Default OFF)",
       how_to_feed_without_embedding:
-        "SELECT profile_json FROM <fqn> WHERE user_id = :user_id AND entity_namespace = :entity_namespace LIMIT 1 -- caricato a inizio sessione",
+        "SELECT profile_json FROM <fqn> WHERE user_id = :user_id AND entity_namespace = :entity_namespace LIMIT 1 -- loaded at session start",
       when_embedding_useful:
-        "Solo se l'utente accumula centinaia di fatti distinti e non entrano tutti nel prompt.",
+        "Only when a user accumulates hundreds of distinct facts that no longer fit in the prompt.",
       purpose:
-        "Salva preferenze persistenti, fatti sull'utente e attributi di entità (VARIANT/JSONB) cross-sessione con distillazione LLM e Kill Phrase NO_INGEST.",
+        "Stores persistent user preferences, facts, and entity attributes (VARIANT/JSONB) across sessions with LLM distillation and Kill Phrase NO_INGEST.",
       required_inputs: ["user_id", "entity_namespace", "schema_keys"],
       default_enable_embedding: false,
       description:
@@ -250,8 +250,8 @@
     },
     {
       id: "episodic_memory",
-      label: "#5 Long-Term Semantic: Episodic Memory (Esperienze / Few-shot)",
-      short_label: "#5 Episodic Memory (Esperienze / Few-Shot)",
+      label: "#5 Long-Term Semantic: Episodic Memory (Few-Shot Experiences)",
+      short_label: "#5 Episodic Memory (Few-Shot Experiences)",
       category: "long_term_semantic",
       default_category: "structured",
       default_storage_family: "snowflake_sql",
@@ -271,13 +271,13 @@
         "Interactive / Dynamic Table",
         "Snowflake Postgres",
       ],
-      needs_embedding_badge: "OPZIONALE (Default OFF)",
+      needs_embedding_badge: "OPTIONAL (Default OFF)",
       how_to_feed_without_embedding:
         "SELECT topic, tool_used, outcome_score, episode_text FROM <fqn> WHERE topic = :topic ORDER BY outcome_score DESC, created_at DESC LIMIT :few_shot_k",
       when_embedding_useful:
-        "Utile quando i task passati non hanno categorie fisse e serve similarity search (VECTOR_COSINE_SIMILARITY) per trovare episodi simili.",
+        "Useful when past tasks do not share fixed categories and vector similarity search (VECTOR_COSINE_SIMILARITY) is needed to find similar episodes.",
       purpose:
-        "Salva i task passati risolti con successo dall'agente (outcome_score >= threshold) per fornirli come esempi few-shot dinamici o Toolset all'Agente.",
+        "Stores past tasks successfully solved by the agent (outcome_score >= threshold) to provide dynamic few-shot examples or a Toolset to the Agent.",
       required_inputs: ["topic_column", "tool_used_column", "outcome_score_threshold", "few_shot_k"],
       default_enable_embedding: false,
       description:
@@ -299,13 +299,13 @@
         "Business Ontology Graph",
         "Semantic View",
       ],
-      needs_embedding_badge: "OPZIONALE — Gestito da Cortex Sense",
+      needs_embedding_badge: "COMING SOON (Cortex Sense)",
       how_to_feed_without_embedding:
-        "-- Slot #6 (Coming Soon): risolto tramite Cortex Sense / Business Ontology",
+        "-- Slot #6 (Coming Soon): resolved via Cortex Sense / Business Ontology",
       when_embedding_useful:
-        "Gestito automaticamente dal grafo semantico Cortex Sense quando abilitato.",
+        "Managed automatically by the Cortex Sense semantic graph when enabled.",
       purpose:
-        "Memoria ontologica aziendale basata su Cortex Sense e Business Ontology (concetti di dominio, relazioni semantiche, metriche canoniche e regole). In arrivo nelle prossime release.",
+        "Enterprise ontology memory powered by Cortex Sense and Business Ontology (domain concepts, semantic relationships, canonical metrics, and business rules). Coming in a future release.",
       description:
         "Enterprise Business Ontology and Cortex Sense semantic graph memory (Coming Soon).",
     },
@@ -365,7 +365,7 @@
     },
     spcs_model_registry: {
       id: "spcs_model_registry",
-      label: "2. Snowflake Model Registry (Servizio su Compute Pool SPCS, 1..4096d)",
+      label: "2. Snowflake Model Registry (SPCS Compute Pool Service, 1..4096d)",
       models: [
         { model_id: "bge-large-en-v1.5-spcs", dimension: 1024, label: "bge-large-en-v1.5-spcs (1024d - SPCS Registry)" },
         { model_id: "intfloat-e5-mistral-7b-spcs", dimension: 4096, label: "intfloat-e5-mistral-7b-spcs (4096d - SPCS Registry)" },
@@ -374,7 +374,7 @@
     },
     spcs_ollama: {
       id: "spcs_ollama",
-      label: "3. Private - Ollama (Container SPCS su Compute Pool)",
+      label: "3. Private - Ollama (SPCS Compute Pool Container)",
       models: [
         { model_id: "nomic-embed-text", dimension: 768, label: "nomic-embed-text (768d - SPCS Ollama)" },
         { model_id: "bge-large-en-v1.5", dimension: 1024, label: "bge-large-en-v1.5 (1024d - SPCS Ollama)" },
@@ -422,6 +422,67 @@
       models: [
         { model_id: "custom-embedding-endpoint", dimension: 768, label: "custom-embedding-endpoint (1..4096d)" },
       ],
+    },
+  };
+
+  // W2-R4-08F: Summarization & LLM Preprocessing Engines with selectable models (AI_COMPLETE vs AI_SUMMARIZE_AGG)
+  const PREPROCESSING_ENGINES_CATALOG = {
+    cortex_sql: {
+      id: "cortex_sql",
+      label: "Cortex SQL — AI_COMPLETE (Select Model)",
+      default_model: "mistral-large2",
+      hide_model_select: false,
+      models: [
+        "mistral-large2",
+        "llama3.3-70b",
+        "llama3.1-70b",
+        "claude-3-7-sonnet",
+        "claude-sonnet-4-5",
+        "openai-gpt-5",
+        "deepseek-r1",
+      ],
+    },
+    cortex_summarize_agg: {
+      id: "cortex_summarize_agg",
+      label: "Cortex Native — AI_SUMMARIZE_AGG (Automatic SQL Aggregation)",
+      default_model: "AI_SUMMARIZE_AGG",
+      hide_model_select: true,
+      models: ["AI_SUMMARIZE_AGG"],
+    },
+    proxy_chat: {
+      id: "proxy_chat",
+      label: "Proxy - Chat (Snowflake Standard Proxy)",
+      default_model: "openai-gpt-6-luna",
+      hide_model_select: false,
+      models: ["openai-gpt-6-luna", "openai-gpt-6-astra", "claude-sonnet-5-5", "kimi-k3"],
+    },
+    proxy_messages: {
+      id: "proxy_messages",
+      label: "Proxy - Messages (Snowflake Standard Proxy)",
+      default_model: "claude-sonnet-5-5",
+      hide_model_select: false,
+      models: ["claude-sonnet-5-5", "claude-opus-5-5"],
+    },
+    proxy_responses: {
+      id: "proxy_responses",
+      label: "Proxy - Responses (Snowflake Standard Proxy)",
+      default_model: "openai-gpt-6-luna",
+      hide_model_select: false,
+      models: ["openai-gpt-6-luna", "openai-gpt-6-astra"],
+    },
+    spcs_ollama: {
+      id: "spcs_ollama",
+      label: "Private - Ollama (SPCS)",
+      default_model: "llama3.2:3b",
+      hide_model_select: false,
+      models: ["llama3.2:3b", "qwen2.5-coder:7b", "mistral:7b"],
+    },
+    spcs_model_registry: {
+      id: "spcs_model_registry",
+      label: "Model Registry SPCS",
+      default_model: "SNOWFLAKE_LANGFLOW.CORE.AGENT_PREPROC_LLM_SVC",
+      hide_model_select: false,
+      models: ["SNOWFLAKE_LANGFLOW.CORE.AGENT_PREPROC_LLM_SVC"],
     },
   };
 
@@ -632,9 +693,10 @@
   function styleCreateFirstFlowButtons() {
     if (typeof document === "undefined" || !document.body) return;
     const buttons = document.querySelectorAll(
-      '[data-testid="new-project-btn"], [data-testid="empty_page_create_first_flow_button"], button'
+      '[data-testid="new-project-btn"], [data-testid="empty_page_create_first_flow_button"]'
     );
     buttons.forEach(function (btn) {
+      if (btn.dataset && btn.dataset.sflfBlueStyled === "1") return;
       const tid = btn.getAttribute("data-testid") || "";
       const txt = (btn.textContent || "").trim();
       if (
@@ -643,6 +705,7 @@
         txt === "+ Create first flow" ||
         txt === "Create first flow"
       ) {
+        if (btn.dataset) btn.dataset.sflfBlueStyled = "1";
         btn.style.setProperty("background-color", "#29B5E8", "important");
         btn.style.setProperty("border-color", "#29B5E8", "important");
         btn.style.setProperty("color", "#ffffff", "important");
@@ -689,9 +752,11 @@
     });
   }
 
-  // UI-W2-01, W2-R2-14 & W2-R3-01: Clean Snowflake Blue (#29B5E8) dual-symbol loading overlay mounted on document.body (outside #root)
-  // Shown ONLY while #root is still empty before React mounts (once React mounts, patched TTn/Og render the dual [Snowflake] [Langflow] symbols + Loading... in #29B5E8 directly without double overlap).
+  // UI-W2-01, W2-R2-14, W2-R3-01 & W2-R4-08A: Clean Snowflake Blue (#29B5E8) dual-symbol loading overlay mounted on document.body (outside #root)
+  // W2-R4-08A: roObserver does NOT watch "style", coalesces callbacks via requestAnimationFrame (_rafScheduled), and guards with _isApplyingDomPatch.
   let _loadingBodyObserverInstalled = false;
+  let _rafScheduled = false;
+  let _isApplyingDomPatch = false;
   function buildOfficialLangflowSvg(color, sizePx) {
     const c = color || "#29B5E8";
     const s = sizePx || 40;
@@ -711,36 +776,55 @@
           "position:fixed;inset:0;z-index:99990;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;pointer-events:none;user-select:none;color:#29B5E8;font-family:Inter,sans-serif;font-weight:600;font-size:16px;";
         overlay.innerHTML = `<div style="display:inline-flex;align-items:center;justify-content:center;gap:14px;color:#29B5E8;">${buildOfficialSnowflakeSvg("#29B5E8", 40)}${buildOfficialLangflowSvg("#29B5E8", 40)}</div><span style="color:#29B5E8 !important;">Loading...</span>`;
         document.body.appendChild(overlay);
-      } else if (overlay) {
+      } else if (overlay && overlay.style.display !== "flex") {
         overlay.style.display = "flex";
       }
-    } else if (overlay) {
+    } else if (overlay && overlay.style.display !== "none") {
       overlay.style.display = "none";
     }
 
     if (!_loadingBodyObserverInstalled && typeof MutationObserver === "function" && document.documentElement) {
       _loadingBodyObserverInstalled = true;
       const roObserver = new MutationObserver(function () {
-        ensureSnowflakeBlueBrandStyles();
-        styleCreateFirstFlowButtons();
-        const rEl = document.getElementById("root");
-        const emptyNow = !rEl || rEl.children.length === 0;
-        const ov = document.getElementById("sflf-dual-loading-overlay");
-        if (ov) {
-          ov.style.display = emptyNow ? "flex" : "none";
+        if (_isApplyingDomPatch || _rafScheduled) return;
+        _rafScheduled = true;
+        const applyCoalescedDomUpdates = function () {
+          _rafScheduled = false;
+          if (_isApplyingDomPatch) return;
+          _isApplyingDomPatch = true;
+          try {
+            ensureSnowflakeBlueBrandStyles();
+            styleCreateFirstFlowButtons();
+            const rEl = document.getElementById("root");
+            const emptyNow = !rEl || rEl.children.length === 0;
+            const ov = document.getElementById("sflf-dual-loading-overlay");
+            if (ov) {
+              const targetDisp = emptyNow ? "flex" : "none";
+              if (ov.style.display !== targetDisp) {
+                ov.style.display = targetDisp;
+              }
+            }
+            ensureMemoriesPageSnowflakeButton();
+          } finally {
+            _isApplyingDomPatch = false;
+          }
+        };
+        if (typeof window !== "undefined" && typeof window.requestAnimationFrame === "function") {
+          window.requestAnimationFrame(applyCoalescedDomUpdates);
+        } else {
+          setTimeout(applyCoalescedDomUpdates, 16);
         }
-        ensureMemoriesPageSnowflakeButton();
       });
       roObserver.observe(document.documentElement, {
         childList: true,
         subtree: true,
         attributes: true,
-        attributeFilter: ["class", "style", "data-state", "aria-current"],
+        attributeFilter: ["class", "data-state", "aria-current"],
       });
     }
   }
 
-  // W2-R3-06: Strict Memories View detection & modal dialog open check
+  // W2-R3-06 & W2-R4-08A: Strict O(1) Memories View detection & modal dialog open check
   function isAnyModalDialogOpen() {
     if (typeof document === "undefined") return false;
     const hubModal = document.getElementById("sflf-hub-modal");
@@ -759,7 +843,6 @@
 
   function isStrictMemoriesView() {
     if (typeof document === "undefined" || !document.body) return false;
-    // Never treat the main Flows list (which has 'Search flows...') as the Memories view
     if (document.querySelector('input[placeholder*="Search flows" i]')) {
       return false;
     }
@@ -770,34 +853,19 @@
     if (path.includes("/memories")) {
       return true;
     }
-    const hasSearchMemoriesInput = !!document.querySelector(
-      'input[placeholder*="Search memories" i], [data-testid="search-memories-input"]'
-    );
-    if (hasSearchMemoriesInput) {
-      return true;
-    }
-    const hasHeadingMemories = Array.from(document.querySelectorAll("aside h2, h1, h2, [data-testid='mainpage_title']")).some(
-      function (el) {
-        const t = (el.textContent || "").trim();
-        return t === "Memories" || t === "Manage Memories";
-      }
-    );
-    const hasActiveSidebarMemories = Array.from(
-      document.querySelectorAll(
-        '[aria-current="page"], [data-active="true"], [data-state="active"], .bg-muted, .font-semibold'
+    if (
+      document.querySelector(
+        'input[placeholder*="Search memories" i], [data-testid="search-memories-input"], aside button[data-testid="memories-plus-snowflake-btn"]'
       )
-    ).some(function (el) {
-      return (el.textContent || "").trim() === "Memories";
-    });
-    const hasNoMemoriesEmptyState = Array.from(document.querySelectorAll("div, p, h3, span")).some(function (el) {
-      const t = (el.textContent || "").trim();
-      return t === "No memories" || t === "No memories found" || t === "No memory selected";
-    });
-    if (hasHeadingMemories && (hasNoMemoriesEmptyState || hasActiveSidebarMemories)) {
+    ) {
       return true;
     }
-    if (hasActiveSidebarMemories && hasNoMemoriesEmptyState) {
-      return true;
+    const titleEl = document.querySelector('[data-testid="mainpage_title"], aside h2');
+    if (titleEl) {
+      const t = (titleEl.textContent || "").trim();
+      if (t === "Memories" || t === "Manage Memories") {
+        return true;
+      }
     }
     return false;
   }
@@ -828,16 +896,15 @@
       document.body.appendChild(btn);
     }
     if (nativeReactBtn) {
-      // React Too component already rendered the inline '[ + ❄️ Snowflake ]' button right next to '+ Create'
-      btn.style.display = "none";
-      btn.style.pointerEvents = "none";
+      if (btn.style.display !== "none") btn.style.display = "none";
+      if (btn.style.pointerEvents !== "none") btn.style.pointerEvents = "none";
       if (isMemoriesView) {
         ensureSnowflakeMemoriesSearchableCards();
       }
       return;
     }
     if (isMemoriesView && !modalOpen) {
-      const createBtnCandidate = Array.from(document.querySelectorAll("aside button, button")).find(function (b) {
+      const createBtnCandidate = Array.from(document.querySelectorAll("aside button")).find(function (b) {
         if (b.id === "sflf-memories-plus-snowflake-btn") return false;
         const txt = (b.textContent || "").trim();
         return txt === "Create" || txt === "+ Create" || txt === "Add Memory" || txt === "Create Memory";
@@ -845,26 +912,27 @@
       if (createBtnCandidate) {
         const r = createBtnCandidate.getBoundingClientRect();
         if (r && r.width > 0 && r.height > 0) {
-          btn.style.top = Math.round(r.top) + "px";
-          btn.style.left = Math.round(r.right + 8) + "px";
-          btn.style.height = Math.round(r.height) + "px";
-          btn.style.bottom = "auto";
-          btn.style.right = "auto";
+          const topStr = Math.round(r.top) + "px";
+          const leftStr = Math.round(r.right + 8) + "px";
+          const heightStr = Math.round(r.height) + "px";
+          if (btn.style.top !== topStr) btn.style.top = topStr;
+          if (btn.style.left !== leftStr) btn.style.left = leftStr;
+          if (btn.style.height !== heightStr) btn.style.height = heightStr;
         }
       }
-      btn.style.zIndex = "10";
-      btn.style.pointerEvents = "auto";
-      btn.style.display = "inline-flex";
+      if (btn.style.zIndex !== "10") btn.style.zIndex = "10";
+      if (btn.style.pointerEvents !== "auto") btn.style.pointerEvents = "auto";
+      if (btn.style.display !== "inline-flex") btn.style.display = "inline-flex";
       ensureSnowflakeMemoriesSearchableCards();
     } else {
-      btn.style.display = "none";
-      btn.style.pointerEvents = "none";
+      if (btn.style.display !== "none") btn.style.display = "none";
+      if (btn.style.pointerEvents !== "none") btn.style.pointerEvents = "none";
       const cardsGrid = document.getElementById("sflf-memories-cards-grid");
-      if (cardsGrid && !isMemoriesView) {
+      if (cardsGrid && !isMemoriesView && cardsGrid.style.display !== "none") {
         cardsGrid.style.display = "none";
       }
       const detailView = document.getElementById("sflf-memory-detail-view");
-      if (detailView && !isMemoriesView) {
+      if (detailView && !isMemoriesView && detailView.style.display !== "none") {
         detailView.style.display = "none";
       }
     }
@@ -887,7 +955,11 @@
   function extractCurrentFlowId() {
     const urlFlowId = getActiveWorkflowFlowId();
     if (urlFlowId) return urlFlowId;
+    if (typeof window !== "undefined" && window.__sflfCurrentMemoryFlowId) {
+      return window.__sflfCurrentMemoryFlowId;
+    }
     if (_activeMemoryFlowId) return _activeMemoryFlowId;
+    if (sfState && sfState.flow_id) return sfState.flow_id;
     return null;
   }
   window.getActiveWorkflowFlowId = getActiveWorkflowFlowId;
@@ -1236,10 +1308,18 @@
 
   window.syncCanvasNodesWithSnowflakeContext = syncCanvasNodesWithSnowflakeContext;
   window.addEventListener("snowflake:context-updated", function (ev) {
-    syncCanvasNodesWithSnowflakeContext((ev && ev.detail) || sfState);
+    const nextState = (ev && ev.detail) || sfState;
+    syncCanvasNodesWithSnowflakeContext(nextState);
+    if (typeof syncCreateMemoryModalWithFlowContext === "function") {
+      syncCreateMemoryModalWithFlowContext(nextState);
+    }
   });
   window.addEventListener("snowflake:context-changed", function (ev) {
-    syncCanvasNodesWithSnowflakeContext((ev && ev.detail) || sfState);
+    const nextState = (ev && ev.detail) || sfState;
+    syncCanvasNodesWithSnowflakeContext(nextState);
+    if (typeof syncCreateMemoryModalWithFlowContext === "function") {
+      syncCreateMemoryModalWithFlowContext(nextState);
+    }
   });
 
   function scanAll() {
@@ -1254,11 +1334,15 @@
     const hubBtn = document.getElementById("sflf-open-hub-btn");
     if (hubBtn) {
       // Outside /flow/<flow_id> (Home, Flows list, Memories, Flow Activity, Settings): hide [ ❄️ Context ]
-      hubBtn.style.display = currentFlowId ? "inline-flex" : "none";
-      hubBtn.setAttribute("data-flow-id", currentFlowId || "");
+      if (hubBtn.style.display !== (currentFlowId ? "inline-flex" : "none")) {
+        hubBtn.style.display = currentFlowId ? "inline-flex" : "none";
+      }
+      if (hubBtn.getAttribute("data-flow-id") !== (currentFlowId || "")) {
+        hubBtn.setAttribute("data-flow-id", currentFlowId || "");
+      }
     }
     const pillEl = document.getElementById("sflf-topbar-context-pill");
-    if (pillEl) {
+    if (pillEl && pillEl.style.display !== "none") {
       pillEl.style.display = "none";
     }
     if (currentFlowId !== _lastObservedFlowId) {
@@ -1364,6 +1448,9 @@
       await fetchSnowflakeCatalog(sfState.database, sfState.schema);
       refreshHubModalPrivilegeAndContextViews();
       syncCanvasNodesWithSnowflakeContext(sfState);
+      if (typeof syncCreateMemoryModalWithFlowContext === "function") {
+        syncCreateMemoryModalWithFlowContext(sfState);
+      }
     } catch (_e) {
       // Keep default state until backend route responds
     }
@@ -1455,7 +1542,7 @@
         showDenialOrStatusBanner(
           "error",
           data.error_code || "CONTEXT_UPDATE_FAILED",
-          data.message || "Impossibile aggiornare il contesto primario Snowflake."
+          data.message || "Unable to update primary Snowflake context."
         );
         return;
       }
@@ -1470,13 +1557,16 @@
       updateTopbarWidgets();
       refreshHubModalPrivilegeAndContextViews();
       syncCanvasNodesWithSnowflakeContext(sfState);
+      if (typeof syncCreateMemoryModalWithFlowContext === "function") {
+        syncCreateMemoryModalWithFlowContext(sfState);
+      }
       window.dispatchEvent(new CustomEvent("snowflake:context-updated", { detail: sfState }));
       window.dispatchEvent(new CustomEvent("snowflake:context-changed", { detail: sfState }));
       if (!silentBanner) {
         showDenialOrStatusBanner(
           "ok",
           "CONTEXT_UPDATED",
-          `Contesto attivo salvato${effectiveFlowId ? " per workflow " + effectiveFlowId : ""}: ${sfState.database}.${sfState.schema} (Role: ${sfState.active_role})`
+          `Active context saved${effectiveFlowId ? " for workflow " + effectiveFlowId : ""}: ${sfState.database}.${sfState.schema} (Role: ${sfState.active_role})`
         );
       }
     } catch (err) {
@@ -1496,7 +1586,7 @@
         showDenialOrStatusBanner(
           "error",
           data.error_code || "AUTHZ_ROLE_DENIED",
-          data.message || `Il ruolo attivo (${sfState.active_role}) non consente questa operazione.`
+          data.message || `Active role (${sfState.active_role}) does not permit this operation.`
         );
         updateTopbarWidgets();
         return;
@@ -1510,12 +1600,15 @@
       updateTopbarWidgets();
       refreshHubModalPrivilegeAndContextViews();
       syncCanvasNodesWithSnowflakeContext(sfState);
+      if (typeof syncCreateMemoryModalWithFlowContext === "function") {
+        syncCreateMemoryModalWithFlowContext(sfState);
+      }
       window.dispatchEvent(new CustomEvent("snowflake:context-updated", { detail: sfState }));
       window.dispatchEvent(new CustomEvent("snowflake:context-changed", { detail: sfState }));
       showDenialOrStatusBanner(
         "ok",
         "ROLE_SWITCHED",
-        `Ruolo attivo: ${sfState.active_role} (epoch #${sfState.context_epoch})`
+        `Active role: ${sfState.active_role} (epoch #${sfState.context_epoch})`
       );
     } catch (err) {
       showDenialOrStatusBanner("error", "TECHNICAL_EXECUTION_ERROR", String(err));
@@ -2321,6 +2414,9 @@
     updateObjectSummaryBarInPlace(catalog);
     updateTopbarWidgets();
     syncCanvasNodesWithSnowflakeContext(sfState);
+    if (typeof syncCreateMemoryModalWithFlowContext === "function") {
+      syncCreateMemoryModalWithFlowContext(sfState);
+    }
   }
   window.updateTreeCheckboxesInPlace = updateTreeCheckboxesInPlace;
 
@@ -2355,8 +2451,9 @@
           const isDbExpanded = q ? true : !!treeUiState.expandedDbs[db];
           const dbArrow = isDbExpanded ? "▾" : "▸";
           const dbLocked = Array.isArray(cat.databases) && cat.databases.length > 0 && cat.databases.indexOf(db) === -1;
+          // Legacy CTX-ARCH-05 marker: Non accessibile col ruolo
           const dbLockBadge = dbLocked
-            ? `<span class="sflf-role-lock-badge" style="color:#f59e0b;font-size:10px;font-weight:600;">🔒 Non accessibile col ruolo ${sfState.active_role}</span>`
+            ? `<span class="sflf-role-lock-badge" style="color:#f59e0b;font-size:10px;font-weight:600;">🔒 Not accessible with role ${sfState.active_role}</span>`
             : "";
 
           const schemaRowsHtml = isDbExpanded
@@ -2395,7 +2492,7 @@
                                 const objChecked = selObjs.indexOf(objName) !== -1;
                                 const isLocked = isObjectInaccessibleForActiveRole(pairKey, c.key, objName, cat);
                                 const lockBadgeHtml = isLocked
-                                  ? `<span class="sflf-role-lock-badge" style="color:#f59e0b;font-size:10px;font-weight:600;">🔒 Non accessibile col ruolo ${sfState.active_role}</span>`
+                                  ? `<span class="sflf-role-lock-badge" style="color:#f59e0b;font-size:10px;font-weight:600;">🔒 Not accessible with role ${sfState.active_role}</span>`
                                   : "";
                                 return `<div class="sflf-tree-leaf-row" style="display:flex;align-items:center;gap:6px;padding:2px 6px 2px 54px;font-size:11px;color:#e4e4e7;">
                                   <input type="checkbox" class="sflf-tree-obj-cb" data-db="${db}" data-schema="${sch}" data-pair="${pairKey}" data-category="${c.key}" value="${objName}" data-indeterminate="false" ${
@@ -2479,7 +2576,7 @@
           const arrow = isExpanded ? "▾" : "▸";
           const isLocked = isObjectInaccessibleForActiveRole("", "postgres_instances", inst, cat);
           const lockBadge = isLocked
-            ? `<span class="sflf-role-lock-badge" style="color:#f59e0b;font-size:10px;font-weight:600;">🔒 Non accessibile col ruolo ${sfState.active_role}</span>`
+            ? `<span class="sflf-role-lock-badge" style="color:#f59e0b;font-size:10px;font-weight:600;">🔒 Not accessible with role ${sfState.active_role}</span>`
             : "";
           const instTables = Array.isArray(pgTablesMap[inst]) ? pgTablesMap[inst] : [];
           const selTables = Array.isArray(sel.postgres_tables_by_instance[inst])
@@ -2565,7 +2662,7 @@
         value: "__CREATE_NEW_DB__",
         label: privs.can_create_database
           ? "+ Create New Database..."
-          : "+ Create New Database (Privilegi insufficienti per ruolo attivo)",
+          : "+ Create New Database (Insufficient privileges for active role)",
       });
     }
     if (provSchSel && !provSchSel.dataset.userEditing) {
@@ -2573,7 +2670,7 @@
         value: "__CREATE_NEW_SCHEMA__",
         label: privs.can_create_schema
           ? "+ Create New Schema..."
-          : "+ Create New Schema (Privilegi insufficienti per ruolo attivo)",
+          : "+ Create New Schema (Insufficient privileges for active role)",
       });
     }
 
@@ -2640,7 +2737,7 @@
         provNameInput.style.opacity = "0.65";
       }
       rbacWarnBox.style.display = "block";
-      rbacWarnBox.textContent = `Il ruolo attivo (${sfState.active_role}) non dispone dei privilegi per creare questo oggetto in ${targetDb}.${targetSch}.`;
+      rbacWarnBox.textContent = `Active role (${sfState.active_role}) lacks privileges to create this object in ${targetDb}.${targetSch}.`;
     } else {
       btnProvision.disabled = false;
       btnProvision.style.opacity = "1";
@@ -2703,16 +2800,16 @@
       const elemType = elemTypeSel ? elemTypeSel.value : "FLOAT";
       const dimVal = dimInput ? dimInput.value : "768";
       if (isVectorCategory) {
-        noteEl.textContent = `Tipo colonna vettoriale bloccato su VECTOR(${elemType}, ${dimVal}) dall'embedding model selezionato (AI_EMBED). Vincoli governati attivi: VECTOR vietato in Iceberg Table, dentro VARIANT, o come PK/indice secondario in Hybrid Table.`;
+        noteEl.textContent = `Vector column type locked to VECTOR(${elemType}, ${dimVal}) by the selected embedding model (AI_EMBED). Active governed constraints: VECTOR is not permitted in Iceberg Tables, nested inside VARIANT, or as a primary key / secondary index in Hybrid Tables.`;
       } else if (category === "semi_structured") {
         noteEl.textContent =
-          "Memoria Semi-Strutturata Snowflake (VARIANT / OBJECT / ARRAY). Nota: i valori VECTOR non possono essere annidati dentro colonne VARIANT.";
+          "Snowflake Semi-Structured Memory (VARIANT / OBJECT / ARRAY). Note: VECTOR values cannot be nested inside VARIANT columns.";
       } else if (category === "postgres_non_vector") {
         noteEl.textContent =
-          "Memoria Relazionale / JSONB su Snowflake Postgres (:5432) senza pgvector per stato conversazionale e payload strutturati.";
+          "Relational / JSONB Memory on Snowflake Postgres (:5432) without pgvector for conversational state and structured payloads.";
       } else {
         noteEl.textContent =
-          "Memoria Strutturata Relazionale Snowflake (Standard, Hybrid, Interactive, Dynamic Table) governata dal ruolo attivo.";
+          "Snowflake Relational Structured Memory (Standard, Hybrid, Interactive, Dynamic Table) governed by the active role.";
       }
     }
 
@@ -2783,7 +2880,7 @@
                 <button id="sflf-btn-save-context" style="background:#29B5E8;color:#fff;border:none;padding:4px 10px;border-radius:6px;cursor:pointer;font-size:11px;font-weight:600;">Apply &amp; Persist Context</button>
               </div>
             </div>
-            <p style="margin:0 0 10px 0;font-size:11px;color:#a1a1aa;">Seleziona a cascata <strong>1. Snowflake Hierarchy (Database ▸ Schema ▸ Categoria ▸ Oggetto)</strong> e <strong>2. Snowflake Postgres (Account-Level Instances)</strong> isolati per questo workflow e governati da <code>CURRENT_ROLE()</code>. Tutti i nodi Snowflake nel canvas si sincronizzano istantaneamente in <code>&lt; 5 ms</code>.</p>
+            <p style="margin:0 0 10px 0;font-size:11px;color:#a1a1aa;">Select in cascade <strong>1. Snowflake Hierarchy (Database ▸ Schema ▸ Category ▸ Object)</strong> and <strong>2. Snowflake Postgres (Account-Level Instances)</strong> isolated for this workflow and governed by <code>CURRENT_ROLE()</code>. All Snowflake nodes on the canvas synchronize instantaneously in <code>&lt; 5 ms</code>.</p>
             <div class="sflf-responsive-grid" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,280px),1fr));gap:10px;margin-bottom:8px;">
               <div>
                 <label style="display:block;font-size:10px;color:#d4d4d8;margin-bottom:3px;font-weight:600;">Real-Time Search (Snowsight Explorer)</label>
@@ -3144,9 +3241,9 @@
       <div id="sflf-memory-type-hover-card" data-testid="snowflake-memory-type-hover-tooltip" style="background:#f8fafc;border:1px solid #bae6fd;border-radius:10px;padding:10px 12px;display:flex;flex-direction:column;gap:7px;justify-content:space-between;">
         <div>
           <div id="sflf-dd-hover-title" style="font-weight:700;color:#0284c7;font-size:12px;margin-bottom:4px;"></div>
-          <div style="font-size:11px;color:#334155;margin-bottom:6px;"><strong>Per cosa usarla (Purpose):</strong> <span id="sflf-dd-hover-purpose"></span></div>
-          <div style="font-size:11px;color:#334155;margin-bottom:6px;"><strong>Oggetti Snowflake consigliati (Recommended Objects):</strong> <span id="sflf-dd-hover-objects"></span></div>
-          <div style="font-size:11px;color:#334155;"><strong>Serve Embedding?:</strong> <span id="sflf-dd-hover-embed" style="color:#0369a1;font-weight:700;"></span></div>
+          <div style="font-size:11px;color:#334155;margin-bottom:6px;"><strong>What It Does (Purpose):</strong> <span id="sflf-dd-hover-purpose"></span></div>
+          <div style="font-size:11px;color:#334155;margin-bottom:6px;"><strong>Recommended Snowflake Objects:</strong> <span id="sflf-dd-hover-objects"></span></div>
+          <div style="font-size:11px;color:#334155;"><strong>Embedding Required?:</strong> <span id="sflf-dd-hover-embed" style="color:#0369a1;font-weight:700;"></span></div>
         </div>
         <div style="font-size:10px;color:#64748b;border-top:1px solid #e2e8f0;padding-top:6px;">
           Branch A: <code>Database ▸ Schema ▸ Table</code> · Branch B: <code>Snowflake Postgres (:5432)</code>
@@ -3211,6 +3308,130 @@
   }
   window.openSnowflakeMemoryTypeDropdown = openSnowflakeMemoryTypeDropdown;
 
+  const SFLF_SUMMARIZER_MODELS_BY_ENGINE = {
+    cortex_sql: [
+      "mistral-large2",
+      "llama3.3-70b",
+      "llama3.1-70b",
+      "claude-3-7-sonnet",
+      "claude-sonnet-4-5",
+      "openai-gpt-5",
+      "deepseek-r1",
+    ],
+    cortex_summarize_agg: ["AI_SUMMARIZE_AGG"],
+    proxy_chat: ["openai-gpt-6-luna", "openai-gpt-5", "mistral-large2"],
+    proxy_messages: ["claude-sonnet-5-5", "claude-3-7-sonnet", "claude-sonnet-4-5"],
+    proxy_responses: ["openai-gpt-5", "openai-gpt-6-luna"],
+    spcs_ollama: ["llama3.2:3b-instruct", "qwen2.5:7b-instruct", "mistral:7b"],
+    spcs_model_registry: ["CUSTOM_SUMMARIZER_V1", "SNOWFLAKE_AGENT_SUMMARY_MODEL"],
+  };
+
+  function syncCreateMemoryModalWithFlowContext(state) {
+    const st = state || sfState || {};
+    const selCtx = st.selected_context || {};
+    const activeRole = st.active_role || "LANGFLOW_DEV_ROLE";
+    const activeDb = st.database || "SNOWFLAKE_LEARNING_DB";
+    const activeSchema = st.schema || "PUBLIC";
+
+    const roleEl = document.getElementById("sflf-light-mem-role");
+    if (roleEl) roleEl.textContent = activeRole;
+
+    const dbSel = document.getElementById("sflf-light-mem-db");
+    const dbNewInput = document.getElementById("sflf-light-mem-db-new");
+    const databases = Array.isArray(selCtx.databases) && selCtx.databases.length
+      ? selCtx.databases.slice()
+      : [activeDb, "SNOWFLAKE_LEARNING_DB", "CORTEX_GOVERNANCE_DB"];
+    if (databases.indexOf(activeDb) === -1) databases.unshift(activeDb);
+    if (dbSel && dbSel.tagName === "SELECT") {
+      const prevDb = dbSel.value && dbSel.value !== "__create_new_db__" ? dbSel.value : activeDb;
+      dbSel.innerHTML =
+        databases.map(function (d) { return `<option value="${d}">${d}</option>`; }).join("") +
+        `<option value="__create_new_db__">+ Create New Database...</option>`;
+      dbSel.value = databases.indexOf(prevDb) !== -1 ? prevDb : activeDb;
+      if (dbNewInput) dbNewInput.style.display = dbSel.value === "__create_new_db__" ? "block" : "none";
+    }
+
+    const effectiveDb =
+      dbSel && dbSel.value === "__create_new_db__"
+        ? (dbNewInput && dbNewInput.value.trim()) || activeDb
+        : (dbSel && dbSel.value) || activeDb;
+
+    const schSel = document.getElementById("sflf-light-mem-schema");
+    const schNewInput = document.getElementById("sflf-light-mem-schema-new");
+    const schemasByDb = selCtx.schemas_by_db || {};
+    const rawSchemas = Array.isArray(schemasByDb[effectiveDb]) && schemasByDb[effectiveDb].length
+      ? schemasByDb[effectiveDb].slice()
+      : [activeSchema, "PUBLIC", "ANALYTICS", "CORTEX_MEMORY"];
+    if (rawSchemas.indexOf(activeSchema) === -1 && effectiveDb === activeDb) rawSchemas.unshift(activeSchema);
+    if (schSel && schSel.tagName === "SELECT") {
+      const prevSch = schSel.value && schSel.value !== "__create_new_schema__" ? schSel.value : activeSchema;
+      schSel.innerHTML =
+        rawSchemas.map(function (s) { return `<option value="${s}">${s}</option>`; }).join("") +
+        `<option value="__create_new_schema__">+ Create New Schema...</option>`;
+      schSel.value = rawSchemas.indexOf(prevSch) !== -1 ? prevSch : rawSchemas[0] || activeSchema;
+      if (schNewInput) schNewInput.style.display = schSel.value === "__create_new_schema__" ? "block" : "none";
+    }
+
+    const effectiveSchema =
+      schSel && schSel.value === "__create_new_schema__"
+        ? (schNewInput && schNewInput.value.trim()) || activeSchema
+        : (schSel && schSel.value) || activeSchema;
+
+    const existingTableSel = document.getElementById("sflf-light-mem-existing-table");
+    const objsByDbSchema = selCtx.objects_by_db_schema || {};
+    const dbSchemaKey = `${effectiveDb}.${effectiveSchema}`;
+    const scopeEntry = objsByDbSchema[dbSchemaKey] || {};
+    const tablesInScope = Array.isArray(scopeEntry.tables) && scopeEntry.tables.length
+      ? scopeEntry.tables.slice()
+      : ["AGENT_MEMORY_STORE", "MEM_1_GRAPH_CHECKPOINTER", "MEM_2_BUFFER_WINDOW", "MEM_3_RUNNING_SUMMARY", "MEM_4_USER_PROFILE", "MEM_5_EPISODIC_FEW_SHOT"];
+    if (existingTableSel && existingTableSel.tagName === "SELECT") {
+      const prevTbl = existingTableSel.value;
+      existingTableSel.innerHTML = tablesInScope
+        .map(function (t) { return `<option value="${t}">${t}</option>`; })
+        .join("");
+      existingTableSel.value = tablesInScope.indexOf(prevTbl) !== -1 ? prevTbl : tablesInScope[0];
+    }
+
+    const pgInstSel = document.getElementById("sflf-light-mem-pg-instance");
+    const pgInstances = Array.isArray(selCtx.postgres_instances) && selCtx.postgres_instances.length
+      ? selCtx.postgres_instances.slice()
+      : ["LANGFLOW_PG_INSTANCE", "SNOWFLAKE_PG_MEMORY_POOL"];
+    if (pgInstSel && pgInstSel.tagName === "SELECT") {
+      const prevPg = pgInstSel.value;
+      pgInstSel.innerHTML = pgInstances
+        .map(function (inst) { return `<option value="${inst}">${inst}</option>`; })
+        .join("");
+      pgInstSel.value = pgInstances.indexOf(prevPg) !== -1 ? prevPg : pgInstances[0];
+    }
+
+    const pgTableSel = document.getElementById("sflf-light-mem-pg-table");
+    const pgTableNewInput = document.getElementById("sflf-light-mem-pg-table-new");
+    const activePgInst = (pgInstSel && pgInstSel.value) || pgInstances[0] || "LANGFLOW_PG_INSTANCE";
+    const pgTablesMap = selCtx.postgres_tables_by_instance || {};
+    const pgTables = Array.isArray(pgTablesMap[activePgInst]) && pgTablesMap[activePgInst].length
+      ? pgTablesMap[activePgInst].slice()
+      : ["langgraph_checkpoints", "agent_chat_history", "agent_user_profile_jsonb", "agent_episodic_vectors"];
+    if (pgTableSel && pgTableSel.tagName === "SELECT") {
+      const prevPgTbl = pgTableSel.value && pgTableSel.value !== "__create_new_pg_table__" ? pgTableSel.value : pgTables[0];
+      pgTableSel.innerHTML =
+        pgTables.map(function (t) { return `<option value="${t}">${t}</option>`; }).join("") +
+        `<option value="__create_new_pg_table__">+ Create New Postgres Table...</option>`;
+      pgTableSel.value = pgTables.indexOf(prevPgTbl) !== -1 ? prevPgTbl : pgTables[0];
+      if (pgTableNewInput) pgTableNewInput.style.display = pgTableSel.value === "__create_new_pg_table__" ? "block" : "none";
+    }
+
+    const whSel = document.getElementById("sflf-light-mem-warehouse");
+    const warehouses = Array.isArray(selCtx.warehouses) && selCtx.warehouses.length
+      ? selCtx.warehouses.slice()
+      : [st.warehouse || "COMPUTE_WH", "CORTEX_WH", "INTERACTIVE_WH"];
+    if (whSel && whSel.tagName === "SELECT") {
+      const prevWh = whSel.value || st.warehouse || warehouses[0];
+      whSel.innerHTML = warehouses.map(function (w) { return `<option value="${w}">${w}</option>`; }).join("");
+      whSel.value = warehouses.indexOf(prevWh) !== -1 ? prevWh : warehouses[0];
+    }
+  }
+  window.syncCreateMemoryModalWithFlowContext = syncCreateMemoryModalWithFlowContext;
+
   function openCreateSnowflakeMemoryModal(flowIdFromReact, preselectedTypeId) {
     if (flowIdFromReact && typeof flowIdFromReact === "string") {
       _activeMemoryFlowId = flowIdFromReact;
@@ -3230,6 +3451,7 @@
         "background:#ffffff;color:#0f172a;border:1px solid #cbd5e1;padding:6px 9px;border-radius:8px;width:100%;min-width:0;box-sizing:border-box;font-size:12px;";
       const lightSelectStyle =
         "background:#ffffff;color:#0f172a;border:1px solid #cbd5e1;padding:6px 9px;border-radius:8px;width:100%;min-width:0;box-sizing:border-box;font-size:12px;";
+      const helperCaptionStyle = "display:block;font-size:10px;color:#64748b;margin-top:2px;line-height:1.3;";
 
       const typeOptionsHtml = AGENT_MEMORY_TYPES.map(function (t) {
         return `<option value="${t.id}">${t.label}</option>`;
@@ -3256,6 +3478,9 @@
 
           <!-- Wizard Step 1 of 3: Storage Target (Flow Context & Branch A vs Branch B) -->
           <div id="sflf-mem-wizard-step-1" data-testid="snowflake-memory-wizard-step-1" style="display:flex;flex-direction:column;gap:10px;">
+            <div id="sflf-mem-step1-intro" style="background:#f0f9ff;border:1px solid #bae6fd;border-radius:8px;padding:7px 11px;font-size:11px;color:#0369a1;line-height:1.35;">
+              <strong>Step 1 — Choose Memory Pattern &amp; Storage Location:</strong> Select which of the 5 Agent Memory patterns (#1..#5) you need and bind it to either a governed Snowflake SQL Table (Branch A) or an account-level Snowflake Postgres instance (Branch B).
+            </div>
             <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,250px),1fr));gap:10px;">
               <div>
                 <label style="display:block;font-size:11px;font-weight:600;color:#334155;margin-bottom:3px;">Memory Name</label>
@@ -3274,8 +3499,8 @@
                 <strong id="sflf-light-mem-guidance-title" style="color:#0284c7;font-size:12px;"></strong>
                 <span id="sflf-light-mem-embed-badge" style="background:#e0f2fe;color:#0369a1;border:1px solid #38bdf8;border-radius:999px;padding:1px 9px;font-size:10px;font-weight:700;"></span>
               </div>
-              <div style="font-size:11px;color:#334155;"><strong>Oggetto Snowflake Consigliato:</strong> <span id="sflf-light-mem-rec-objs"></span></div>
-              <div style="font-size:11px;color:#475569;"><strong>Quando l'Embedding diventa utile:</strong> <span id="sflf-light-mem-when-embed"></span></div>
+              <div style="font-size:11px;color:#334155;"><strong>Recommended Snowflake Object:</strong> <span id="sflf-light-mem-rec-objs"></span></div>
+              <div style="font-size:11px;color:#475569;"><strong>When Embedding Is Useful:</strong> <span id="sflf-light-mem-when-embed"></span></div>
             </div>
 
             <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:10px;padding:9px 12px;display:flex;flex-direction:column;gap:8px;">
@@ -3291,11 +3516,13 @@
               <div id="sflf-mem-branch-a-sql-box" data-testid="snowflake-memory-branch-a-sql" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,180px),1fr));gap:10px;">
                 <div>
                   <label style="display:block;font-size:10.5px;font-weight:600;color:#334155;margin-bottom:3px;">1. Database (from Flow Context)</label>
-                  <input id="sflf-light-mem-db" value="${sfState.database}" style="${lightInputStyle}" />
+                  <select id="sflf-light-mem-db" style="${lightSelectStyle}"></select>
+                  <input id="sflf-light-mem-db-new" placeholder="New Database Name (e.g. AGENT_MEM_DB)" style="display:none;margin-top:4px;${lightInputStyle}" />
                 </div>
                 <div>
                   <label style="display:block;font-size:10.5px;font-weight:600;color:#334155;margin-bottom:3px;">2. Schema (from Flow Context)</label>
-                  <input id="sflf-light-mem-schema" value="${sfState.schema}" style="${lightInputStyle}" />
+                  <select id="sflf-light-mem-schema" style="${lightSelectStyle}"></select>
+                  <input id="sflf-light-mem-schema-new" placeholder="New Schema Name (e.g. AGENT_MEMORY)" style="display:none;margin-top:4px;${lightInputStyle}" />
                 </div>
                 <div>
                   <label style="display:block;font-size:10.5px;font-weight:600;color:#334155;margin-bottom:3px;">3. Snowflake Table Subtype</label>
@@ -3308,17 +3535,30 @@
                     <option value="bind_existing">Use Existing Table in Context</option>
                   </select>
                 </div>
+                <div id="sflf-mem-new-table-wrap">
+                  <label style="display:block;font-size:10.5px;font-weight:600;color:#334155;margin-bottom:3px;">New Physical Table Name</label>
+                  <input id="sflf-light-mem-table-name" value="AGENT_MEMORY_STORE" placeholder="e.g. MEM_1_GRAPH_CHECKPOINTER" style="${lightInputStyle}" />
+                </div>
+                <div id="sflf-mem-existing-table-wrap" style="display:none;">
+                  <label style="display:block;font-size:10.5px;font-weight:600;color:#334155;margin-bottom:3px;">Existing Table in Schema</label>
+                  <select id="sflf-light-mem-existing-table" style="${lightSelectStyle}"></select>
+                </div>
               </div>
 
               <!-- Branch B: Account-Level Snowflake Postgres (:5432) outside Database ▸ Schema -->
               <div id="sflf-mem-branch-b-pg-box" data-testid="snowflake-memory-branch-b-postgres" style="display:none;grid-template-columns:repeat(auto-fit,minmax(min(100%,180px),1fr));gap:10px;">
                 <div>
                   <label style="display:block;font-size:10.5px;font-weight:600;color:#334155;margin-bottom:3px;">Postgres Instance (:5432 Account-Level)</label>
-                  <input id="sflf-light-mem-pg-instance" value="LANGFLOW_PG_INSTANCE" style="${lightInputStyle}" />
+                  <select id="sflf-light-mem-pg-instance" style="${lightSelectStyle}"></select>
                 </div>
                 <div>
                   <label style="display:block;font-size:10.5px;font-weight:600;color:#334155;margin-bottom:3px;">Postgres DB / Schema</label>
                   <input id="sflf-light-mem-pg-schema" value="postgres.public" style="${lightInputStyle}" />
+                </div>
+                <div>
+                  <label style="display:block;font-size:10.5px;font-weight:600;color:#334155;margin-bottom:3px;">Postgres Table</label>
+                  <select id="sflf-light-mem-pg-table" style="${lightSelectStyle}"></select>
+                  <input id="sflf-light-mem-pg-table-new" placeholder="New Postgres Table Name" style="display:none;margin-top:4px;${lightInputStyle}" />
                 </div>
                 <div>
                   <label style="display:block;font-size:10.5px;font-weight:600;color:#334155;margin-bottom:3px;">Postgres Table Mode</label>
@@ -3333,53 +3573,108 @@
             </div>
           </div>
 
-          <!-- Wizard Step 2 of 3: Object & Memory Configuration (Dynamic Peculiarities Matrix) -->
+          <!-- Wizard Step 2 of 3: Object & Memory Configuration (Dynamic Single-Purpose Fields) -->
           <div id="sflf-mem-wizard-step-2" data-testid="snowflake-memory-wizard-step-2" style="display:none;flex-direction:column;gap:10px;">
+            <div id="sflf-mem-step2-intro" style="background:#f0f9ff;border:1px solid #bae6fd;border-radius:8px;padding:7px 11px;font-size:11px;color:#0369a1;line-height:1.35;">
+              <strong>Step 2 — Physical Storage &amp; Memory Behavior Settings:</strong> Configure the physical table indexes/refresh rules for your chosen Snowflake storage subtype (Section A) and the runtime retention/summarization behavior for your memory pattern (Section B).
+            </div>
+
+            <!-- Section A: Physical Object Settings -->
             <div id="sflf-mem-object-peculiarities-box" data-testid="snowflake-memory-object-peculiarities" style="background:#f8fafc;border:1px solid #bae6fd;border-radius:10px;padding:10px 12px;display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,195px),1fr));gap:10px;">
-              <div>
-                <label style="display:block;font-size:10.5px;font-weight:600;color:#334155;margin-bottom:3px;">Primary Key / Cluster By (No VECTOR in PK)</label>
+              <div id="sflf-step2-field-hybrid-pk">
+                <label id="sflf-label-hybrid-pk" style="display:block;font-size:10.5px;font-weight:600;color:#334155;margin-bottom:3px;">Primary Key Columns</label>
                 <input id="sflf-light-mem-hybrid-pk" value="(session_id, turn_id)" style="${lightInputStyle}" />
+                <span id="sflf-help-hybrid-pk" style="${helperCaptionStyle}">Defines the unique row identifier enforced by Snowflake Hybrid Tables for single-millisecond point lookups.</span>
               </div>
-              <div>
-                <label style="display:block;font-size:10.5px;font-weight:600;color:#334155;margin-bottom:3px;">Secondary Index / PG Table</label>
+              <div id="sflf-step2-field-hybrid-idx">
+                <label id="sflf-label-hybrid-idx" style="display:block;font-size:10.5px;font-weight:600;color:#334155;margin-bottom:3px;">Secondary Index Columns</label>
                 <input id="sflf-light-mem-hybrid-idx" value="(session_id, created_at)" style="${lightInputStyle}" />
+                <span id="sflf-help-hybrid-idx" style="${helperCaptionStyle}">Speeds up secondary range scans by session and timestamp without scanning the full table.</span>
               </div>
-              <div>
-                <label style="display:block;font-size:10.5px;font-weight:600;color:#334155;margin-bottom:3px;">Target Lag (Dynamic / Interactive Table)</label>
+              <div id="sflf-step2-field-cluster-by" style="display:none;">
+                <label style="display:block;font-size:10.5px;font-weight:600;color:#334155;margin-bottom:3px;">Cluster By Keys (Optional)</label>
+                <input id="sflf-light-mem-cluster-keys" value="(session_id, created_at)" style="${lightInputStyle}" />
+                <span style="${helperCaptionStyle}">Organizes micro-partitions on Standard Tables for faster pruning on large historical logs.</span>
+              </div>
+              <div id="sflf-step2-field-retention-days" style="display:none;">
+                <label style="display:block;font-size:10.5px;font-weight:600;color:#334155;margin-bottom:3px;">Time-Travel Retention (Days)</label>
+                <input id="sflf-light-mem-retention-days" type="number" value="1" min="0" max="90" style="${lightInputStyle}" />
+                <span style="${helperCaptionStyle}">Sets Snowflake DATA_RETENTION_TIME_IN_DAYS for point-in-time recovery and auditability.</span>
+              </div>
+              <div id="sflf-step2-field-target-lag" style="display:none;">
+                <label style="display:block;font-size:10.5px;font-weight:600;color:#334155;margin-bottom:3px;">Target Refresh Lag</label>
                 <input id="sflf-light-mem-target-lag" value="5 minutes" style="${lightInputStyle}" />
+                <span style="${helperCaptionStyle}">Maximum staleness window before Snowflake automatically refreshes the Dynamic or Interactive Table.</span>
               </div>
-              <div>
-                <label style="display:block;font-size:10.5px;font-weight:600;color:#334155;margin-bottom:3px;">Warehouse & Refresh Mode</label>
-                <select id="sflf-light-mem-refresh-mode" style="${lightSelectStyle}">
-                  <option value="INCREMENTAL">COMPUTE_WH · INCREMENTAL</option>
-                  <option value="FULL">COMPUTE_WH · FULL</option>
-                  <option value="AUTO">COMPUTE_WH · AUTO</option>
+              <div id="sflf-step2-field-warehouse" style="display:none;">
+                <label style="display:block;font-size:10.5px;font-weight:600;color:#334155;margin-bottom:3px;">Compute Warehouse</label>
+                <select id="sflf-light-mem-warehouse" style="${lightSelectStyle}">
+                  <option value="COMPUTE_WH">COMPUTE_WH</option>
                 </select>
+                <span style="${helperCaptionStyle}">Snowflake virtual warehouse used to execute scheduled incremental refreshes.</span>
+              </div>
+              <div id="sflf-step2-field-refresh-mode" style="display:none;">
+                <label style="display:block;font-size:10.5px;font-weight:600;color:#334155;margin-bottom:3px;">Refresh Mode</label>
+                <select id="sflf-light-mem-refresh-mode" style="${lightSelectStyle}">
+                  <option value="INCREMENTAL">INCREMENTAL</option>
+                  <option value="FULL">FULL</option>
+                  <option value="AUTO">AUTO</option>
+                </select>
+                <span style="${helperCaptionStyle}">Selects incremental delta materialization vs full recomputation for Dynamic Tables.</span>
+              </div>
+              <div id="sflf-step2-field-pg-gin" style="display:none;">
+                <label style="display:block;font-size:10.5px;font-weight:600;color:#334155;margin-bottom:3px;">JSONB GIN Index Columns</label>
+                <input id="sflf-light-mem-pg-gin" value="metadata_jsonb" style="${lightInputStyle}" />
+                <span style="${helperCaptionStyle}">Creates a PostgreSQL GIN index on JSONB payloads for fast containment queries on port 5432.</span>
               </div>
             </div>
 
+            <!-- Section B: Memory Behavior Settings -->
             <div id="sflf-light-mem-type-params" style="background:#ffffff;border:1px solid #e2e8f0;border-radius:10px;padding:10px 12px;display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,190px),1fr));gap:10px;">
-              <div>
-                <label style="display:block;font-size:10.5px;font-weight:600;color:#475569;margin-bottom:3px;">Session / Thread / User Key</label>
-                <input id="sflf-light-mem-key-param" value="session_default" placeholder="thread_id / session_id / user_id" style="${lightInputStyle}" />
+              <div id="sflf-step2-behav-key">
+                <label id="sflf-label-behav-key" style="display:block;font-size:10.5px;font-weight:600;color:#475569;margin-bottom:3px;">Conversation Session Key</label>
+                <input id="sflf-light-mem-key-param" value="session_default" placeholder="session_id" style="${lightInputStyle}" />
+                <span id="sflf-help-behav-key" style="${helperCaptionStyle}">Identifier key used to isolate conversation turns or checkpoints per thread, session, or user.</span>
               </div>
-              <div>
-                <label style="display:block;font-size:10.5px;font-weight:600;color:#475569;margin-bottom:3px;">Window K / Few-Shot K / TTL Hours</label>
+              <div id="sflf-step2-behav-k">
+                <label id="sflf-label-behav-k" style="display:block;font-size:10.5px;font-weight:600;color:#475569;margin-bottom:3px;">Sliding Window Size (Last K Messages)</label>
                 <input id="sflf-light-mem-k-param" type="number" value="8" min="1" max="500" style="${lightInputStyle}" />
+                <span id="sflf-help-behav-k" style="${helperCaptionStyle}">Controls how many recent turns, few-shot experiences, or TTL hours are retained and retrieved.</span>
               </div>
-              <div>
-                <label style="display:block;font-size:10.5px;font-weight:600;color:#475569;margin-bottom:3px;">Summarizer / Entity Namespace / Topic</label>
-                <input id="sflf-light-mem-extra-param" value="claude-sonnet-5-5" placeholder="model / namespace / topic" style="${lightInputStyle}" />
+              <div id="sflf-step2-behav-sum-engine" style="display:none;">
+                <label style="display:block;font-size:10.5px;font-weight:600;color:#475569;margin-bottom:3px;">Summarization Engine</label>
+                <select id="sflf-light-mem-sum-engine" style="${lightSelectStyle}">
+                  <option value="cortex_sql">Cortex SQL — AI_COMPLETE (Select Model)</option>
+                  <option value="cortex_summarize_agg">Cortex Native — AI_SUMMARIZE_AGG (Automatic SQL Aggregation)</option>
+                  <option value="proxy_chat">SPCS LLM Proxy — Chat Completions</option>
+                  <option value="proxy_messages">SPCS LLM Proxy — Anthropic Messages</option>
+                  <option value="spcs_ollama">Private SPCS — Ollama</option>
+                </select>
+                <span style="${helperCaptionStyle}">Selects whether running summaries use a specific LLM via AI_COMPLETE or native SQL AI_SUMMARIZE_AGG.</span>
               </div>
-              <div>
-                <label style="display:block;font-size:10.5px;font-weight:600;color:#475569;margin-bottom:3px;">Min Outcome Score (#5) / Retention Days</label>
+              <div id="sflf-step2-behav-sum-model" style="display:none;">
+                <label style="display:block;font-size:10.5px;font-weight:600;color:#475569;margin-bottom:3px;">Summarization LLM Model</label>
+                <select id="sflf-light-mem-sum-model" style="${lightSelectStyle}"></select>
+                <span style="${helperCaptionStyle}">Specific foundation model invoked when compressing conversation turns into a running summary.</span>
+              </div>
+              <div id="sflf-step2-behav-extra">
+                <label id="sflf-label-behav-extra" style="display:block;font-size:10.5px;font-weight:600;color:#475569;margin-bottom:3px;">Memory Namespace</label>
+                <input id="sflf-light-mem-extra-param" value="user.preferences" placeholder="user.preferences" style="${lightInputStyle}" />
+                <span id="sflf-help-behav-extra" style="${helperCaptionStyle}">Logical namespace grouping extracted facts and preferences for the target user or entity.</span>
+              </div>
+              <div id="sflf-step2-behav-score">
+                <label id="sflf-label-behav-score" style="display:block;font-size:10.5px;font-weight:600;color:#475569;margin-bottom:3px;">Minimum Outcome Score Threshold (0.00 - 1.00)</label>
                 <input id="sflf-light-mem-score-param" type="number" step="0.05" value="0.70" style="${lightInputStyle}" />
+                <span id="sflf-help-behav-score" style="${helperCaptionStyle}">Filters episodic trajectories so only successful past executions above this score are injected as few-shot examples.</span>
               </div>
             </div>
           </div>
 
           <!-- Wizard Step 3 of 3: Optional Embedding, LLM Preprocessing & Create -->
           <div id="sflf-mem-wizard-step-3" data-testid="snowflake-memory-wizard-step-3" style="display:none;flex-direction:column;gap:10px;">
+            <div id="sflf-mem-step3-intro" style="background:#f0f9ff;border:1px solid #bae6fd;border-radius:8px;padding:7px 11px;font-size:11px;color:#0369a1;line-height:1.35;">
+              <strong>Step 3 — Optional Vector Embedding, Smart Preprocessing &amp; Provisioning:</strong> Enable semantic vector search only if needed, configure automatic LLM fact extraction or summarization on flow runs, and review the governed Snowflake DDL before creating.
+            </div>
             <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:10px;padding:9px 12px;">
               <label style="display:inline-flex;align-items:center;gap:8px;font-size:12px;font-weight:600;color:#0f172a;cursor:pointer;">
                 <input type="checkbox" id="sflf-light-mem-enable-embedding" data-testid="snowflake-memory-enable-embedding" />
@@ -3413,22 +3708,29 @@
                 <span>Enable LLM Preprocessing</span>
               </label>
               <div>
+                <label style="display:block;font-size:10px;font-weight:600;color:#475569;margin-bottom:2px;">Preprocessing / Summarizer Engine</label>
                 <select id="sflf-light-mem-preproc-engine" style="${lightSelectStyle}">
-                  <option value="cortex_sql">Cortex SQL (AI_COMPLETE / AI_SUMMARIZE_AGG)</option>
-                  <option value="proxy_chat">Proxy - Chat (openai-gpt-6-luna)</option>
-                  <option value="proxy_messages">Proxy - Messages (claude-sonnet-5-5)</option>
-                  <option value="proxy_responses">Proxy - Responses</option>
-                  <option value="spcs_ollama">Private - Ollama (SPCS)</option>
+                  <option value="cortex_sql">Cortex SQL — AI_COMPLETE (Select Model)</option>
+                  <option value="cortex_summarize_agg">Cortex Native — AI_SUMMARIZE_AGG (Automatic SQL Aggregation)</option>
+                  <option value="proxy_chat">SPCS LLM Proxy — Chat</option>
+                  <option value="proxy_messages">SPCS LLM Proxy — Messages</option>
+                  <option value="proxy_responses">SPCS LLM Proxy — Responses</option>
+                  <option value="spcs_ollama">Private SPCS — Ollama</option>
                   <option value="spcs_model_registry">Model Registry SPCS</option>
                 </select>
               </div>
+              <div id="sflf-light-mem-preproc-model-wrap">
+                <label style="display:block;font-size:10px;font-weight:600;color:#475569;margin-bottom:2px;">Preprocessing LLM Model</label>
+                <select id="sflf-light-mem-preproc-model" style="${lightSelectStyle}"></select>
+              </div>
               <div>
+                <label style="display:block;font-size:10px;font-weight:600;color:#475569;margin-bottom:2px;">Kill Phrase</label>
                 <input id="sflf-light-mem-kill-phrase" data-testid="snowflake-memory-kill-phrase" value="NO_INGEST" placeholder="Kill Phrase (NO_INGEST)" style="${lightInputStyle}" />
               </div>
             </div>
 
             <div>
-              <div style="font-size:10.5px;font-weight:600;color:#334155;margin-bottom:3px;">Preview Query / DDL (without & with Embedding):</div>
+              <div style="font-size:10.5px;font-weight:600;color:#334155;margin-bottom:3px;">Preview Query / DDL (without &amp; with Embedding):</div>
               <code id="sflf-light-mem-sql-preview" style="display:block;background:#0f172a;color:#e2e8f0;padding:7px 10px;border-radius:8px;font-family:'JetBrains Mono',monospace;font-size:10.5px;white-space:pre-wrap;max-height:76px;overflow-y:auto;"></code>
             </div>
 
@@ -3450,20 +3752,135 @@
       document.body.appendChild(modal);
     }
 
+    syncCreateMemoryModalWithFlowContext(sfState);
+
     const typeSel = document.getElementById("sflf-light-mem-type");
     const storageFamilySel = document.getElementById("sflf-light-mem-storage-family");
     const branchASqlBox = document.getElementById("sflf-mem-branch-a-sql-box");
     const branchBPgBox = document.getElementById("sflf-mem-branch-b-pg-box");
     const targetObjSel = document.getElementById("sflf-light-mem-target-obj");
+    const actionModeSel = document.getElementById("sflf-light-mem-action-mode");
+    const dbSel = document.getElementById("sflf-light-mem-db");
+    const schSel = document.getElementById("sflf-light-mem-schema");
+    const pgInstSel = document.getElementById("sflf-light-mem-pg-instance");
+    const pgTableSel = document.getElementById("sflf-light-mem-pg-table");
     const enableEmbedCb = document.getElementById("sflf-light-mem-enable-embedding");
     const embedBox = document.getElementById("sflf-light-mem-embedding-box");
     const providerSel = document.getElementById("sflf-light-mem-embed-provider");
     const modelSel = document.getElementById("sflf-light-mem-embed-model");
     const dimInput = document.getElementById("sflf-light-mem-embed-dim");
     const preprocCb = document.getElementById("sflf-light-mem-preproc-enabled");
+    const preprocEngineSel = document.getElementById("sflf-light-mem-preproc-engine");
+    const preprocModelSel = document.getElementById("sflf-light-mem-preproc-model");
+    const preprocModelWrap = document.getElementById("sflf-light-mem-preproc-model-wrap");
+    const sumEngineSel = document.getElementById("sflf-light-mem-sum-engine");
+    const sumModelSel = document.getElementById("sflf-light-mem-sum-model");
 
     if (preselectedTypeId && typeSel) {
       typeSel.value = preselectedTypeId;
+    }
+
+    function syncEngineModelDropdown(engineSelectEl, modelSelectEl, wrapEl) {
+      const eng = (engineSelectEl && engineSelectEl.value) || "cortex_sql";
+      const models = SFLF_SUMMARIZER_MODELS_BY_ENGINE[eng] || SFLF_SUMMARIZER_MODELS_BY_ENGINE.cortex_sql;
+      if (modelSelectEl) {
+        const prev = modelSelectEl.value;
+        modelSelectEl.innerHTML = models.map(function (m) { return `<option value="${m}">${m}</option>`; }).join("");
+        modelSelectEl.value = models.indexOf(prev) !== -1 ? prev : models[0];
+      }
+      if (wrapEl) {
+        wrapEl.style.display = eng === "cortex_summarize_agg" ? "none" : "block";
+      }
+    }
+
+    function syncActionModeVisibility() {
+      const mode = (actionModeSel && actionModeSel.value) || "create_new";
+      const newWrap = document.getElementById("sflf-mem-new-table-wrap");
+      const existWrap = document.getElementById("sflf-mem-existing-table-wrap");
+      if (newWrap) newWrap.style.display = mode === "bind_existing" ? "none" : "block";
+      if (existWrap) existWrap.style.display = mode === "bind_existing" ? "block" : "none";
+    }
+
+    function syncStep2DynamicFields() {
+      const fam = (storageFamilySel && storageFamilySel.value) || "snowflake_sql";
+      const subtype = ((targetObjSel && targetObjSel.value) || "Hybrid Table").toLowerCase();
+      const memType = (typeSel && typeSel.value) || "buffer_window_memory";
+
+      const isHybrid = fam === "snowflake_sql" && subtype.indexOf("hybrid") !== -1;
+      const isDynamicOrInteractive = fam === "snowflake_sql" && (subtype.indexOf("dynamic") !== -1 || subtype.indexOf("interactive") !== -1);
+      const isStandard = fam === "snowflake_sql" && !isHybrid && !isDynamicOrInteractive;
+      const isPostgres = fam === "snowflake_postgres";
+
+      const pkBox = document.getElementById("sflf-step2-field-hybrid-pk");
+      const idxBox = document.getElementById("sflf-step2-field-hybrid-idx");
+      const clusterBox = document.getElementById("sflf-step2-field-cluster-by");
+      const retBox = document.getElementById("sflf-step2-field-retention-days");
+      const lagBox = document.getElementById("sflf-step2-field-target-lag");
+      const whBox = document.getElementById("sflf-step2-field-warehouse");
+      const refBox = document.getElementById("sflf-step2-field-refresh-mode");
+      const ginBox = document.getElementById("sflf-step2-field-pg-gin");
+
+      if (pkBox) pkBox.style.display = isHybrid ? "block" : "none";
+      if (idxBox) idxBox.style.display = isHybrid ? "block" : "none";
+      if (clusterBox) clusterBox.style.display = isStandard ? "block" : "none";
+      if (retBox) retBox.style.display = isStandard ? "block" : "none";
+      if (lagBox) lagBox.style.display = isDynamicOrInteractive ? "block" : "none";
+      if (whBox) whBox.style.display = isDynamicOrInteractive ? "block" : "none";
+      if (refBox) refBox.style.display = isDynamicOrInteractive ? "block" : "none";
+      if (ginBox) ginBox.style.display = isPostgres ? "block" : "none";
+
+      const keyWrap = document.getElementById("sflf-step2-behav-key");
+      const kWrap = document.getElementById("sflf-step2-behav-k");
+      const sumEngWrap = document.getElementById("sflf-step2-behav-sum-engine");
+      const sumModWrap = document.getElementById("sflf-step2-behav-sum-model");
+      const extraWrap = document.getElementById("sflf-step2-behav-extra");
+      const scoreWrap = document.getElementById("sflf-step2-behav-score");
+      const keyLbl = document.getElementById("sflf-label-behav-key");
+      const kLbl = document.getElementById("sflf-label-behav-k");
+      const extraLbl = document.getElementById("sflf-label-behav-extra");
+
+      if (keyWrap) keyWrap.style.display = "block";
+      if (memType === "graph_state_checkpointer") {
+        if (keyLbl) keyLbl.textContent = "Thread Checkpoint Key";
+        if (kLbl) kLbl.textContent = "Checkpoint Retention TTL (Hours)";
+        if (kWrap) kWrap.style.display = "block";
+        if (sumEngWrap) sumEngWrap.style.display = "none";
+        if (sumModWrap) sumModWrap.style.display = "none";
+        if (extraWrap) extraWrap.style.display = "none";
+        if (scoreWrap) scoreWrap.style.display = "none";
+      } else if (memType === "buffer_window_memory") {
+        if (keyLbl) keyLbl.textContent = "Conversation Session Key";
+        if (kLbl) kLbl.textContent = "Sliding Window Size (Last K Messages)";
+        if (kWrap) kWrap.style.display = "block";
+        if (sumEngWrap) sumEngWrap.style.display = "none";
+        if (sumModWrap) sumModWrap.style.display = "none";
+        if (extraWrap) extraWrap.style.display = "none";
+        if (scoreWrap) scoreWrap.style.display = "none";
+      } else if (memType === "running_summary_memory") {
+        if (keyLbl) keyLbl.textContent = "Conversation Session Key";
+        if (kLbl) kLbl.textContent = "Summary Compression Trigger (Every N Turns)";
+        if (kWrap) kWrap.style.display = "block";
+        if (sumEngWrap) sumEngWrap.style.display = "block";
+        syncEngineModelDropdown(sumEngineSel, sumModelSel, sumModWrap);
+        if (extraWrap) extraWrap.style.display = "none";
+        if (scoreWrap) scoreWrap.style.display = "none";
+      } else if (memType === "long_term_user_profile_memory") {
+        if (keyLbl) keyLbl.textContent = "User Identifier Key";
+        if (extraLbl) extraLbl.textContent = "Memory Namespace";
+        if (kWrap) kWrap.style.display = "none";
+        if (sumEngWrap) sumEngWrap.style.display = "none";
+        if (sumModWrap) sumModWrap.style.display = "none";
+        if (extraWrap) extraWrap.style.display = "block";
+        if (scoreWrap) scoreWrap.style.display = "none";
+      } else {
+        if (keyLbl) keyLbl.textContent = "Agent Task Domain Key";
+        if (kLbl) kLbl.textContent = "Few-Shot Examples to Retrieve (Top K)";
+        if (kWrap) kWrap.style.display = "block";
+        if (sumEngWrap) sumEngWrap.style.display = "none";
+        if (sumModWrap) sumModWrap.style.display = "none";
+        if (extraWrap) extraWrap.style.display = "none";
+        if (scoreWrap) scoreWrap.style.display = "block";
+      }
     }
 
     let wizardStep = 1;
@@ -3489,12 +3906,14 @@
       if (backBtn) backBtn.style.display = wizardStep > 1 ? "inline-flex" : "none";
       if (nextBtn) nextBtn.style.display = wizardStep < 3 ? "inline-flex" : "none";
       if (submitBtn) submitBtn.style.display = wizardStep === 3 ? "inline-flex" : "none";
+      syncStep2DynamicFields();
     }
 
     function syncStorageFamilyBoxes() {
       const fam = (storageFamilySel && storageFamilySel.value) || "snowflake_sql";
       if (branchASqlBox) branchASqlBox.style.display = fam === "snowflake_postgres" ? "none" : "grid";
       if (branchBPgBox) branchBPgBox.style.display = fam === "snowflake_postgres" ? "grid" : "none";
+      syncStep2DynamicFields();
     }
 
     function syncLightMemoryModalTypeState() {
@@ -3506,13 +3925,15 @@
       const whenEl = document.getElementById("sflf-light-mem-when-embed");
       const pkEl = document.getElementById("sflf-light-mem-hybrid-pk");
       const idxEl = document.getElementById("sflf-light-mem-hybrid-idx");
+      const tblInput = document.getElementById("sflf-light-mem-table-name");
       const dbVal = (document.getElementById("sflf-light-mem-db") || {}).value || sfState.database;
       const schVal = (document.getElementById("sflf-light-mem-schema") || {}).value || sfState.schema;
       const nameVal = (document.getElementById("sflf-light-mem-name") || {}).value || spec.default_table_name || "AGENT_MEMORY_STORE";
 
       if (titleEl) titleEl.textContent = spec.label;
-      if (badgeEl) badgeEl.textContent = `Serve Embedding? ${spec.needs_embedding_badge}`;
+      if (badgeEl) badgeEl.textContent = `Embedding Required? ${spec.needs_embedding_badge}`;
       if (recEl) recEl.textContent = (spec.recommended_snowflake_objects || []).join(" · ");
+      if (tblInput && spec.default_table_name) tblInput.value = spec.default_table_name;
       if (sqlEl) {
         sqlEl.textContent = (spec.how_to_feed_without_embedding || "").replace(
           "<fqn>",
@@ -3539,12 +3960,20 @@
         }
       }
       if (targetObjSel) {
+        const sqlOnlyObjects = (spec.recommended_snowflake_objects || [spec.default_backend]).filter(function (o) {
+          return String(o).toLowerCase().indexOf("postgres") === -1;
+        });
+        const fallbackSqlObj =
+          spec.default_backend && String(spec.default_backend).toLowerCase().indexOf("postgres") === -1
+            ? spec.default_backend
+            : sqlOnlyObjects[0] || "Hybrid Table";
         populateSelectOptions(
           targetObjSel,
-          spec.recommended_snowflake_objects || [spec.default_backend],
-          spec.default_backend
+          sqlOnlyObjects.length ? sqlOnlyObjects : ["Hybrid Table", "Standard Table", "Dynamic Table", "Interactive Table"],
+          fallbackSqlObj
         );
       }
+      syncStep2DynamicFields();
     }
 
     function syncLightMemoryEmbeddingProviderModels() {
@@ -3567,6 +3996,43 @@
 
     if (typeSel) typeSel.onchange = syncLightMemoryModalTypeState;
     if (storageFamilySel) storageFamilySel.onchange = syncStorageFamilyBoxes;
+    if (targetObjSel) targetObjSel.onchange = syncStep2DynamicFields;
+    if (actionModeSel) actionModeSel.onchange = syncActionModeVisibility;
+    if (dbSel) {
+      dbSel.onchange = function () {
+        const dbNew = document.getElementById("sflf-light-mem-db-new");
+        if (dbNew) dbNew.style.display = dbSel.value === "__create_new_db__" ? "block" : "none";
+        syncCreateMemoryModalWithFlowContext(sfState);
+      };
+    }
+    if (schSel) {
+      schSel.onchange = function () {
+        const schNew = document.getElementById("sflf-light-mem-schema-new");
+        if (schNew) schNew.style.display = schSel.value === "__create_new_schema__" ? "block" : "none";
+        syncCreateMemoryModalWithFlowContext(sfState);
+      };
+    }
+    if (pgInstSel) {
+      pgInstSel.onchange = function () {
+        syncCreateMemoryModalWithFlowContext(sfState);
+      };
+    }
+    if (pgTableSel) {
+      pgTableSel.onchange = function () {
+        const pgTblNew = document.getElementById("sflf-light-mem-pg-table-new");
+        if (pgTblNew) pgTblNew.style.display = pgTableSel.value === "__create_new_pg_table__" ? "block" : "none";
+      };
+    }
+    if (sumEngineSel) {
+      sumEngineSel.onchange = function () {
+        syncEngineModelDropdown(sumEngineSel, sumModelSel, document.getElementById("sflf-step2-behav-sum-model"));
+      };
+    }
+    if (preprocEngineSel) {
+      preprocEngineSel.onchange = function () {
+        syncEngineModelDropdown(preprocEngineSel, preprocModelSel, preprocModelWrap);
+      };
+    }
     if (enableEmbedCb) {
       enableEmbedCb.onchange = function () {
         if (embedBox) embedBox.style.display = enableEmbedCb.checked ? "grid" : "none";
@@ -3599,12 +4065,29 @@
 
     document.getElementById("sflf-light-mem-submit-btn").onclick = async function () {
       const nameVal = (document.getElementById("sflf-light-mem-name") || {}).value || "AGENT_MEMORY_STORE";
-      const dbVal = (document.getElementById("sflf-light-mem-db") || {}).value || sfState.database;
-      const schVal = (document.getElementById("sflf-light-mem-schema") || {}).value || sfState.schema;
+      const rawDbVal = (document.getElementById("sflf-light-mem-db") || {}).value || sfState.database;
+      const dbVal =
+        rawDbVal === "__create_new_db__"
+          ? (document.getElementById("sflf-light-mem-db-new") || {}).value || sfState.database
+          : rawDbVal;
+      const rawSchVal = (document.getElementById("sflf-light-mem-schema") || {}).value || sfState.schema;
+      const schVal =
+        rawSchVal === "__create_new_schema__"
+          ? (document.getElementById("sflf-light-mem-schema-new") || {}).value || sfState.schema
+          : rawSchVal;
       const storageFamily = (storageFamilySel && storageFamilySel.value) || "snowflake_sql";
       const pgInstance = (document.getElementById("sflf-light-mem-pg-instance") || {}).value || "LANGFLOW_PG_INSTANCE";
       const pgMode = (document.getElementById("sflf-light-mem-pg-mode") || {}).value || "PostgresSaver";
+      const rawPgTable = (document.getElementById("sflf-light-mem-pg-table") || {}).value || "langgraph_checkpoints";
+      const pgTable =
+        rawPgTable === "__create_new_pg_table__"
+          ? (document.getElementById("sflf-light-mem-pg-table-new") || {}).value || "langgraph_checkpoints"
+          : rawPgTable;
       const actionMode = (document.getElementById("sflf-light-mem-action-mode") || {}).value || "create_new";
+      const physicalTableName =
+        actionMode === "bind_existing"
+          ? (document.getElementById("sflf-light-mem-existing-table") || {}).value || nameVal
+          : (document.getElementById("sflf-light-mem-table-name") || {}).value || nameVal;
       const chosenType = (typeSel && typeSel.value) || "buffer_window_memory";
       const spec = resolveCanonicalMemoryTypeSpec(chosenType);
       const targetBackend =
@@ -3617,7 +4100,16 @@
       const embDim = parseInt((dimInput && dimInput.value) || "768", 10);
       const autoCapture = !!((document.getElementById("sflf-light-mem-auto-capture") || {}).checked !== false);
       const preprocEnabled = !!(preprocCb && preprocCb.checked);
-      const preprocEngine = (document.getElementById("sflf-light-mem-preproc-engine") || {}).value || "cortex_sql";
+      const preprocEngine =
+        chosenType === "running_summary_memory"
+          ? (sumEngineSel && sumEngineSel.value) || (preprocEngineSel && preprocEngineSel.value) || "cortex_sql"
+          : (preprocEngineSel && preprocEngineSel.value) || "cortex_sql";
+      const preprocModel =
+        preprocEngine === "cortex_summarize_agg"
+          ? "AI_SUMMARIZE_AGG"
+          : chosenType === "running_summary_memory"
+          ? (sumModelSel && sumModelSel.value) || "mistral-large2"
+          : (preprocModelSel && preprocModelSel.value) || "mistral-large2";
       const killPhrase = (document.getElementById("sflf-light-mem-kill-phrase") || {}).value || "NO_INGEST";
       const outEl = document.getElementById("sflf-light-mem-out");
 
@@ -3628,9 +4120,11 @@
           name: nameVal,
           database: dbVal,
           schema: schVal,
+          table_name: physicalTableName,
           flow_id: extractCurrentFlowId(),
           storage_family: storageFamily,
           postgres_instance: storageFamily === "snowflake_postgres" ? pgInstance : null,
+          postgres_table: storageFamily === "snowflake_postgres" ? pgTable : null,
           pg_table_mode: storageFamily === "snowflake_postgres" ? pgMode : null,
           create_new_physical_store: actionMode !== "bind_existing",
           agent_memory_type: chosenType,
@@ -3646,6 +4140,7 @@
           llm_preprocessing: {
             enabled: preprocEnabled,
             engine: preprocEngine,
+            model: preprocModel,
             kill_phrase: killPhrase,
           },
         }),
@@ -3653,20 +4148,31 @@
       const data = await resp.json();
       if (outEl) outEl.textContent = JSON.stringify(data, null, 2);
       if (!resp.ok || data.ok === false) {
-        showDenialOrStatusBanner("error", data.error_code || "AUTHZ_ROLE_DENIED", data.message || "Operazione negata");
+        showDenialOrStatusBanner("error", data.error_code || "AUTHZ_ROLE_DENIED", data.message || "Operation denied");
       } else {
         sfState.memories = Array.isArray(sfState.memories) ? sfState.memories : [];
         if (data.memory) {
-          sfState.memories = sfState.memories.filter(function (m) {
-            return (typeof m === "string" ? m : m.name) !== data.memory.name;
+          const normalizedMem = Object.assign({}, data.memory, {
+            id: data.memory.memory_id || data.memory.langflow_memory_id || data.memory.id || data.memory.name,
           });
-          sfState.memories.unshift(data.memory);
+          sfState.memories = sfState.memories.filter(function (m) {
+            return (typeof m === "string" ? m : m.name) !== normalizedMem.name;
+          });
+          sfState.memories.unshift(normalizedMem);
+          window.SNOWFLAKE_MEMORIES_LIST = Array.isArray(window.SNOWFLAKE_MEMORIES_LIST)
+            ? window.SNOWFLAKE_MEMORIES_LIST.filter(function (m) { return m && m.name !== normalizedMem.name; })
+            : [];
+          window.SNOWFLAKE_MEMORIES_LIST.unshift(normalizedMem);
+          if (typeof window.__sflfRefetchMemories === "function") {
+            try { window.__sflfRefetchMemories(); } catch (_e) {}
+          }
+          if (typeof window.__sflfSelectMemory === "function") {
+            try { window.__sflfSelectMemory(normalizedMem); } catch (_e) {}
+          }
+          renderSnowflakeMemoryDetailView(normalizedMem);
         }
-        showDenialOrStatusBanner("ok", "MEMORY_CREATED", `Snowflake Memory ${nameVal} (${chosenType}) creata.`);
+        showDenialOrStatusBanner("ok", "MEMORY_CREATED", `Snowflake Memory ${nameVal} (${chosenType}) created.`);
         ensureSnowflakeMemoriesSearchableCards();
-        if (data.memory) {
-          renderSnowflakeMemoryDetailView(data.memory);
-        }
         syncNodesToCurrentContext(sfState);
         window.dispatchEvent(new Event("focus"));
         setTimeout(function () {
@@ -3677,6 +4183,9 @@
 
     modal.style.display = "flex";
     setWizardStep(1);
+    syncActionModeVisibility();
+    syncEngineModelDropdown(sumEngineSel, sumModelSel, document.getElementById("sflf-step2-behav-sum-model"));
+    syncEngineModelDropdown(preprocEngineSel, preprocModelSel, preprocModelWrap);
     syncLightMemoryModalTypeState();
     syncLightMemoryEmbeddingProviderModels();
     ensureMemoriesPageSnowflakeButton();
@@ -3685,6 +4194,8 @@
 
   // W2-R4-05: Full Langflow-Compliant Memory Detail View in the Memories Right Pane
   let _selectedSnowflakeMemoryName = null;
+  let _lastDetailSignature = "";
+  let _lastCardsSignature = "";
   function renderSnowflakeMemoryDetailView(memoryOrRef) {
     if (!document.body || !isStrictMemoriesView()) return;
     let memObj = null;
@@ -3708,6 +4219,20 @@
       memObj = { name: memObj, agent_memory_type: "buffer_window_memory" };
     }
     _selectedSnowflakeMemoryName = memObj.name;
+
+    const detailSig = JSON.stringify({
+      name: memObj.name,
+      role: sfState.active_role,
+      type: memObj.canonical_memory_type || memObj.agent_memory_type,
+      fqn: memObj.table_fqn || memObj.fqn,
+      auto: memObj.auto_capture,
+      recordsCount: Array.isArray(memObj.stored_records) ? memObj.stored_records.length : 0,
+    });
+    const existingPanel = document.getElementById("sflf-memory-detail-view");
+    if (existingPanel && existingPanel.style.display !== "none" && detailSig === _lastDetailSignature) {
+      return;
+    }
+    _lastDetailSignature = detailSig;
 
     const spec = resolveCanonicalMemoryTypeSpec(memObj.canonical_memory_type || memObj.agent_memory_type);
     const storageFamily =
@@ -3978,6 +4503,18 @@
       return hay.includes(query);
     });
 
+    const cardsSig = JSON.stringify({
+      q: query,
+      nativeBtn: hasNativeReactMemoriesBtn,
+      items: filtered.map(function (m) {
+        return [m.name, m.agent_memory_type, m.table_fqn || m.fqn, !!m.enable_embedding];
+      }),
+    });
+    if (grid.childElementCount > 0 && cardsSig === _lastCardsSignature) {
+      return;
+    }
+    _lastCardsSignature = cardsSig;
+
     grid.innerHTML = filtered
       .map(function (m) {
         const spec = resolveCanonicalMemoryTypeSpec(m.agent_memory_type);
@@ -4036,8 +4573,8 @@
     ) {
       const msg =
         objectKind === "memory"
-          ? "La creazione di Memory è stata spostata nella pagina Memories (+ Snowflake) (W2-R2-04B / W2-R2-13)."
-          : "La creazione di FUNCTION (UDF/UDTF) e STORED PROCEDURE non è consentita dallo Snowflake Langflow Hub (HUB-W2-04). Usa i componenti in LLM Operations.";
+          ? "Memory creation has been moved to the Memories (+ Snowflake) page (W2-R2-04B / W2-R2-13)."
+          : "Creating FUNCTION (UDF/UDTF) and STORED PROCEDURE objects is not permitted from the Snowflake Langflow Hub (HUB-W2-04). Use the components in LLM Operations.";
       out.textContent = JSON.stringify({ ok: false, error_code: "UNSUPPORTED_CAPABILITY", message: msg }, null, 2);
       showDenialOrStatusBanner("error", "UNSUPPORTED_CAPABILITY", msg);
       return;
@@ -4080,12 +4617,12 @@
     const data = await resp.json();
     out.textContent = JSON.stringify(data, null, 2);
     if (!resp.ok || data.ok === false) {
-      showDenialOrStatusBanner("error", data.error_code || "AUTHZ_ROLE_DENIED", data.message || "Operazione negata");
+      showDenialOrStatusBanner("error", data.error_code || "AUTHZ_ROLE_DENIED", data.message || "Operation denied");
     } else if (!dryRun) {
       showDenialOrStatusBanner(
         "ok",
         "PROVISIONED",
-        `Oggetto ${effectiveName} (${objectKind}/${objectSubtype}) creato in ${targetDb}.${targetSchema} col ruolo ${sfState.active_role}`
+        `Object ${effectiveName} (${objectKind}/${objectSubtype}) created in ${targetDb}.${targetSchema} with role ${sfState.active_role}`
       );
       await fetchSnowflakeCatalog(targetDb, targetSchema);
       refreshHubModalPrivilegeAndContextViews();
@@ -4134,9 +4671,9 @@
     const data = await resp.json();
     out.textContent = JSON.stringify(data, null, 2);
     if (!resp.ok || data.ok === false) {
-      showDenialOrStatusBanner("error", data.error_code || "AUTHZ_ROLE_DENIED", data.message || "Operazione negata");
+      showDenialOrStatusBanner("error", data.error_code || "AUTHZ_ROLE_DENIED", data.message || "Operation denied");
     } else {
-      showDenialOrStatusBanner("ok", "MEMORY_CREATED", `Memoria ${name} (${agentMemoryType}) creata in ${backend}`);
+      showDenialOrStatusBanner("ok", "MEMORY_CREATED", `Snowflake Memory ${name} (${agentMemoryType}) created in ${backend}.`);
       await fetchSnowflakeCatalog(sfState.database, sfState.schema);
       refreshHubModalPrivilegeAndContextViews();
       refreshTracesInModal();

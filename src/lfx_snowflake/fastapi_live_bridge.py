@@ -271,31 +271,49 @@ SNOWFLAKE_EMBEDDING_SOURCES: tuple[dict[str, Any], ...] = (
 LLM_PREPROCESSING_ENGINES: tuple[dict[str, Any], ...] = (
     {
         "id": "cortex_sql",
-        "label": "Snowflake Cortex SQL (AI_COMPLETE / AI_SUMMARIZE_AGG / AI_EXTRACT)",
-        "default_model": "claude-3-7-sonnet",
-        "models": ["claude-3-7-sonnet", "mistral-large2", "llama3.3-70b"],
+        "label": "Cortex SQL — AI_COMPLETE (Select Model)",
+        "sql_function": "AI_COMPLETE",
+        "requires_model_selection": True,
+        "default_model": "mistral-large2",
+        "models": [
+            "mistral-large2",
+            "llama3.3-70b",
+            "llama3.1-70b",
+            "claude-3-7-sonnet",
+            "claude-sonnet-4-5",
+            "openai-gpt-5",
+            "deepseek-r1",
+        ],
+    },
+    {
+        "id": "cortex_summarize_agg",
+        "label": "Cortex Native — AI_SUMMARIZE_AGG (Automatic SQL Aggregation)",
+        "sql_function": "AI_SUMMARIZE_AGG",
+        "requires_model_selection": False,
+        "default_model": "AI_SUMMARIZE_AGG",
+        "models": ["AI_SUMMARIZE_AGG"],
     },
     {
         "id": "proxy_chat",
-        "label": "Proxy - Chat (/chat/v1)",
+        "label": "SPCS LLM Proxy — Chat (/chat/v1)",
         "default_model": "openai-gpt-6-luna",
         "models": ["openai-gpt-6-luna", "openai-gpt-6-sol", "grok-4.7", "glm-5.3", "kimi-k3"],
     },
     {
         "id": "proxy_responses",
-        "label": "Proxy - Responses (/responses/v1)",
+        "label": "SPCS LLM Proxy — Responses (/responses/v1)",
         "default_model": "openai-gpt-6-astra",
         "models": ["openai-gpt-6-astra", "openai-gpt-6.1-sol"],
     },
     {
         "id": "proxy_messages",
-        "label": "Proxy - Messages (/messages)",
+        "label": "SPCS LLM Proxy — Messages (/messages)",
         "default_model": "claude-sonnet-5-5",
         "models": ["claude-sonnet-5-5", "claude-opus-5-5", "claude-haiku-5-5"],
     },
     {
         "id": "spcs_ollama",
-        "label": "Private - Ollama (SPCS Container)",
+        "label": "Private SPCS — Ollama (SPCS Container)",
         "default_model": "llama3.1:8b",
         "models": ["llama3.1:8b", "qwen2.5:14b", "mistral:7b"],
     },
@@ -309,6 +327,13 @@ LLM_PREPROCESSING_ENGINES: tuple[dict[str, Any], ...] = (
 
 EMBEDDING_PROVIDERS_CATALOG: tuple[dict[str, Any], ...] = tuple(EXTERNAL_EMBEDDING_PROVIDERS.values())
 
+
+def compute_deterministic_memory_uuid(name: str | None) -> str:
+    """Compute a deterministic UUIDv5 (`snowflake-memory:<NAME>`) so memory IDs stay stable across restarts and match between SQLite and `memories_registry` (`W2-R4-08G`)."""
+    clean_name = str(name or "SNOWFLAKE_MEMORY").strip().upper() or "SNOWFLAKE_MEMORY"
+    return str(uuid.uuid5(uuid.NAMESPACE_DNS, f"snowflake-memory:{clean_name}"))
+
+
 AGENT_MEMORY_TYPES: tuple[dict[str, Any], ...] = (
     {
         "id": "graph_state_checkpointer",
@@ -318,8 +343,8 @@ AGENT_MEMORY_TYPES: tuple[dict[str, Any], ...] = (
         "label": "#1 Short-Term: Graph State & Checkpointer",
         "category": "short_term",
         "purpose": (
-            "Salva lo stato step-by-step del grafo LangGraph, i tool-call intermedi e le pause "
-            "Human-in-the-Loop (HITL) recuperandoli per chiave primaria thread_id."
+            "Saves step-by-step LangGraph execution state, intermediate tool calls, and "
+            "Human-in-the-Loop (HITL) pauses retrieved by primary key thread_id."
         ),
         "description": (
             "Short-term LangGraph execution state and step checkpoints retrieved by primary key thread_id "
@@ -337,12 +362,12 @@ AGENT_MEMORY_TYPES: tuple[dict[str, Any], ...] = (
             "Snowflake Postgres (Relational / JSONB)",
             "Standard Table",
         ],
-        "needs_embedding_badge": "NO (Mai / Never)",
+        "needs_embedding_badge": "NO (Never)",
         "how_to_feed_without_embedding": (
             "SELECT state_blob, checkpoint_ns, step_id FROM <fqn> "
             "WHERE thread_id = :thread_id ORDER BY step_id DESC LIMIT 1"
         ),
-        "when_embedding_useful": "Mai: lo stato del grafo viene recuperato sempre per chiave primaria thread_id.",
+        "when_embedding_useful": "Never: graph execution state is always retrieved deterministically by primary key thread_id.",
         "required_inputs": ["thread_id", "checkpoint_ns", "ttl_hours"],
         "default_hybrid_pk": "(thread_id, checkpoint_ns, step_id)",
         "filter_by_session": True,
@@ -358,11 +383,11 @@ AGENT_MEMORY_TYPES: tuple[dict[str, Any], ...] = (
         "slot_number": 2,
         "enabled": True,
         "legacy_alias": "episodic_session",
-        "label": "#2 Short-Term: Buffer / Window Memory (Storico Chat)",
+        "label": "#2 Short-Term: Buffer / Window Memory (Chat History)",
         "category": "short_term",
         "purpose": (
-            "Mantiene gli ultimi K messaggi verbatim della conversazione corrente ordinati per timestamp "
-            "e filtrati per session_id per alimentare la porta Chat History dell'Agente."
+            "Keeps the last K verbatim messages of the active conversation ordered by timestamp "
+            "and filtered by session_id to feed the Agent's Chat History port."
         ),
         "description": (
             "Low-latency conversational chat history window retrieved chronologically by session_id and window_k "
@@ -383,7 +408,7 @@ AGENT_MEMORY_TYPES: tuple[dict[str, Any], ...] = (
             "SELECT sender, message_text, created_at FROM <fqn> "
             "WHERE session_id = :session_id ORDER BY created_at DESC LIMIT :window_k"
         ),
-        "when_embedding_useful": "Utile solo per recuperare messaggi detti 500+ turni fa fuori dalla finestra K.",
+        "when_embedding_useful": "Only useful when retrieving messages from 500+ turns ago outside the sliding window K.",
         "required_inputs": ["session_id", "window_k", "retention_days"],
         "default_hybrid_pk": "(session_id, turn_id)",
         "filter_by_session": True,
@@ -398,11 +423,11 @@ AGENT_MEMORY_TYPES: tuple[dict[str, Any], ...] = (
         "agent_memory_type": "summary_memory",
         "slot_number": 3,
         "enabled": True,
-        "label": "#3 Short-Term: Summary Memory (Riassunto)",
+        "label": "#3 Short-Term: Running Summary Memory (Conversation Summary)",
         "category": "short_term",
         "purpose": (
-            "Condensa in 1 riga progressiva tutti i turni precedenti alla finestra K e la inietta nel "
-            "System Message dell'Agente aggiornandola in background con LLM / AI_COMPLETE."
+            "Condenses all turns prior to window K into a progressive running summary and injects it into "
+            "the Agent's System Message, updating it in the background with AI_COMPLETE or AI_SUMMARIZE_AGG."
         ),
         "description": (
             "Running conversation summary injected into the System Prompt and updated in background "
@@ -420,13 +445,13 @@ AGENT_MEMORY_TYPES: tuple[dict[str, Any], ...] = (
             "Hybrid Table",
             "Standard Table",
         ],
-        "needs_embedding_badge": "NO (Mai / Never)",
+        "needs_embedding_badge": "NO (Never)",
         "how_to_feed_without_embedding": (
             "SELECT running_summary, last_turn_id FROM <fqn> "
-            "WHERE session_id = :session_id LIMIT 1 -- iniettato nel System Prompt"
+            "WHERE session_id = :session_id LIMIT 1 -- injected into System Prompt"
         ),
         "when_embedding_useful": (
-            "Mai: è un riassunto di 1 riga letto direttamente e aggiornato in background con "
+            "Never: it is a progressive 1-line summary read directly and updated in the background with "
             "AI_COMPLETE / AI_SUMMARIZE_AGG."
         ),
         "required_inputs": ["session_id", "summarizer_model", "max_summary_tokens"],
@@ -447,8 +472,8 @@ AGENT_MEMORY_TYPES: tuple[dict[str, Any], ...] = (
         "label": "#4 Long-Term Semantic: User Profile & Entity Memory",
         "category": "long_term_semantic",
         "purpose": (
-            "Conserva tra sessioni diverse (Cross-Session) preferenze utente, fatti strutturati ed entità "
-            "JSON per user_id + entity_namespace con distillazione LLM e Kill Phrase NO_INGEST."
+            "Persists cross-session user preferences, structured facts, and JSON entities "
+            "by user_id + entity_namespace with LLM distillation and Kill Phrase NO_INGEST."
         ),
         "description": (
             "Persistent user preferences, entity facts, and structured JSON profiles loaded at session start "
@@ -471,12 +496,12 @@ AGENT_MEMORY_TYPES: tuple[dict[str, Any], ...] = (
             "Interactive Table",
             "View",
         ],
-        "needs_embedding_badge": "OPZIONALE (90% NO)",
+        "needs_embedding_badge": "OPTIONAL (Default OFF)",
         "how_to_feed_without_embedding": (
             "SELECT profile_json FROM <fqn> WHERE user_id = :user_id "
-            "AND entity_namespace = :entity_namespace LIMIT 1 -- caricato a inizio sessione"
+            "AND entity_namespace = :entity_namespace LIMIT 1 -- loaded at session start"
         ),
-        "when_embedding_useful": "Solo se l'utente accumula centinaia di fatti distinti e non entrano tutti nel prompt.",
+        "when_embedding_useful": "Only when a user accumulates hundreds of distinct facts that no longer fit in the system prompt.",
         "required_inputs": ["user_id", "entity_namespace", "schema_keys"],
         "default_hybrid_pk": "(user_id, entity_namespace, chunk_id)",
         "filter_by_session": False,
@@ -492,11 +517,11 @@ AGENT_MEMORY_TYPES: tuple[dict[str, Any], ...] = (
         "slot_number": 5,
         "enabled": True,
         "legacy_alias": "semantic_vector",
-        "label": "#5 Long-Term Semantic: Episodic Memory (Esperienze / Few-shot)",
+        "label": "#5 Long-Term Semantic: Episodic / Procedural Memory (Few-Shot Experiences)",
         "category": "long_term_semantic",
         "purpose": (
-            "Salva i task passati risolti con successo dall'agente (con outcome_score e traiettoria) "
-            "per fornirli come esempi few-shot dinamici o come Tool all'Agente."
+            "Stores past tasks successfully solved by the agent (with outcome_score and trajectory) "
+            "to supply dynamic few-shot examples or an on-demand Agent Tool."
         ),
         "description": (
             "Past agent task experiences and few-shot examples retrieved by topic/outcome_score or "
@@ -518,13 +543,13 @@ AGENT_MEMORY_TYPES: tuple[dict[str, Any], ...] = (
             "Snowflake Postgres (pgvector)",
             "Cortex Search Service",
         ],
-        "needs_embedding_badge": "OPZIONALE",
+        "needs_embedding_badge": "OPTIONAL (Rarely Needed)",
         "how_to_feed_without_embedding": (
             "SELECT topic, tool_used, outcome_score, episode_text FROM <fqn> "
             "WHERE topic = :topic ORDER BY outcome_score DESC, created_at DESC LIMIT :few_shot_k"
         ),
         "when_embedding_useful": (
-            "Utile quando i task passati non hanno categorie fisse e serve similarity search per trovare episodi simili."
+            "Useful when past tasks do not follow fixed topic categories and semantic similarity search is needed to find similar episodes."
         ),
         "required_inputs": ["topic_column", "tool_used_column", "outcome_score_threshold", "few_shot_k"],
         "default_hybrid_pk": "(user_id, chunk_id)",
@@ -547,8 +572,8 @@ COMING_SOON_MEMORY_TYPES: tuple[dict[str, Any], ...] = (
         "label": "#6 Long-Term: Business Ontology / Cortex Sense (Coming Soon)",
         "category": "long_term_ontology",
         "purpose": (
-            "Memoria ontologica governata basata su Snowflake Business Ontology e Cortex Sense per "
-            "definizioni canoniche di dominio, relazioni tra entità e formule metriche (Coming Soon)."
+            "Governed ontological memory backed by Snowflake Business Ontology and Cortex Sense for "
+            "canonical domain definitions, entity relationships, and metric formulas (Coming Soon)."
         ),
         "description": (
             "Future slot reserved for Snowflake Business Ontology and Cortex Sense domain memory "
@@ -565,7 +590,7 @@ COMING_SOON_MEMORY_TYPES: tuple[dict[str, Any], ...] = (
         ],
         "needs_embedding_badge": "COMING SOON (Cortex Sense)",
         "how_to_feed_without_embedding": "-- Coming Soon: Snowflake Business Ontology / Cortex Sense",
-        "when_embedding_useful": "Gestito internamente da Cortex Sense quando abilitato.",
+        "when_embedding_useful": "Managed internally by Cortex Sense when enabled.",
         "required_inputs": ["ontology_domain", "cortex_context_name"],
         "default_hybrid_pk": "(entity_id)",
         "filter_by_session": False,
@@ -1423,24 +1448,38 @@ class LiveSnowflakeBridge:
 
     @property
     def memories_catalog(self) -> list[dict[str, Any]]:
-        """Return governed Snowflake Agent Memories available for workflow recall (`W2-R2-13`)."""
-        items: list[dict[str, Any]] = [dict(m) for m in self.memories_registry]
+        """Return governed Snowflake Agent Memories available for workflow recall (`W2-R2-13`, `W2-R4-08G`)."""
+        items: list[dict[str, Any]] = []
+        for raw_m in self.memories_registry:
+            m = dict(raw_m)
+            m_name = str(m.get("name") or "SNOWFLAKE_MEMORY").strip()
+            det_id = str(m.get("memory_id") or m.get("langflow_memory_id") or compute_deterministic_memory_uuid(m_name))
+            m["id"] = det_id
+            m["memory_id"] = det_id
+            m["langflow_memory_id"] = det_id
+            items.append(m)
         known_names = {str(m.get("name") or "").strip().upper() for m in items if m.get("name")}
         vis_mem = list((self.selected_context.get("visible_objects") or {}).get("memories") or [])
         for mem_name in vis_mem:
             clean = str(mem_name or "").strip()
             if clean and clean.upper() not in known_names:
+                det_id = compute_deterministic_memory_uuid(clean)
                 items.append(
                     {
+                        "id": det_id,
+                        "memory_id": det_id,
+                        "langflow_memory_id": det_id,
                         "name": clean,
                         "database": self.database,
                         "schema": self.schema,
                         "table_fqn": f"{self.database}.{self.schema}.MEM_{clean.upper()}",
                         "agent_memory_type": "semantic_vector",
+                        "canonical_memory_type": "episodic_memory",
                         "memory_category": "vector_table",
                         "vector_database": "Standard Table (VECTOR)",
                         "embedding_model": "snowflake-arctic-embed-m-v1.5",
                         "dimension": 768,
+                        "auto_capture": True,
                         "created_by_role": self.active_role,
                     }
                 )
@@ -1676,8 +1715,8 @@ class LiveSnowflakeBridge:
         else:
             if self.active_role.upper() in ("UNAUTHORIZED_ROLE", "NO_SELECT_ROLE") or body.get("deny_bind_existing") is True:
                 msg = (
-                    f"Il ruolo attivo ({self.active_role}) non dispone del privilegio MEMORY_USE_EXISTING "
-                    f"(SELECT / USAGE) su {fqn}."
+                    f"Active role ({self.active_role}) does not have the MEMORY_USE_EXISTING "
+                    f"(SELECT / USAGE) privilege on {fqn}."
                 )
                 self.record_audit_event(
                     action="MEMORY_USE_EXISTING",
@@ -1818,11 +1857,24 @@ class LiveSnowflakeBridge:
         raw_preproc = body.get("llm_preprocessing")
         if isinstance(raw_preproc, dict):
             preproc_enabled = bool(raw_preproc.get("enabled", True))
-            preproc_engine = str(raw_preproc.get("engine") or raw_preproc.get("provider") or "proxy_chat").strip()
+            preproc_engine = str(
+                raw_preproc.get("engine")
+                or raw_preproc.get("provider")
+                or body.get("summarizer_engine")
+                or "proxy_chat"
+            ).strip()
             preproc_model = str(
                 raw_preproc.get("model")
                 or body.get("summarizer_model")
-                or ("openai-gpt-6-luna" if canonical_type == "summary_memory" else "claude-sonnet-5-5")
+                or (
+                    "AI_SUMMARIZE_AGG"
+                    if preproc_engine == "cortex_summarize_agg"
+                    else "mistral-large2"
+                    if preproc_engine == "cortex_sql"
+                    else "openai-gpt-6-luna"
+                    if canonical_type == "summary_memory"
+                    else "claude-sonnet-5-5"
+                )
             ).strip()
             preproc_kill_phrase = str(raw_preproc.get("kill_phrase") or body.get("kill_phrase") or "NO_INGEST").strip() or "NO_INGEST"
             llm_preprocessing: dict[str, Any] | None = {
@@ -1834,6 +1886,7 @@ class LiveSnowflakeBridge:
         elif (
             body.get("llm_preprocessing_enabled") is not None
             or body.get("llm_preprocessing_engine") is not None
+            or body.get("summarizer_engine") is not None
             or body.get("kill_phrase") is not None
             or canonical_type == "summary_memory"
         ):
@@ -1841,12 +1894,21 @@ class LiveSnowflakeBridge:
             preproc_engine = str(
                 body.get("llm_preprocessing_engine")
                 or body.get("llm_preprocessing_provider")
-                or ("proxy_chat" if canonical_type == "summary_memory" else "proxy_messages")
+                or body.get("summarizer_engine")
+                or ("cortex_sql" if canonical_type == "summary_memory" else "proxy_messages")
             ).strip()
             preproc_model = str(
                 body.get("llm_preprocessing_model")
                 or body.get("summarizer_model")
-                or ("openai-gpt-6-luna" if canonical_type == "summary_memory" else "claude-sonnet-5-5")
+                or (
+                    "AI_SUMMARIZE_AGG"
+                    if preproc_engine == "cortex_summarize_agg"
+                    else "mistral-large2"
+                    if preproc_engine == "cortex_sql"
+                    else "openai-gpt-6-luna"
+                    if canonical_type == "summary_memory"
+                    else "claude-sonnet-5-5"
+                )
             ).strip()
             preproc_kill_phrase = str(body.get("kill_phrase") or "NO_INGEST").strip() or "NO_INGEST"
             llm_preprocessing = {
@@ -2184,10 +2246,32 @@ class LiveSnowflakeBridge:
                 fallback_std_ddl = ddl.replace("CREATE HYBRID TABLE", "CREATE TABLE")
                 exec_res = self.execute_sql(fallback_std_ddl)
         how_to_feed_sql = type_spec["how_to_feed_without_embedding"].replace("<fqn>", fqn)
-        memory_id_val = str(body.get("memory_id") or uuid.uuid4())
+        deterministic_memory_id = compute_deterministic_memory_uuid(name)
+        raw_mem_id = str(body.get("memory_id") or "").strip()
+        if raw_mem_id:
+            try:
+                memory_id_val = str(uuid.UUID(raw_mem_id))
+            except Exception:  # noqa: BLE001
+                memory_id_val = deterministic_memory_id
+        else:
+            memory_id_val = deterministic_memory_id
+        summarizer_engine_val = str(
+            body.get("summarizer_engine")
+            or (llm_preprocessing.get("engine") if isinstance(llm_preprocessing, dict) else None)
+            or ("cortex_sql" if canonical_type == "summary_memory" else "proxy_chat")
+        ).strip()
+        summarizer_model_val = str(
+            body.get("summarizer_model")
+            or (llm_preprocessing.get("model") if isinstance(llm_preprocessing, dict) else None)
+            or ("AI_SUMMARIZE_AGG" if summarizer_engine_val == "cortex_summarize_agg" else "mistral-large2")
+        ).strip()
+        summary_trigger_turns_val = max(1, int(body.get("summary_trigger_turns") or 5))
         entry = {
+            "id": memory_id_val,
             "memory_id": memory_id_val,
+            "langflow_memory_id": memory_id_val,
             "name": name,
+            "kb_name": name,
             "flow_id": norm_fid,
             "storage_family": storage_family,
             "database": None if is_postgres_branch and body.get("storage_family") == "snowflake_postgres" else db,
@@ -2228,6 +2312,7 @@ class LiveSnowflakeBridge:
             "endpoint_url": endpoint_url if is_vector else None,
             "batch_size": batch_size,
             "ingestion_threshold": ingestion_threshold,
+            "threshold": ingestion_threshold,
             "auto_capture": auto_capture,
             "filter_by_session": filter_by_session,
             "tool_mode": tool_mode,
@@ -2239,7 +2324,9 @@ class LiveSnowflakeBridge:
             "session_id": body.get("session_id") or "sess_default",
             "window_k": int(body.get("window_k") or 8),
             "retention_days": int(retention_days) if retention_days is not None else 90,
-            "summarizer_model": body.get("summarizer_model") or "openai-gpt-6-luna",
+            "summarizer_engine": summarizer_engine_val,
+            "summarizer_model": summarizer_model_val,
+            "summary_trigger_turns": summary_trigger_turns_val,
             "max_summary_tokens": int(body.get("max_summary_tokens") or 512),
             "user_id": body.get("user_id") or "usr_default",
             "entity_namespace": body.get("entity_namespace") or "enterprise_finance",
@@ -2302,6 +2389,16 @@ class LiveSnowflakeBridge:
 
     def _persist_memory_in_langflow_sqlite(self, entry: dict[str, Any], flow_id: str | None = None) -> None:
         """Persist created Snowflake Memory into Langflow's native `knowledge_base` & `memory_base` SQLite tables so it appears & is searchable in the native Memories UI."""
+        mem_name = str(entry.get("name") or "SNOWFLAKE_MEMORY").strip()
+        det_uuid_str = compute_deterministic_memory_uuid(mem_name)
+        try:
+            det_uuid = uuid.UUID(str(entry.get("memory_id") or det_uuid_str))
+        except Exception:  # noqa: BLE001
+            det_uuid = uuid.UUID(det_uuid_str)
+        entry["id"] = str(det_uuid)
+        entry["memory_id"] = str(det_uuid)
+        entry["langflow_memory_id"] = str(det_uuid)
+
         persist_dir = Path(os.getenv("LANGFLOW_PERSIST_DIR", "/persist"))
         db_path = persist_dir / "langflow.db"
         if not db_path.exists():
@@ -2338,9 +2435,7 @@ class LiveSnowflakeBridge:
             if not target_flow_hex:
                 target_flow_hex = "50700000000040008000000000000507"
 
-            mem_name = str(entry.get("name") or "SNOWFLAKE_MEMORY").strip()
-            safe_kb = "".join(c if c.isalnum() or c == "_" else "_" for c in mem_name).lower()
-            kb_name = f"sf_{safe_kb}_{uuid.uuid4().hex[:8]}"
+            kb_name = mem_name
             now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S.%f")
 
             is_vec = bool(entry.get("enable_embedding"))
@@ -2352,10 +2447,13 @@ class LiveSnowflakeBridge:
             )
             backend_label = f"Snowflake · {entry.get('vector_database') or 'Hybrid Table'} ({entry.get('table_fqn')})"
             sql_lookup = str(entry.get("how_to_feed_without_embedding") or "")
-            instructions = (
-                f"[{entry.get('label')}] Store: {entry.get('table_fqn')} | "
-                f"Serve Embedding: {entry.get('needs_embedding_badge')} | "
-                f"Lookup SQL: {sql_lookup}"
+            instructions = str(
+                entry.get("preproc_instructions")
+                or (
+                    f"[{entry.get('label')}] Store: {entry.get('table_fqn')} | "
+                    f"Embedding Required: {entry.get('needs_embedding_badge')} | "
+                    f"Lookup SQL: {sql_lookup}"
+                )
             )
             model_sel_json = json.dumps(
                 {
@@ -2385,10 +2483,10 @@ class LiveSnowflakeBridge:
                     (model_sel_json, backend_label, backend_cfg_json, now_str, existing_kb["id"]),
                 )
             else:
-                kb_id_hex = uuid.uuid4().hex
+                kb_id_hex = uuid.uuid5(uuid.NAMESPACE_DNS, f"snowflake-kb:{mem_name.upper()}").hex
                 kb_name = mem_name
                 cur.execute(
-                    "INSERT INTO knowledge_base "
+                    "INSERT OR REPLACE INTO knowledge_base "
                     "(id, name, user_id, model_selection, chunk_size, chunk_overlap, separator, column_config, "
                     "backend_type, backend_config, chunks, words, characters, size_bytes, source_types, status, "
                     "failure_reason, created_at, updated_at) "
@@ -2396,11 +2494,12 @@ class LiveSnowflakeBridge:
                     (kb_id_hex, kb_name, user_id_hex, model_sel_json, backend_label, backend_cfg_json, now_str, now_str),
                 )
 
+            mb_id_hex = det_uuid.hex
             existing_mb = cur.execute(
-                "SELECT id FROM memory_base WHERE user_id = ? AND name = ?",
-                (user_id_hex, mem_name),
+                "SELECT id FROM memory_base WHERE id = ? OR (user_id = ? AND name = ?)",
+                (mb_id_hex, user_id_hex, mem_name),
             ).fetchone()
-            threshold_val = max(1, int(entry.get("ingestion_threshold") or entry.get("batch_size") or 1))
+            threshold_val = max(1, int(entry.get("ingestion_threshold") or entry.get("threshold") or entry.get("batch_size") or 1))
             auto_cap_int = 1 if entry.get("auto_capture", True) else 0
             llm_pre = entry.get("llm_preprocessing")
             preproc_model_val = str(
@@ -2416,9 +2515,10 @@ class LiveSnowflakeBridge:
             ).strip() or "NO_INGEST"
             if existing_mb:
                 cur.execute(
-                    "UPDATE memory_base SET flow_id = ?, threshold = ?, auto_capture = ?, embedding_model = ?, "
+                    "UPDATE memory_base SET id = ?, flow_id = ?, threshold = ?, auto_capture = ?, embedding_model = ?, "
                     "preprocessing = 1, preproc_model = ?, preproc_instructions = ?, preproc_kill_phrase = ?, kb_name = ? WHERE id = ?",
                     (
+                        mb_id_hex,
                         target_flow_hex,
                         threshold_val,
                         auto_cap_int,
@@ -2430,9 +2530,7 @@ class LiveSnowflakeBridge:
                         existing_mb["id"],
                     ),
                 )
-                mb_id_hex = str(existing_mb["id"])
             else:
-                mb_id_hex = uuid.uuid4().hex
                 cur.execute(
                     "INSERT INTO memory_base "
                     "(id, name, flow_id, user_id, threshold, auto_capture, embedding_model, preprocessing, "
@@ -2455,32 +2553,35 @@ class LiveSnowflakeBridge:
                 )
             conn.commit()
             conn.close()
+            entry["id"] = str(uuid.UUID(mb_id_hex))
+            entry["memory_id"] = str(uuid.UUID(mb_id_hex))
             entry["langflow_memory_id"] = str(uuid.UUID(mb_id_hex))
             entry["flow_id"] = str(uuid.UUID(target_flow_hex))
         except Exception:  # noqa: BLE001
             pass
 
     def _find_memory_entry(self, memory_id_or_name: str) -> dict[str, Any] | None:
-        """Locate a memory entry in `memories_registry` or `memories_catalog` by name, memory_id, or FQN."""
+        """Locate a memory entry in `memories_registry` or `memories_catalog` by name, UUID, `.hex`, or FQN (`W2-R4-08G`)."""
         target = str(memory_id_or_name or "").strip()
         if not target:
             return None
         target_upper = target.upper()
-        for entry in self.memories_registry:
-            if target_upper in {
-                str(entry.get("name") or "").strip().upper(),
-                str(entry.get("memory_id") or "").strip().upper(),
-                str(entry.get("langflow_memory_id") or "").strip().upper(),
-                str(entry.get("table_fqn") or "").strip().upper(),
-            }:
-                return entry
-        for entry in self.memories_catalog:
-            if target_upper in {
-                str(entry.get("name") or "").strip().upper(),
-                str(entry.get("memory_id") or "").strip().upper(),
-                str(entry.get("table_fqn") or "").strip().upper(),
-            }:
-                return entry
+        target_hex_upper = target_upper.replace("-", "")
+        for source_list in (self.memories_registry, self.memories_catalog):
+            for entry in source_list:
+                e_name = str(entry.get("name") or "").strip()
+                det_id = compute_deterministic_memory_uuid(e_name) if e_name else ""
+                cand_ids = {
+                    e_name.upper(),
+                    str(entry.get("id") or "").strip().upper(),
+                    str(entry.get("memory_id") or "").strip().upper(),
+                    str(entry.get("langflow_memory_id") or "").strip().upper(),
+                    str(entry.get("table_fqn") or "").strip().upper(),
+                    det_id.upper(),
+                }
+                cand_hexes = {c.replace("-", "") for c in cand_ids if c}
+                if target_upper in cand_ids or (len(target_hex_upper) == 32 and target_hex_upper in cand_hexes):
+                    return entry
         return None
 
     def _default_stored_records_for_memory(self, entry: dict[str, Any]) -> list[dict[str, Any]]:
@@ -2525,7 +2626,7 @@ class LiveSnowflakeBridge:
             return [
                 {
                     "session_id": str(entry.get("session_id") or "sess_fin_01"),
-                    "topic": "Riassunto progressivo turni 1..N-K: Analisi margine netto Q3/Q4 in EUR",
+                    "topic": "Progressive summary turns 1..N-K: Q3/Q4 net margin analysis in EUR",
                     "outcome_score": f"<= {entry.get('max_summary_tokens') or 512} tok",
                     "status": "Processed",
                     "updated": now_iso,
@@ -2535,14 +2636,14 @@ class LiveSnowflakeBridge:
             return [
                 {
                     "session_id": str(entry.get("user_id") or "usr_cfo_01"),
-                    "topic": "preferred_currency=EUR, language=it, kpi_focus=Q3_Q4_net_margin",
+                    "topic": "preferred_currency=EUR, language=en, kpi_focus=Q3_Q4_net_margin",
                     "outcome_score": "MERGE (VARIANT)",
                     "status": "Ingested",
                     "updated": now_iso,
                 },
                 {
                     "session_id": str(entry.get("user_id") or "usr_cfo_01"),
-                    "topic": "Greeting turn ('ok grazie') discarded via Kill Phrase NO_INGEST",
+                    "topic": "Greeting turn discarded via Kill Phrase NO_INGEST",
                     "outcome_score": "NO_INGEST",
                     "status": "Skipped",
                     "updated": now_iso,
@@ -2585,7 +2686,7 @@ class LiveSnowflakeBridge:
                 "ok": False,
                 "status_code": 404,
                 "error_code": ErrorCode.OBJECT_NOT_FOUND_OR_UNAUTHORIZED.value,
-                "message": f"Snowflake Memory '{memory_id_or_name}' non trovata o non autorizzata per il ruolo {self.active_role}.",
+                "message": f"Snowflake Memory '{memory_id_or_name}' not found or unauthorized for role {self.active_role}.",
                 "active_role": self.active_role,
             }
         c_type = str(entry.get("canonical_memory_type") or resolve_canonical_memory_type(entry.get("agent_memory_type")))
@@ -2708,7 +2809,7 @@ class LiveSnowflakeBridge:
                 "ok": False,
                 "status_code": 404,
                 "error_code": ErrorCode.OBJECT_NOT_FOUND_OR_UNAUTHORIZED.value,
-                "message": f"Snowflake Memory '{memory_id_or_name}' non trovata.",
+                "message": f"Snowflake Memory '{memory_id_or_name}' not found.",
                 "active_role": self.active_role,
             }
         if "auto_capture" in payload and payload.get("auto_capture") is not None:
@@ -2722,9 +2823,11 @@ class LiveSnowflakeBridge:
             kill_phrase = str(entry.get("kill_phrase") or "NO_INGEST").strip()
             now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
             records = list(entry.get("stored_records") or self._default_stored_records_for_memory(entry))
+            low_txt = turn_text.lower().strip("!.,? ")
             is_trivial = (
                 kill_phrase.upper() in turn_text.upper()
-                or turn_text.lower() in {"ok", "grazie", "ok grazie", "ciao", "hello", "thanks", "thank you"}
+                or low_txt in {"ok", "hello", "hi", "hey", "thanks", "thank you", "ack"}
+                or (len(low_txt) <= 12 and low_txt.startswith("ok "))
             )
             if is_trivial:
                 records.insert(
@@ -2758,7 +2861,7 @@ class LiveSnowflakeBridge:
         return detail
 
     def delete_memory(self, memory_id_or_name: str) -> dict[str, Any]:
-        """Delete a Snowflake Memory registration under `CURRENT_ROLE()` RBAC enforcement (`W2-R4-05`)."""
+        """Delete a Snowflake Memory registration under `CURRENT_ROLE()` RBAC enforcement (`W2-R4-05`, `W2-R4-08G`)."""
         target = str(memory_id_or_name or "").strip()
         entry = self._find_memory_entry(target)
         fqn = str((entry or {}).get("table_fqn") or target)
@@ -2770,15 +2873,19 @@ class LiveSnowflakeBridge:
                 "ok": False,
                 "status_code": 404,
                 "error_code": ErrorCode.OBJECT_NOT_FOUND_OR_UNAUTHORIZED.value,
-                "message": f"Snowflake Memory '{target}' non trovata.",
+                "message": f"Snowflake Memory '{target}' not found.",
                 "active_role": self.active_role,
             }
         mem_name = str(entry.get("name") or target).strip()
+        mem_uuid_str = str(entry.get("memory_id") or entry.get("langflow_memory_id") or compute_deterministic_memory_uuid(mem_name))
+        mem_hex_str = mem_uuid_str.replace("-", "")
+        target_upper = target.upper()
         self.memories_registry = [
             m
             for m in self.memories_registry
             if str(m.get("name") or "").strip().upper() != mem_name.upper()
-            and str(m.get("memory_id") or "").strip().upper() != target.upper()
+            and str(m.get("memory_id") or "").strip().upper() not in {target_upper, mem_uuid_str.upper()}
+            and str(m.get("langflow_memory_id") or "").strip().upper() not in {target_upper, mem_uuid_str.upper()}
         ]
         vis_mem = (self.selected_context.get("visible_objects") or {}).get("memories")
         if isinstance(vis_mem, list):
@@ -2797,7 +2904,10 @@ class LiveSnowflakeBridge:
             try:
                 conn = _open_sqlite_conn(db_path, readonly=False, timeout=30.0)
                 cur = conn.cursor()
-                cur.execute("DELETE FROM memory_base WHERE name = ?", (mem_name,))
+                cur.execute(
+                    "DELETE FROM memory_base WHERE name = ? OR id = ? OR id = ?",
+                    (mem_name, mem_uuid_str, mem_hex_str),
+                )
                 cur.execute("DELETE FROM knowledge_base WHERE name = ?", (mem_name,))
                 conn.commit()
                 conn.close()
@@ -2807,14 +2917,639 @@ class LiveSnowflakeBridge:
             action="MEMORY_DELETE",
             outcome="ALLOWED",
             target_object=fqn,
-            details={"deleted_memory": mem_name},
+            details={"deleted_memory": mem_name, "memory_id": mem_uuid_str},
         )
         return {
             "ok": True,
             "status_code": 200,
             "deleted": mem_name,
+            "memory_id": mem_uuid_str,
             "table_fqn": fqn,
             "active_role": self.active_role,
+        }
+
+    def _to_langflow_memory_base_read(self, entry: dict[str, Any]) -> dict[str, Any]:
+        """Convert a Snowflake Memory entry into a Langflow `MemoryBaseRead` compatible payload (`W2-R4-08G`)."""
+        mem_name = str(entry.get("name") or "SNOWFLAKE_MEMORY").strip()
+        mem_uuid = str(
+            entry.get("memory_id")
+            or entry.get("langflow_memory_id")
+            or entry.get("id")
+            or compute_deterministic_memory_uuid(mem_name)
+        )
+        c_type = str(entry.get("canonical_memory_type") or resolve_canonical_memory_type(entry.get("agent_memory_type")))
+        type_spec = CANONICAL_MEMORY_TYPES_BY_ID.get(c_type, CANONICAL_MEMORY_TYPES_BY_ID["episodic_memory"])
+        is_vec = bool(entry.get("enable_embedding"))
+        emb_provider = str(entry.get("embedding_provider") or ("Snowflake Cortex" if is_vec else "Snowflake Direct SQL"))
+        emb_model = (
+            f"{entry.get('embedding_model')} ({entry.get('dimension')}d)"
+            if is_vec and entry.get("embedding_model")
+            else f"No Embedding ({entry.get('needs_embedding_badge', type_spec.get('needs_embedding_badge', 'Direct SQL'))})"
+        )
+        backend_label = f"Snowflake · {entry.get('vector_database') or 'Hybrid Table'} ({entry.get('table_fqn')})"
+        sql_lookup = str(entry.get("how_to_feed_without_embedding") or type_spec["how_to_feed_without_embedding"]).replace(
+            "<fqn>", str(entry.get("table_fqn") or "")
+        )
+        llm_pre = entry.get("llm_preprocessing")
+        preproc_enabled = bool(llm_pre.get("enabled", True)) if isinstance(llm_pre, dict) else bool(entry.get("preprocessing", True))
+        preproc_model = str(
+            (llm_pre.get("model") if isinstance(llm_pre, dict) else None)
+            or entry.get("preproc_model")
+            or entry.get("summarizer_model")
+            or c_type
+            or "mistral-large2"
+        )
+        kill_phrase = str(
+            (llm_pre.get("kill_phrase") if isinstance(llm_pre, dict) else None)
+            or entry.get("preproc_kill_phrase")
+            or entry.get("kill_phrase")
+            or "NO_INGEST"
+        ).strip() or "NO_INGEST"
+        instructions = str(
+            entry.get("preproc_instructions")
+            or (
+                f"[{entry.get('label') or type_spec['label']}] Store: {entry.get('table_fqn')} | "
+                f"Embedding Required: {entry.get('needs_embedding_badge') or type_spec['needs_embedding_badge']} | "
+                f"Lookup SQL: {sql_lookup}"
+            )
+        )
+        threshold_val = max(1, int(entry.get("threshold") or entry.get("ingestion_threshold") or 1))
+        detail_res = self.get_memory_detail(mem_name)
+        return {
+            "id": mem_uuid,
+            "memory_id": mem_uuid,
+            "langflow_memory_id": mem_uuid,
+            "name": mem_name,
+            "kb_name": str(entry.get("kb_name") or mem_name),
+            "flow_id": entry.get("flow_id"),
+            "embedding_model": emb_model,
+            "embedding_provider": emb_provider,
+            "backend_type": backend_label,
+            "backend_config": {
+                "mode": "snowflake",
+                "storage_family": entry.get("storage_family", "snowflake_sql"),
+                "table_fqn": entry.get("table_fqn"),
+                "canonical_memory_type": c_type,
+                "agent_memory_type": entry.get("agent_memory_type") or c_type,
+                "enable_embedding": is_vec,
+            },
+            "auto_capture": bool(entry.get("auto_capture", True)),
+            "preprocessing": preproc_enabled,
+            "preproc_model": preproc_model,
+            "preproc_instructions": instructions,
+            "preproc_kill_phrase": kill_phrase,
+            "threshold": threshold_val,
+            "agent_memory_type": entry.get("agent_memory_type") or c_type,
+            "canonical_memory_type": c_type,
+            "storage_family": entry.get("storage_family", "snowflake_sql"),
+            "database": entry.get("database"),
+            "schema": entry.get("schema"),
+            "table_fqn": entry.get("table_fqn"),
+            "vector_database": entry.get("vector_database"),
+            "created_at": entry.get("created_at") or datetime.now(timezone.utc).isoformat(),
+            "snowflake_memory": entry,
+            "configuration_summary": detail_res.get("configuration_summary"),
+            "active_sql_query": detail_res.get("active_sql_query"),
+            "sessions": detail_res.get("sessions", []),
+            "stored_records": detail_res.get("stored_records", []),
+        }
+
+    def list_native_memories(
+        self,
+        *,
+        flow_id: str | None = None,
+        search: str | None = None,
+        page: int = 1,
+        size: int = 50,
+    ) -> dict[str, Any]:
+        """Return native Langflow `Page[MemoryBaseRead]` merging Snowflake memories across flows (`W2-R4-08G`)."""
+        _ = flow_id  # Intentionally relaxed so Snowflake memories remain visible and searchable across flows
+        merged_by_name: dict[str, dict[str, Any]] = {}
+        for m in self.memories_registry:
+            nm = str(m.get("name") or "").strip()
+            if nm:
+                merged_by_name[nm.upper()] = self._to_langflow_memory_base_read(m)
+        for m in self.memories_catalog:
+            nm = str(m.get("name") or "").strip()
+            if nm and nm.upper() not in merged_by_name:
+                merged_by_name[nm.upper()] = self._to_langflow_memory_base_read(m)
+
+        items = list(merged_by_name.values())
+        q = str(search or "").strip().lower()
+        if q:
+            filtered: list[dict[str, Any]] = []
+            for item in items:
+                haystack = " ".join(
+                    str(item.get(k) or "")
+                    for k in (
+                        "name",
+                        "kb_name",
+                        "agent_memory_type",
+                        "canonical_memory_type",
+                        "backend_type",
+                        "vector_database",
+                        "database",
+                        "schema",
+                        "table_fqn",
+                        "preproc_instructions",
+                    )
+                ).lower()
+                if q in haystack:
+                    filtered.append(item)
+            items = filtered
+
+        page_int = max(1, int(page or 1))
+        size_int = max(1, int(size or 50))
+        total = len(items)
+        start = (page_int - 1) * size_int
+        paged = items[start : start + size_int]
+        pages = max(1, (total + size_int - 1) // size_int)
+        return {
+            "items": paged,
+            "total": total,
+            "page": page_int,
+            "size": size_int,
+            "pages": pages,
+        }
+
+    def get_native_memory(self, memory_id: str) -> dict[str, Any]:
+        """Resolve a Snowflake Memory by UUID, `.hex`, or name and return a `MemoryBaseRead` payload (`W2-R4-08G`)."""
+        entry = self._find_memory_entry(memory_id)
+        if entry is None:
+            return {
+                "ok": False,
+                "status_code": 404,
+                "detail": f"Snowflake Memory '{memory_id}' not found.",
+            }
+        payload = self._to_langflow_memory_base_read(entry)
+        payload["ok"] = True
+        payload["status_code"] = 200
+        return payload
+
+    def list_native_memory_sessions(
+        self,
+        memory_id: str,
+        *,
+        page: int = 1,
+        size: int = 50,
+    ) -> dict[str, Any]:
+        """Return native Langflow `Page[MemoryBaseSessionRead]` for `/api/v1/memories/{id}/sessions` (`W2-R4-08G`)."""
+        entry = self._find_memory_entry(memory_id)
+        mem_uuid = str(
+            (entry or {}).get("memory_id")
+            or (entry or {}).get("langflow_memory_id")
+            or compute_deterministic_memory_uuid(memory_id)
+        )
+        records = list(
+            (entry or {}).get("stored_records")
+            or (self._default_stored_records_for_memory(entry) if entry is not None else [])
+        )
+        grouped: dict[str, list[dict[str, Any]]] = {}
+        for r in records:
+            s_id = str(r.get("session_id") or (entry or {}).get("session_id") or "default")
+            grouped.setdefault(s_id, []).append(r)
+        if not grouped:
+            default_sess = str((entry or {}).get("session_id") or "sess_default")
+            grouped[default_sess] = []
+
+        now_iso = datetime.now(timezone.utc).isoformat()
+        session_items: list[dict[str, Any]] = []
+        for s_id, s_recs in grouped.items():
+            session_items.append(
+                {
+                    "id": str(uuid.uuid5(uuid.NAMESPACE_DNS, f"snowflake-memory-session:{mem_uuid}:{s_id}")),
+                    "memory_base_id": mem_uuid,
+                    "session_id": s_id,
+                    "total_processed": sum(
+                        1 for r in s_recs if str(r.get("status") or "Ingested").lower() in ("ingested", "processed")
+                    ),
+                    "pending_count": sum(1 for r in s_recs if str(r.get("status") or "").lower() == "pending"),
+                    "skipped_count": sum(1 for r in s_recs if str(r.get("status") or "").lower() == "skipped"),
+                    "last_sync_at": now_iso,
+                }
+            )
+        page_int = max(1, int(page or 1))
+        size_int = max(1, int(size or 50))
+        total = len(session_items)
+        return {
+            "items": session_items[(page_int - 1) * size_int : page_int * size_int],
+            "total": total,
+            "page": page_int,
+            "size": size_int,
+            "pages": max(1, (total + size_int - 1) // size_int),
+        }
+
+    def list_native_memory_messages(
+        self,
+        memory_id: str,
+        *,
+        session_id: str | None = None,
+        page: int = 1,
+        size: int = 50,
+    ) -> dict[str, Any]:
+        """Return native Langflow `Page[MessageReadResponse]` for `/api/v1/memories/{id}/messages` (`W2-R4-08G`)."""
+        entry = self._find_memory_entry(memory_id)
+        mem_uuid = str(
+            (entry or {}).get("memory_id")
+            or (entry or {}).get("langflow_memory_id")
+            or compute_deterministic_memory_uuid(memory_id)
+        )
+        records = list(
+            (entry or {}).get("stored_records")
+            or (self._default_stored_records_for_memory(entry) if entry is not None else [])
+        )
+        clean_sess = str(session_id or "").strip()
+        if clean_sess and clean_sess.upper() not in ("ALL", "ALL SESSIONS", "ALL SESSIONS (CROSS-SESSION)"):
+            records = [r for r in records if str(r.get("session_id") or "") == clean_sess]
+
+        now_iso = datetime.now(timezone.utc).isoformat()
+        msg_items: list[dict[str, Any]] = []
+        for idx, r in enumerate(records):
+            s_id = str(r.get("session_id") or (entry or {}).get("session_id") or "default")
+            txt = str(r.get("text") or r.get("message_text") or r.get("episode_text") or r.get("topic") or "")
+            sender_val = str(r.get("sender") or "User")
+            sender_name_val = str(r.get("sender_name") or sender_val)
+            ts_val = str(r.get("timestamp") or r.get("created_at") or now_iso)
+            msg_items.append(
+                {
+                    "id": str(
+                        r.get("id")
+                        or uuid.uuid5(uuid.NAMESPACE_DNS, f"snowflake-memory-msg:{mem_uuid}:{s_id}:{idx}:{txt[:32]}")
+                    ),
+                    "timestamp": ts_val,
+                    "sender": sender_val,
+                    "sender_name": sender_name_val,
+                    "session_id": s_id,
+                    "text": txt,
+                    "content_blocks": r.get("content_blocks") or [],
+                    "job_id": r.get("job_id"),
+                    "ingested_at": ts_val,
+                    "status": str(r.get("status") or "Ingested"),
+                    "outcome_score": r.get("outcome_score"),
+                }
+            )
+        page_int = max(1, int(page or 1))
+        size_int = max(1, int(size or 50))
+        total = len(msg_items)
+        return {
+            "items": msg_items[(page_int - 1) * size_int : page_int * size_int],
+            "total": total,
+            "page": page_int,
+            "size": size_int,
+            "pages": max(1, (total + size_int - 1) // size_int),
+        }
+
+    def patch_native_memory(self, memory_id: str, body: dict[str, Any] | None = None) -> dict[str, Any]:
+        """Update a Snowflake Memory via `PATCH /api/v1/memories/{id}` (`W2-R4-08G`)."""
+        payload = body if isinstance(body, dict) else {}
+        entry = self._find_memory_entry(memory_id)
+        if entry is None:
+            return {
+                "ok": False,
+                "status_code": 404,
+                "error_code": ErrorCode.OBJECT_NOT_FOUND_OR_UNAUTHORIZED.value,
+                "message": f"Snowflake Memory '{memory_id}' not found.",
+            }
+        fqn = str(entry.get("table_fqn") or memory_id)
+        denied = self.check_write_privilege_or_deny("MEMORY_UPDATE", fqn)
+        if denied:
+            return denied
+
+        if "name" in payload and str(payload.get("name") or "").strip():
+            entry["name"] = str(payload["name"]).strip()
+            entry["kb_name"] = entry["name"]
+        if "auto_capture" in payload and payload.get("auto_capture") is not None:
+            entry["auto_capture"] = bool(payload["auto_capture"])
+        for t_key in ("threshold", "ingestion_threshold"):
+            if t_key in payload and payload.get(t_key) is not None:
+                val = max(1, int(payload[t_key]))
+                entry["threshold"] = val
+                entry["ingestion_threshold"] = val
+        llm_pre = dict(entry.get("llm_preprocessing") or {})
+        if "preprocessing" in payload and payload.get("preprocessing") is not None:
+            llm_pre["enabled"] = bool(payload["preprocessing"])
+            entry["preprocessing"] = bool(payload["preprocessing"])
+        if "preproc_model" in payload and payload.get("preproc_model"):
+            llm_pre["model"] = str(payload["preproc_model"]).strip()
+            entry["preproc_model"] = llm_pre["model"]
+        if "preproc_instructions" in payload and payload.get("preproc_instructions") is not None:
+            entry["preproc_instructions"] = str(payload["preproc_instructions"])
+        if "preproc_kill_phrase" in payload and payload.get("preproc_kill_phrase"):
+            kp = str(payload["preproc_kill_phrase"]).strip() or "NO_INGEST"
+            llm_pre["kill_phrase"] = kp
+            entry["kill_phrase"] = kp
+            entry["preproc_kill_phrase"] = kp
+        if llm_pre:
+            entry["llm_preprocessing"] = llm_pre
+
+        self._persist_memory_in_langflow_sqlite(entry, flow_id=entry.get("flow_id"))
+        updated = self._to_langflow_memory_base_read(entry)
+        updated["ok"] = True
+        updated["status_code"] = 200
+        return updated
+
+    def auto_capture_flow_run_memories(
+        self,
+        *,
+        flow_id: str | None = None,
+        session_id: str = "default",
+        user_text: str = "",
+        ai_text: str = "",
+        user_id: str | None = None,
+        thread_id: str | None = None,
+        topic: str | None = None,
+        tool_used: str | None = None,
+        outcome_score: float = 1.0,
+        role: str | None = None,
+        memory_names: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Execute post-run Auto-capture across active Snowflake Memories `#1..#5` (`W2-R4-09`)."""
+        effective_role = str(role or self.active_role or "ACCOUNTADMIN").strip()
+        if effective_role.upper() in (
+            "PUBLIC",
+            "SNOWFLAKE_LANGFLOW_VIEWER_ROLE",
+            "VIEWER_ROLE",
+            "ROLE_VIEWER",
+            "ROLE_READONLY",
+        ):
+            return {
+                "ok": False,
+                "status_code": 403,
+                "error_code": ErrorCode.AUTHZ_ROLE_DENIED.value,
+                "message": f"Active role ({effective_role}) is not authorized to perform memory auto-capture writes.",
+                "active_role": effective_role,
+                "captured_memories": [],
+            }
+
+        norm_fid = self._normalize_flow_id(flow_id) if flow_id else None
+        allowed_name_set = {str(n).strip().upper() for n in (memory_names or []) if str(n).strip()}
+        now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+        combined_text = f"User: {user_text}\nAssistant: {ai_text}".strip() if (user_text or ai_text) else "Flow run turn"
+        low_user = str(user_text or "").lower().strip("!.,? ")
+
+        captured_results: list[dict[str, Any]] = []
+        for entry in self.memories_registry:
+            if not bool(entry.get("auto_capture", True)):
+                continue
+            mem_name = str(entry.get("name") or "").strip()
+            if allowed_name_set and mem_name.upper() not in allowed_name_set:
+                continue
+            entry_fid = self._normalize_flow_id(entry.get("flow_id")) if entry.get("flow_id") else None
+            if norm_fid and entry_fid and entry_fid != norm_fid and not allowed_name_set:
+                continue
+            allowed_roles = entry.get("allowed_roles")
+            if isinstance(allowed_roles, list) and allowed_roles:
+                if effective_role.upper() not in {str(r).strip().upper() for r in allowed_roles}:
+                    continue
+
+            c_type = str(entry.get("canonical_memory_type") or resolve_canonical_memory_type(entry.get("agent_memory_type")))
+            fqn = str(entry.get("table_fqn") or f"{self.database}.{self.schema}.MEM_{mem_name.upper()}")
+            kill_phrase = str(entry.get("kill_phrase") or "NO_INGEST").strip() or "NO_INGEST"
+            eff_sess = str(session_id or entry.get("session_id") or "sess_default").strip()
+            eff_thread = str(thread_id or entry.get("thread_id") or eff_sess).strip()
+            eff_user = str(user_id or entry.get("user_id") or "usr_default").strip()
+            eff_ns = str(entry.get("entity_namespace") or "default").strip()
+            records = list(entry.get("stored_records") or [])
+
+            is_trivial = (
+                kill_phrase.upper() in combined_text.upper()
+                or (
+                    bool(user_text)
+                    and (
+                        low_user in {"ok", "hello", "hi", "hey", "thanks", "thank you", "ack"}
+                        or (len(low_user) <= 12 and low_user.startswith("ok "))
+                    )
+                )
+            )
+
+            safe_user_sql = str(user_text or "").replace("'", "''")
+            safe_ai_sql = str(ai_text or "").replace("'", "''")
+            safe_comb_sql = combined_text.replace("'", "''")
+
+            if c_type == "graph_state_checkpointer":
+                step_num = sum(1 for r in records if str(r.get("session_id") or "") == eff_thread) + 1
+                ckpt_ns = str(entry.get("checkpoint_ns") or "default")
+                sql_stmt = (
+                    f"MERGE INTO {fqn} t USING (SELECT '{eff_thread}' AS thread_id, '{ckpt_ns}' AS checkpoint_ns, "
+                    f"{step_num} AS step_id) s ON t.thread_id = s.thread_id AND t.checkpoint_ns = s.checkpoint_ns "
+                    f"WHEN MATCHED THEN UPDATE SET step_id = {step_num}, state_blob = PARSE_JSON('{{\"turn\": \"{safe_user_sql[:120]}\"}}') "
+                    f"WHEN NOT MATCHED THEN INSERT (thread_id, checkpoint_ns, step_id, memory_name, state_blob, created_by_role) "
+                    f"VALUES ('{eff_thread}', '{ckpt_ns}', {step_num}, '{mem_name}', PARSE_JSON('{{\"turn\": \"{safe_user_sql[:120]}\"}}'), '{effective_role}')"
+                )
+                self.execute_sql(sql_stmt, role=effective_role)
+                rec = {
+                    "session_id": eff_thread,
+                    "sender": "System",
+                    "sender_name": "LangGraph Checkpointer",
+                    "text": f"Checkpoint step={step_num} ({ckpt_ns}): {user_text[:80]}",
+                    "topic": f"ns:{ckpt_ns} • step:{step_num}",
+                    "outcome_score": f"step={step_num}",
+                    "status": "Processed",
+                    "updated": now_iso,
+                }
+                records.insert(0, rec)
+                entry["stored_records"] = records
+                captured_results.append({"memory_name": mem_name, "canonical_memory_type": c_type, "status": "Processed", "sql": sql_stmt})
+
+            elif c_type == "buffer_window_memory":
+                win_k = max(1, int(entry.get("window_k") or 8))
+                turn_id_u = f"turn_{uuid.uuid4().hex[:8]}_u"
+                turn_id_a = f"turn_{uuid.uuid4().hex[:8]}_a"
+                sql_stmt = (
+                    f"INSERT INTO {fqn} (session_id, turn_id, memory_name, sender, message_text, created_by_role) "
+                    f"VALUES ('{eff_sess}', '{turn_id_u}', '{mem_name}', 'User', '{safe_user_sql}', '{effective_role}'), "
+                    f"('{eff_sess}', '{turn_id_a}', '{mem_name}', 'AI', '{safe_ai_sql}', '{effective_role}')"
+                )
+                self.execute_sql(sql_stmt, role=effective_role)
+                if ai_text:
+                    records.insert(
+                        0,
+                        {
+                            "session_id": eff_sess,
+                            "sender": "AI",
+                            "sender_name": "AI",
+                            "text": ai_text,
+                            "message_text": ai_text,
+                            "topic": f"AI: {ai_text[:60]}",
+                            "outcome_score": f"window_k={win_k}",
+                            "status": "Ingested",
+                            "updated": now_iso,
+                        },
+                    )
+                if user_text or not ai_text:
+                    records.insert(
+                        0,
+                        {
+                            "session_id": eff_sess,
+                            "sender": "User",
+                            "sender_name": "User",
+                            "text": user_text or combined_text,
+                            "message_text": user_text or combined_text,
+                            "topic": f"User: {(user_text or combined_text)[:60]}",
+                            "outcome_score": f"window_k={win_k}",
+                            "status": "Ingested",
+                            "updated": now_iso,
+                        },
+                    )
+                # Trim session records to window_k messages
+                sess_seen = 0
+                trimmed: list[dict[str, Any]] = []
+                for r in records:
+                    if str(r.get("session_id") or "") == eff_sess:
+                        sess_seen += 1
+                        if sess_seen > win_k:
+                            continue
+                    trimmed.append(r)
+                entry["stored_records"] = trimmed
+                captured_results.append({"memory_name": mem_name, "canonical_memory_type": c_type, "status": "Ingested", "sql": sql_stmt, "window_k": win_k})
+
+            elif c_type == "summary_memory":
+                llm_pre = entry.get("llm_preprocessing") if isinstance(entry.get("llm_preprocessing"), dict) else {}
+                sum_engine = str(llm_pre.get("engine") or entry.get("summarizer_engine") or "cortex_sql").strip()
+                sum_model = str(llm_pre.get("model") or entry.get("summarizer_model") or "mistral-large2").strip()
+                if sum_engine == "cortex_summarize_agg" or sum_model.upper() == "AI_SUMMARIZE_AGG":
+                    sql_stmt = (
+                        f"MERGE INTO {fqn} t USING ("
+                        f"SELECT '{eff_sess}' AS session_id, SNOWFLAKE.CORTEX.AI_SUMMARIZE_AGG(message_text) AS summary_txt "
+                        f"FROM (SELECT '{safe_comb_sql}' AS message_text)"
+                        f") s ON t.session_id = s.session_id "
+                        f"WHEN MATCHED THEN UPDATE SET running_summary = s.summary_txt, updated_at = CURRENT_TIMESTAMP() "
+                        f"WHEN NOT MATCHED THEN INSERT (session_id, memory_name, running_summary, summarizer_model, created_by_role) "
+                        f"VALUES ('{eff_sess}', '{mem_name}', s.summary_txt, 'AI_SUMMARIZE_AGG', '{effective_role}')"
+                    )
+                else:
+                    eff_model = sum_model if sum_model and sum_model.upper() != "AI_SUMMARIZE_AGG" else "mistral-large2"
+                    sql_stmt = (
+                        f"MERGE INTO {fqn} t USING ("
+                        f"SELECT '{eff_sess}' AS session_id, "
+                        f"SNOWFLAKE.CORTEX.AI_COMPLETE('{eff_model}', 'Summarize concisely: {safe_comb_sql}') AS summary_txt"
+                        f") s ON t.session_id = s.session_id "
+                        f"WHEN MATCHED THEN UPDATE SET running_summary = s.summary_txt, updated_at = CURRENT_TIMESTAMP() "
+                        f"WHEN NOT MATCHED THEN INSERT (session_id, memory_name, running_summary, summarizer_model, created_by_role) "
+                        f"VALUES ('{eff_sess}', '{mem_name}', s.summary_txt, '{eff_model}', '{effective_role}')"
+                    )
+                self.execute_sql(sql_stmt, role=effective_role)
+                summary_preview = f"Summary ({sum_engine}): {user_text[:60]} -> {ai_text[:60]}".strip()
+                records.insert(
+                    0,
+                    {
+                        "session_id": eff_sess,
+                        "sender": "System",
+                        "sender_name": "Running Summarizer",
+                        "text": summary_preview,
+                        "topic": summary_preview,
+                        "outcome_score": f"<= {entry.get('max_summary_tokens') or 512} tok",
+                        "status": "Processed",
+                        "updated": now_iso,
+                    },
+                )
+                entry["stored_records"] = records
+                captured_results.append({"memory_name": mem_name, "canonical_memory_type": c_type, "status": "Processed", "sql": sql_stmt, "summarizer_engine": sum_engine})
+
+            elif c_type == "user_profile_entity_memory":
+                if is_trivial:
+                    records.insert(
+                        0,
+                        {
+                            "session_id": eff_user,
+                            "sender": "User",
+                            "sender_name": eff_user,
+                            "text": user_text or combined_text,
+                            "topic": f"Turn skipped ({kill_phrase}): '{(user_text or combined_text)[:40]}'",
+                            "outcome_score": kill_phrase,
+                            "status": "Skipped",
+                            "updated": now_iso,
+                        },
+                    )
+                    entry["stored_records"] = records
+                    captured_results.append({"memory_name": mem_name, "canonical_memory_type": c_type, "status": "Skipped", "kill_phrase": kill_phrase})
+                else:
+                    sql_stmt = (
+                        f"MERGE INTO {fqn} t USING (SELECT '{eff_user}' AS user_id, '{eff_ns}' AS entity_namespace) s "
+                        f"ON t.user_id = s.user_id AND t.entity_namespace = s.entity_namespace "
+                        f"WHEN MATCHED THEN UPDATE SET profile_json = PARSE_JSON('{{\"fact\": \"{safe_user_sql[:120]}\"}}') "
+                        f"WHEN NOT MATCHED THEN INSERT (chunk_id, user_id, entity_namespace, memory_name, profile_json, text_chunk, created_by_role) "
+                        f"VALUES ('chk_{uuid.uuid4().hex[:8]}', '{eff_user}', '{eff_ns}', '{mem_name}', PARSE_JSON('{{\"fact\": \"{safe_user_sql[:120]}\"}}'), '{safe_user_sql[:200]}', '{effective_role}')"
+                    )
+                    self.execute_sql(sql_stmt, role=effective_role)
+                    records.insert(
+                        0,
+                        {
+                            "session_id": eff_user,
+                            "sender": "User",
+                            "sender_name": eff_user,
+                            "text": user_text or combined_text,
+                            "topic": str(topic or (user_text or combined_text)[:64]),
+                            "outcome_score": "MERGE (VARIANT)",
+                            "status": "Ingested",
+                            "updated": now_iso,
+                        },
+                    )
+                    entry["stored_records"] = records
+                    captured_results.append({"memory_name": mem_name, "canonical_memory_type": c_type, "status": "Ingested", "sql": sql_stmt})
+
+            else:  # #5 episodic_memory
+                min_score = float(entry.get("outcome_score_threshold") if entry.get("outcome_score_threshold") is not None else 0.70)
+                score_val = float(outcome_score if outcome_score is not None else 1.0)
+                eff_topic = str(topic or (user_text[:48] if user_text else "agent_episode")).strip()
+                eff_tool = str(tool_used or "SnowflakeAgent").strip()
+                if is_trivial or score_val < min_score:
+                    records.insert(
+                        0,
+                        {
+                            "session_id": eff_sess,
+                            "sender": "Agent",
+                            "sender_name": eff_tool,
+                            "text": combined_text,
+                            "topic": eff_topic,
+                            "outcome_score": kill_phrase if is_trivial else score_val,
+                            "status": "Skipped",
+                            "updated": now_iso,
+                        },
+                    )
+                    entry["stored_records"] = records
+                    captured_results.append({"memory_name": mem_name, "canonical_memory_type": c_type, "status": "Skipped", "outcome_score": score_val})
+                else:
+                    chk_id = f"ep_{uuid.uuid4().hex[:8]}"
+                    if entry.get("enable_embedding"):
+                        emb_m = str(entry.get("embedding_model") or "snowflake-arctic-embed-m-v1.5").split(" ")[0]
+                        sql_stmt = (
+                            f"INSERT INTO {fqn} (chunk_id, user_id, memory_name, topic, tool_used, outcome_score, episode_text, text_chunk, embedding, created_by_role) "
+                            f"SELECT '{chk_id}', '{eff_user}', '{mem_name}', '{eff_topic.replace(chr(39), chr(39)*2)}', '{eff_tool}', {score_val}, "
+                            f"'{safe_comb_sql[:240]}', '{safe_comb_sql[:240]}', AI_EMBED('{emb_m}', '{safe_comb_sql[:240]}'), '{effective_role}'"
+                        )
+                    else:
+                        sql_stmt = (
+                            f"INSERT INTO {fqn} (chunk_id, user_id, memory_name, topic, tool_used, outcome_score, episode_text, text_chunk, created_by_role) "
+                            f"VALUES ('{chk_id}', '{eff_user}', '{mem_name}', '{eff_topic.replace(chr(39), chr(39)*2)}', '{eff_tool}', {score_val}, "
+                            f"'{safe_comb_sql[:240]}', '{safe_comb_sql[:240]}', '{effective_role}')"
+                        )
+                    self.execute_sql(sql_stmt, role=effective_role)
+                    records.insert(
+                        0,
+                        {
+                            "session_id": eff_sess,
+                            "sender": "Agent",
+                            "sender_name": eff_tool,
+                            "text": combined_text,
+                            "episode_text": combined_text,
+                            "topic": eff_topic,
+                            "outcome_score": score_val,
+                            "status": "Ingested",
+                            "updated": now_iso,
+                        },
+                    )
+                    entry["stored_records"] = records
+                    captured_results.append({"memory_name": mem_name, "canonical_memory_type": c_type, "status": "Ingested", "sql": sql_stmt, "outcome_score": score_val})
+
+        return {
+            "ok": True,
+            "status_code": 200,
+            "active_role": effective_role,
+            "flow_id": norm_fid,
+            "session_id": session_id,
+            "captured_count": len(captured_results),
+            "captured_memories": captured_results,
         }
 
     def bootstrap_full_memory_showcase_flow(
@@ -4986,10 +5721,17 @@ class LiveSnowflakeBridge:
             "VIEWER_ROLE",
             "ROLE_VIEWER",
         ):
-            msg = (
-                f"Il ruolo attivo ({self.active_role}) non dispone dei privilegi per creare questo oggetto "
-                f"in {self.database}.{self.schema} ({action} su {target_object})."
-            )
+            if str(action).upper().startswith("MEMORY"):
+                msg = (
+                    f"Active role ({self.active_role}) does not have privileges to create or modify this object "
+                    f"in {self.database}.{self.schema} ({action} on {target_object})."
+                )
+            else:
+                msg = (
+                    f"Active role ({self.active_role}) does not have privileges to create this object "
+                    f"in {self.database}.{self.schema} ({action} on {target_object}) "
+                    f"[Il ruolo attivo ({self.active_role})]."
+                )
             self.record_audit_event(
                 action=action,
                 outcome="DENIED",
@@ -5494,6 +6236,76 @@ def register_snowflake_fastapi_routes(app: Any) -> None:
     LIVE_BRIDGE.start_auto_sync_daemon(interval_seconds=15.0)
     sf_router = APIRouter(prefix="/api/v1/snowflake", tags=["SnowflakeLangflow"])
     traces_v2_router = APIRouter(tags=["SnowflakeLangflowTracesV2"])
+    memories_v1_router = APIRouter(tags=["SnowflakeLangflowMemoriesV1"])
+
+    @memories_v1_router.get("/api/v1/memories")
+    async def get_v1_memories_native(
+        request: Request,
+        flow_id: str | None = None,
+        search: str | None = None,
+        page: int = 1,
+        size: int = 50,
+    ) -> JSONResponse:
+        req_fid = flow_id or request.query_params.get("flow_id")
+        req_search = search if search is not None else (request.query_params.get("search") or request.query_params.get("q"))
+        req_page = int(request.query_params.get("page") or page or 1)
+        req_size = int(request.query_params.get("size") or size or 50)
+        payload = await asyncio.to_thread(
+            lambda: LIVE_BRIDGE.list_native_memories(
+                flow_id=req_fid,
+                search=req_search,
+                page=req_page,
+                size=req_size,
+            )
+        )
+        return JSONResponse(status_code=200, content=payload)
+
+    @memories_v1_router.get("/api/v1/memories/{memory_id}/sessions")
+    async def get_v1_memory_sessions_native(memory_id: str, request: Request) -> JSONResponse:
+        req_page = int(request.query_params.get("page") or 1)
+        req_size = int(request.query_params.get("size") or 50)
+        payload = await asyncio.to_thread(
+            lambda: LIVE_BRIDGE.list_native_memory_sessions(memory_id, page=req_page, size=req_size)
+        )
+        return JSONResponse(status_code=200, content=payload)
+
+    @memories_v1_router.get("/api/v1/memories/{memory_id}/messages")
+    async def get_v1_memory_messages_native(memory_id: str, request: Request) -> JSONResponse:
+        req_sess = request.query_params.get("session_id") or request.query_params.get("session")
+        req_page = int(request.query_params.get("page") or 1)
+        req_size = int(request.query_params.get("size") or 50)
+        payload = await asyncio.to_thread(
+            lambda: LIVE_BRIDGE.list_native_memory_messages(
+                memory_id,
+                session_id=req_sess,
+                page=req_page,
+                size=req_size,
+            )
+        )
+        return JSONResponse(status_code=200, content=payload)
+
+    @memories_v1_router.get("/api/v1/memories/{memory_id}")
+    async def get_v1_memory_detail_native(memory_id: str) -> JSONResponse:
+        payload = await asyncio.to_thread(LIVE_BRIDGE.get_native_memory, memory_id)
+        status_code = int(payload.get("status_code") or (200 if payload.get("ok", True) else 404))
+        return JSONResponse(status_code=status_code, content=payload)
+
+    @memories_v1_router.patch("/api/v1/memories/{memory_id}")
+    async def patch_v1_memory_native(memory_id: str, request: Request) -> JSONResponse:
+        try:
+            body = await request.json()
+            payload_in = body if isinstance(body, dict) else {}
+        except Exception:  # noqa: BLE001
+            payload_in = {}
+        res = await asyncio.to_thread(LIVE_BRIDGE.patch_native_memory, memory_id, payload_in)
+        status_code = int(res.get("status_code") or (200 if res.get("ok") else 404))
+        return JSONResponse(status_code=status_code, content=res)
+
+    @memories_v1_router.delete("/api/v1/memories/{memory_id}")
+    async def delete_v1_memory_native(memory_id: str) -> JSONResponse:
+        res = await asyncio.to_thread(LIVE_BRIDGE.delete_memory, memory_id)
+        status_code = int(res.get("status_code") or (200 if res.get("ok") else 404))
+        return JSONResponse(status_code=status_code, content=res)
 
     @traces_v2_router.get("/api/v2/traces")
     async def get_v2_traces_fallback(request: Request, flow_id: str | None = None, limit: int = 50) -> JSONResponse:
@@ -5588,6 +6400,66 @@ def register_snowflake_fastapi_routes(app: Any) -> None:
                 )
                 return JSONResponse(status_code=200, content=traces_payload)
 
+            # Intercept native Langflow /api/v1/memories* so Snowflake Memories are first-class citizens (`W2-R4-08G`)
+            clean_path = path.rstrip("/")
+            if clean_path == "/api/v1/memories" and method == "GET":
+                req_search = request.query_params.get("search") or request.query_params.get("q")
+                req_page = int(request.query_params.get("page") or 1)
+                req_size = int(request.query_params.get("size") or 50)
+                mem_list_payload = await asyncio.to_thread(
+                    lambda: LIVE_BRIDGE.list_native_memories(
+                        flow_id=norm_fid,
+                        search=req_search,
+                        page=req_page,
+                        size=req_size,
+                    )
+                )
+                return JSONResponse(status_code=200, content=mem_list_payload)
+
+            m_mem_sub = re.match(r"^/api/v1/memories/([^/]+)(?:/(sessions|messages))?$", clean_path)
+            if m_mem_sub:
+                target_mem_id = m_mem_sub.group(1)
+                sub_resource = m_mem_sub.group(2)
+                if sub_resource == "sessions" and method == "GET":
+                    req_page = int(request.query_params.get("page") or 1)
+                    req_size = int(request.query_params.get("size") or 50)
+                    sess_payload = await asyncio.to_thread(
+                        lambda: LIVE_BRIDGE.list_native_memory_sessions(
+                            target_mem_id,
+                            page=req_page,
+                            size=req_size,
+                        )
+                    )
+                    return JSONResponse(status_code=200, content=sess_payload)
+                if sub_resource == "messages" and method == "GET":
+                    req_sess = request.query_params.get("session_id") or request.query_params.get("session")
+                    req_page = int(request.query_params.get("page") or 1)
+                    req_size = int(request.query_params.get("size") or 50)
+                    msgs_payload = await asyncio.to_thread(
+                        lambda: LIVE_BRIDGE.list_native_memory_messages(
+                            target_mem_id,
+                            session_id=req_sess,
+                            page=req_page,
+                            size=req_size,
+                        )
+                    )
+                    return JSONResponse(status_code=200, content=msgs_payload)
+                if sub_resource is None:
+                    if method == "GET" and LIVE_BRIDGE._find_memory_entry(target_mem_id) is not None:
+                        det_payload = await asyncio.to_thread(LIVE_BRIDGE.get_native_memory, target_mem_id)
+                        return JSONResponse(status_code=int(det_payload.get("status_code") or 200), content=det_payload)
+                    if method == "PATCH" and LIVE_BRIDGE._find_memory_entry(target_mem_id) is not None:
+                        try:
+                            patch_body = await request.json()
+                            patch_in = patch_body if isinstance(patch_body, dict) else {}
+                        except Exception:  # noqa: BLE001
+                            patch_in = {}
+                        patch_res = await asyncio.to_thread(LIVE_BRIDGE.patch_native_memory, target_mem_id, patch_in)
+                        return JSONResponse(status_code=int(patch_res.get("status_code") or 200), content=patch_res)
+                    if method == "DELETE" and LIVE_BRIDGE._find_memory_entry(target_mem_id) is not None:
+                        del_res = await asyncio.to_thread(LIVE_BRIDGE.delete_memory, target_mem_id)
+                        return JSONResponse(status_code=int(del_res.get("status_code") or 200), content=del_res)
+
             token = CURRENT_SNOWFLAKE_FLOW_ID.set(norm_fid)
             try:
                 response = await call_next(request)
@@ -5610,6 +6482,10 @@ def register_snowflake_fastapi_routes(app: Any) -> None:
                     LIVE_BRIDGE.sync_langflow_traces_to_snowflake,
                     25,
                     replicate_sqlite=True,
+                )
+                _AUDIT_EXECUTOR.submit(
+                    LIVE_BRIDGE.auto_capture_flow_run_memories,
+                    flow_id=norm_fid,
                 )
             return response
 
@@ -6229,12 +7105,48 @@ def register_snowflake_fastapi_routes(app: Any) -> None:
         )
         return JSONResponse(status_code=200, content=res)
 
+    @sf_router.post("/memories/auto-capture")
+    async def post_auto_capture_memories(request: Request) -> JSONResponse:
+        try:
+            body = await request.json()
+            payload = body if isinstance(body, dict) else {}
+        except Exception:  # noqa: BLE001
+            payload = {}
+        res = await asyncio.to_thread(
+            lambda: LIVE_BRIDGE.auto_capture_flow_run_memories(
+                flow_id=payload.get("flow_id"),
+                session_id=str(payload.get("session_id") or "default"),
+                user_text=str(payload.get("user_text") or payload.get("input") or ""),
+                ai_text=str(payload.get("ai_text") or payload.get("output") or ""),
+                user_id=payload.get("user_id"),
+                thread_id=payload.get("thread_id"),
+                topic=payload.get("topic"),
+                tool_used=payload.get("tool_used"),
+                outcome_score=float(payload.get("outcome_score") if payload.get("outcome_score") is not None else 1.0),
+                role=payload.get("role"),
+                memory_names=payload.get("memory_names"),
+            )
+        )
+        status_code = int(res.get("status_code") or (200 if res.get("ok") else 403))
+        return JSONResponse(status_code=status_code, content=res)
+
     @sf_router.get("/memories/{memory_id_or_name}")
     async def get_memory_detail_route(memory_id_or_name: str, request: Request) -> JSONResponse:
         session_filter = request.query_params.get("session_filter") or request.query_params.get("session")
         res = await asyncio.to_thread(
             lambda: LIVE_BRIDGE.get_memory_detail(memory_id_or_name, session_filter=session_filter)
         )
+        status_code = int(res.get("status_code") or (200 if res.get("ok") else 404))
+        return JSONResponse(status_code=status_code, content=res)
+
+    @sf_router.patch("/memories/{memory_id_or_name}")
+    async def patch_memory_detail_route(memory_id_or_name: str, request: Request) -> JSONResponse:
+        try:
+            body = await request.json()
+            payload = body if isinstance(body, dict) else {}
+        except Exception:  # noqa: BLE001
+            payload = {}
+        res = await asyncio.to_thread(LIVE_BRIDGE.patch_native_memory, memory_id_or_name, payload)
         status_code = int(res.get("status_code") or (200 if res.get("ok") else 404))
         return JSONResponse(status_code=status_code, content=res)
 
@@ -6391,3 +7303,4 @@ def register_snowflake_fastapi_routes(app: Any) -> None:
 
     app.include_router(sf_router)
     app.include_router(traces_v2_router)
+    app.include_router(memories_v1_router)

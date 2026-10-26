@@ -56,6 +56,7 @@ from lfx_snowflake.fastapi_live_bridge import (  # noqa: E402
     register_snowflake_fastapi_routes,
 )
 from lfx_snowflake.native_category_components.files_and_knowledge.snowflake_memory_base import (  # noqa: E402
+    SnowflakeChatMessageHistoryAdapter,
     SnowflakeMemoryBaseNativeComponent,
 )
 from lfx_snowflake.native_category_components.models_and_agents.snowflake_message_history import (  # noqa: E402
@@ -188,6 +189,9 @@ def _build_fastapi_test_client() -> Any:
         def post(self, url: str, json: Any = None) -> _StubJSONResponse:
             return self._dispatch("POST", url, json_body=json)
 
+        def patch(self, url: str, json: Any = None) -> _StubJSONResponse:
+            return self._dispatch("PATCH", url, json_body=json)
+
         def delete(self, url: str) -> _StubJSONResponse:
             return self._dispatch("DELETE", url)
 
@@ -285,9 +289,9 @@ def test_w2_r4_02_five_canonical_memory_types_plus_coming_soon_slot_6_and_hover_
     assert "business_ontology_cortex_sense" in ui_js
     assert "Coming Soon" in ui_js
     for field_label in (
-        "Per cosa usarla (Purpose)",
-        "Oggetti Snowflake consigliati (Recommended Objects)",
-        "Serve Embedding?",
+        "What It Does (Purpose):",
+        "Recommended Snowflake Objects:",
+        "Embedding Required?",
     ):
         assert field_label in ui_js
 
@@ -440,6 +444,7 @@ def test_w2_r4_04_four_snowflake_embedding_sources_and_llm_preprocessing_no_inge
     engine_ids = [e["id"] for e in LLM_PREPROCESSING_ENGINES]
     assert engine_ids == [
         "cortex_sql",
+        "cortex_summarize_agg",
         "proxy_chat",
         "proxy_responses",
         "proxy_messages",
@@ -953,3 +958,484 @@ def test_priority_a_and_b_preserved_concept_zero_diff_and_public_repo_sanitizati
     )
     assert san_proc.returncode == 0, f"Public repo sanitization failed:\n{san_proc.stdout}\n{san_proc.stderr}"
     assert "[SANITIZATION PASSED]" in san_proc.stdout
+
+
+def test_w2_r4_08a_mutation_observer_debounce_and_o1_memories_view_guard() -> None:
+    """W2-R4-08A: roObserver excludes 'style', coalesces via requestAnimationFrame, and isStrictMemoriesView is O(1)."""
+    ui_js = (REPO_ROOT / "frontend_patches" / "snowflake-ui-integration.js").read_text(encoding="utf-8")
+
+    # 1. roObserver must NOT observe "style" attribute mutations
+    assert 'attributeFilter: ["class", "data-state", "aria-current"]' in ui_js
+    assert 'attributeFilter: ["class", "style"' not in ui_js
+
+    # 2. requestAnimationFrame coalescing & re-entrancy guard
+    assert "_isApplyingDomPatch" in ui_js
+    assert "_rafScheduled" in ui_js
+    assert "requestAnimationFrame" in ui_js
+
+    # 3. isStrictMemoriesView must be O(1) and must NOT call querySelectorAll("div, p, h3, span")
+    assert 'querySelectorAll("div, p, h3, span")' not in ui_js
+    assert "function isStrictMemoriesView()" in ui_js
+
+    # 4. Signature dirty-checking in ensureSnowflakeMemoriesSearchableCards and renderSnowflakeMemoryDetailView
+    assert "_lastCardsSignature" in ui_js
+    assert "_lastDetailSignature" in ui_js
+
+
+def test_w2_r4_08b_compiled_bundle_patch_button_order_and_refresh_hooks() -> None:
+    """W2-R4-08B & W2-R4-08G: install_live_hooks_in_container.py multi-pattern button order and refresh hooks."""
+    live_hooks_py = (REPO_ROOT / "scripts" / "install_live_hooks_in_container.py").read_text(encoding="utf-8")
+
+    # Multi-pattern / regex fallback for memories-plus-snowflake-btn
+    assert "too_prev_plus_text" in live_hooks_py
+    assert "too_btn_canonical" in live_hooks_py
+    assert 'data-testid\\":\\"memories-plus-snowflake-btn\\"' in live_hooks_py or '"data-testid":"memories-plus-snowflake-btn"' in live_hooks_py
+    assert "window.__sflfCurrentMemoryFlowId" in live_hooks_py
+    assert "window.__sflfSelectMemory" in live_hooks_py
+    assert "window.__sflfRefetchMemories" in live_hooks_py
+    assert "window.openSnowflakeMemoryTypeDropdown" in live_hooks_py
+
+
+def test_w2_r4_08c_and_08d_flow_context_sync_and_100_percent_english_strings() -> None:
+    """W2-R4-08C & W2-R4-08D: <5ms Flow Context sync in Create Memory wizard and 100% English strings."""
+    ui_js = (REPO_ROOT / "frontend_patches" / "snowflake-ui-integration.js").read_text(encoding="utf-8")
+    modals_tsx = (REPO_ROOT / "frontend_patches" / "settings_and_memories_modals.tsx").read_text(encoding="utf-8")
+    bridge_py = (REPO_ROOT / "src" / "lfx_snowflake" / "fastapi_live_bridge.py").read_text(encoding="utf-8")
+
+    # 1. W2-R4-08C: syncCreateMemoryModalWithFlowContext defined and wired to modal open, context events, and role switch
+    assert "function syncCreateMemoryModalWithFlowContext(" in ui_js
+    assert "window.syncCreateMemoryModalWithFlowContext = syncCreateMemoryModalWithFlowContext" in ui_js
+    assert 'window.addEventListener("snowflake:context-updated"' in ui_js
+    assert 'window.addEventListener("snowflake:context-changed"' in ui_js
+    for synced_id in (
+        "sflf-light-mem-role",
+        "sflf-light-mem-db",
+        "sflf-light-mem-schema",
+        "sflf-light-mem-existing-table",
+        "sflf-light-mem-pg-instance",
+        "sflf-light-mem-pg-table",
+    ):
+        assert synced_id in ui_js, f"Missing synced element ID {synced_id} in snowflake-ui-integration.js"
+
+    # 2. W2-R4-08D: Verify zero Italian phrases remain in backend & frontend patches
+    forbidden_italian_phrases = (
+        "Per cosa usarla",
+        "Cosa fa (Scopo)",
+        "Oggetti Snowflake consigliati",
+        "Oggetto Snowflake Consigliato",
+        "Serve Embedding",
+        "Come si passa all",
+        "Quando l'Embedding diventa utile",
+        "NO (Mai",
+        "OPZIONALE (Spento di default",
+        "OPZIONALE (Raramente necessario",
+        "Operazione negata",
+        "Salva lo stato",
+        "Mantiene gli ultimi",
+        "Comprime conversazioni",
+        "Memoria cross-session",
+        "Archivio di esperienze",
+    )
+    for phrase in forbidden_italian_phrases:
+        assert phrase not in bridge_py, f"Italian phrase '{phrase}' still found in fastapi_live_bridge.py"
+        assert phrase not in ui_js, f"Italian phrase '{phrase}' still found in snowflake-ui-integration.js"
+        assert phrase not in modals_tsx, f"Italian phrase '{phrase}' still found in settings_and_memories_modals.tsx"
+
+    # Verify Reviser Guardrail #1: #2 buffer_window_memory preserves needs_embedding_badge == "NO"
+    type_2 = next(t for t in AGENT_MEMORY_TYPES if t["id"] == "buffer_window_memory")
+    assert type_2["needs_embedding_badge"] == "NO"
+    type_1 = next(t for t in AGENT_MEMORY_TYPES if t["id"] == "graph_state_checkpointer")
+    assert type_1["needs_embedding_badge"] == "NO (Never)"
+
+
+def test_w2_r4_08e_08f_08h_three_step_wizard_dropdowns_dynamic_fields_and_summarizers() -> None:
+    """W2-R4-08E, 08F, 08H: 3-step wizard <select> dropdowns, Branch A/B separation, dynamic Step 2 fields, and summarizer engines."""
+    ui_js = (REPO_ROOT / "frontend_patches" / "snowflake-ui-integration.js").read_text(encoding="utf-8")
+
+    # 1. Step 1, Step 2, Step 3 English intro banners
+    assert 'id="sflf-mem-step1-intro"' in ui_js
+    assert 'id="sflf-mem-step2-intro"' in ui_js
+    assert 'id="sflf-mem-step3-intro"' in ui_js
+
+    # 2. Step 1 <select> dropdowns for Database, Schema, Existing Table, and Postgres Instance/Table + Create New inline inputs
+    assert '<select id="sflf-light-mem-db"' in ui_js
+    assert '<select id="sflf-light-mem-schema"' in ui_js
+    assert '<select id="sflf-light-mem-existing-table"' in ui_js
+    assert '<select id="sflf-light-mem-pg-instance"' in ui_js
+    assert '<select id="sflf-light-mem-pg-table"' in ui_js
+    assert 'id="sflf-light-mem-db-new"' in ui_js
+    assert 'id="sflf-light-mem-schema-new"' in ui_js
+    assert 'id="sflf-light-mem-pg-table-new"' in ui_js
+
+    # 3. Strict Branch A vs Branch B separation: Branch A target-obj filters out "postgres"
+    assert 'String(o).toLowerCase().indexOf("postgres") === -1' in ui_js
+
+    # 4. Step 2 dynamic field visibility & single-purpose English labels (zero slash-combined labels)
+    assert "function syncStep2DynamicFields()" in ui_js
+    for step2_field_id in (
+        "sflf-step2-field-hybrid-pk",
+        "sflf-step2-field-hybrid-idx",
+        "sflf-step2-field-cluster-by",
+        "sflf-step2-field-retention-days",
+        "sflf-step2-field-target-lag",
+        "sflf-step2-field-warehouse",
+        "sflf-step2-field-refresh-mode",
+        "sflf-step2-field-pg-gin",
+        "sflf-light-mem-sum-engine",
+        "sflf-light-mem-sum-model",
+    ):
+        assert step2_field_id in ui_js, f"Missing Step 2 dynamic field {step2_field_id} in snowflake-ui-integration.js"
+
+    # 5. Step 3 and #3 Running Summary expose both AI_COMPLETE (cortex_sql) and AI_SUMMARIZE_AGG (cortex_summarize_agg) + model <select>
+    assert 'value="cortex_sql"' in ui_js
+    assert 'value="cortex_summarize_agg"' in ui_js
+    assert '<select id="sflf-light-mem-preproc-model"' in ui_js
+    engine_map = {e["id"]: e for e in LLM_PREPROCESSING_ENGINES}
+    assert "cortex_sql" in engine_map
+    assert "AI_COMPLETE" in engine_map["cortex_sql"]["label"]
+    assert "mistral-large2" in engine_map["cortex_sql"]["models"]
+    assert "cortex_summarize_agg" in engine_map
+    assert "AI_SUMMARIZE_AGG" in engine_map["cortex_summarize_agg"]["label"]
+
+
+def test_w2_r4_08g_deterministic_uuidv5_and_native_memories_v1_endpoints() -> None:
+    """W2-R4-08G (Priority #1): Deterministic UUIDv5 IDs and full native /api/v1/memories* round-trip."""
+    import uuid as _uuid
+
+    client = _build_fastapi_test_client()
+    client.post("/api/v1/snowflake/role", json={"target_role": "ACCOUNTADMIN"})
+
+    mem_name = "W2_R4_08G_NATIVE_VISIBILITY_MEM"
+    expected_uuid = str(_uuid.uuid5(_uuid.NAMESPACE_DNS, f"snowflake-memory:{mem_name.upper()}"))
+
+    # 1. Create memory via POST /api/v1/snowflake/memories
+    create_res = client.post(
+        "/api/v1/snowflake/memories",
+        json={
+            "name": mem_name,
+            "agent_memory_type": "buffer_window_memory",
+            "storage_family": "snowflake_sql",
+            "database": "SNOWFLAKE_LANGFLOW",
+            "schema": "CORE",
+            "table_type": "HYBRID",
+            "window_k": 10,
+            "auto_capture": True,
+            "dry_run": True,
+        },
+    )
+    assert create_res.status_code == 201
+    created_mem = create_res.json()["memory"]
+    assert created_mem["memory_id"] == expected_uuid
+    assert created_mem["langflow_memory_id"] == expected_uuid
+
+    # 2. GET /api/v1/memories returns Page[MemoryBaseRead] and does NOT exclude Snowflake memories when flow_id is passed
+    list_res = client.get(f"/api/v1/memories?flow_id=some-other-flow-999&search={mem_name}")
+    assert list_res.status_code == 200
+    list_payload = list_res.json()
+    assert "items" in list_payload and "total" in list_payload and "pages" in list_payload
+    matched_items = [item for item in list_payload["items"] if item["name"] == mem_name]
+    assert len(matched_items) == 1
+    assert matched_items[0]["id"] == expected_uuid
+
+    # 3. GET /api/v1/memories/{memory_id} resolves by UUID, hex, and name without returning 404/422
+    for lookup_key in (expected_uuid, _uuid.UUID(expected_uuid).hex, mem_name):
+        get_res = client.get(f"/api/v1/memories/{lookup_key}")
+        assert get_res.status_code == 200
+        get_body = get_res.json()
+        assert get_body["id"] == expected_uuid
+        assert get_body["name"] == mem_name
+        assert "backend_config" in get_body
+        assert "configuration_summary" in get_body
+
+    # 4. GET /api/v1/memories/{memory_id}/sessions and /messages
+    sess_res = client.get(f"/api/v1/memories/{expected_uuid}/sessions")
+    assert sess_res.status_code == 200
+    sess_body = sess_res.json()
+    assert sess_body["total"] >= 1
+    assert sess_body["items"][0]["memory_base_id"] == expected_uuid
+
+    msgs_res = client.get(f"/api/v1/memories/{expected_uuid}/messages")
+    assert msgs_res.status_code == 200
+    msgs_body = msgs_res.json()
+    assert msgs_body["total"] >= 1
+    assert "sender" in msgs_body["items"][0]
+    assert "text" in msgs_body["items"][0]
+
+    # 5. PATCH /api/v1/memories/{memory_id} updates auto_capture & threshold
+    patch_res = client.patch(
+        f"/api/v1/memories/{expected_uuid}",
+        json={"auto_capture": False, "threshold": 3},
+    )
+    assert patch_res.status_code == 200
+    patched_body = patch_res.json()
+    assert patched_body["auto_capture"] is False
+    assert int(patched_body["threshold"]) == 3
+
+    # 6. DELETE /api/v1/memories/{memory_id} removes the memory cleanly
+    del_res = client.delete(f"/api/v1/memories/{expected_uuid}")
+    assert del_res.status_code == 200
+    assert del_res.json()["ok"] is True
+
+
+def test_w2_r4_09_native_canvas_components_two_node_delegation_and_post_run_auto_capture() -> None:
+    """W2-R4-09: 1-node & 2-node External Memory port delegation, [Retrieve | Store] TabInput, and post-run Auto-capture."""
+    from lfx.io import HandleInput, MessageInput, TabInput
+    from lfx.schema.message import Message
+
+    LIVE_BRIDGE.switch_role("ACCOUNTADMIN")
+
+    # 1. Verify SnowflakeMemoryBaseNativeComponent exposes orange Memory output port returning SnowflakeChatMessageHistoryAdapter
+    mem_base_outputs = {o.name: o for o in SnowflakeMemoryBaseNativeComponent.outputs}
+    assert "memory" in mem_base_outputs
+    assert mem_base_outputs["memory"].method == "build_memory"
+    assert "Memory" in mem_base_outputs["memory"].types
+    assert "BaseChatMessageHistory" in mem_base_outputs["memory"].types
+
+    mem_base_node = SnowflakeMemoryBaseNativeComponent(
+        memory_base="MEM_2_CHAT_WINDOW",
+        canonical_memory_type="buffer_window_memory",
+        session_id="sess_w2_r4_09_two_node",
+        window_k=6,
+    )
+    adapter = mem_base_node.build_memory()
+    assert isinstance(adapter, SnowflakeChatMessageHistoryAdapter)
+    assert adapter.memory_name == "MEM_2_CHAT_WINDOW"
+    assert adapter.canonical_memory_type == "buffer_window_memory"
+
+    # 2. Verify SnowflakeMessageHistoryNativeComponent inputs & outputs (TabInput mode, HandleInput memory, MessageInput message_text)
+    msg_hist_inputs = {i.name: i for i in SnowflakeMessageHistoryNativeComponent.inputs}
+    assert isinstance(msg_hist_inputs["mode"], TabInput)
+    assert msg_hist_inputs["mode"].options == ["Retrieve", "Store"]
+    assert isinstance(msg_hist_inputs["memory"], HandleInput)
+    assert "Memory" in msg_hist_inputs["memory"].input_types
+    assert isinstance(msg_hist_inputs["message_text"], MessageInput)
+    assert "Message" in msg_hist_inputs["message_text"].input_types
+
+    msg_hist_outputs = {o.name: o for o in SnowflakeMessageHistoryNativeComponent.outputs}
+    assert {"messages", "table", "replay_state", "stored_message"}.issubset(set(msg_hist_outputs))
+
+    # Verify update_outputs dynamically switches outputs between Retrieve and Store modes
+    hist_node_probe = SnowflakeMessageHistoryNativeComponent()
+    fe_retrieve = hist_node_probe.update_outputs({"outputs": []}, "mode", "Retrieve")
+    assert [o["name"] for o in fe_retrieve["outputs"]] == ["messages", "table", "replay_state"]
+    fe_store = hist_node_probe.update_outputs({"outputs": []}, "mode", "Store")
+    assert [o["name"] for o in fe_store["outputs"]] == ["stored_message", "table", "replay_state"]
+
+    # 3. Verify 2-node delegation: Memory Base --[orange Memory]--> Message History (Store -> Retrieve)
+    store_node = SnowflakeMessageHistoryNativeComponent(
+        mode="Store",
+        memory=adapter,
+        session_id="sess_w2_r4_09_two_node",
+        message_text=Message(text="Verify Q4 EBITDA reconciliation in EUR", sender="User", sender_name="User"),
+    )
+    stored_msg = store_node.store_message()
+    stored_payload = json.loads(stored_msg.text)
+    assert stored_payload["external_memory_connected"] is True
+    assert stored_payload["external_memory_name"] == "MEM_2_CHAT_WINDOW"
+    assert stored_payload["stored_text"] == "Verify Q4 EBITDA reconciliation in EUR"
+
+    retrieve_node = SnowflakeMessageHistoryNativeComponent(
+        mode="Retrieve",
+        memory=adapter,
+        session_id="sess_w2_r4_09_two_node",
+        window_k=6,
+    )
+    retrieved_msg = retrieve_node.retrieve_chat_history()
+    retrieved_payload = json.loads(retrieved_msg.text)
+    assert retrieved_payload["external_memory_connected"] is True
+    assert any(
+        (t.get("message_text") or t.get("text")) == "Verify Q4 EBITDA reconciliation in EUR"
+        for t in retrieved_payload["messages"]
+    )
+
+    # 4. Verify post-run Auto-capture across #1..#5 via POST /api/v1/snowflake/memories/auto-capture
+    client = _build_fastapi_test_client()
+    client.post("/api/v1/snowflake/role", json={"target_role": "ACCOUNTADMIN"})
+
+    # Trivial turn -> #4 User Profile skipped via NO_INGEST kill phrase while #1, #2, #3 capture
+    ac_skip_res = client.post(
+        "/api/v1/snowflake/memories/auto-capture",
+        json={
+            "flow_id": SHOWCASE_FLOW_ID,
+            "session_id": "sess_autocap_09",
+            "user_text": "ok thanks",
+            "ai_text": "You are welcome!",
+            "outcome_score": 0.5,
+        },
+    )
+    assert ac_skip_res.status_code == 200
+    ac_skip_body = ac_skip_res.json()
+    assert ac_skip_body["ok"] is True
+    assert ac_skip_body["captured_count"] >= 3
+    assert any(
+        s["canonical_memory_type"] == "user_profile_entity_memory"
+        and s["status"] == "Skipped"
+        and s.get("kill_phrase") == "NO_INGEST"
+        for s in ac_skip_body["captured_memories"]
+    )
+    assert any(
+        s["canonical_memory_type"] == "episodic_memory" and s["status"] == "Skipped"
+        for s in ac_skip_body["captured_memories"]
+    )
+
+    # Substantive high-score turn -> all #1..#5 capture (including #3 summary via AI_SUMMARIZE_AGG/AI_COMPLETE & #5 few-shot)
+    ac_full_res = client.post(
+        "/api/v1/snowflake/memories/auto-capture",
+        json={
+            "flow_id": SHOWCASE_FLOW_ID,
+            "session_id": "sess_autocap_09",
+            "user_text": "Always report consolidated margin variances in EUR with breakdown by region.",
+            "ai_text": "Confirmed: consolidated Q4 margin variance is +4.2% in EUR across EMEA and NA.",
+            "outcome_score": 0.96,
+        },
+    )
+    assert ac_full_res.status_code == 200
+    ac_full_body = ac_full_res.json()
+    assert ac_full_body["ok"] is True
+    captured_non_skipped = {
+        c["canonical_memory_type"]
+        for c in ac_full_body["captured_memories"]
+        if c["status"] in ("Processed", "Ingested")
+    }
+    assert {
+        "graph_state_checkpointer",
+        "buffer_window_memory",
+        "summary_memory",
+        "user_profile_entity_memory",
+        "episodic_memory",
+    }.issubset(captured_non_skipped)
+
+
+def test_w2_r4_verifier_middleware_interception_and_bundle_patch_execution() -> None:
+    """Verifier test: verify middleware /api/v1/memories interception and compiled bundle regex patch execution."""
+    import asyncio
+    import re
+    import urllib.parse
+
+    from lfx_snowflake.fastapi_live_bridge import (
+        LIVE_BRIDGE,
+        compute_deterministic_memory_uuid,
+        register_snowflake_fastapi_routes,
+    )
+
+    class _DummyApp:
+        def __init__(self) -> None:
+            self.routes: list[object] = []
+            self.http_middleware: object = None
+
+        def include_router(self, _r: object) -> None:
+            pass
+
+        def get(self, *_a: object, **_k: object):
+            return lambda fn: fn
+
+        def post(self, *_a: object, **_k: object):
+            return lambda fn: fn
+
+        def delete(self, *_a: object, **_k: object):
+            return lambda fn: fn
+
+        def middleware(self, _kind: str):
+            def _dec(fn):
+                self.http_middleware = fn
+                return fn
+            return _dec
+
+    dummy_app = _DummyApp()
+    register_snowflake_fastapi_routes(dummy_app)
+    snowflake_flow_context_and_trace_middleware = dummy_app.http_middleware
+    assert callable(snowflake_flow_context_and_trace_middleware)
+
+    LIVE_BRIDGE.switch_role("ACCOUNTADMIN")
+    mem_id = compute_deterministic_memory_uuid("MEM_2_CHAT_WINDOW")
+
+    class _FakeURL:
+        def __init__(self, path: str, query: str = "") -> None:
+            self.path = path
+            self.query = query
+
+    class _FakeRequest:
+        def __init__(self, method: str, path: str, query_params: dict | None = None, body_obj: dict | None = None) -> None:
+            q_str = urllib.parse.urlencode(query_params or {})
+            self.method = method
+            self.url = _FakeURL(path, q_str)
+            self.headers: dict[str, str] = {}
+            self.query_params = query_params or {}
+            self._body_obj = body_obj or {}
+
+        async def json(self) -> dict:
+            return self._body_obj
+
+    async def _never_called(_req: object) -> object:
+        raise AssertionError("call_next should not be reached when middleware intercepts /api/v1/memories*")
+
+    def _resp_json(resp: object) -> dict:
+        if hasattr(resp, "content") and isinstance(getattr(resp, "content"), dict):
+            return getattr(resp, "content")
+        raw = getattr(resp, "body", b"{}")
+        return json.loads(raw.decode("utf-8") if isinstance(raw, bytes) else str(raw))
+
+    # 1. Middleware intercepts GET /api/v1/memories even with a mismatched flow_id
+    resp_list = asyncio.run(
+        snowflake_flow_context_and_trace_middleware(
+            _FakeRequest("GET", "/api/v1/memories", {"flow_id": "other-flow-123", "search": "MEM_2_CHAT_WINDOW"}),
+            _never_called,
+        )
+    )
+    assert resp_list.status_code == 200
+    body_list = _resp_json(resp_list)
+    assert any(item["id"] == mem_id for item in body_list["items"])
+
+    # 2. Middleware intercepts GET /api/v1/memories/{id}, /sessions, /messages, and PATCH
+    resp_detail = asyncio.run(
+        snowflake_flow_context_and_trace_middleware(
+            _FakeRequest("GET", f"/api/v1/memories/{mem_id}"),
+            _never_called,
+        )
+    )
+    assert resp_detail.status_code == 200
+    assert _resp_json(resp_detail)["id"] == mem_id
+
+    resp_patch = asyncio.run(
+        snowflake_flow_context_and_trace_middleware(
+            _FakeRequest("PATCH", f"/api/v1/memories/{mem_id}", body_obj={"auto_capture": True, "threshold": 5}),
+            _never_called,
+        )
+    )
+    assert resp_patch.status_code == 200
+    assert _resp_json(resp_patch)["auto_capture"] is True
+
+    # 3. Verify regex replacement on a pre-patched bundle containing legacy [sf_svg, "+ Snowflake"]
+    live_hooks_py = (REPO_ROOT / "scripts" / "install_live_hooks_in_container.py").read_text(encoding="utf-8")
+    ns: dict[str, object] = {"re": re, "OFFICIAL_SNOWFLAKE_PATH": "M0 0h288v288H0z"}
+    # Extract the sf_svg_inline_xs_white and too_btn_canonical definitions
+    sf_match = re.search(r"sf_svg_inline_xs_white\s*=\s*\(([\s\S]*?)\)\n", live_hooks_py)
+    assert sf_match is not None
+    exec(f"sf_svg_inline_xs_white = ({sf_match.group(1)})", ns)
+    btn_match = re.search(r"too_btn_canonical\s*=\s*\(([\s\S]*?)\)\n", live_hooks_py)
+    assert btn_match is not None
+    exec(f"too_btn_canonical = ({btn_match.group(1)})", ns)
+
+    synthetic_bundle = (
+        'v.jsxs("div",{className:"mt-3 flex items-center gap-2 flex-wrap",children:['
+        'v.jsxs(qt,{size:"sm",variant:"outline",onClick:f,disabled:!u,className:"rounded-[10px]",children:[v.jsx(qe,{name:"Plus",className:"h-3.5 w-3.5"}),p("memory.createButton")]}),'
+        'v.jsxs(qt,{size:"sm",variant:"outline","data-testid":"memories-plus-snowflake-btn",'
+        'onClick:()=>window.openCreateSnowflakeMemoryModal&&window.openCreateSnowflakeMemoryModal(u),'
+        'style:{backgroundColor:"#29B5E8",borderColor:"#29B5E8",color:"#ffffff"},'
+        'className:"rounded-[10px] font-semibold flex items-center gap-1.5",children:['
+        + str(ns["sf_svg_inline_xs_white"])
+        + ',"+ Snowflake"]})]})]})'
+    )
+    patched_bundle = re.sub(
+        r'v\.jsxs\(qt,\{size:"sm",variant:"outline","data-testid":"memories-'
+        + r'plus-snowflake-btn"[\s\S]*?\}\)\]\}\)\]\}\)',
+        str(ns["too_btn_canonical"]),
+        synthetic_bundle,
+    )
+    assert '"+ Snowflake"' not in patched_bundle
+    assert "window.openSnowflakeMemoryTypeDropdown" in patched_bundle
+    plus_idx = patched_bundle.index('data-testid":"memories-plus-snowflake-btn"')
+    btn_slice = patched_bundle[plus_idx:]
+    assert btn_slice.index('name:"Plus"') < btn_slice.index("viewBox") < btn_slice.index('"Snowflake"')
+
+

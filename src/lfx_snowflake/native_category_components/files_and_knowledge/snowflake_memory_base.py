@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 import json
 from typing import Any
 
 import lfx_snowflake._lfx_compat  # noqa: F401
 from lfx.custom import Component
-from lfx.field_typing import Tool
+from lfx.field_typing import BaseChatMessageHistory, Memory, Tool
 from lfx.io import BoolInput, DropdownInput, FloatInput, IntInput, MessageTextInput, Output, StrInput
 from lfx.schema import Data
 from lfx.schema.message import Message
@@ -30,6 +31,296 @@ def _memory_base_options() -> list[str]:
         if d not in opts:
             opts.append(d)
     return opts or ["SNOWFLAKE_KB_MEM"]
+
+
+def _register_chat_message_history_adapter():
+    class SnowflakeChatMessageHistoryAdapter:
+        """LangChain `BaseChatMessageHistory` & Langflow `Memory` port adapter (`W2-R4-09`).
+
+        Wraps `SnowflakeMemoryBaseNativeComponent` so it can either operate as a single
+        standalone memory node or plug into `SnowflakeMessageHistoryNativeComponent`'s
+        orange `External Memory` (`memory`) handle.
+        """
+
+        def __init__(self, component: SnowflakeMemoryBaseNativeComponent) -> None:
+            self.component = component
+            self._local_messages: list[dict[str, Any]] = []
+
+        @property
+        def helper(self) -> SnowflakeMemoryBaseComponent:
+            return self.component._build_helper()
+
+        @property
+        def memory_name(self) -> str:
+            return self.helper.memory_name
+
+        @property
+        def canonical_memory_type(self) -> str:
+            return self.helper.canonical_memory_type
+
+        @property
+        def storage_family(self) -> str:
+            return self.helper.storage_family
+
+        @property
+        def table_fqn(self) -> str:
+            return self.helper.table_fqn
+
+        @property
+        def session_id(self) -> str:
+            return str(getattr(self.component, "session_id", None) or self.helper.session_id or "default")
+
+        @property
+        def window_k(self) -> int:
+            return int(getattr(self.component, "window_k", None) or self.helper.window_k or 8)
+
+        @property
+        def user_id(self) -> str:
+            return str(getattr(self.component, "user_id", None) or self.helper.user_id or "default")
+
+        @property
+        def project_id(self) -> str:
+            return str(getattr(self.component, "project_id", "default") or "default")
+
+        @property
+        def filter_by_session(self) -> bool:
+            return bool(self.helper.filter_by_session)
+
+        def _find_bridge_entry(self) -> dict[str, Any] | None:
+            finder = getattr(LIVE_BRIDGE, "_find_memory_entry", None)
+            if callable(finder):
+                return finder(self.memory_name)
+            for entry in getattr(LIVE_BRIDGE, "memories_registry", []):
+                if str(entry.get("name") or "").strip().upper() == self.memory_name.upper():
+                    return entry
+            return None
+
+        def add_message(
+            self,
+            message: Any,
+            *,
+            session_id: str | None = None,
+            sender: str | None = None,
+            sender_name: str | None = None,
+            user_id: str | None = None,
+            project_id: str | None = None,
+            message_id: str | None = None,
+            metadata: dict[str, Any] | None = None,
+        ) -> Message:
+            eff_session = str(session_id or self.session_id or "default").strip()
+            eff_user = str(user_id or self.user_id or "default").strip()
+            eff_project = str(project_id or self.project_id or "default").strip()
+
+            raw_text = ""
+            inferred_sender = sender
+            inferred_sender_name = sender_name
+            if isinstance(message, Message):
+                raw_text = str(message.text or "")
+                msg_data = getattr(message, "data", {}) or {}
+                inferred_sender = inferred_sender or msg_data.get("sender") or getattr(message, "sender", None)
+                inferred_sender_name = (
+                    inferred_sender_name or msg_data.get("sender_name") or getattr(message, "sender_name", None)
+                )
+                if not session_id and (msg_data.get("session_id") or getattr(message, "session_id", None)):
+                    eff_session = str(msg_data.get("session_id") or getattr(message, "session_id"))
+            elif isinstance(message, dict):
+                raw_text = str(message.get("text") or message.get("message") or message.get("content") or "")
+                inferred_sender = inferred_sender or message.get("sender")
+                inferred_sender_name = inferred_sender_name or message.get("sender_name")
+                if not session_id and message.get("session_id"):
+                    eff_session = str(message["session_id"])
+            elif hasattr(message, "content"):
+                raw_text = str(getattr(message, "content", "") or "")
+                msg_type = str(getattr(message, "type", "") or "").lower()
+                if not inferred_sender:
+                    inferred_sender = "AI" if msg_type in ("ai", "assistant") else "User"
+            else:
+                raw_text = str(message or "")
+
+            eff_sender = str(inferred_sender or "User")
+            eff_sender_name = str(inferred_sender_name or eff_sender)
+            now_iso = datetime.now(timezone.utc).isoformat()
+            seq_no = len(self._local_messages) + 1
+            eff_msg_id = str(message_id or f"msg-{eff_session}-{seq_no}")
+
+            record: dict[str, Any] = {
+                "id": eff_msg_id,
+                "message_id": eff_msg_id,
+                "session_id": eff_session,
+                "user_id": eff_user,
+                "project_id": eff_project,
+                "sender": eff_sender,
+                "sender_name": eff_sender_name,
+                "text": raw_text,
+                "message_text": raw_text,
+                "topic": f"{eff_sender_name}: {raw_text[:80]}",
+                "status": "Ingested",
+                "timestamp": now_iso,
+                "updated": now_iso,
+                "memory_base": self.memory_name,
+                "canonical_memory_type": self.canonical_memory_type,
+                "storage_family": self.storage_family,
+                "table_fqn": self.table_fqn,
+                "active_role": LIVE_BRIDGE.active_role,
+                **(metadata or {}),
+            }
+            self._local_messages.append(record)
+
+            self.helper.store_memory(
+                raw_text,
+                user_id=eff_user,
+                project_id=eff_project,
+                session_id=eff_session,
+                metadata=record,
+            )
+
+            entry = self._find_bridge_entry()
+            if entry is not None:
+                stored_list = list(entry.get("stored_records") or [])
+                stored_list.insert(0, dict(record))
+                entry["stored_records"] = stored_list
+
+            return Message(
+                text=raw_text,
+                id=eff_msg_id,
+                message_id=eff_msg_id,
+                sender=eff_sender,
+                sender_name=eff_sender_name,
+                session_id=eff_session,
+                timestamp=now_iso,
+                memory_base=self.memory_name,
+                canonical_memory_type=self.canonical_memory_type,
+                storage_family=self.storage_family,
+                table_fqn=self.table_fqn,
+                active_role=LIVE_BRIDGE.active_role,
+            )
+
+        def add_messages(self, messages: list[Any], **kwargs: Any) -> list[Message]:
+            return [self.add_message(m, **kwargs) for m in messages]
+
+        def add_user_message(self, message: str | Any, **kwargs: Any) -> Message:
+            kwargs.setdefault("sender", "User")
+            kwargs.setdefault("sender_name", "User")
+            return self.add_message(message, **kwargs)
+
+        def add_ai_message(self, message: str | Any, **kwargs: Any) -> Message:
+            kwargs.setdefault("sender", "AI")
+            kwargs.setdefault("sender_name", "AI")
+            return self.add_message(message, **kwargs)
+
+        def get_message_dicts(
+            self,
+            *,
+            session_id: str | None = None,
+            limit: int | None = None,
+            user_id: str | None = None,
+            project_id: str | None = None,
+        ) -> list[dict[str, Any]]:
+            eff_session = str(session_id or self.session_id or "default").strip()
+            eff_limit = int(limit if limit is not None else self.window_k or 8)
+            filter_sess = self.filter_by_session or bool(session_id)
+
+            matched: list[dict[str, Any]] = []
+            seen_ids: set[str] = set()
+
+            for rec in self._local_messages:
+                if filter_sess and str(rec.get("session_id") or "") != eff_session:
+                    continue
+                rid = str(rec.get("message_id") or rec.get("id") or "")
+                if rid and rid in seen_ids:
+                    continue
+                if rid:
+                    seen_ids.add(rid)
+                matched.append(dict(rec))
+
+            entry = self._find_bridge_entry()
+            if entry is not None:
+                for rec in reversed(list(entry.get("stored_records") or [])):
+                    if filter_sess and str(rec.get("session_id") or "") != eff_session:
+                        continue
+                    rid = str(rec.get("message_id") or rec.get("id") or "")
+                    if rid and rid in seen_ids:
+                        continue
+                    text_val = str(rec.get("text") or rec.get("message_text") or rec.get("topic") or "")
+                    norm_rec = {
+                        "id": rid or f"rec-{len(matched) + 1}",
+                        "message_id": rid or f"rec-{len(matched) + 1}",
+                        "session_id": str(rec.get("session_id") or eff_session),
+                        "user_id": str(rec.get("user_id") or user_id or self.user_id),
+                        "project_id": str(rec.get("project_id") or project_id or self.project_id),
+                        "sender": str(rec.get("sender") or "User"),
+                        "sender_name": str(rec.get("sender_name") or rec.get("sender") or "User"),
+                        "text": text_val,
+                        "message_text": text_val,
+                        "timestamp": str(rec.get("timestamp") or rec.get("updated") or ""),
+                        "memory_base": self.memory_name,
+                        "canonical_memory_type": self.canonical_memory_type,
+                        "storage_family": self.storage_family,
+                        "table_fqn": self.table_fqn,
+                        "active_role": LIVE_BRIDGE.active_role,
+                    }
+                    if rid:
+                        seen_ids.add(rid)
+                    matched.append(norm_rec)
+
+            if eff_limit > 0 and len(matched) > eff_limit:
+                matched = matched[-eff_limit:]
+            return matched
+
+        def get_messages(
+            self,
+            *,
+            session_id: str | None = None,
+            limit: int | None = None,
+            user_id: str | None = None,
+            project_id: str | None = None,
+        ) -> list[Message]:
+            rows = self.get_message_dicts(
+                session_id=session_id,
+                limit=limit,
+                user_id=user_id,
+                project_id=project_id,
+            )
+            return [Message(**{k: v for k, v in r.items() if k != "text"}, text=str(r.get("text") or "")) for r in rows]
+
+        @property
+        def messages(self) -> list[Message]:
+            return self.get_messages()
+
+        def clear(self, *, session_id: str | None = None) -> None:
+            if session_id:
+                self._local_messages = [
+                    r for r in self._local_messages if str(r.get("session_id") or "") != str(session_id)
+                ]
+            else:
+                self._local_messages.clear()
+            entry = self._find_bridge_entry()
+            if entry is not None and isinstance(entry.get("stored_records"), list):
+                if session_id:
+                    entry["stored_records"] = [
+                        r for r in entry["stored_records"] if str(r.get("session_id") or "") != str(session_id)
+                    ]
+                else:
+                    entry["stored_records"] = []
+
+        def to_data(self) -> Data:
+            return Data(
+                data={
+                    "memory_name": self.memory_name,
+                    "canonical_memory_type": self.canonical_memory_type,
+                    "storage_family": self.storage_family,
+                    "table_fqn": self.table_fqn,
+                    "session_id": self.session_id,
+                    "window_k": self.window_k,
+                    "active_role": LIVE_BRIDGE.active_role,
+                    "messages": self.get_message_dicts(),
+                }
+            )
+
+    return SnowflakeChatMessageHistoryAdapter
+
+
+SnowflakeChatMessageHistoryAdapter = _register_chat_message_history_adapter()
 
 
 class SnowflakeMemoryBaseNativeComponent(Component):
@@ -170,6 +461,7 @@ class SnowflakeMemoryBaseNativeComponent(Component):
     ]
 
     outputs = [
+        Output(display_name="Memory", name="memory", method="build_memory", types=["Memory", "BaseChatMessageHistory"]),
         Output(display_name="Results", name="results", method="recall_memory_data"),
         Output(display_name="Checkpoint State", name="checkpoint_state", method="get_checkpoint_state"),
         Output(display_name="Messages / Chat History", name="chat_history", method="get_chat_history"),
@@ -178,6 +470,14 @@ class SnowflakeMemoryBaseNativeComponent(Component):
         Output(display_name="Few-Shot Context", name="few_shot_context", method="get_few_shot_context"),
         Output(display_name="Toolset", name="component_as_tool", method="to_toolkit", types=["Tool"]),
     ]
+
+    def build_memory(self) -> SnowflakeChatMessageHistoryAdapter:
+        """Return an External Memory adapter (`Memory` / `BaseChatMessageHistory`) for 2-node or 1-node canvas wiring (`W2-R4-09`)."""
+        adapter = getattr(self, "_memory_adapter", None)
+        if not isinstance(adapter, SnowflakeChatMessageHistoryAdapter):
+            adapter = SnowflakeChatMessageHistoryAdapter(self)
+            self._memory_adapter = adapter
+        return adapter
 
     def _build_helper(self, memory_name_override: str | None = None) -> SnowflakeMemoryBaseComponent:
         mem_name = (
@@ -283,7 +583,12 @@ class SnowflakeMemoryBaseNativeComponent(Component):
 
     def get_chat_history(self) -> Message:
         payload = self._execute_recall()
-        rows = payload.get("rows") or []
+        rows = list(payload.get("rows") or [])
+        if not rows:
+            rows = self.build_memory().get_message_dicts(
+                session_id=str(getattr(self, "session_id", "default") or "default"),
+                limit=int(getattr(self, "window_k", 8) or 8),
+            )
         text = json.dumps(
             {
                 "output_port": "chat_history",

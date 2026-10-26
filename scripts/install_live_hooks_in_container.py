@@ -380,7 +380,7 @@ def install_all() -> None:
         'const _existingNames=new Set((_origE||[]).map(_x=>(_x.name||"").toUpperCase()));'
         'const e=[..._sfMems.filter(_m=>!_existingNames.has((_m.name||"").toUpperCase())),...(_origE||[])];'
     )
-    too_fn_new = (
+    too_fn_prev2 = (
         'function Too({filteredMemories:_origE,memoriesSearch:t,setMemoriesSearch:n,fetchNextPage:o,hasNextPage:s,'
         'isFetchingNextPage:a,selectedMemoryId:c,currentFlowId:u,onSelectMemory:_origH,onCreateMemory:f}){'
         'const _sfMems=(typeof window!=="undefined"&&Array.isArray(window.SNOWFLAKE_MEMORIES_LIST)?window.SNOWFLAKE_MEMORIES_LIST:[])'
@@ -388,6 +388,17 @@ def install_all() -> None:
         'const _existingNames=new Set((_origE||[]).map(_x=>(_x.name||"").toUpperCase()));'
         'const e=[..._sfMems.filter(_m=>!_existingNames.has((_m.name||"").toUpperCase())),...(_origE||[])];'
         'const h=(_sel)=>{if(typeof _origH==="function")_origH(_sel);if(typeof window!=="undefined"&&typeof window.renderSnowflakeMemoryDetailView==="function")window.renderSnowflakeMemoryDetailView(_sel);};'
+    )
+    too_fn_new = (
+        'function Too({filteredMemories:_origE,memoriesSearch:t,setMemoriesSearch:n,fetchNextPage:o,hasNextPage:s,'
+        'isFetchingNextPage:a,selectedMemoryId:c,currentFlowId:u,onSelectMemory:_origH,onCreateMemory:f}){'
+        'const _sfMems=(typeof window!=="undefined"&&Array.isArray(window.SNOWFLAKE_MEMORIES_LIST)?window.SNOWFLAKE_MEMORIES_LIST:[])'
+        '.filter(_m=>{const _q=(t||"").trim().toLowerCase();return!_q||`${_m.name||""} ${_m.description||""} ${_m.kb_name||""} ${_m.agent_memory_type||""} ${_m.backend_type||""}`.toLowerCase().includes(_q);});'
+        'const _existingIds=new Set((_origE||[]).map(_x=>String(_x.id||"").toLowerCase()).filter(Boolean));'
+        'const _existingNames=new Set((_origE||[]).map(_x=>(_x.name||"").toUpperCase()).filter(Boolean));'
+        'const e=[..._sfMems.filter(_m=>!_existingIds.has(String(_m.id||"").toLowerCase())&&!_existingNames.has((_m.name||"").toUpperCase())),...(_origE||[])];'
+        'const h=(_sel)=>{if(typeof _origH==="function")_origH(_sel);if(typeof window!=="undefined"&&typeof window.renderSnowflakeMemoryDetailView==="function")window.renderSnowflakeMemoryDetailView(_sel);};'
+        'if(typeof window!=="undefined"){window.__sflfCurrentMemoryFlowId=u;window.__sflfSelectMemory=h;}'
     )
 
     too_orig = (
@@ -412,6 +423,24 @@ def install_all() -> None:
         + sf_svg_inline_xs_white
         + ',v.jsx(qe,{name:"Plus",className:"h-3.5 w-3.5"}),"Snowflake"]})'
         ']})]})'
+    )
+    too_prev_plus_text = (
+        'v.jsxs("div",{className:"border-b border-border px-4 py-3",children:[v.jsxs("div",{className:"flex items-center gap-2",children:[v.jsx(qe,{name:"BrainCog",className:"h-4 w-4 text-muted-foreground"}),v.jsx("h2",{className:"text-sm font-semibold",children:p("memory.sidebarTitle")})]}),'
+        'v.jsxs("div",{className:"mt-3 flex items-center gap-2 flex-wrap",children:['
+        'v.jsxs(qt,{size:"sm",variant:"outline",onClick:f,disabled:!u,className:"rounded-[10px]",children:[v.jsx(qe,{name:"Plus",className:"h-3.5 w-3.5"}),p("memory.createButton")]}),'
+        'v.jsxs(qt,{size:"sm",variant:"outline","data-testid":"memories-plus-snowflake-btn",onClick:()=>window.openCreateSnowflakeMemoryModal&&window.openCreateSnowflakeMemoryModal(u),style:{backgroundColor:"#29B5E8",borderColor:"#29B5E8",color:"#ffffff"},className:"rounded-[10px] font-semibold flex items-center gap-1.5",children:['
+        + sf_svg_inline_xs_white
+        + ',"\x2b Snowflake"]})'
+        ']})]})'
+    )
+    too_btn_canonical = (
+        'v.jsxs(qt,{size:"sm",variant:"outline","data-testid":"memories-plus-snowflake-btn",'
+        'onClick:(ev)=>window.openSnowflakeMemoryTypeDropdown?window.openSnowflakeMemoryTypeDropdown(u,ev):window.openCreateSnowflakeMemoryModal&&window.openCreateSnowflakeMemoryModal(u),'
+        'style:{backgroundColor:"#29B5E8",borderColor:"#29B5E8",color:"#ffffff"},'
+        'className:"rounded-[10px] font-semibold flex items-center gap-1.5",children:['
+        'v.jsx(qe,{name:"Plus",className:"h-3.5 w-3.5"}),'
+        + sf_svg_inline_xs_white
+        + ',"Snowflake"]})]})]})'
     )
 
     s2_orig = (
@@ -564,8 +593,26 @@ def install_all() -> None:
         txt = txt.replace(login_logo_orig, login_logo_new)
         txt = txt.replace(too_fn_orig, too_fn_new)
         txt = txt.replace(too_fn_prev, too_fn_new)
+        txt = txt.replace(too_fn_prev2, too_fn_new)
+        txt = re.sub(
+            r'function Too\(\{filteredMemories:_origE,memoriesSearch:t,setMemoriesSearch:n,fetchNextPage:o,hasNextPage:s,isFetchingNextPage:a,selectedMemoryId:c,currentFlowId:u,onSelectMemory:(?:h|_origH),onCreateMemory:f\}\)\{[\s\S]*?(?=const\{t:p\}=dt\(\))',
+            too_fn_new,
+            txt,
+        )
         txt = txt.replace(too_orig, too_new)
         txt = txt.replace(too_prev, too_new)
+        txt = txt.replace(too_prev_plus_text, too_new)
+        txt = re.sub(
+            r'v\.jsxs\(qt,\{size:"sm",variant:"outline","data-testid":"memories-'
+            + r'plus-snowflake-btn"[\s\S]*?\}\)\]\}\)\]\}\)',
+            too_btn_canonical,
+            txt,
+        )
+        if "window.__sflfRefetchMemories=Ae" not in txt:
+            txt = txt.replace(
+                "onRefresh:Ae",
+                'onRefresh:(typeof window!=="undefined"&&(window.__sflfRefetchMemories=Ae),Ae)',
+            )
         txt = txt.replace(s2_orig, s2_new)
         txt = txt.replace(s3_orig, s3_new)
         txt = txt.replace(s4_orig, s4_new)
@@ -659,6 +706,9 @@ def install_all() -> None:
         )
         if js_asset.name.startswith("index-") and "__sflfPatched" not in txt:
             txt = dom_guard_banner + txt
+        if js_asset.name.startswith("index-") and "memories-plus-snowflake-btn" in txt:
+            assert '"\x2b Snowflake"' not in txt, "Legacy '+ Snowflake' label found in patched React bundle!"
+            assert "openSnowflakeMemoryTypeDropdown" in txt, "Missing openSnowflakeMemoryTypeDropdown in patched React bundle!"
         if txt != orig:
             js_asset.write_text(txt, encoding="utf-8")
             print(f"[install_live_hooks] Patched React bundle {js_asset.name}")

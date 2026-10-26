@@ -53,6 +53,22 @@ class MessageTextInput(_BaseInput):
     input_type = "MessageTextInput"
 
 
+class MessageInput(_BaseInput):
+    input_type = "MessageInput"
+
+    def __init__(self, **kwargs: Any) -> None:
+        kwargs.setdefault("input_types", ["Message"])
+        super().__init__(**kwargs)
+
+
+class TabInput(_BaseInput):
+    input_type = "TabInput"
+
+    def __init__(self, **kwargs: Any) -> None:
+        kwargs.setdefault("real_time_refresh", True)
+        super().__init__(**kwargs)
+
+
 class DropdownInput(_BaseInput):
     input_type = "DropdownInput"
 
@@ -98,6 +114,9 @@ class Output(dict):
         for k, v in payload.items():
             setattr(self, k, v)
 
+    def to_dict(self) -> dict[str, Any]:
+        return dict(self)
+
 
 class Data:
     def __init__(self, data: dict[str, Any] | None = None, **kwargs: Any) -> None:
@@ -116,6 +135,9 @@ class Message:
     def __init__(self, text: str = "", **kwargs: Any) -> None:
         self.text = text
         self.data = {"text": text, **kwargs}
+        for k, v in kwargs.items():
+            if not hasattr(self, k):
+                setattr(self, k, v)
 
 
 class Tool:
@@ -146,6 +168,8 @@ class Tool:
 
 
 LanguageModel = Any
+Memory = Any
+BaseChatMessageHistory = Any
 
 
 class Component:
@@ -157,6 +181,7 @@ class Component:
     outputs: list[Any] = []
 
     def __init__(self, **kwargs: Any) -> None:
+        self._explicit_kwargs = set(kwargs.keys())
         for inp in getattr(self, "inputs", []):
             inp_name = getattr(inp, "name", None) or (inp.get("name") if isinstance(inp, dict) else None)
             inp_val = getattr(inp, "value", None) if not isinstance(inp, dict) else inp.get("value")
@@ -196,6 +221,19 @@ def ensure_lfx_shim_installed() -> None:
     import types
 
     if "lfx" in sys.modules or importlib.util.find_spec("lfx") is not None:
+        try:
+            import lfx.field_typing as _real_ft
+            import lfx.io as _real_io
+
+            for cls in (MessageInput, TabInput):
+                if not hasattr(_real_io, cls.__name__):
+                    setattr(_real_io, cls.__name__, cls)
+            if not hasattr(_real_ft, "Memory"):
+                setattr(_real_ft, "Memory", Memory)
+            if not hasattr(_real_ft, "BaseChatMessageHistory"):
+                setattr(_real_ft, "BaseChatMessageHistory", BaseChatMessageHistory)
+        except Exception:  # noqa: BLE001
+            pass
         return
 
     lfx_mod = types.ModuleType("lfx")
@@ -210,10 +248,12 @@ def ensure_lfx_shim_installed() -> None:
         FloatInput,
         HandleInput,
         IntInput,
+        MessageInput,
         MessageTextInput,
         MultilineInput,
         Output,
         StrInput,
+        TabInput,
     ):
         setattr(io_mod, cls.__name__, cls)
 
@@ -233,6 +273,8 @@ def ensure_lfx_shim_installed() -> None:
     ft_mod = types.ModuleType("lfx.field_typing")
     ft_mod.LanguageModel = LanguageModel  # type: ignore[attr-defined]
     ft_mod.Tool = Tool  # type: ignore[attr-defined]
+    ft_mod.Memory = Memory  # type: ignore[attr-defined]
+    ft_mod.BaseChatMessageHistory = BaseChatMessageHistory  # type: ignore[attr-defined]
 
     sys.modules["lfx"] = lfx_mod
     sys.modules["lfx.custom"] = custom_mod
