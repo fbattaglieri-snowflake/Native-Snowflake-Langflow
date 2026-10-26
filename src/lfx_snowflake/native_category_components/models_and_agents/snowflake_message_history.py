@@ -161,6 +161,23 @@ class SnowflakeMessageHistoryNativeComponent(Component):
         Output(display_name="Replay State", name="replay_state", method="retrieve_replay_state"),
     ]
 
+    def to_build_config(self) -> dict[str, dict[str, Any]]:
+        cfg: dict[str, dict[str, Any]] = {}
+        for inp in getattr(self, "inputs", []):
+            inp_name = getattr(inp, "name", None) or (inp.get("name") if isinstance(inp, dict) else None)
+            if inp_name:
+                if isinstance(inp, dict):
+                    cfg[inp_name] = dict(inp)
+                elif hasattr(inp, "to_dict"):
+                    cfg[inp_name] = inp.to_dict()
+                else:
+                    cfg[inp_name] = {
+                        "name": inp_name,
+                        "value": getattr(inp, "value", None),
+                        "show": getattr(inp, "show", True),
+                    }
+        return cfg
+
     def update_build_config(
         self,
         build_config: dict[str, Any],

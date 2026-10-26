@@ -372,6 +372,14 @@ def install_all() -> None:
         'function Too({filteredMemories:e,memoriesSearch:t,setMemoriesSearch:n,fetchNextPage:o,hasNextPage:s,'
         'isFetchingNextPage:a,selectedMemoryId:c,currentFlowId:u,onSelectMemory:h,onCreateMemory:f}){'
     )
+    too_fn_prev = (
+        'function Too({filteredMemories:_origE,memoriesSearch:t,setMemoriesSearch:n,fetchNextPage:o,hasNextPage:s,'
+        'isFetchingNextPage:a,selectedMemoryId:c,currentFlowId:u,onSelectMemory:h,onCreateMemory:f}){'
+        'const _sfMems=(typeof window!=="undefined"&&Array.isArray(window.SNOWFLAKE_MEMORIES_LIST)?window.SNOWFLAKE_MEMORIES_LIST:[])'
+        '.filter(_m=>{const _q=(t||"").trim().toLowerCase();return!_q||`${_m.name||""} ${_m.description||""}`.toLowerCase().includes(_q);});'
+        'const _existingNames=new Set((_origE||[]).map(_x=>(_x.name||"").toUpperCase()));'
+        'const e=[..._sfMems.filter(_m=>!_existingNames.has((_m.name||"").toUpperCase())),...(_origE||[])];'
+    )
     too_fn_new = (
         'function Too({filteredMemories:_origE,memoriesSearch:t,setMemoriesSearch:n,fetchNextPage:o,hasNextPage:s,'
         'isFetchingNextPage:a,selectedMemoryId:c,currentFlowId:u,onSelectMemory:_origH,onCreateMemory:f}){'
@@ -394,6 +402,15 @@ def install_all() -> None:
         'v.jsx(qe,{name:"Plus",className:"h-3.5 w-3.5"}),'
         + sf_svg_inline_xs_white
         + ',"Snowflake"]})'
+        ']})]})'
+    )
+    too_prev = (
+        'v.jsxs("div",{className:"border-b border-border px-4 py-3",children:[v.jsxs("div",{className:"flex items-center gap-2",children:[v.jsx(qe,{name:"BrainCog",className:"h-4 w-4 text-muted-foreground"}),v.jsx("h2",{className:"text-sm font-semibold",children:p("memory.sidebarTitle")})]}),'
+        'v.jsxs("div",{className:"mt-3 flex items-center gap-2 flex-wrap",children:['
+        'v.jsxs(qt,{size:"sm",variant:"outline",onClick:f,disabled:!u,className:"rounded-[10px]",children:[v.jsx(qe,{name:"Plus",className:"h-3.5 w-3.5"}),p("memory.createButton")]}),'
+        'v.jsxs(qt,{size:"sm",variant:"outline","data-testid":"memories-plus-snowflake-btn",onClick:()=>window.openCreateSnowflakeMemoryModal&&window.openCreateSnowflakeMemoryModal(u),style:{backgroundColor:"#29B5E8",borderColor:"#29B5E8",color:"#ffffff"},className:"rounded-[10px] font-semibold flex items-center gap-1.5",children:['
+        + sf_svg_inline_xs_white
+        + ',v.jsx(qe,{name:"Plus",className:"h-3.5 w-3.5"}),"Snowflake"]})'
         ']})]})'
     )
 
@@ -546,7 +563,9 @@ def install_all() -> None:
         txt = txt.replace(og_orig, og_new)
         txt = txt.replace(login_logo_orig, login_logo_new)
         txt = txt.replace(too_fn_orig, too_fn_new)
+        txt = txt.replace(too_fn_prev, too_fn_new)
         txt = txt.replace(too_orig, too_new)
+        txt = txt.replace(too_prev, too_new)
         txt = txt.replace(s2_orig, s2_new)
         txt = txt.replace(s3_orig, s3_new)
         txt = txt.replace(s4_orig, s4_new)
@@ -773,6 +792,7 @@ def install_all() -> None:
         "StandardMessages",
         "PrivateOllama",
         "SnowflakeCortexAgentA2A",
+        "SnowflakeMessageHistory",
     ):
         assert ma_comp in idx_cats["models_and_agents"], f"Missing {ma_comp} in models_and_agents"
 
@@ -798,6 +818,7 @@ def install_all() -> None:
         "SnowflakeCortexSearchSplitText",
         "SnowflakeCortexSearchServiceCreator",
         "SnowflakeCortexSearchStreamTask",
+        "SnowflakeMemoryBase",
     ):
         assert fk_comp in idx_cats["files_and_knowledge"], f"Missing {fk_comp} in files_and_knowledge"
     assert "SnowflakeKnowledgeMemory" not in idx_cats["files_and_knowledge"]
@@ -829,10 +850,12 @@ def install_all() -> None:
         "/api/v1/snowflake/catalog",
         "/api/v1/snowflake/provision",
         "/api/v1/snowflake/memories",
+        "/api/v1/snowflake/memories/recall",
+        "/api/v1/snowflake/memories/showcase/full-memory-enterprise-agent",
         "/api/v1/snowflake/traces",
     ):
         assert req_route in sf_paths, f"Missing route {req_route} in {sf_paths}"
-    print("[install_live_hooks] Verification passed: 26 components merged into 5 native categories + 0 bottom bundles.")
+    print("[install_live_hooks] Verification passed: 28 components merged into 5 native categories + 0 bottom bundles.")
 
 
 if __name__ == "__main__":

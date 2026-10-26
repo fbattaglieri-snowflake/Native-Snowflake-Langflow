@@ -32,6 +32,7 @@ COPY --chown=1000:1000 src/ /app/src/
 COPY --chown=1000:1000 frontend_patches/ /app/frontend_patches/
 COPY --chown=1000:1000 scripts/ /app/scripts/
 COPY --chown=1000:1000 sql/ /app/sql/
+COPY --chown=1000:1000 starter_projects/ /app/starter_projects/
 
 ENV PYTHONPATH="/app/src"
 

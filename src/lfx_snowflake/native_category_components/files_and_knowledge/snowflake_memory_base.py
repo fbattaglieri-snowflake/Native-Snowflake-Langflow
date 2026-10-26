@@ -219,6 +219,23 @@ class SnowflakeMemoryBaseNativeComponent(Component):
             few_shot_k=int(getattr(self, "few_shot_k", 3) or 3),
         )
 
+    def to_build_config(self) -> dict[str, dict[str, Any]]:
+        cfg: dict[str, dict[str, Any]] = {}
+        for inp in getattr(self, "inputs", []):
+            inp_name = getattr(inp, "name", None) or (inp.get("name") if isinstance(inp, dict) else None)
+            if inp_name:
+                if isinstance(inp, dict):
+                    cfg[inp_name] = dict(inp)
+                elif hasattr(inp, "to_dict"):
+                    cfg[inp_name] = inp.to_dict()
+                else:
+                    cfg[inp_name] = {
+                        "name": inp_name,
+                        "value": getattr(inp, "value", None),
+                        "show": getattr(inp, "show", True),
+                    }
+        return cfg
+
     def get_dynamic_port_and_field_spec(self, memory_name: str | None = None) -> dict[str, Any]:
         helper = self._build_helper(memory_name)
         return helper.get_dynamic_port_and_field_spec(memory_name)

@@ -865,6 +865,54 @@ def test_w2_r4_verifier_route_ordering_recall_and_native_build_config_and_router
     assert pg_mem_res.body["memory"]["kill_phrase"] == "NO_INGEST"
 
 
+def test_verifier_showcase_sqlite_flow_and_transaction_persistence(tmp_path: Path, monkeypatch) -> None:
+    """Verifier check: bootstrap_and_run_full_memory_showcase persists flow + transaction in langflow.db and records activity."""
+    import sqlite3
+
+    db_file = tmp_path / "langflow.db"
+    conn = sqlite3.connect(str(db_file))
+    conn.execute(
+        "CREATE TABLE flow (id CHAR(32) PRIMARY KEY, name VARCHAR NOT NULL, description TEXT, "
+        "data JSON, is_component BOOLEAN, updated_at DATETIME, access_type VARCHAR(7) NOT NULL, "
+        "flow_type VARCHAR(8) NOT NULL, user_id CHAR(32), folder_id CHAR(32), workspace_id CHAR(32), "
+        "icon VARCHAR, icon_bg_color VARCHAR, tags JSON, locked BOOLEAN)"
+    )
+    conn.execute(
+        'CREATE TABLE "transaction" (id CHAR(32) PRIMARY KEY, timestamp DATETIME NOT NULL, '
+        "vertex_id VARCHAR NOT NULL, target_id VARCHAR, inputs JSON, outputs JSON, "
+        "status VARCHAR NOT NULL, error VARCHAR, flow_id CHAR(32) NOT NULL)"
+    )
+    conn.commit()
+    conn.close()
+
+    monkeypatch.setenv("LANGFLOW_PERSIST_DIR", str(tmp_path))
+    bridge = LiveSnowflakeBridge()
+    res = bootstrap_and_run_full_memory_showcase(bridge, dry_run=True, execute_simulation=True)
+    assert res["ok"] is True
+    assert res["flow_persisted_sqlite"] is True
+    assert res["activity_persistence"]["sqlite_tx_persisted"] is True
+    assert any(
+        ev.get("activity_id") == "act-w2r4-showcase-507"
+        and ev.get("flow_name") == "Snowflake_Full_Memory_Enterprise_Agent"
+        for ev in bridge._recent_activity_events
+    )
+
+    conn = sqlite3.connect(str(db_file))
+    flow_row = conn.execute(
+        "SELECT name, access_type, flow_type FROM flow WHERE name = ?",
+        ("Snowflake_Full_Memory_Enterprise_Agent",),
+    ).fetchone()
+    assert flow_row is not None
+    assert flow_row[1] == "PRIVATE"
+    assert flow_row[2] == "workflow"
+    tx_row = conn.execute(
+        'SELECT vertex_id, status FROM "transaction" WHERE id = ?',
+        ("50700000000040008000000000000507",),
+    ).fetchone()
+    assert tx_row == ("Node_Agent_Orchestrator", "SUCCESS")
+    conn.close()
+
+
 def test_priority_a_and_b_preserved_concept_zero_diff_and_public_repo_sanitization() -> None:
     """Priority A & B: Verify 0 git diff on preserved_provisioning_and_memories_concept.js and public repo sanitization."""
     diff_proc = subprocess.run(
