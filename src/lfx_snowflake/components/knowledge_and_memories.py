@@ -63,6 +63,18 @@ ALLOWED_GENERATIVE_PREPROCESSING_PROVIDERS = frozenset(
         "Snowflake Proxy - Messages",
         "Snowflake Proxy - Chat",
         "Ollama (Snowflake Hosted)",
+        "Cortex SQL",
+        "Private - Ollama",
+        "Model Registry SPCS",
+        "Proxy - Chat",
+        "Proxy - Responses",
+        "Proxy - Messages",
+        "cortex_sql",
+        "proxy_chat",
+        "proxy_responses",
+        "proxy_messages",
+        "spcs_ollama",
+        "spcs_model_registry",
     }
 )
 
@@ -292,6 +304,12 @@ DEFAULT_SNOWFLAKE_EMBEDDING_CATALOG: dict[str, EmbeddingModelSpec] = {
         dimension=768,
         version="1.5",
     ),
+    "twelvelabs-marengo-embed-3-0": EmbeddingModelSpec(
+        model_id="twelvelabs-marengo-embed-3-0",
+        provider="Snowflake Cortex Embedding",
+        dimension=512,
+        version="3.0",
+    ),
 }
 
 EXTERNAL_EMBEDDING_MODELS_CATALOG: dict[str, EmbeddingModelSpec] = {
@@ -332,6 +350,30 @@ EXTERNAL_EMBEDDING_MODELS_CATALOG: dict[str, EmbeddingModelSpec] = {
         dimension=1024,
         version="1.5",
     ),
+    "model-registry-spcs-embedding": EmbeddingModelSpec(
+        model_id="model-registry-spcs-embedding",
+        provider="Snowflake Model Registry SPCS",
+        dimension=768,
+        version="1.0",
+    ),
+    "proxy-chat-embedding": EmbeddingModelSpec(
+        model_id="proxy-chat-embedding",
+        provider="Snowflake Standard Proxy SPCS",
+        dimension=1024,
+        version="1.0",
+    ),
+    "proxy-responses-embedding": EmbeddingModelSpec(
+        model_id="proxy-responses-embedding",
+        provider="Snowflake Standard Proxy SPCS",
+        dimension=1024,
+        version="1.0",
+    ),
+    "proxy-messages-embedding": EmbeddingModelSpec(
+        model_id="proxy-messages-embedding",
+        provider="Snowflake Standard Proxy SPCS",
+        dimension=1024,
+        version="1.0",
+    ),
     "custom-embedding-endpoint": EmbeddingModelSpec(
         model_id="custom-embedding-endpoint",
         provider="Custom Embedding Endpoint",
@@ -347,6 +389,7 @@ class LLMPreprocessingConfig:
     provider: str | None = None
     model_id: str | None = None
     instructions: str | None = None
+    kill_phrase: str = "NO_INGEST"
 
     def validate(self) -> None:
         if not self.enabled:
@@ -824,11 +867,19 @@ class CreateMemoryDialogService:
             prov_clean = (embedding_provider or "snowflake_cortex").strip().lower()
             if isinstance(embedding_model, EmbeddingModelSpec):
                 resolved_embed = embedding_model
-            elif prov_clean == "custom_endpoint":
+            elif prov_clean in ("custom_endpoint", "spcs_model_registry", "spcs_llm_proxy"):
                 dim_val = int(custom_dimension or vector_dimension_override or 768)
+                provider_label = {
+                    "spcs_model_registry": "Snowflake Model Registry SPCS",
+                    "spcs_llm_proxy": "Snowflake Standard Proxy SPCS",
+                }.get(prov_clean, "Custom Embedding Endpoint")
+                default_mid = {
+                    "spcs_model_registry": "model-registry-spcs-embedding",
+                    "spcs_llm_proxy": "proxy-chat-embedding",
+                }.get(prov_clean, "custom-embedding-endpoint")
                 resolved_embed = EmbeddingModelSpec(
-                    model_id=str(embedding_model or "custom-embedding-endpoint").strip(),
-                    provider="Custom Embedding Endpoint",
+                    model_id=str(embedding_model or default_mid).strip(),
+                    provider=provider_label,
                     dimension=dim_val,
                     version="1.0",
                 )
@@ -1049,7 +1100,9 @@ class SnowflakeKnowledgeComponent:
 
         stored_rows = self.engine.records.setdefault(store.name, [])
         ingested_count = 0
+        skipped_count = 0
         batches_processed = 0
+        kill_phrase = (store.llm_preprocessing.kill_phrase or "NO_INGEST").strip().upper()
 
         for i in range(0, len(records), store.batch_size):
             batch = records[i : i + store.batch_size]
@@ -1065,6 +1118,10 @@ class SnowflakeKnowledgeComponent:
                         processed_text = self.engine._preprocessor_fn(raw_text, store.llm_preprocessing)
                     else:
                         processed_text = f"[PREPROCESSED:{store.llm_preprocessing.model_id}] {raw_text}"
+                    cleaned_proc = (processed_text or "").strip().upper()
+                    if cleaned_proc in (kill_phrase, "NO_INGEST", "SKIP", f"[{kill_phrase}]", "[NO_INGEST]"):
+                        skipped_count += 1
+                        continue
 
                 # Avoid duplicate vector computation when Cortex Search manages embeddings natively or store is non-vector
                 if not store.is_vector_memory or (
@@ -1115,8 +1172,10 @@ class SnowflakeKnowledgeComponent:
             "store_name": store.name,
             "backend_type": store.backend_type.value,
             "ingested_count": ingested_count,
+            "skipped_count": skipped_count,
             "batches_processed": batches_processed,
             "llm_preprocessing_used": store.llm_preprocessing.enabled,
+            "kill_phrase": kill_phrase if store.llm_preprocessing.enabled else None,
             "availability_status": (
                 "SOURCE_TABLE_COMMITTED_INDEX_REFRESH_PENDING"
                 if store.backend_type == VectorBackendType.CORTEX_SEARCH
@@ -1242,55 +1301,472 @@ class SnowflakeKnowledgeComponent:
         }
 
 
-class SnowflakeMemoryBaseComponent:
-    """Langflow `Memory Base` long-term memory component (`REQ-10`, `[G-A4]`).
+DYNAMIC_MEMORY_BASE_TYPE_SPECS: dict[str, dict[str, Any]] = {
+    "graph_state_checkpointer": {
+        "id": "graph_state_checkpointer",
+        "order": 1,
+        "label": "1. Short-Term: Graph State & Checkpointer",
+        "filter_by_session": True,
+        "tool_mode_default": False,
+        "tool_mode_supported": False,
+        "visible_fields": [
+            "memory_base",
+            "thread_id",
+            "checkpoint_ns",
+            "ttl_hours",
+            "filter_by_session",
+        ],
+        "hidden_fields": [
+            "session_id",
+            "window_k",
+            "summarizer_model",
+            "max_summary_tokens",
+            "user_id",
+            "entity_namespace",
+            "topic",
+            "outcome_score_threshold",
+            "few_shot_k",
+            "tool_mode",
+            "search_query",
+        ],
+        "primary_output_port": "checkpoint_state",
+        "primary_output_display_name": "Checkpoint State",
+        "output_ports": ("checkpoint_state", "results"),
+    },
+    "buffer_window_memory": {
+        "id": "buffer_window_memory",
+        "order": 2,
+        "label": "2. Short-Term: Buffer / Window Memory",
+        "filter_by_session": True,
+        "tool_mode_default": False,
+        "tool_mode_supported": False,
+        "visible_fields": [
+            "memory_base",
+            "session_id",
+            "window_k",
+            "filter_by_session",
+        ],
+        "hidden_fields": [
+            "thread_id",
+            "checkpoint_ns",
+            "ttl_hours",
+            "summarizer_model",
+            "max_summary_tokens",
+            "user_id",
+            "entity_namespace",
+            "topic",
+            "outcome_score_threshold",
+            "few_shot_k",
+            "tool_mode",
+            "search_query",
+        ],
+        "primary_output_port": "messages",
+        "primary_output_display_name": "Messages / Chat History",
+        "output_ports": ("messages", "chat_history", "results"),
+    },
+    "summary_memory": {
+        "id": "summary_memory",
+        "order": 3,
+        "label": "3. Short-Term: Summary Memory",
+        "filter_by_session": True,
+        "tool_mode_default": False,
+        "tool_mode_supported": False,
+        "visible_fields": [
+            "memory_base",
+            "session_id",
+            "summarizer_model",
+            "max_summary_tokens",
+            "filter_by_session",
+        ],
+        "hidden_fields": [
+            "thread_id",
+            "checkpoint_ns",
+            "ttl_hours",
+            "window_k",
+            "user_id",
+            "entity_namespace",
+            "topic",
+            "outcome_score_threshold",
+            "few_shot_k",
+            "tool_mode",
+            "search_query",
+        ],
+        "primary_output_port": "running_summary",
+        "primary_output_display_name": "Running Summary",
+        "output_ports": ("running_summary", "results"),
+    },
+    "user_profile_entity_memory": {
+        "id": "user_profile_entity_memory",
+        "order": 4,
+        "label": "4. Long-Term Semantic: User Profile & Entity Memory",
+        "filter_by_session": False,
+        "tool_mode_default": False,
+        "tool_mode_supported": True,
+        "visible_fields": [
+            "memory_base",
+            "user_id",
+            "entity_namespace",
+            "search_query",
+            "filter_by_session",
+            "tool_mode",
+        ],
+        "hidden_fields": [
+            "thread_id",
+            "checkpoint_ns",
+            "ttl_hours",
+            "session_id",
+            "window_k",
+            "summarizer_model",
+            "max_summary_tokens",
+            "topic",
+            "outcome_score_threshold",
+            "few_shot_k",
+        ],
+        "primary_output_port": "profile_context",
+        "primary_output_display_name": "Profile Context",
+        "output_ports": ("profile_context", "tool", "results"),
+    },
+    "episodic_memory": {
+        "id": "episodic_memory",
+        "order": 5,
+        "label": "5. Long-Term Semantic: Episodic Memory",
+        "filter_by_session": False,
+        "tool_mode_default": True,
+        "tool_mode_supported": True,
+        "visible_fields": [
+            "memory_base",
+            "topic",
+            "outcome_score_threshold",
+            "few_shot_k",
+            "search_query",
+            "filter_by_session",
+            "tool_mode",
+        ],
+        "hidden_fields": [
+            "thread_id",
+            "checkpoint_ns",
+            "ttl_hours",
+            "session_id",
+            "window_k",
+            "summarizer_model",
+            "max_summary_tokens",
+            "user_id",
+            "entity_namespace",
+        ],
+        "primary_output_port": "few_shot_context",
+        "primary_output_display_name": "Few-Shot Context",
+        "output_ports": ("tool", "few_shot_context", "results"),
+    },
+}
 
-    Preserves `Memory Base` selector, `Search Query`, `Filter by Session`, `Results`, and `Tool Mode`.
+
+class SnowflakeMemoryBaseComponent:
+    """Langflow `Memory Base` long-term and short-term memory component (`REQ-10`, `[G-A4]`, `W2-R4-06`, `W2-R4-06B`).
+
+    Preserves `Memory Base` selector, `Search Query`, `Filter by Session`, `Results`, and `Tool Mode`,
+    while dynamically adapting inputs and outputs to all 5 canonical Snowflake Memory types (`#1..#5`):
+    - `#1 graph_state_checkpointer`: `thread_id`, `checkpoint_ns`, `ttl_hours`, `checkpoint_state`
+    - `#2 buffer_window_memory`: `session_id`, `window_k=8`, `filter_by_session=True`, `messages` (`Chat History`)
+    - `#3 summary_memory`: `session_id`, `summarizer_model`, `max_summary_tokens`, `running_summary`
+    - `#4 user_profile_entity_memory`: `user_id`, `entity_namespace`, `filter_by_session=False`, `profile_context` + `tool`
+    - `#5 episodic_memory`: `topic`, `outcome_score_threshold`, `few_shot_k`, `tool_mode=True`, `tool` + `few_shot_context`
     Enforces that `filter_by_session=False` allows cross-session search ONLY within the
     caller's authorized `(user_id, project_id, effective_role)` scope.
     """
 
     display_name = "Memory Base"
     category = "Files & Knowledge"
-    ports = ("search_query", "results", "tool")
+    ports = (
+        "search_query",
+        "results",
+        "tool",
+        "checkpoint_state",
+        "messages",
+        "running_summary",
+        "profile_context",
+        "few_shot_context",
+    )
 
     def __init__(
         self,
-        engine: InMemoryVectorStoreEngine,
-        memory_name: str,
+        engine: InMemoryVectorStoreEngine | None = None,
+        memory_name: str = "SNOWFLAKE_KB_MEM",
         *,
-        filter_by_session: bool = True,
-        tool_mode: bool = False,
+        filter_by_session: bool | None = None,
+        tool_mode: bool | None = None,
+        canonical_memory_type: str | None = None,
+        thread_id: str = "default",
+        checkpoint_ns: str = "default",
+        ttl_hours: int = 24,
+        session_id: str = "default",
+        window_k: int = 8,
+        summarizer_model: str = "openai-gpt-6-luna",
+        max_summary_tokens: int = 512,
+        user_id: str = "default",
+        entity_namespace: str = "default",
+        topic: str = "general",
+        outcome_score_threshold: float = 0.7,
+        few_shot_k: int = 3,
     ) -> None:
-        self.knowledge = SnowflakeKnowledgeComponent(engine, memory_name)
+        if isinstance(engine, str) and memory_name == "SNOWFLAKE_KB_MEM":
+            memory_name = engine
+            engine = None
+        self.engine = engine
         self.memory_name = memory_name
-        self.filter_by_session = filter_by_session
-        self.tool_mode = tool_mode
+        self.knowledge = SnowflakeKnowledgeComponent(engine, memory_name) if engine is not None else None
+
+        catalog_entry = self._resolve_catalog_entry(memory_name)
+        resolved_type = canonical_memory_type or (
+            str(catalog_entry.get("canonical_memory_type") or catalog_entry.get("agent_memory_type") or "")
+            if catalog_entry
+            else ""
+        )
+        self.canonical_memory_type = resolve_canonical_memory_type(resolved_type or "episodic_memory")
+        spec = DYNAMIC_MEMORY_BASE_TYPE_SPECS[self.canonical_memory_type]
+
+        raw_backend = str(
+            (catalog_entry or {}).get("storage_family")
+            or (catalog_entry or {}).get("vector_database")
+            or (catalog_entry or {}).get("storage_backend")
+            or "Standard Table"
+        )
+        raw_fqn = str((catalog_entry or {}).get("table_fqn") or f"{LIVE_BRIDGE.database}.{LIVE_BRIDGE.schema}.{memory_name}")
+        self.storage_family = (
+            "snowflake_postgres"
+            if ("postgres" in raw_backend.lower() or ":5432" in raw_fqn)
+            else "snowflake_sql"
+        )
+        self.table_fqn = raw_fqn
+        self.enable_embedding = bool((catalog_entry or {}).get("enable_embedding", False))
+
+        if filter_by_session is not None:
+            self.filter_by_session = bool(filter_by_session)
+        elif catalog_entry is not None and "filter_by_session" in catalog_entry:
+            self.filter_by_session = bool(catalog_entry["filter_by_session"])
+        elif engine is not None and canonical_memory_type is None and catalog_entry is None:
+            self.filter_by_session = True
+        else:
+            self.filter_by_session = bool(spec["filter_by_session"])
+
+        if tool_mode is not None:
+            self.tool_mode = bool(tool_mode)
+        elif catalog_entry is not None and "tool_mode" in catalog_entry:
+            self.tool_mode = bool(catalog_entry["tool_mode"])
+        elif engine is not None and canonical_memory_type is None and catalog_entry is None:
+            self.tool_mode = False
+        else:
+            self.tool_mode = bool(spec["tool_mode_default"])
+
+        self.thread_id = str((catalog_entry or {}).get("thread_id") or thread_id)
+        self.checkpoint_ns = str((catalog_entry or {}).get("checkpoint_ns") or checkpoint_ns)
+        self.ttl_hours = int((catalog_entry or {}).get("ttl_hours") or ttl_hours)
+        self.session_id = str((catalog_entry or {}).get("session_id") or session_id)
+        self.window_k = int((catalog_entry or {}).get("window_k") or window_k)
+        self.summarizer_model = str((catalog_entry or {}).get("summarizer_model") or summarizer_model)
+        self.max_summary_tokens = int((catalog_entry or {}).get("max_summary_tokens") or max_summary_tokens)
+        self.user_id = str((catalog_entry or {}).get("user_id") or user_id)
+        self.entity_namespace = str((catalog_entry or {}).get("entity_namespace") or entity_namespace)
+        self.topic = str((catalog_entry or {}).get("topic") or topic)
+        self.outcome_score_threshold = float(
+            (catalog_entry or {}).get("outcome_score_threshold")
+            if (catalog_entry or {}).get("outcome_score_threshold") is not None
+            else outcome_score_threshold
+        )
+        self.few_shot_k = int((catalog_entry or {}).get("few_shot_k") or few_shot_k)
+
+    @staticmethod
+    def _resolve_catalog_entry(memory_name: str | None) -> dict[str, Any] | None:
+        clean = str(memory_name or "").split(" (")[0].strip()
+        if not clean or clean == "None":
+            return None
+        for entry in getattr(LIVE_BRIDGE, "memories_catalog", []):
+            if clean.upper() in {
+                str(entry.get("name") or "").strip().upper(),
+                str(entry.get("table_fqn") or "").strip().upper(),
+            }:
+                return dict(entry)
+        return None
+
+    def get_dynamic_port_and_field_spec(
+        self,
+        memory_name: str | None = None,
+        *,
+        override_canonical_type: str | None = None,
+    ) -> dict[str, Any]:
+        """Return dynamic field visibility and output port specification for the selected memory (`W2-R4-06`, `W2-R4-06B`)."""
+        target_name = memory_name or self.memory_name
+        entry = self._resolve_catalog_entry(target_name)
+        if override_canonical_type:
+            canonical_type = resolve_canonical_memory_type(override_canonical_type)
+            raw_backend = str(
+                (entry or {}).get("storage_family")
+                or (entry or {}).get("vector_database")
+                or (entry or {}).get("storage_backend")
+                or self.storage_family
+            )
+            raw_fqn = str((entry or {}).get("table_fqn") or self.table_fqn)
+            storage_family = (
+                "snowflake_postgres"
+                if ("postgres" in raw_backend.lower() or ":5432" in raw_fqn)
+                else "snowflake_sql"
+            )
+            enable_embed = bool((entry or {}).get("enable_embedding", self.enable_embedding))
+        elif entry is not None:
+            canonical_type = resolve_canonical_memory_type(
+                str(entry.get("canonical_memory_type") or entry.get("agent_memory_type") or self.canonical_memory_type)
+            )
+            raw_backend = str(
+                entry.get("storage_family") or entry.get("vector_database") or entry.get("storage_backend") or ""
+            )
+            raw_fqn = str(entry.get("table_fqn") or self.table_fqn)
+            storage_family = (
+                "snowflake_postgres"
+                if ("postgres" in raw_backend.lower() or ":5432" in raw_fqn)
+                else "snowflake_sql"
+            )
+            enable_embed = bool(entry.get("enable_embedding", False))
+        else:
+            canonical_type = self.canonical_memory_type
+            storage_family = self.storage_family
+            raw_fqn = self.table_fqn
+            enable_embed = self.enable_embedding
+
+        spec = dict(DYNAMIC_MEMORY_BASE_TYPE_SPECS[canonical_type])
+        effective_tool_mode = bool(self.tool_mode if memory_name is None else spec["tool_mode_default"])
+        active_ports = list(spec["output_ports"])
+        if canonical_type == "user_profile_entity_memory" and not effective_tool_mode and "tool" in active_ports:
+            active_ports.remove("tool")
+        return {
+            "memory_name": str(target_name or "").split(" (")[0].strip(),
+            "canonical_memory_type": canonical_type,
+            "order": spec["order"],
+            "label": spec["label"],
+            "storage_family": storage_family,
+            "table_fqn": raw_fqn,
+            "enable_embedding": enable_embed,
+            "filter_by_session": bool(spec["filter_by_session"]),
+            "tool_mode": effective_tool_mode,
+            "tool_mode_supported": bool(spec["tool_mode_supported"]),
+            "visible_fields": list(spec["visible_fields"]),
+            "hidden_fields": list(spec["hidden_fields"]),
+            "primary_output_port": spec["primary_output_port"],
+            "primary_output_display_name": spec["primary_output_display_name"],
+            "output_ports": tuple(active_ports),
+        }
+
+    def update_build_config(
+        self,
+        build_config: dict[str, Any],
+        field_value: Any = None,
+        field_name: str | None = None,
+    ) -> dict[str, Any]:
+        """Dynamically adapt `Memory Base` node fields and defaults when a memory `#1..#5` is selected (`W2-R4-06B`)."""
+        mem_opts = LIVE_BRIDGE.get_memory_catalog_options(include_none=False)
+        for key in ("memory_base", "memory_name", "memory_catalog_ref"):
+            if key in build_config and isinstance(build_config[key], dict):
+                build_config[key]["options"] = mem_opts
+                if field_name == key and isinstance(field_value, str) and field_value.strip():
+                    build_config[key]["value"] = field_value
+
+        selected_mem = (
+            str(field_value)
+            if field_name in ("memory_base", "memory_name", "memory_catalog_ref") and isinstance(field_value, str)
+            else str(
+                (build_config.get("memory_base") or {}).get("value")
+                or (build_config.get("memory_name") or {}).get("value")
+                or self.memory_name
+            )
+        )
+        self.memory_name = selected_mem.split(" (")[0].strip() or self.memory_name
+        entry = self._resolve_catalog_entry(self.memory_name)
+        override_type: str | None = None
+        if field_name == "canonical_memory_type" and isinstance(field_value, str) and field_value.strip():
+            override_type = resolve_canonical_memory_type(field_value)
+            self.canonical_memory_type = override_type
+        elif entry is not None:
+            self.canonical_memory_type = resolve_canonical_memory_type(
+                str(entry.get("canonical_memory_type") or entry.get("agent_memory_type") or "episodic_memory")
+            )
+
+        dynamic_spec = self.get_dynamic_port_and_field_spec(
+            self.memory_name,
+            override_canonical_type=override_type,
+        )
+        visible_set = set(dynamic_spec["visible_fields"])
+        hidden_set = set(dynamic_spec["hidden_fields"])
+
+        for fname in visible_set:
+            if fname in build_config and isinstance(build_config[fname], dict):
+                build_config[fname]["show"] = True
+        for fname in hidden_set:
+            if fname in build_config and isinstance(build_config[fname], dict):
+                build_config[fname]["show"] = False
+
+        if "filter_by_session" in build_config and isinstance(build_config["filter_by_session"], dict):
+            build_config["filter_by_session"]["value"] = dynamic_spec["filter_by_session"]
+            self.filter_by_session = dynamic_spec["filter_by_session"]
+        if "tool_mode" in build_config and isinstance(build_config["tool_mode"], dict):
+            if field_name == "tool_mode" and isinstance(field_value, bool):
+                build_config["tool_mode"]["value"] = field_value
+                self.tool_mode = field_value
+            else:
+                build_config["tool_mode"]["value"] = dynamic_spec["tool_mode"]
+                self.tool_mode = dynamic_spec["tool_mode"]
+        if "canonical_memory_type" in build_config and isinstance(build_config["canonical_memory_type"], dict):
+            build_config["canonical_memory_type"]["value"] = dynamic_spec["canonical_memory_type"]
+        if "storage_target_summary" in build_config and isinstance(build_config["storage_target_summary"], dict):
+            build_config["storage_target_summary"]["value"] = (
+                f"{dynamic_spec['label']} -> {dynamic_spec['table_fqn']} ({dynamic_spec['storage_family']})"
+            )
+        build_config["_dynamic_memory_spec"] = dynamic_spec
+        return build_config
 
     def store_memory(
         self,
         content: str,
         *,
-        user_id: str,
-        project_id: str,
-        session_id: str,
+        user_id: str = "default",
+        project_id: str = "default",
+        session_id: str = "default",
         metadata: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        row = {"content": content, **(metadata or {})}
-        return self.knowledge.ingest(
-            [row],
-            user_id=user_id,
-            project_id=project_id,
-            session_id=session_id,
-        )
+        if self.knowledge is not None:
+            row = {"content": content, **(metadata or {})}
+            return self.knowledge.ingest(
+                [row],
+                user_id=user_id,
+                project_id=project_id,
+                session_id=session_id,
+            )
+        ingest_fn = getattr(LIVE_BRIDGE, "ingest_memory_record", None)
+        if callable(ingest_fn):
+            return ingest_fn(
+                self.memory_name,
+                content=content,
+                user_id=user_id,
+                project_id=project_id,
+                session_id=session_id,
+                metadata=metadata or {},
+            )
+        return {
+            "ok": True,
+            "store_name": self.memory_name,
+            "canonical_memory_type": self.canonical_memory_type,
+            "table_fqn": self.table_fqn,
+            "ingested_count": 1,
+            "effective_role": LIVE_BRIDGE.active_role,
+        }
 
     def search_memory(
         self,
-        search_query: str,
+        search_query: str = "",
         *,
-        user_id: str,
-        project_id: str,
+        user_id: str = "default",
+        project_id: str = "default",
         session_id: str | None = None,
+        thread_id: str | None = None,
+        entity_namespace: str | None = None,
+        topic: str | None = None,
         top_k: int = 5,
     ) -> dict[str, Any]:
         if self.filter_by_session and not session_id:
@@ -1299,19 +1775,57 @@ class SnowflakeMemoryBaseComponent:
                 "session_id is required when filter_by_session=True.",
                 http_status=400,
             )
-        return self.knowledge.retrieve(
-            search_query,
-            user_id=user_id,
-            project_id=project_id,
-            session_id=session_id,
-            filter_by_session=self.filter_by_session,
-            include_metadata=True,
-            top_k=top_k,
+        if self.knowledge is not None and self.engine is not None and self.memory_name in self.engine.stores:
+            return self.knowledge.retrieve(
+                search_query,
+                user_id=user_id,
+                project_id=project_id,
+                session_id=session_id,
+                filter_by_session=self.filter_by_session,
+                include_metadata=True,
+                top_k=top_k,
+            )
+        recalled = LIVE_BRIDGE.recall_memory(
+            self.memory_name,
+            query=search_query,
+            session_id=session_id or self.session_id,
+            thread_id=thread_id or self.thread_id,
+            user_id=user_id or self.user_id,
+            entity_namespace=entity_namespace or self.entity_namespace,
+            topic=topic or self.topic or search_query,
+            limit=self.few_shot_k if self.canonical_memory_type == "episodic_memory" else (self.window_k or top_k),
         )
+        recalled["filter_by_session"] = self.filter_by_session
+        recalled["isolation_filter"] = {
+            "user_id": user_id,
+            "project_id": project_id,
+            "effective_role": LIVE_BRIDGE.active_role,
+            **({"session_id": session_id} if self.filter_by_session else {}),
+        }
+        recalled["dynamic_spec"] = self.get_dynamic_port_and_field_spec(self.memory_name)
+        return recalled
+
+    def build_tool(self) -> dict[str, Any]:
+        """Build an Agent-compatible Tool descriptor when `tool_mode=True` (`#4`, `#5`)."""
+        spec = self.get_dynamic_port_and_field_spec(self.memory_name)
+        return {
+            "tool_name": f"snowflake_memory_{self.memory_name.lower()}",
+            "memory_name": self.memory_name,
+            "canonical_memory_type": self.canonical_memory_type,
+            "table_fqn": self.table_fqn,
+            "storage_family": self.storage_family,
+            "enable_embedding": self.enable_embedding,
+            "filter_by_session": self.filter_by_session,
+            "tool_mode": True,
+            "outcome_score_threshold": self.outcome_score_threshold,
+            "few_shot_k": self.few_shot_k,
+            "primary_output_port": spec["primary_output_port"],
+            "active_role": LIVE_BRIDGE.active_role,
+        }
 
 
 class SnowflakeMemoryManagerComponent:
-    """Langflow `SnowflakeMemoryManagerComponent` supporting all 5 LangChain/Langflow Memory Types (`W2-R3-05`).
+    """Langflow `SnowflakeMemoryManagerComponent` supporting all 5 LangChain/Langflow Memory Types (`W2-R3-05`, `W2-R4-04`).
 
     Supports:
     1. `graph_state_checkpointer` (#1 Short-Term: Graph State & Checkpointer)
@@ -1321,8 +1835,8 @@ class SnowflakeMemoryManagerComponent:
     5. `episodic_memory` (#5 Long-Term Semantic: Episodic Memory, alias `semantic_vector`)
 
     Includes non-embedding SQL lookup mode (`enable_embedding=False`, default) and optional
-    Snowflake `AI_EMBED` (`snowflake_cortex`) or external embedding providers (`openai`, `cohere`,
-    `huggingface_ollama`, `custom_endpoint`).
+    Snowflake `AI_EMBED` / `AI_MULTI_EMBED` (`snowflake_cortex`), `spcs_model_registry`, `spcs_ollama`,
+    `spcs_llm_proxy`, or external embedding providers (`openai`, `cohere`, `huggingface_ollama`, `custom_endpoint`).
     """
 
     display_name = "Snowflake Memory Manager"
@@ -1340,7 +1854,12 @@ class SnowflakeMemoryManagerComponent:
         agent_memory_type: str = "episodic_memory",
         database: str | None = None,
         schema: str | None = None,
+        storage_family: str | None = None,
         storage_backend: str | None = None,
+        postgres_instance: str | None = None,
+        pg_database: str = "postgres",
+        pg_schema: str = "public",
+        pg_table_mode: str | None = None,
         enable_embedding: bool = False,
         embedding_provider: str = "snowflake_cortex",
         embedding_model: str = "snowflake-arctic-embed-m-v1.5",
@@ -1361,6 +1880,12 @@ class SnowflakeMemoryManagerComponent:
         tool_used_column: str = "tool_used",
         outcome_score_threshold: float = 0.7,
         few_shot_k: int = 3,
+        filter_by_session: bool | None = None,
+        tool_mode: bool | None = None,
+        auto_capture: bool = True,
+        ingestion_threshold: int = 1,
+        llm_preprocessing: dict[str, Any] | None = None,
+        flow_id: str | None = None,
         create_new_physical_store: bool = True,
     ) -> None:
         self.name = name
@@ -1370,6 +1895,13 @@ class SnowflakeMemoryManagerComponent:
         self.schema = (schema or LIVE_BRIDGE.schema).strip().upper()
         type_spec = CANONICAL_MEMORY_TYPES_BY_ID[self.canonical_memory_type]
         self.storage_backend = storage_backend or type_spec["recommended_snowflake_objects"][0]
+        self.storage_family = storage_family or (
+            "snowflake_postgres" if "postgres" in self.storage_backend.lower() else "snowflake_sql"
+        )
+        self.postgres_instance = postgres_instance
+        self.pg_database = pg_database
+        self.pg_schema = pg_schema
+        self.pg_table_mode = pg_table_mode
         self.enable_embedding = bool(enable_embedding)
         self.embedding_provider = (embedding_provider or "snowflake_cortex").strip().lower()
         self.embedding_model = embedding_model
@@ -1390,6 +1922,23 @@ class SnowflakeMemoryManagerComponent:
         self.tool_used_column = tool_used_column
         self.outcome_score_threshold = outcome_score_threshold
         self.few_shot_k = few_shot_k
+        dyn_spec = DYNAMIC_MEMORY_BASE_TYPE_SPECS[self.canonical_memory_type]
+        self.filter_by_session = bool(
+            filter_by_session if filter_by_session is not None else dyn_spec["filter_by_session"]
+        )
+        self.tool_mode = bool(tool_mode if tool_mode is not None else dyn_spec["tool_mode_default"])
+        self.auto_capture = bool(auto_capture)
+        self.ingestion_threshold = int(ingestion_threshold)
+        self.llm_preprocessing = dict(
+            llm_preprocessing
+            or {
+                "enabled": self.canonical_memory_type == "summary_memory",
+                "engine": "proxy_chat" if self.canonical_memory_type == "summary_memory" else "cortex_sql",
+                "model": self.summarizer_model,
+                "kill_phrase": "NO_INGEST",
+            }
+        )
+        self.flow_id = flow_id
         self.create_new_physical_store = create_new_physical_store
 
     def get_type_metadata(self) -> dict[str, Any]:
@@ -1401,6 +1950,11 @@ class SnowflakeMemoryManagerComponent:
                 "name": self.name,
                 "database": self.database,
                 "schema": self.schema,
+                "storage_family": self.storage_family,
+                "postgres_instance": self.postgres_instance,
+                "pg_database": self.pg_database,
+                "pg_schema": self.pg_schema,
+                "pg_table_mode": self.pg_table_mode,
                 "agent_memory_type": self.agent_memory_type,
                 "vector_database": self.storage_backend,
                 "enable_embedding": self.enable_embedding,
@@ -1423,6 +1977,12 @@ class SnowflakeMemoryManagerComponent:
                 "tool_used_column": self.tool_used_column,
                 "outcome_score_threshold": self.outcome_score_threshold,
                 "few_shot_k": self.few_shot_k,
+                "filter_by_session": self.filter_by_session,
+                "tool_mode": self.tool_mode,
+                "auto_capture": self.auto_capture,
+                "ingestion_threshold": self.ingestion_threshold,
+                "llm_preprocessing": self.llm_preprocessing,
+                "flow_id": self.flow_id,
                 "create_new_physical_store": self.create_new_physical_store,
                 "dry_run": dry_run,
             }

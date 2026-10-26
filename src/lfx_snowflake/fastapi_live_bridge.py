@@ -30,11 +30,20 @@ CANONICAL_TECHNICAL_MEMORY_TABLES: frozenset[str] = frozenset(
         "MEM_RUNNING_SUMMARIES",
         "MEM_USER_ENTITY_PROFILES",
         "MEM_EPISODIC_EXPERIENCES",
+        "AGENT_CHECKPOINTS",
+        "CHAT_WINDOW_HISTORY",
+        "CHAT_SESSION_SUMMARY",
+        "USER_ENTITY_PROFILE",
         "AGENT_EPISODIC_MEMORY",
         "CHAT_MESSAGE_HISTORY",
         "LANGGRAPH_CHECKPOINTS",
         "SNOWFLAKE_KB_MEM",
         "MEM_SNOWFLAKE_KB_MEM",
+        "MEM_1_GRAPH_CHECKPOINTER",
+        "MEM_2_CHAT_WINDOW",
+        "MEM_3_SESSION_SUMMARY",
+        "MEM_4_USER_ENTITY_PROFILE",
+        "MEM_5_EPISODIC_FEWSHOT",
     }
 )
 
@@ -114,18 +123,19 @@ LEGACY_MEMORY_TYPE_ALIASES: dict[str, str] = {
 EXTERNAL_EMBEDDING_PROVIDERS: dict[str, dict[str, Any]] = {
     "snowflake_cortex": {
         "id": "snowflake_cortex",
-        "label": "Snowflake Cortex (AI_EMBED)",
+        "label": "1. Snowflake Cortex Native (AI_EMBED / AI_MULTI_EMBED)",
         "is_snowflake_native": True,
         "models": [
-            {"model_id": "snowflake-arctic-embed-m-v1.5", "dimension": 768},
-            {"model_id": "snowflake-arctic-embed-m", "dimension": 768},
-            {"model_id": "e5-base-v2", "dimension": 768},
-            {"model_id": "snowflake-arctic-embed-l-v2.0", "dimension": 1024},
-            {"model_id": "snowflake-arctic-embed-l-v2.0-8k", "dimension": 1024},
-            {"model_id": "nv-embed-qa-4", "dimension": 1024},
-            {"model_id": "multilingual-e5-large", "dimension": 1024},
-            {"model_id": "voyage-multilingual-2", "dimension": 1024},
-            {"model_id": "voyage-multimodal-3", "dimension": 1024},
+            {"model_id": "snowflake-arctic-embed-m-v1.5", "dimension": 768, "function": "AI_EMBED"},
+            {"model_id": "snowflake-arctic-embed-m", "dimension": 768, "function": "AI_EMBED"},
+            {"model_id": "e5-base-v2", "dimension": 768, "function": "AI_EMBED"},
+            {"model_id": "snowflake-arctic-embed-l-v2.0", "dimension": 1024, "function": "AI_EMBED"},
+            {"model_id": "snowflake-arctic-embed-l-v2.0-8k", "dimension": 1024, "function": "AI_EMBED"},
+            {"model_id": "nv-embed-qa-4", "dimension": 1024, "function": "AI_EMBED"},
+            {"model_id": "multilingual-e5-large", "dimension": 1024, "function": "AI_EMBED"},
+            {"model_id": "voyage-multilingual-2", "dimension": 1024, "function": "AI_EMBED"},
+            {"model_id": "voyage-multimodal-3", "dimension": 1024, "function": "AI_EMBED"},
+            {"model_id": "twelvelabs-marengo-embed-3-0", "dimension": 512, "function": "AI_MULTI_EMBED"},
         ],
         "dimensions": {
             "snowflake-arctic-embed-m-v1.5": 768,
@@ -137,7 +147,62 @@ EXTERNAL_EMBEDDING_PROVIDERS: dict[str, dict[str, Any]] = {
             "multilingual-e5-large": 1024,
             "voyage-multilingual-2": 1024,
             "voyage-multimodal-3": 1024,
+            "twelvelabs-marengo-embed-3-0": 512,
         },
+    },
+    "spcs_model_registry": {
+        "id": "spcs_model_registry",
+        "label": "2. Snowflake Model Registry (SPCS Compute Pool, 1..4096d)",
+        "is_snowflake_native": True,
+        "models": [
+            {"model_id": "bge-large-en-v1.5-spcs", "dimension": 1024},
+            {"model_id": "e5-mistral-7b-instruct-spcs", "dimension": 4096},
+            {"model_id": "custom-registry-embedding", "dimension": 768},
+        ],
+        "dimensions": {
+            "bge-large-en-v1.5-spcs": 1024,
+            "e5-mistral-7b-instruct-spcs": 4096,
+            "custom-registry-embedding": 768,
+        },
+        "supports_custom_dimension": True,
+        "min_dimension": 1,
+        "max_dimension": 4096,
+    },
+    "spcs_ollama": {
+        "id": "spcs_ollama",
+        "label": "3. Private - Ollama (SPCS Container on Compute Pool)",
+        "is_snowflake_native": True,
+        "models": [
+            {"model_id": "nomic-embed-text", "dimension": 768},
+            {"model_id": "bge-large-en-v1.5", "dimension": 1024},
+            {"model_id": "mxbai-embed-large", "dimension": 1024},
+        ],
+        "dimensions": {
+            "nomic-embed-text": 768,
+            "bge-large-en-v1.5": 1024,
+            "mxbai-embed-large": 1024,
+        },
+        "supports_custom_dimension": True,
+        "min_dimension": 1,
+        "max_dimension": 4096,
+    },
+    "spcs_llm_proxy": {
+        "id": "spcs_llm_proxy",
+        "label": "4. Snowflake Standard Proxy (Proxy - Chat / Responses / Messages)",
+        "is_snowflake_native": True,
+        "models": [
+            {"model_id": "openai-gpt-6-luna-embed", "dimension": 1536},
+            {"model_id": "snowflake-arctic-embed-l-v2.0", "dimension": 1024},
+            {"model_id": "proxy-custom-embedding", "dimension": 768},
+        ],
+        "dimensions": {
+            "openai-gpt-6-luna-embed": 1536,
+            "snowflake-arctic-embed-l-v2.0": 1024,
+            "proxy-custom-embedding": 768,
+        },
+        "supports_custom_dimension": True,
+        "min_dimension": 1,
+        "max_dimension": 4096,
     },
     "openai": {
         "id": "openai",
@@ -196,14 +261,66 @@ EXTERNAL_EMBEDDING_PROVIDERS: dict[str, dict[str, Any]] = {
     },
 }
 
+SNOWFLAKE_EMBEDDING_SOURCES: tuple[dict[str, Any], ...] = (
+    EXTERNAL_EMBEDDING_PROVIDERS["snowflake_cortex"],
+    EXTERNAL_EMBEDDING_PROVIDERS["spcs_model_registry"],
+    EXTERNAL_EMBEDDING_PROVIDERS["spcs_ollama"],
+    EXTERNAL_EMBEDDING_PROVIDERS["spcs_llm_proxy"],
+)
+
+LLM_PREPROCESSING_ENGINES: tuple[dict[str, Any], ...] = (
+    {
+        "id": "cortex_sql",
+        "label": "Snowflake Cortex SQL (AI_COMPLETE / AI_SUMMARIZE_AGG / AI_EXTRACT)",
+        "default_model": "claude-3-7-sonnet",
+        "models": ["claude-3-7-sonnet", "mistral-large2", "llama3.3-70b"],
+    },
+    {
+        "id": "proxy_chat",
+        "label": "Proxy - Chat (/chat/v1)",
+        "default_model": "openai-gpt-6-luna",
+        "models": ["openai-gpt-6-luna", "openai-gpt-6-sol", "grok-4.7", "glm-5.3", "kimi-k3"],
+    },
+    {
+        "id": "proxy_responses",
+        "label": "Proxy - Responses (/responses/v1)",
+        "default_model": "openai-gpt-6-astra",
+        "models": ["openai-gpt-6-astra", "openai-gpt-6.1-sol"],
+    },
+    {
+        "id": "proxy_messages",
+        "label": "Proxy - Messages (/messages)",
+        "default_model": "claude-sonnet-5-5",
+        "models": ["claude-sonnet-5-5", "claude-opus-5-5", "claude-haiku-5-5"],
+    },
+    {
+        "id": "spcs_ollama",
+        "label": "Private - Ollama (SPCS Container)",
+        "default_model": "llama3.1:8b",
+        "models": ["llama3.1:8b", "qwen2.5:14b", "mistral:7b"],
+    },
+    {
+        "id": "spcs_model_registry",
+        "label": "Snowflake Model Registry (SPCS Service)",
+        "default_model": "custom-summarizer-spcs",
+        "models": ["custom-summarizer-spcs"],
+    },
+)
+
 EMBEDDING_PROVIDERS_CATALOG: tuple[dict[str, Any], ...] = tuple(EXTERNAL_EMBEDDING_PROVIDERS.values())
 
 AGENT_MEMORY_TYPES: tuple[dict[str, Any], ...] = (
     {
         "id": "graph_state_checkpointer",
         "agent_memory_type": "graph_state_checkpointer",
+        "slot_number": 1,
+        "enabled": True,
         "label": "#1 Short-Term: Graph State & Checkpointer",
         "category": "short_term",
+        "purpose": (
+            "Salva lo stato step-by-step del grafo LangGraph, i tool-call intermedi e le pause "
+            "Human-in-the-Loop (HITL) recuperandoli per chiave primaria thread_id."
+        ),
         "description": (
             "Short-term LangGraph execution state and step checkpoints retrieved by primary key thread_id "
             "backed by Snowflake Postgres (PostgresSaver), Hybrid Table, or SnowflakeCheckpointer."
@@ -227,15 +344,26 @@ AGENT_MEMORY_TYPES: tuple[dict[str, Any], ...] = (
         ),
         "when_embedding_useful": "Mai: lo stato del grafo viene recuperato sempre per chiave primaria thread_id.",
         "required_inputs": ["thread_id", "checkpoint_ns", "ttl_hours"],
+        "default_hybrid_pk": "(thread_id, checkpoint_ns, step_id)",
+        "filter_by_session": True,
+        "embedding_locked_off": True,
+        "default_llm_preprocessing": False,
+        "default_kill_phrase": "NO_INGEST",
         "default_enable_embedding": False,
         "enable_embedding": False,
     },
     {
         "id": "buffer_window_memory",
         "agent_memory_type": "buffer_window_memory",
+        "slot_number": 2,
+        "enabled": True,
         "legacy_alias": "episodic_session",
         "label": "#2 Short-Term: Buffer / Window Memory (Storico Chat)",
         "category": "short_term",
+        "purpose": (
+            "Mantiene gli ultimi K messaggi verbatim della conversazione corrente ordinati per timestamp "
+            "e filtrati per session_id per alimentare la porta Chat History dell'Agente."
+        ),
         "description": (
             "Low-latency conversational chat history window retrieved chronologically by session_id and window_k "
             "backed by Snowflake Postgres (Relational / JSONB), Hybrid Table, or Standard Table."
@@ -257,14 +385,25 @@ AGENT_MEMORY_TYPES: tuple[dict[str, Any], ...] = (
         ),
         "when_embedding_useful": "Utile solo per recuperare messaggi detti 500+ turni fa fuori dalla finestra K.",
         "required_inputs": ["session_id", "window_k", "retention_days"],
+        "default_hybrid_pk": "(session_id, turn_id)",
+        "filter_by_session": True,
+        "embedding_locked_off": False,
+        "default_llm_preprocessing": False,
+        "default_kill_phrase": "NO_INGEST",
         "default_enable_embedding": False,
         "enable_embedding": False,
     },
     {
         "id": "summary_memory",
         "agent_memory_type": "summary_memory",
+        "slot_number": 3,
+        "enabled": True,
         "label": "#3 Short-Term: Summary Memory (Riassunto)",
         "category": "short_term",
+        "purpose": (
+            "Condensa in 1 riga progressiva tutti i turni precedenti alla finestra K e la inietta nel "
+            "System Message dell'Agente aggiornandola in background con LLM / AI_COMPLETE."
+        ),
         "description": (
             "Running conversation summary injected into the System Prompt and updated in background "
             "with AI_COMPLETE / AI_SUMMARIZE_AGG."
@@ -291,15 +430,26 @@ AGENT_MEMORY_TYPES: tuple[dict[str, Any], ...] = (
             "AI_COMPLETE / AI_SUMMARIZE_AGG."
         ),
         "required_inputs": ["session_id", "summarizer_model", "max_summary_tokens"],
+        "default_hybrid_pk": "(session_id)",
+        "filter_by_session": True,
+        "embedding_locked_off": True,
+        "default_llm_preprocessing": True,
+        "default_kill_phrase": "NO_INGEST",
         "default_enable_embedding": False,
         "enable_embedding": False,
     },
     {
         "id": "user_profile_entity_memory",
         "agent_memory_type": "user_profile_entity_memory",
+        "slot_number": 4,
+        "enabled": True,
         "legacy_alias": "structured_long_term",
         "label": "#4 Long-Term Semantic: User Profile & Entity Memory",
         "category": "long_term_semantic",
+        "purpose": (
+            "Conserva tra sessioni diverse (Cross-Session) preferenze utente, fatti strutturati ed entità "
+            "JSON per user_id + entity_namespace con distillazione LLM e Kill Phrase NO_INGEST."
+        ),
         "description": (
             "Persistent user preferences, entity facts, and structured JSON profiles loaded at session start "
             "backed by Snowflake Postgres (PostgresStore) or Hybrid/Standard Table (VARIANT)."
@@ -328,15 +478,26 @@ AGENT_MEMORY_TYPES: tuple[dict[str, Any], ...] = (
         ),
         "when_embedding_useful": "Solo se l'utente accumula centinaia di fatti distinti e non entrano tutti nel prompt.",
         "required_inputs": ["user_id", "entity_namespace", "schema_keys"],
+        "default_hybrid_pk": "(user_id, entity_namespace, chunk_id)",
+        "filter_by_session": False,
+        "embedding_locked_off": False,
+        "default_llm_preprocessing": False,
+        "default_kill_phrase": "NO_INGEST",
         "default_enable_embedding": False,
         "enable_embedding": False,
     },
     {
         "id": "episodic_memory",
         "agent_memory_type": "episodic_memory",
+        "slot_number": 5,
+        "enabled": True,
         "legacy_alias": "semantic_vector",
         "label": "#5 Long-Term Semantic: Episodic Memory (Esperienze / Few-shot)",
         "category": "long_term_semantic",
+        "purpose": (
+            "Salva i task passati risolti con successo dall'agente (con outcome_score e traiettoria) "
+            "per fornirli come esempi few-shot dinamici o come Tool all'Agente."
+        ),
         "description": (
             "Past agent task experiences and few-shot examples retrieved by topic/outcome_score or "
             "optional semantic vector similarity (Snowflake AI_EMBED or External Embedding Provider)."
@@ -366,10 +527,57 @@ AGENT_MEMORY_TYPES: tuple[dict[str, Any], ...] = (
             "Utile quando i task passati non hanno categorie fisse e serve similarity search per trovare episodi simili."
         ),
         "required_inputs": ["topic_column", "tool_used_column", "outcome_score_threshold", "few_shot_k"],
+        "default_hybrid_pk": "(user_id, chunk_id)",
+        "filter_by_session": False,
+        "embedding_locked_off": False,
+        "default_llm_preprocessing": False,
+        "default_kill_phrase": "NO_INGEST",
         "default_enable_embedding": False,
         "enable_embedding": False,
     },
 )
+
+COMING_SOON_MEMORY_TYPES: tuple[dict[str, Any], ...] = (
+    {
+        "id": "business_ontology_cortex_sense",
+        "agent_memory_type": "business_ontology_cortex_sense",
+        "slot_number": 6,
+        "enabled": False,
+        "badge": "Coming Soon",
+        "label": "#6 Long-Term: Business Ontology / Cortex Sense (Coming Soon)",
+        "category": "long_term_ontology",
+        "purpose": (
+            "Memoria ontologica governata basata su Snowflake Business Ontology e Cortex Sense per "
+            "definizioni canoniche di dominio, relazioni tra entità e formule metriche (Coming Soon)."
+        ),
+        "description": (
+            "Future slot reserved for Snowflake Business Ontology and Cortex Sense domain memory "
+            "(disabled in the current release)."
+        ),
+        "recommended_snowflake_objects": [
+            "Business Ontology",
+            "Cortex Sense Context",
+            "Semantic View",
+        ],
+        "supported_backends": [
+            "Business Ontology",
+            "Cortex Sense Context",
+        ],
+        "needs_embedding_badge": "COMING SOON (Cortex Sense)",
+        "how_to_feed_without_embedding": "-- Coming Soon: Snowflake Business Ontology / Cortex Sense",
+        "when_embedding_useful": "Gestito internamente da Cortex Sense quando abilitato.",
+        "required_inputs": ["ontology_domain", "cortex_context_name"],
+        "default_hybrid_pk": "(entity_id)",
+        "filter_by_session": False,
+        "embedding_locked_off": True,
+        "default_llm_preprocessing": False,
+        "default_kill_phrase": "NO_INGEST",
+        "default_enable_embedding": False,
+        "enable_embedding": False,
+    },
+)
+
+DROPDOWN_MEMORY_TYPES: tuple[dict[str, Any], ...] = AGENT_MEMORY_TYPES + COMING_SOON_MEMORY_TYPES
 
 CANONICAL_MEMORY_TYPES_BY_ID: dict[str, dict[str, Any]] = {
     m["agent_memory_type"]: m for m in AGENT_MEMORY_TYPES
@@ -393,12 +601,12 @@ def resolve_memory_embedding_dimension(
     custom_dimension: int | None = None,
     default: int = 768,
 ) -> int:
-    """Resolve embedding dimension across Snowflake AI_EMBED and external Langflow embedding providers."""
+    """Resolve embedding dimension across the 4 Snowflake embedding sources and external Langflow providers."""
     from .providers.embeddings import resolve_embedding_dimension
 
     prov = (embedding_provider or "snowflake_cortex").strip().lower()
     clean_model = (embedding_model or "").strip().split(" ")[0].replace("ollama/", "")
-    if prov == "custom_endpoint" and custom_dimension is not None:
+    if prov in ("custom_endpoint", "spcs_model_registry", "spcs_llm_proxy") and custom_dimension is not None:
         return int(custom_dimension)
     if prov in EXTERNAL_EMBEDDING_PROVIDERS:
         dims_map = EXTERNAL_EMBEDDING_PROVIDERS[prov].get("dimensions", {})
@@ -1140,7 +1348,13 @@ class LiveSnowflakeBridge:
         if enable_embedding and (safe_q or agent_type == "semantic_vector"):
             embed_model = str(matched.get("embedding_model") or "snowflake-arctic-embed-m-v1.5").split(" ")[0]
             dim = int(matched.get("dimension") or 768)
-            if embedding_provider in ("", "none", "snowflake_cortex"):
+            if embed_model == "twelvelabs-marengo-embed-3-0":
+                recall_sql = (
+                    f"SELECT chunk_id, memory_name, text_chunk, metadata, "
+                    f"VECTOR_COSINE_SIMILARITY(embedding, AI_MULTI_EMBED('{embed_model}', '{safe_q}')) AS score "
+                    f"FROM {fqn} ORDER BY score DESC LIMIT {bounded_limit}"
+                )
+            elif embedding_provider in ("", "none", "snowflake_cortex"):
                 recall_sql = (
                     f"SELECT chunk_id, memory_name, text_chunk, metadata, "
                     f"VECTOR_COSINE_SIMILARITY(embedding, AI_EMBED('{embed_model}', '{safe_q}')) AS score "
@@ -1185,9 +1399,11 @@ class LiveSnowflakeBridge:
                 )
         elif canonical_type == "episodic_memory":
             few_shot_k = int(matched.get("few_shot_k") or bounded_limit)
+            min_score = matched.get("outcome_score_threshold")
+            score_filter = f" AND outcome_score >= {float(min_score)}" if min_score is not None else ""
             recall_sql = (
                 f"SELECT topic, tool_used, outcome_score, episode_text FROM {fqn} "
-                f"WHERE topic = '{safe_topic}' ORDER BY outcome_score DESC, created_at DESC LIMIT {few_shot_k}"
+                f"WHERE topic = '{safe_topic}'{score_filter} ORDER BY outcome_score DESC, created_at DESC LIMIT {few_shot_k}"
             )
         else:
             where_clause = f" WHERE text_chunk ILIKE '%{safe_q}%'" if safe_q else ""
@@ -1213,20 +1429,68 @@ class LiveSnowflakeBridge:
         }
 
     def create_or_register_memory(self, body: dict[str, Any]) -> dict[str, Any]:
-        """Create or register a Snowflake Agent Memory across all 5 LangChain/Langflow Memory types (`W2-R2-13`, `W2-R3-05`)."""
+        """Create or register a Snowflake Agent Memory across all 5 canonical types, Branch A (`Database ▸ Schema`) vs Branch B (`Snowflake Postgres` :5432), 4 Snowflake embedding sources, and `NO_INGEST` LLM preprocessing (`W2-R4-02..W2-R4-05`)."""
         name = str(body.get("name") or "").strip()
-        db = str(body.get("database") or self.database).strip().upper()
-        sch = str(body.get("schema") or self.schema).strip().upper()
+        raw_flow_id = str(body.get("flow_id") or "").strip() or CURRENT_SNOWFLAKE_FLOW_ID.get()
+        norm_fid = self._normalize_flow_id(str(raw_flow_id)) if raw_flow_id else None
+        flow_ctx = self.get_flow_context(norm_fid) if norm_fid else self.selected_context
+
+        ctx_dbs = list(flow_ctx.get("databases") or [flow_ctx.get("database") or self.database])
+        default_db = str(flow_ctx.get("database") or (ctx_dbs[0] if ctx_dbs else self.database) or self.database).strip().upper()
+        default_sch_list = list((flow_ctx.get("schemas_by_db") or {}).get(default_db) or [flow_ctx.get("schema") or self.schema])
+        default_sch = str(flow_ctx.get("schema") or (default_sch_list[0] if default_sch_list else self.schema) or self.schema).strip().upper()
+
+        db = str(body.get("database") or default_db).strip().upper()
+        sch = str(body.get("schema") or default_sch).strip().upper()
         raw_agent_type = str(body.get("agent_memory_type") or body.get("memory_type") or "").strip().lower()
         category = str(body.get("memory_category") or "").strip().lower()
         backend = str(body.get("vector_database") or body.get("storage_backend") or body.get("recommended_object") or "").strip()
+
+        if raw_agent_type in ("business_ontology_cortex_sense", "cortex_sense", "business_ontology"):
+            return {
+                "ok": False,
+                "status_code": 422,
+                "error_code": ErrorCode.UNSUPPORTED_CAPABILITY.value,
+                "message": "Memory type '#6 Business Ontology / Cortex Sense' is Coming Soon and disabled in this release (W2-R4-02).",
+                "active_role": self.active_role,
+            }
+
+        raw_storage_family = str(body.get("storage_family") or "").strip().lower()
+        is_postgres_branch = bool(
+            raw_storage_family in ("snowflake_postgres", "postgres", "branch_b")
+            or body.get("postgres_instance")
+            or "POSTGRES" in backend.upper()
+            or category.startswith("postgres")
+        )
+        storage_family = "snowflake_postgres" if is_postgres_branch else "snowflake_sql"
 
         storage_mode = str(body.get("storage_mode") or "").strip().lower()
         create_physical = bool(
             body.get("create_new_physical_store", body.get("create_physical_resource", storage_mode != "bind_existing"))
         )
         safe_table = "".join(c if c.isalnum() or c == "_" else "_" for c in (name or "MEMORY_STORE")).upper()
-        fqn = str(body.get("table_fqn") or f"{db}.{sch}.MEM_{safe_table}").strip()
+
+        pg_instances_in_ctx = list(
+            flow_ctx.get("postgres_instances")
+            or self.selected_context.get("postgres_instances")
+            or ["LANGFLOW_PG_INSTANCE"]
+        )
+        postgres_instance = (
+            str(body.get("postgres_instance") or (pg_instances_in_ctx[0] if pg_instances_in_ctx else "LANGFLOW_PG_INSTANCE")).strip()
+            if is_postgres_branch
+            else None
+        )
+        pg_database = str(body.get("pg_database") or "postgres").strip() if is_postgres_branch else None
+        pg_schema = str(body.get("pg_schema") or "public").strip() if is_postgres_branch else None
+
+        if body.get("table_fqn"):
+            fqn = str(body.get("table_fqn")).strip()
+        elif is_postgres_branch and (body.get("storage_family") or body.get("postgres_instance") or body.get("pg_table")):
+            raw_pg_tbl = str(body.get("pg_table") or body.get("table_name") or f"mem_{safe_table.lower()}").strip()
+            short_pg_tbl = raw_pg_tbl.split(".")[-1]
+            fqn = f"{postgres_instance}:5432/{pg_database}.{pg_schema}.{short_pg_tbl}"
+        else:
+            fqn = f"{db}.{sch}.MEM_{safe_table}"
 
         if create_physical:
             denied = self.check_write_privilege_or_deny("MEMORY_CREATE_PHYSICAL", fqn)
@@ -1289,9 +1553,30 @@ class LiveSnowflakeBridge:
             canonical_type = "user_profile_entity_memory"
             agent_memory_type = "structured_long_term"
 
+        # Enforce embedding locked OFF for #1 graph_state_checkpointer and #3 summary_memory (W2-R4-04)
+        if canonical_type in ("graph_state_checkpointer", "summary_memory"):
+            if body.get("reject_locked_embedding") is True and enable_embedding:
+                return {
+                    "ok": False,
+                    "status_code": 422,
+                    "error_code": ErrorCode.UNSUPPORTED_CAPABILITY.value,
+                    "message": f"Embedding vectorization is locked OFF for memory type '{canonical_type}' (W2-R4-04).",
+                    "active_role": self.active_role,
+                }
+            enable_embedding = False
+
         type_spec = CANONICAL_MEMORY_TYPES_BY_ID[canonical_type]
         if not backend:
-            if agent_memory_type == "episodic_session" or canonical_type in ("graph_state_checkpointer", "buffer_window_memory", "summary_memory"):
+            if is_postgres_branch:
+                if canonical_type == "graph_state_checkpointer":
+                    backend = "Snowflake Postgres (PostgresSaver)"
+                elif canonical_type == "user_profile_entity_memory":
+                    backend = "Snowflake Postgres (PostgresStore)"
+                elif enable_embedding:
+                    backend = "Snowflake Postgres (pgvector)"
+                else:
+                    backend = "Snowflake Postgres (Relational / JSONB)"
+            elif agent_memory_type == "episodic_session" or canonical_type in ("graph_state_checkpointer", "buffer_window_memory", "summary_memory"):
                 backend = "Hybrid Table"
             elif agent_memory_type == "structured_long_term" or canonical_type == "user_profile_entity_memory":
                 backend = "Semi-Structured (VARIANT)" if category == "semi_structured" else "Standard Table"
@@ -1301,9 +1586,9 @@ class LiveSnowflakeBridge:
                 backend = type_spec["recommended_snowflake_objects"][0]
 
         if not category:
-            if "POSTGRES" in backend.upper() and ("PGVECTOR" in backend.upper() or enable_embedding):
+            if (is_postgres_branch or "POSTGRES" in backend.upper()) and ("PGVECTOR" in backend.upper() or enable_embedding):
                 category = "postgres_pgvector"
-            elif "POSTGRES" in backend.upper():
+            elif is_postgres_branch or "POSTGRES" in backend.upper():
                 category = "postgres_non_vector"
             elif "CORTEX SEARCH" in backend.upper():
                 category = "cortex_search"
@@ -1314,17 +1599,27 @@ class LiveSnowflakeBridge:
             else:
                 category = "structured"
 
-        default_tbl_type = (
-            "HYBRID"
-            if (
-                "HYBRID" in backend.upper()
-                or agent_memory_type == "episodic_session"
-                or canonical_type in ("graph_state_checkpointer", "buffer_window_memory", "summary_memory")
-            )
-            else "STANDARD"
-        )
-        table_type = str(body.get("table_type") or default_tbl_type).strip().upper()
-        semi_type = str(body.get("semi_structured_type") or "").strip().upper()
+        raw_tbl_type = str(body.get("table_type") or "").strip().upper()
+        if "DYNAMIC" in raw_tbl_type or "DYNAMIC" in backend.upper():
+            table_type = "DYNAMIC"
+        elif "INTERACTIVE" in raw_tbl_type or "INTERACTIVE" in backend.upper():
+            table_type = "INTERACTIVE"
+        elif "ICEBERG" in raw_tbl_type or "ICEBERG" in backend.upper():
+            table_type = "ICEBERG"
+        elif "HYBRID" in raw_tbl_type:
+            table_type = "HYBRID"
+        elif "STANDARD" in raw_tbl_type:
+            table_type = "STANDARD"
+        elif (
+            "HYBRID" in backend.upper()
+            or agent_memory_type == "episodic_session"
+            or canonical_type in ("graph_state_checkpointer", "buffer_window_memory", "summary_memory")
+        ):
+            table_type = "HYBRID"
+        else:
+            table_type = "STANDARD"
+
+        semi_type = str(body.get("semi_structured_type") or body.get("payload_column_type") or "").strip().upper()
         embedding_provider = str(
             body.get("embedding_provider") or ("snowflake_cortex" if enable_embedding else "none")
         ).strip().lower()
@@ -1333,7 +1628,60 @@ class LiveSnowflakeBridge:
         embedding_model = str(body.get("embedding_model") or "snowflake-arctic-embed-m-v1.5").strip()
         elem_type = str(body.get("vector_element_type") or "FLOAT").strip().upper()
         batch_size = int(body.get("batch_size") or 64)
-        llm_preprocessing = body.get("llm_preprocessing") or None
+        ingestion_threshold = max(1, int(body.get("ingestion_threshold") or 1))
+        auto_capture = bool(body.get("auto_capture", True))
+        filter_by_session = bool(
+            body.get(
+                "filter_by_session",
+                type_spec.get("filter_by_session", canonical_type in ("graph_state_checkpointer", "buffer_window_memory", "summary_memory")),
+            )
+        )
+        tool_mode = bool(body.get("tool_mode", canonical_type == "episodic_memory"))
+
+        raw_preproc = body.get("llm_preprocessing")
+        if isinstance(raw_preproc, dict):
+            preproc_enabled = bool(raw_preproc.get("enabled", True))
+            preproc_engine = str(raw_preproc.get("engine") or raw_preproc.get("provider") or "proxy_chat").strip()
+            preproc_model = str(
+                raw_preproc.get("model")
+                or body.get("summarizer_model")
+                or ("openai-gpt-6-luna" if canonical_type == "summary_memory" else "claude-sonnet-5-5")
+            ).strip()
+            preproc_kill_phrase = str(raw_preproc.get("kill_phrase") or body.get("kill_phrase") or "NO_INGEST").strip() or "NO_INGEST"
+            llm_preprocessing: dict[str, Any] | None = {
+                "enabled": preproc_enabled,
+                "engine": preproc_engine,
+                "model": preproc_model,
+                "kill_phrase": preproc_kill_phrase,
+            }
+        elif (
+            body.get("llm_preprocessing_enabled") is not None
+            or body.get("llm_preprocessing_engine") is not None
+            or body.get("kill_phrase") is not None
+            or canonical_type == "summary_memory"
+        ):
+            preproc_enabled = bool(body.get("llm_preprocessing_enabled", canonical_type == "summary_memory"))
+            preproc_engine = str(
+                body.get("llm_preprocessing_engine")
+                or body.get("llm_preprocessing_provider")
+                or ("proxy_chat" if canonical_type == "summary_memory" else "proxy_messages")
+            ).strip()
+            preproc_model = str(
+                body.get("llm_preprocessing_model")
+                or body.get("summarizer_model")
+                or ("openai-gpt-6-luna" if canonical_type == "summary_memory" else "claude-sonnet-5-5")
+            ).strip()
+            preproc_kill_phrase = str(body.get("kill_phrase") or "NO_INGEST").strip() or "NO_INGEST"
+            llm_preprocessing = {
+                "enabled": preproc_enabled,
+                "engine": preproc_engine,
+                "model": preproc_model,
+                "kill_phrase": preproc_kill_phrase,
+            }
+        else:
+            preproc_kill_phrase = "NO_INGEST"
+            llm_preprocessing = None
+
         endpoint_url = str(body.get("endpoint_url") or "").strip() or None
         custom_dim = body.get("custom_dimension")
         custom_dim_int = int(custom_dim) if custom_dim is not None else None
@@ -1413,28 +1761,141 @@ class LiveSnowflakeBridge:
                 "active_role": self.active_role,
             }
 
-        dim = requested_dim if embedding_provider == "custom_endpoint" else expected_dim
+        dim = (
+            requested_dim
+            if embedding_provider in ("custom_endpoint", "spcs_model_registry", "spcs_llm_proxy")
+            else expected_dim
+        )
         table_kw = "HYBRID TABLE" if table_type == "HYBRID" else "TABLE"
         vec_col_ddl = f", embedding VECTOR({elem_type}, {dim})" if is_vector else ""
 
+        # Object-specific peculiarities (W2-R4-04 Step 2)
+        raw_pk = str(body.get("primary_key") or type_spec.get("default_hybrid_pk") or "(chunk_id)").strip().strip("()")
+        pk_cols = [
+            c.strip()
+            for c in raw_pk.split(",")
+            if c.strip() and c.strip().lower() not in ("embedding", "task_embedding", "vector")
+        ]
+        if not pk_cols:
+            pk_cols = ["chunk_id"]
+        sanitized_pk_expr = f"({', '.join(pk_cols)})"
+
+        raw_sec_idx = str(body.get("secondary_index") or "").strip().strip("()")
+        sec_idx_cols = [
+            c.strip()
+            for c in raw_sec_idx.split(",")
+            if c.strip() and c.strip().lower() not in ("embedding", "task_embedding", "vector")
+        ]
+        sec_idx_ddl = (
+            f", INDEX idx_{safe_table.lower()} ({', '.join(sec_idx_cols)})"
+            if table_type == "HYBRID" and sec_idx_cols
+            else ""
+        )
+
+        target_lag = str(body.get("target_lag") or ("1 minute" if table_type == "INTERACTIVE" else "5 minutes")).strip()
+        warehouse_name = str(
+            body.get("interactive_warehouse" if table_type == "INTERACTIVE" else "warehouse")
+            or body.get("warehouse")
+            or flow_ctx.get("warehouse")
+            or self.warehouse
+            or ("INTERACTIVE_WH" if table_type == "INTERACTIVE" else "COMPUTE_WH")
+        ).strip()
+        refresh_mode = str(body.get("refresh_mode") or "INCREMENTAL").strip().upper()
+        source_table = str(body.get("source_table") or f"{db}.{sch}.RAW_AGENT_EVENTS").strip()
+        raw_cluster = str(
+            body.get("cluster_by")
+            or ("user_id, entity_namespace" if canonical_type == "user_profile_entity_memory" else "user_id, topic")
+        ).strip().strip("()")
+        cluster_cols = [
+            c.strip()
+            for c in raw_cluster.split(",")
+            if c.strip() and c.strip().lower() not in ("embedding", "task_embedding", "vector")
+        ] or ["user_id"]
+        sanitized_cluster_by = ", ".join(cluster_cols)
+
+        retention_days = body.get("retention_days")
+        retention_ddl = (
+            f" DATA_RETENTION_TIME_IN_DAYS = {int(retention_days)}"
+            if retention_days is not None and table_type == "STANDARD"
+            else ""
+        )
+
+        default_pg_mode = (
+            "PostgresSaver"
+            if canonical_type == "graph_state_checkpointer"
+            else "PostgresStore JSONB"
+            if canonical_type == "user_profile_entity_memory"
+            else "JSONB + pgvector"
+            if is_vector
+            else "Relational / JSONB"
+        )
+        pg_table_mode = str(body.get("pg_table_mode") or default_pg_mode).strip() if is_postgres_branch else None
+        pg_table_short = (
+            str(
+                body.get("pg_table")
+                or body.get("table_name")
+                or (
+                    "langgraph_checkpoints"
+                    if canonical_type == "graph_state_checkpointer"
+                    else "chat_message_history"
+                    if canonical_type == "buffer_window_memory"
+                    else f"mem_{safe_table.lower()}"
+                )
+            )
+            .strip()
+            .split(".")[-1]
+            if is_postgres_branch
+            else None
+        )
+        gin_index_jsonb = bool(body.get("gin_index_jsonb", True)) if is_postgres_branch else False
+
         if not create_physical:
             ddl = f"-- Bound to existing Snowflake Memory store {fqn} (MEMORY_USE_EXISTING)"
-        elif category == "postgres_pgvector" or ("POSTGRES" in backend.upper() and is_vector):
+        elif is_postgres_branch and (category == "postgres_pgvector" or is_vector or "PGVECTOR" in str(pg_table_mode or "").upper()):
+            pg_sch_eff = (pg_schema or sch or "public").lower()
+            pg_tbl_eff = pg_table_short or f"mem_{safe_table.lower()}"
+            gin_ddl = (
+                f" CREATE INDEX IF NOT EXISTS idx_{pg_tbl_eff}_gin ON {pg_sch_eff}.{pg_tbl_eff} USING GIN (metadata);"
+                if gin_index_jsonb
+                else ""
+            )
             ddl = (
                 f"CREATE EXTENSION IF NOT EXISTS vector; "
-                f"CREATE TABLE IF NOT EXISTS {sch.lower()}.mem_{safe_table.lower()} ("
-                f"chunk_id TEXT PRIMARY KEY, memory_name TEXT, text_chunk TEXT, "
+                f"CREATE TABLE IF NOT EXISTS {pg_sch_eff}.{pg_tbl_eff} ("
+                f"chunk_id TEXT PRIMARY KEY, user_id TEXT, session_id TEXT, topic TEXT, tool_used TEXT, "
+                f"outcome_score DOUBLE PRECISION DEFAULT 1.0, memory_name TEXT, text_chunk TEXT, "
                 f"embedding vector({dim}), metadata JSONB DEFAULT '{{}}'::jsonb, "
-                f"created_by_role TEXT, created_at TIMESTAMPTZ DEFAULT NOW());"
+                f"created_by_role TEXT, created_at TIMESTAMPTZ DEFAULT NOW());{gin_ddl}"
             )
-        elif category == "postgres_non_vector" or ("POSTGRES" in backend.upper() and not is_vector):
-            ddl = (
-                f"CREATE TABLE IF NOT EXISTS {sch.lower()}.mem_{safe_table.lower()} ("
-                f"session_id TEXT, thread_id TEXT, user_id TEXT, entity_namespace TEXT, "
-                f"chunk_id TEXT PRIMARY KEY, memory_name TEXT, text_chunk TEXT, "
-                f"payload JSONB DEFAULT '{{}}'::jsonb, metadata JSONB DEFAULT '{{}}'::jsonb, "
-                f"created_by_role TEXT, created_at TIMESTAMPTZ DEFAULT NOW());"
-            )
+        elif is_postgres_branch:
+            pg_sch_eff = (pg_schema or sch or "public").lower()
+            pg_tbl_eff = pg_table_short or f"mem_{safe_table.lower()}"
+            if pg_table_mode == "PostgresSaver" or canonical_type == "graph_state_checkpointer":
+                ddl = (
+                    f"CREATE TABLE IF NOT EXISTS {pg_sch_eff}.{pg_tbl_eff} ("
+                    f"thread_id TEXT NOT NULL, checkpoint_ns TEXT NOT NULL DEFAULT 'default', "
+                    f"checkpoint_id TEXT NOT NULL, step_id INTEGER DEFAULT 0, memory_name TEXT, "
+                    f"checkpoint JSONB NOT NULL DEFAULT '{{}}'::jsonb, metadata JSONB DEFAULT '{{}}'::jsonb, "
+                    f"created_by_role TEXT, created_at TIMESTAMPTZ DEFAULT NOW(), "
+                    f"PRIMARY KEY (thread_id, checkpoint_ns, checkpoint_id));"
+                )
+            elif pg_table_mode == "PostgresStore JSONB" or canonical_type == "user_profile_entity_memory":
+                ddl = (
+                    f"CREATE TABLE IF NOT EXISTS {pg_sch_eff}.{pg_tbl_eff} ("
+                    f"user_id TEXT NOT NULL, entity_namespace TEXT NOT NULL DEFAULT 'default', "
+                    f"memory_key TEXT NOT NULL, memory_name TEXT, "
+                    f"profile_json JSONB NOT NULL DEFAULT '{{}}'::jsonb, metadata JSONB DEFAULT '{{}}'::jsonb, "
+                    f"created_by_role TEXT, updated_at TIMESTAMPTZ DEFAULT NOW(), "
+                    f"PRIMARY KEY (user_id, entity_namespace, memory_key));"
+                )
+            else:
+                ddl = (
+                    f"CREATE TABLE IF NOT EXISTS {pg_sch_eff}.{pg_tbl_eff} ("
+                    f"session_id TEXT, thread_id TEXT, user_id TEXT, entity_namespace TEXT, "
+                    f"chunk_id TEXT PRIMARY KEY, memory_name TEXT, sender TEXT, message_text TEXT, text_chunk TEXT, "
+                    f"payload JSONB DEFAULT '{{}}'::jsonb, metadata JSONB DEFAULT '{{}}'::jsonb, "
+                    f"created_by_role TEXT, created_at TIMESTAMPTZ DEFAULT NOW());"
+                )
         elif category == "cortex_search" or "CORTEX SEARCH" in backend.upper():
             wh = str(body.get("warehouse") or self.warehouse or "<WAREHOUSE>").strip()
             clean_embed = embedding_model.split(" ")[0]
@@ -1447,6 +1908,32 @@ class LiveSnowflakeBridge:
                 f"WAREHOUSE = {wh} TARGET_LAG = '1 minute' EMBEDDING_MODEL = '{clean_embed}' "
                 f"AS (SELECT * FROM {fqn});"
             )
+        elif table_type == "DYNAMIC":
+            vec_sel = (
+                f", CAST(embedding AS VECTOR({elem_type}, {dim})) AS embedding"
+                if is_vector
+                else ""
+            )
+            ddl = (
+                f"CREATE OR REPLACE DYNAMIC TABLE {fqn} "
+                f"TARGET_LAG = '{target_lag}' WAREHOUSE = {warehouse_name} REFRESH_MODE = {refresh_mode} "
+                f"AS SELECT chunk_id, user_id, entity_namespace, topic, tool_used, outcome_score, "
+                f"profile_json, episode_text, text_chunk{vec_sel}, created_by_role, created_at "
+                f"FROM {source_table};"
+            )
+        elif table_type == "INTERACTIVE":
+            vec_sel = (
+                f", CAST(embedding AS VECTOR({elem_type}, {dim})) AS embedding"
+                if is_vector
+                else ""
+            )
+            ddl = (
+                f"CREATE OR REPLACE INTERACTIVE TABLE {fqn} "
+                f"CLUSTER BY ({sanitized_cluster_by}) TARGET_LAG = '{target_lag}' WAREHOUSE = {warehouse_name} "
+                f"AS SELECT chunk_id, user_id, entity_namespace, topic, tool_used, outcome_score, "
+                f"profile_json, episode_text, text_chunk{vec_sel}, created_by_role, created_at "
+                f"FROM {source_table};"
+            )
         elif canonical_type == "graph_state_checkpointer":
             ddl = (
                 f"CREATE {table_kw} IF NOT EXISTS {fqn} ("
@@ -1454,7 +1941,7 @@ class LiveSnowflakeBridge:
                 f"step_id INTEGER DEFAULT 0, memory_name VARCHAR(256), state_blob VARIANT, "
                 f"ttl_hours INTEGER DEFAULT 24{vec_col_ddl}, metadata VARIANT, "
                 f"created_by_role VARCHAR(128), created_at TIMESTAMP_TZ DEFAULT CURRENT_TIMESTAMP(), "
-                f"PRIMARY KEY (thread_id, checkpoint_ns, step_id));"
+                f"PRIMARY KEY {sanitized_pk_expr}{sec_idx_ddl}){retention_ddl};"
             )
         elif canonical_type == "buffer_window_memory":
             ddl = (
@@ -1462,43 +1949,48 @@ class LiveSnowflakeBridge:
                 f"session_id VARCHAR(128), turn_id VARCHAR(128), memory_name VARCHAR(256), "
                 f"sender VARCHAR(64), message_text VARCHAR, text_chunk VARCHAR{vec_col_ddl}, "
                 f"metadata VARIANT, created_by_role VARCHAR(128), "
-                f"created_at TIMESTAMP_TZ DEFAULT CURRENT_TIMESTAMP(), PRIMARY KEY (session_id, turn_id));"
+                f"created_at TIMESTAMP_TZ DEFAULT CURRENT_TIMESTAMP(), "
+                f"PRIMARY KEY {sanitized_pk_expr}{sec_idx_ddl}){retention_ddl};"
             )
         elif canonical_type == "summary_memory":
             ddl = (
                 f"CREATE {table_kw} IF NOT EXISTS {fqn} ("
-                f"session_id VARCHAR(128) PRIMARY KEY, memory_name VARCHAR(256), "
+                f"session_id VARCHAR(128), memory_name VARCHAR(256), "
                 f"running_summary VARCHAR, last_turn_id VARCHAR(128), "
                 f"summarizer_model VARCHAR(128) DEFAULT 'mistral-large2', "
                 f"max_summary_tokens INTEGER DEFAULT 512{vec_col_ddl}, metadata VARIANT, "
-                f"created_by_role VARCHAR(128), updated_at TIMESTAMP_TZ DEFAULT CURRENT_TIMESTAMP());"
+                f"created_by_role VARCHAR(128), updated_at TIMESTAMP_TZ DEFAULT CURRENT_TIMESTAMP(), "
+                f"PRIMARY KEY {sanitized_pk_expr}{sec_idx_ddl}){retention_ddl};"
             )
         elif canonical_type == "user_profile_entity_memory":
             col_type = semi_type if semi_type in ("VARIANT", "OBJECT", "ARRAY") else "VARIANT"
             ddl = (
                 f"CREATE {table_kw} IF NOT EXISTS {fqn} ("
-                f"chunk_id VARCHAR(128) PRIMARY KEY, user_id VARCHAR(128), "
-                f"entity_namespace VARCHAR(128) DEFAULT 'default', memory_name VARCHAR(256), "
-                f"profile_json {col_type}, payload {col_type}, text_chunk VARCHAR{vec_col_ddl}, "
-                f"metadata VARIANT, created_by_role VARCHAR(128), "
-                f"created_at TIMESTAMP_TZ DEFAULT CURRENT_TIMESTAMP());"
+                f"chunk_id VARCHAR(128), user_id VARCHAR(128), "
+                f"entity_namespace VARCHAR(128) DEFAULT 'default', memory_key VARCHAR(128) DEFAULT 'profile', "
+                f"memory_name VARCHAR(256), profile_json {col_type}, payload {col_type}, "
+                f"text_chunk VARCHAR{vec_col_ddl}, metadata VARIANT, created_by_role VARCHAR(128), "
+                f"created_at TIMESTAMP_TZ DEFAULT CURRENT_TIMESTAMP(), "
+                f"PRIMARY KEY {sanitized_pk_expr}{sec_idx_ddl}){retention_ddl};"
             )
         elif canonical_type == "episodic_memory" and not is_vector:
             ddl = (
                 f"CREATE {table_kw} IF NOT EXISTS {fqn} ("
-                f"chunk_id VARCHAR(128) PRIMARY KEY, memory_name VARCHAR(256), "
+                f"chunk_id VARCHAR(128), user_id VARCHAR(128) DEFAULT 'default', memory_name VARCHAR(256), "
                 f"topic VARCHAR(256), tool_used VARCHAR(256), outcome_score FLOAT DEFAULT 1.0, "
-                f"episode_text VARCHAR, text_chunk VARCHAR, metadata VARIANT, "
-                f"created_by_role VARCHAR(128), created_at TIMESTAMP_TZ DEFAULT CURRENT_TIMESTAMP());"
+                f"episode_text VARCHAR, trajectory_json VARIANT, text_chunk VARCHAR, metadata VARIANT, "
+                f"created_by_role VARCHAR(128), created_at TIMESTAMP_TZ DEFAULT CURRENT_TIMESTAMP(), "
+                f"PRIMARY KEY {sanitized_pk_expr}{sec_idx_ddl}){retention_ddl};"
             )
         else:
             ddl = (
                 f"CREATE {table_kw} IF NOT EXISTS {fqn} ("
-                f"chunk_id VARCHAR(128) PRIMARY KEY, memory_name VARCHAR(256), "
+                f"chunk_id VARCHAR(128), user_id VARCHAR(128) DEFAULT 'default', memory_name VARCHAR(256), "
                 f"topic VARCHAR(256), tool_used VARCHAR(256), outcome_score FLOAT DEFAULT 1.0, "
-                f"episode_text VARCHAR, text_chunk VARCHAR, "
+                f"episode_text VARCHAR, trajectory_json VARIANT, text_chunk VARCHAR, "
                 f"embedding VECTOR({elem_type}, {dim}), metadata VARIANT, created_by_role VARCHAR(128), "
-                f"created_at TIMESTAMP_TZ DEFAULT CURRENT_TIMESTAMP());"
+                f"created_at TIMESTAMP_TZ DEFAULT CURRENT_TIMESTAMP(), "
+                f"PRIMARY KEY {sanitized_pk_expr}{sec_idx_ddl}){retention_ddl};"
             )
 
         exec_res = (
@@ -1507,14 +1999,25 @@ class LiveSnowflakeBridge:
             else self.execute_sql(ddl)
         )
         how_to_feed_sql = type_spec["how_to_feed_without_embedding"].replace("<fqn>", fqn)
+        memory_id_val = str(body.get("memory_id") or uuid.uuid4())
         entry = {
+            "memory_id": memory_id_val,
             "name": name,
-            "database": db,
-            "schema": sch,
+            "flow_id": norm_fid,
+            "storage_family": storage_family,
+            "database": None if is_postgres_branch and body.get("storage_family") == "snowflake_postgres" else db,
+            "schema": None if is_postgres_branch and body.get("storage_family") == "snowflake_postgres" else sch,
+            "postgres_instance": postgres_instance,
+            "pg_database": pg_database,
+            "pg_schema": pg_schema,
+            "pg_table": pg_table_short,
+            "pg_table_mode": pg_table_mode,
+            "gin_index_jsonb": gin_index_jsonb,
             "table_fqn": fqn,
             "agent_memory_type": agent_memory_type,
             "canonical_memory_type": canonical_type,
             "label": type_spec["label"],
+            "purpose": type_spec["purpose"],
             "memory_category": category,
             "vector_database": backend,
             "recommended_snowflake_objects": list(type_spec["recommended_snowflake_objects"]),
@@ -1522,8 +2025,15 @@ class LiveSnowflakeBridge:
             "how_to_feed_without_embedding": how_to_feed_sql,
             "when_embedding_useful": type_spec["when_embedding_useful"],
             "required_inputs": list(type_spec["required_inputs"]),
-            "table_type": table_type,
-            "semi_structured_type": semi_type or None,
+            "table_type": "POSTGRES" if is_postgres_branch else table_type,
+            "primary_key": sanitized_pk_expr if not is_postgres_branch else "(thread_id, checkpoint_ns, checkpoint_id)",
+            "secondary_index": ", ".join(sec_idx_cols) if sec_idx_cols else None,
+            "vector_excluded_from_pk_and_index": True,
+            "target_lag": target_lag if table_type in ("DYNAMIC", "INTERACTIVE") else None,
+            "warehouse": warehouse_name if table_type in ("DYNAMIC", "INTERACTIVE") else None,
+            "refresh_mode": refresh_mode if table_type == "DYNAMIC" else None,
+            "cluster_by": sanitized_cluster_by if table_type == "INTERACTIVE" else None,
+            "semi_structured_type": semi_type or ("VARIANT" if canonical_type == "user_profile_entity_memory" else None),
             "enable_embedding": is_vector,
             "is_vector_memory": is_vector,
             "embedding_provider": embedding_provider if is_vector else "none",
@@ -1532,33 +2042,71 @@ class LiveSnowflakeBridge:
             "dimension": dim if is_vector else None,
             "endpoint_url": endpoint_url if is_vector else None,
             "batch_size": batch_size,
+            "ingestion_threshold": ingestion_threshold,
+            "auto_capture": auto_capture,
+            "filter_by_session": filter_by_session,
+            "tool_mode": tool_mode,
+            "kill_phrase": preproc_kill_phrase,
             "llm_preprocessing": llm_preprocessing,
-            "thread_id": body.get("thread_id"),
-            "checkpoint_ns": body.get("checkpoint_ns"),
-            "ttl_hours": body.get("ttl_hours"),
-            "session_id": body.get("session_id"),
-            "window_k": body.get("window_k"),
-            "retention_days": body.get("retention_days"),
-            "summarizer_model": body.get("summarizer_model"),
-            "max_summary_tokens": body.get("max_summary_tokens"),
-            "user_id": body.get("user_id"),
-            "entity_namespace": body.get("entity_namespace"),
-            "schema_keys": body.get("schema_keys"),
-            "topic_column": body.get("topic_column"),
-            "tool_used_column": body.get("tool_used_column"),
-            "outcome_score_threshold": body.get("outcome_score_threshold"),
-            "few_shot_k": body.get("few_shot_k"),
+            "thread_id": body.get("thread_id") or "thr_default",
+            "checkpoint_ns": body.get("checkpoint_ns") or "default",
+            "ttl_hours": int(body.get("ttl_hours") or 24),
+            "session_id": body.get("session_id") or "sess_default",
+            "window_k": int(body.get("window_k") or 8),
+            "retention_days": int(retention_days) if retention_days is not None else 90,
+            "summarizer_model": body.get("summarizer_model") or "openai-gpt-6-luna",
+            "max_summary_tokens": int(body.get("max_summary_tokens") or 512),
+            "user_id": body.get("user_id") or "usr_default",
+            "entity_namespace": body.get("entity_namespace") or "enterprise_finance",
+            "schema_keys": body.get("schema_keys") or ["preferred_currency", "language", "kpi_focus"],
+            "topic_column": body.get("topic_column") or "topic",
+            "tool_used_column": body.get("tool_used_column") or "tool_used",
+            "outcome_score_threshold": float(body.get("outcome_score_threshold") if body.get("outcome_score_threshold") is not None else 0.70),
+            "few_shot_k": int(body.get("few_shot_k") or 3),
             "storage_mode": "create_physical" if create_physical else "bind_existing",
             "ddl": ddl,
             "created_by_role": self.active_role,
             "created_at": datetime.now(timezone.utc).isoformat(),
             "snowflake_created": bool(exec_res.get("ok")) and create_physical,
+            "stored_records": list(body.get("stored_records") or []),
         }
-        self.memories_registry.append(entry)
+        # Replace existing memory entry with same name if present, else append
+        existing_idx = next(
+            (i for i, m in enumerate(self.memories_registry) if str(m.get("name") or "").strip().upper() == name.upper() and name),
+            None,
+        )
+        if existing_idx is not None:
+            self.memories_registry[existing_idx] = entry
+        else:
+            self.memories_registry.append(entry)
+
         vis_mem = self.selected_context.setdefault("visible_objects", {}).setdefault("memories", [])
         if name and name not in vis_mem:
             vis_mem.append(name)
-        self._persist_memory_in_langflow_sqlite(entry, flow_id=str(body.get("flow_id") or "").strip() or None)
+        if norm_fid:
+            f_ctx = self.get_flow_context(norm_fid)
+            f_vis_mem = f_ctx.setdefault("visible_objects", {}).setdefault("memories", [])
+            if name and name not in f_vis_mem:
+                f_vis_mem.append(name)
+            self.contexts_by_flow_id[norm_fid] = f_ctx
+
+        if create_physical:
+            if is_postgres_branch and postgres_instance:
+                self.register_object_in_context(
+                    category="postgres_instances",
+                    object_name=postgres_instance,
+                    flow_id=norm_fid,
+                )
+            else:
+                self.register_object_in_context(
+                    database=db,
+                    schema=sch,
+                    category="tables",
+                    object_name=fqn,
+                    flow_id=norm_fid,
+                )
+
+        self._persist_memory_in_langflow_sqlite(entry, flow_id=norm_fid)
         self.record_audit_event(
             action="MEMORY_CREATE_PHYSICAL" if create_physical else "MEMORY_USE_EXISTING",
             outcome="ALLOWED",
@@ -1627,6 +2175,7 @@ class LiveSnowflakeBridge:
             backend_cfg_json = json.dumps(
                 {
                     "mode": "snowflake",
+                    "storage_family": entry.get("storage_family", "snowflake_sql"),
                     "table_fqn": entry.get("table_fqn"),
                     "canonical_memory_type": entry.get("canonical_memory_type"),
                     "enable_embedding": is_vec,
@@ -1659,18 +2208,32 @@ class LiveSnowflakeBridge:
                 "SELECT id FROM memory_base WHERE user_id = ? AND name = ?",
                 (user_id_hex, mem_name),
             ).fetchone()
-            threshold_val = max(1, int(entry.get("batch_size") or 1))
-            preproc_model_val = str(entry.get("summarizer_model") or entry.get("canonical_memory_type") or "snowflake-sql")
+            threshold_val = max(1, int(entry.get("ingestion_threshold") or entry.get("batch_size") or 1))
+            auto_cap_int = 1 if entry.get("auto_capture", True) else 0
+            llm_pre = entry.get("llm_preprocessing")
+            preproc_model_val = str(
+                (llm_pre.get("model") if isinstance(llm_pre, dict) else None)
+                or entry.get("summarizer_model")
+                or entry.get("canonical_memory_type")
+                or "snowflake-sql"
+            )
+            kill_phrase_val = str(
+                (llm_pre.get("kill_phrase") if isinstance(llm_pre, dict) else None)
+                or entry.get("kill_phrase")
+                or "NO_INGEST"
+            ).strip() or "NO_INGEST"
             if existing_mb:
                 cur.execute(
-                    "UPDATE memory_base SET flow_id = ?, threshold = ?, embedding_model = ?, preprocessing = 1, "
-                    "preproc_model = ?, preproc_instructions = ?, kb_name = ? WHERE id = ?",
+                    "UPDATE memory_base SET flow_id = ?, threshold = ?, auto_capture = ?, embedding_model = ?, "
+                    "preprocessing = 1, preproc_model = ?, preproc_instructions = ?, preproc_kill_phrase = ?, kb_name = ? WHERE id = ?",
                     (
                         target_flow_hex,
                         threshold_val,
+                        auto_cap_int,
                         emb_model,
                         preproc_model_val,
                         instructions,
+                        kill_phrase_val,
                         kb_name,
                         existing_mb["id"],
                     ),
@@ -1682,16 +2245,18 @@ class LiveSnowflakeBridge:
                     "INSERT INTO memory_base "
                     "(id, name, flow_id, user_id, threshold, auto_capture, embedding_model, preprocessing, "
                     "preproc_model, preproc_instructions, preproc_kill_phrase, kb_name, created_at) "
-                    "VALUES (?, ?, ?, ?, ?, 1, ?, 1, ?, ?, 'SKIP', ?, ?)",
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?)",
                     (
                         mb_id_hex,
                         mem_name,
                         target_flow_hex,
                         user_id_hex,
                         threshold_val,
+                        auto_cap_int,
                         emb_model,
                         preproc_model_val,
                         instructions,
+                        kill_phrase_val,
                         kb_name,
                         now_str,
                     ),
@@ -1702,6 +2267,505 @@ class LiveSnowflakeBridge:
             entry["flow_id"] = str(uuid.UUID(target_flow_hex))
         except Exception:  # noqa: BLE001
             pass
+
+    def _find_memory_entry(self, memory_id_or_name: str) -> dict[str, Any] | None:
+        """Locate a memory entry in `memories_registry` or `memories_catalog` by name, memory_id, or FQN."""
+        target = str(memory_id_or_name or "").strip()
+        if not target:
+            return None
+        target_upper = target.upper()
+        for entry in self.memories_registry:
+            if target_upper in {
+                str(entry.get("name") or "").strip().upper(),
+                str(entry.get("memory_id") or "").strip().upper(),
+                str(entry.get("langflow_memory_id") or "").strip().upper(),
+                str(entry.get("table_fqn") or "").strip().upper(),
+            }:
+                return entry
+        for entry in self.memories_catalog:
+            if target_upper in {
+                str(entry.get("name") or "").strip().upper(),
+                str(entry.get("memory_id") or "").strip().upper(),
+                str(entry.get("table_fqn") or "").strip().upper(),
+            }:
+                return entry
+        return None
+
+    def _default_stored_records_for_memory(self, entry: dict[str, Any]) -> list[dict[str, Any]]:
+        """Generate representative stored records for a memory when no live records have been ingested yet (`W2-R4-05`)."""
+        c_type = str(entry.get("canonical_memory_type") or "episodic_memory")
+        now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+        if c_type == "graph_state_checkpointer":
+            return [
+                {
+                    "session_id": str(entry.get("thread_id") or "thr_fin_q4_01"),
+                    "topic": f"ns:{entry.get('checkpoint_ns') or 'default'} • step:4 (HITL ready)",
+                    "outcome_score": "step=4",
+                    "status": "Processed",
+                    "updated": now_iso,
+                },
+                {
+                    "session_id": "thr_fin_q3_02",
+                    "topic": "ns:default • step:7 (completed)",
+                    "outcome_score": "step=7",
+                    "status": "Ingested",
+                    "updated": now_iso,
+                },
+            ]
+        if c_type == "buffer_window_memory":
+            return [
+                {
+                    "session_id": str(entry.get("session_id") or "sess_fin_01"),
+                    "topic": f"Window K={entry.get('window_k') or 8} turns (User + Assistant)",
+                    "outcome_score": "8 turns",
+                    "status": "Ingested",
+                    "updated": now_iso,
+                },
+                {
+                    "session_id": "sess_fin_02",
+                    "topic": "Window K=8 turns (Q4 margin drilldown)",
+                    "outcome_score": "4 turns",
+                    "status": "Processed",
+                    "updated": now_iso,
+                },
+            ]
+        if c_type == "summary_memory":
+            return [
+                {
+                    "session_id": str(entry.get("session_id") or "sess_fin_01"),
+                    "topic": "Riassunto progressivo turni 1..N-K: Analisi margine netto Q3/Q4 in EUR",
+                    "outcome_score": f"<= {entry.get('max_summary_tokens') or 512} tok",
+                    "status": "Processed",
+                    "updated": now_iso,
+                },
+            ]
+        if c_type == "user_profile_entity_memory":
+            return [
+                {
+                    "session_id": str(entry.get("user_id") or "usr_cfo_01"),
+                    "topic": "preferred_currency=EUR, language=it, kpi_focus=Q3_Q4_net_margin",
+                    "outcome_score": "MERGE (VARIANT)",
+                    "status": "Ingested",
+                    "updated": now_iso,
+                },
+                {
+                    "session_id": str(entry.get("user_id") or "usr_cfo_01"),
+                    "topic": "Greeting turn ('ok grazie') discarded via Kill Phrase NO_INGEST",
+                    "outcome_score": "NO_INGEST",
+                    "status": "Skipped",
+                    "updated": now_iso,
+                },
+            ]
+        return [
+            {
+                "session_id": "sess_094a",
+                "topic": "margin_q4_reconciliation",
+                "outcome_score": 0.96,
+                "status": "Ingested",
+                "updated": now_iso,
+            },
+            {
+                "session_id": "sess_081c",
+                "topic": "ebitda_variance_bridge",
+                "outcome_score": 0.92,
+                "status": "Ingested",
+                "updated": now_iso,
+            },
+            {
+                "session_id": "sess_079b",
+                "topic": "trivial_greeting_turn",
+                "outcome_score": "—",
+                "status": "Skipped",
+                "updated": now_iso,
+            },
+        ]
+
+    def get_memory_detail(
+        self,
+        memory_id_or_name: str,
+        *,
+        session_filter: str | None = None,
+    ) -> dict[str, Any]:
+        """Return full Langflow-compliant Memory Detail View payload (`W2-R4-05`)."""
+        entry = self._find_memory_entry(memory_id_or_name)
+        if entry is None:
+            return {
+                "ok": False,
+                "status_code": 404,
+                "error_code": ErrorCode.OBJECT_NOT_FOUND_OR_UNAUTHORIZED.value,
+                "message": f"Snowflake Memory '{memory_id_or_name}' non trovata o non autorizzata per il ruolo {self.active_role}.",
+                "active_role": self.active_role,
+            }
+        c_type = str(entry.get("canonical_memory_type") or resolve_canonical_memory_type(entry.get("agent_memory_type")))
+        type_spec = CANONICAL_MEMORY_TYPES_BY_ID.get(c_type, CANONICAL_MEMORY_TYPES_BY_ID["episodic_memory"])
+        storage_family = str(
+            entry.get("storage_family")
+            or ("snowflake_postgres" if "POSTGRES" in str(entry.get("vector_database") or "").upper() else "snowflake_sql")
+        )
+        is_vec = bool(entry.get("enable_embedding"))
+        llm_pre = entry.get("llm_preprocessing")
+        if isinstance(llm_pre, dict) and llm_pre.get("enabled"):
+            preproc_summary = (
+                f"Enabled ({llm_pre.get('engine', 'proxy_chat')}: {llm_pre.get('model', 'openai-gpt-6-luna')} "
+                f"• Kill Phrase: {llm_pre.get('kill_phrase', 'NO_INGEST')})"
+            )
+        else:
+            preproc_summary = f"Disabled (Kill Phrase ready: {entry.get('kill_phrase') or 'NO_INGEST'})"
+
+        if storage_family == "snowflake_postgres":
+            subtype_summary = (
+                f"SNOWFLAKE POSTGRES (:5432) • {entry.get('pg_table_mode') or 'Relational / JSONB'} "
+                f"({entry.get('pg_database') or 'postgres'}.{entry.get('pg_schema') or 'public'}.{entry.get('pg_table') or 'memory_store'})"
+            )
+        elif entry.get("table_type") == "DYNAMIC":
+            subtype_summary = (
+                f"DYNAMIC TABLE (TARGET_LAG = '{entry.get('target_lag') or '5 minutes'}', "
+                f"WAREHOUSE = {entry.get('warehouse') or 'COMPUTE_WH'}, REFRESH_MODE = {entry.get('refresh_mode') or 'INCREMENTAL'})"
+            )
+        elif entry.get("table_type") == "INTERACTIVE":
+            subtype_summary = (
+                f"INTERACTIVE TABLE (CLUSTER BY ({entry.get('cluster_by') or 'user_id'}), "
+                f"TARGET_LAG = '{entry.get('target_lag') or '1 minute'}')"
+            )
+        elif entry.get("table_type") == "HYBRID":
+            subtype_summary = f"HYBRID TABLE (PK: {entry.get('primary_key') or type_spec.get('default_hybrid_pk')})"
+        else:
+            subtype_summary = (
+                f"STANDARD TABLE ({entry.get('semi_structured_type') or 'RELATIONAL / VARIANT'}, "
+                f"Retention: {entry.get('retention_days') or 90}d)"
+            )
+
+        active_sql = str(entry.get("how_to_feed_without_embedding") or type_spec["how_to_feed_without_embedding"]).replace(
+            "<fqn>", str(entry.get("table_fqn") or "")
+        )
+        if is_vec:
+            emb_model = str(entry.get("embedding_model") or "snowflake-arctic-embed-l-v2.0").split(" ")[0]
+            active_sql = (
+                f"SELECT chunk_id, topic, tool_used, outcome_score, episode_text, "
+                f"VECTOR_COSINE_SIMILARITY(embedding, AI_EMBED('{emb_model}', :query)) AS score "
+                f"FROM {entry.get('table_fqn')} WHERE outcome_score >= {entry.get('outcome_score_threshold', 0.7)} "
+                f"ORDER BY score DESC LIMIT {entry.get('few_shot_k', 3)}"
+            )
+
+        config_summary = {
+            "name": entry.get("name"),
+            "memory_type_id": c_type,
+            "memory_type_label": entry.get("label") or type_spec["label"],
+            "flow_scope": entry.get("flow_id") or "Global / Active Flow",
+            "storage_family": storage_family,
+            "storage_target": (
+                "Snowflake Postgres (:5432 — Account-Level)"
+                if storage_family == "snowflake_postgres"
+                else "Snowflake SQL (Database ▸ Schema)"
+            ),
+            "snowflake_object": entry.get("table_fqn"),
+            "object_subtype": subtype_summary,
+            "filter_by_session": (
+                "Enabled (Session-Scoped)"
+                if entry.get("filter_by_session", type_spec.get("filter_by_session", False))
+                else "Disabled (Cross-Session Recall within user_id + role)"
+            ),
+            "embedding_model": (
+                f"{entry.get('embedding_provider')} • {entry.get('embedding_model')} ({entry.get('dimension')}d)"
+                if is_vec
+                else "Disabled (Direct SQL / AI_FILTER Lookup)"
+            ),
+            "ingestion_batch": (
+                f"Threshold = {entry.get('ingestion_threshold', 1)} run(s) • Batch Size = {entry.get('batch_size', 64)}"
+            ),
+            "llm_preprocessing": preproc_summary,
+            "kill_phrase": entry.get("kill_phrase") or "NO_INGEST",
+            "active_sql_query": active_sql,
+            "ddl": entry.get("ddl"),
+        }
+
+        records = list(entry.get("stored_records") or [])
+        if not records:
+            records = self._default_stored_records_for_memory(entry)
+            entry["stored_records"] = records
+
+        sessions = sorted({str(r.get("session_id") or "default") for r in records})
+        clean_filter = str(session_filter or "").strip()
+        if clean_filter and clean_filter.upper() not in ("ALL", "ALL SESSIONS", "ALL SESSIONS (CROSS-SESSION)"):
+            filtered_records = [r for r in records if str(r.get("session_id") or "") == clean_filter]
+        else:
+            filtered_records = records
+
+        return {
+            "ok": True,
+            "status_code": 200,
+            "active_role": self.active_role,
+            "context_epoch": self.context_epoch,
+            "memory": entry,
+            "configuration_summary": config_summary,
+            "active_sql_query": active_sql,
+            "sessions": ["All Sessions (Cross-Session)", *sessions],
+            "stored_records": filtered_records,
+        }
+
+    def reload_memory_detail(
+        self,
+        memory_id_or_name: str,
+        body: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Reload sessions and stored records for a Snowflake Memory and optionally toggle `auto_capture` or ingest a turn with `NO_INGEST` evaluation (`W2-R4-05`)."""
+        payload = body if isinstance(body, dict) else {}
+        entry = self._find_memory_entry(memory_id_or_name)
+        if entry is None:
+            return {
+                "ok": False,
+                "status_code": 404,
+                "error_code": ErrorCode.OBJECT_NOT_FOUND_OR_UNAUTHORIZED.value,
+                "message": f"Snowflake Memory '{memory_id_or_name}' non trovata.",
+                "active_role": self.active_role,
+            }
+        if "auto_capture" in payload and payload.get("auto_capture") is not None:
+            entry["auto_capture"] = bool(payload.get("auto_capture"))
+
+        ingest_turn = payload.get("ingest_turn")
+        if isinstance(ingest_turn, dict):
+            turn_text = str(ingest_turn.get("text") or ingest_turn.get("message") or "").strip()
+            sess_id = str(ingest_turn.get("session_id") or entry.get("session_id") or "sess_live_01").strip()
+            topic_val = str(ingest_turn.get("topic") or turn_text[:48] or "turn").strip()
+            kill_phrase = str(entry.get("kill_phrase") or "NO_INGEST").strip()
+            now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+            records = list(entry.get("stored_records") or self._default_stored_records_for_memory(entry))
+            is_trivial = (
+                kill_phrase.upper() in turn_text.upper()
+                or turn_text.lower() in {"ok", "grazie", "ok grazie", "ciao", "hello", "thanks", "thank you"}
+            )
+            if is_trivial:
+                records.insert(
+                    0,
+                    {
+                        "session_id": sess_id,
+                        "topic": f"Turn skipped ({kill_phrase}): '{turn_text[:40]}'",
+                        "outcome_score": kill_phrase,
+                        "status": "Skipped",
+                        "updated": now_iso,
+                    },
+                )
+            else:
+                records.insert(
+                    0,
+                    {
+                        "session_id": sess_id,
+                        "topic": topic_val,
+                        "outcome_score": ingest_turn.get("outcome_score", "MERGE"),
+                        "status": str(ingest_turn.get("status") or "Ingested"),
+                        "updated": now_iso,
+                    },
+                )
+            entry["stored_records"] = records
+
+        detail = self.get_memory_detail(
+            memory_id_or_name,
+            session_filter=str(payload.get("session_filter") or "").strip() or None,
+        )
+        detail["reloaded"] = True
+        return detail
+
+    def delete_memory(self, memory_id_or_name: str) -> dict[str, Any]:
+        """Delete a Snowflake Memory registration under `CURRENT_ROLE()` RBAC enforcement (`W2-R4-05`)."""
+        target = str(memory_id_or_name or "").strip()
+        entry = self._find_memory_entry(target)
+        fqn = str((entry or {}).get("table_fqn") or target)
+        denied = self.check_write_privilege_or_deny("MEMORY_DELETE", fqn)
+        if denied:
+            return denied
+        if entry is None:
+            return {
+                "ok": False,
+                "status_code": 404,
+                "error_code": ErrorCode.OBJECT_NOT_FOUND_OR_UNAUTHORIZED.value,
+                "message": f"Snowflake Memory '{target}' non trovata.",
+                "active_role": self.active_role,
+            }
+        mem_name = str(entry.get("name") or target).strip()
+        self.memories_registry = [
+            m
+            for m in self.memories_registry
+            if str(m.get("name") or "").strip().upper() != mem_name.upper()
+            and str(m.get("memory_id") or "").strip().upper() != target.upper()
+        ]
+        vis_mem = (self.selected_context.get("visible_objects") or {}).get("memories")
+        if isinstance(vis_mem, list):
+            self.selected_context["visible_objects"]["memories"] = [
+                x for x in vis_mem if str(x).strip().upper() != mem_name.upper()
+            ]
+        for f_ctx in self.contexts_by_flow_id.values():
+            f_vis = (f_ctx.get("visible_objects") or {}).get("memories")
+            if isinstance(f_vis, list):
+                f_ctx["visible_objects"]["memories"] = [
+                    x for x in f_vis if str(x).strip().upper() != mem_name.upper()
+                ]
+        persist_dir = Path(os.getenv("LANGFLOW_PERSIST_DIR", "/persist"))
+        db_path = persist_dir / "langflow.db"
+        if db_path.exists():
+            try:
+                conn = _open_sqlite_conn(db_path, readonly=False, timeout=30.0)
+                cur = conn.cursor()
+                cur.execute("DELETE FROM memory_base WHERE name = ?", (mem_name,))
+                cur.execute("DELETE FROM knowledge_base WHERE name = ?", (mem_name,))
+                conn.commit()
+                conn.close()
+            except Exception:  # noqa: BLE001
+                pass
+        self.record_audit_event(
+            action="MEMORY_DELETE",
+            outcome="ALLOWED",
+            target_object=fqn,
+            details={"deleted_memory": mem_name},
+        )
+        return {
+            "ok": True,
+            "status_code": 200,
+            "deleted": mem_name,
+            "table_fqn": fqn,
+            "active_role": self.active_role,
+        }
+
+    def bootstrap_full_memory_showcase_flow(
+        self,
+        *,
+        dry_run: bool = True,
+        execute_simulation: bool = True,
+    ) -> dict[str, Any]:
+        """Bootstrap and optionally run the `Snowflake_Full_Memory_Enterprise_Agent` showcase flow combining `#1..#5` + `#7` + `#8` (`W2-R4-07`)."""
+        try:
+            from .showcase_full_memory_agent import bootstrap_and_run_full_memory_showcase
+
+            return bootstrap_and_run_full_memory_showcase(
+                self,
+                dry_run=dry_run,
+                execute_simulation=execute_simulation,
+            )
+        except ImportError:
+            pass
+
+        showcase_flow_id = "f0000000-0000-4000-8000-000000000507"
+        self.update_selected_context(
+            {
+                "database": "SNOWFLAKE_LANGFLOW",
+                "schema": "CORE",
+                "databases": ["SNOWFLAKE_LANGFLOW"],
+                "schemas_by_db": {"SNOWFLAKE_LANGFLOW": ["CORE"]},
+                "postgres_instances": ["LANGFLOW_PG_INSTANCE"],
+                "objects_by_db_schema": {
+                    "SNOWFLAKE_LANGFLOW.CORE": {
+                        "tables": ["FINANCIAL_LEDGER_Q4", "COST_CENTERS_DIM"],
+                        "semantic_views": ["FINANCE_MARGIN_SEMANTIC_VIEW"],
+                        "cortex_search_services": ["ACCOUNTING_POLICY_SEARCH_SVC"],
+                    }
+                },
+            },
+            flow_id=showcase_flow_id,
+        )
+        showcase_specs = [
+            {
+                "name": "MEM_1_GRAPH_CHECKPOINTER",
+                "flow_id": showcase_flow_id,
+                "agent_memory_type": "graph_state_checkpointer",
+                "storage_family": "snowflake_postgres",
+                "postgres_instance": "LANGFLOW_PG_INSTANCE",
+                "pg_database": "postgres",
+                "pg_schema": "public",
+                "pg_table": "langgraph_checkpoints",
+                "pg_table_mode": "PostgresSaver",
+                "enable_embedding": False,
+                "dry_run": dry_run,
+            },
+            {
+                "name": "MEM_2_CHAT_WINDOW",
+                "flow_id": showcase_flow_id,
+                "agent_memory_type": "buffer_window_memory",
+                "storage_family": "snowflake_postgres",
+                "postgres_instance": "LANGFLOW_PG_INSTANCE",
+                "pg_database": "postgres",
+                "pg_schema": "public",
+                "pg_table": "chat_message_history",
+                "pg_table_mode": "Relational / JSONB",
+                "filter_by_session": True,
+                "window_k": 8,
+                "enable_embedding": False,
+                "dry_run": dry_run,
+            },
+            {
+                "name": "MEM_3_SESSION_SUMMARY",
+                "flow_id": showcase_flow_id,
+                "agent_memory_type": "summary_memory",
+                "storage_family": "snowflake_sql",
+                "database": "SNOWFLAKE_LANGFLOW",
+                "schema": "CORE",
+                "table_type": "HYBRID",
+                "table_fqn": "SNOWFLAKE_LANGFLOW.CORE.CHAT_SESSION_SUMMARY",
+                "primary_key": "(session_id)",
+                "filter_by_session": True,
+                "enable_embedding": False,
+                "summarizer_model": "openai-gpt-6-luna",
+                "llm_preprocessing": {
+                    "enabled": True,
+                    "engine": "proxy_chat",
+                    "model": "openai-gpt-6-luna",
+                    "kill_phrase": "NO_INGEST",
+                },
+                "dry_run": dry_run,
+            },
+            {
+                "name": "MEM_4_USER_ENTITY_PROFILE",
+                "flow_id": showcase_flow_id,
+                "agent_memory_type": "user_profile_entity_memory",
+                "storage_family": "snowflake_sql",
+                "database": "SNOWFLAKE_LANGFLOW",
+                "schema": "CORE",
+                "table_type": "HYBRID",
+                "table_fqn": "SNOWFLAKE_LANGFLOW.CORE.USER_ENTITY_PROFILE",
+                "primary_key": "(user_id, entity_namespace, memory_key)",
+                "semi_structured_type": "VARIANT",
+                "filter_by_session": False,
+                "enable_embedding": False,
+                "llm_preprocessing": {
+                    "enabled": True,
+                    "engine": "proxy_messages",
+                    "model": "claude-sonnet-5-5",
+                    "kill_phrase": "NO_INGEST",
+                },
+                "dry_run": dry_run,
+            },
+            {
+                "name": "MEM_5_EPISODIC_FEWSHOT",
+                "flow_id": showcase_flow_id,
+                "agent_memory_type": "episodic_memory",
+                "storage_family": "snowflake_sql",
+                "database": "SNOWFLAKE_LANGFLOW",
+                "schema": "CORE",
+                "table_type": "HYBRID",
+                "table_fqn": "SNOWFLAKE_LANGFLOW.CORE.AGENT_EPISODIC_MEMORY",
+                "primary_key": "(user_id, chunk_id)",
+                "filter_by_session": False,
+                "tool_mode": True,
+                "enable_embedding": True,
+                "embedding_provider": "snowflake_cortex",
+                "embedding_model": "snowflake-arctic-embed-l-v2.0",
+                "outcome_score_threshold": 0.90,
+                "few_shot_k": 3,
+                "dry_run": dry_run,
+            },
+        ]
+        created_memories = []
+        for spec in showcase_specs:
+            res = self.create_or_register_memory(spec)
+            if res.get("ok"):
+                created_memories.append(res["memory"])
+        return {
+            "ok": True,
+            "flow_name": "Snowflake_Full_Memory_Enterprise_Agent",
+            "flow_id": showcase_flow_id,
+            "memories_created": [m["name"] for m in created_memories],
+            "memories": created_memories,
+            "domain_tools_#7": ["Cortex Analyst (FINANCE_MARGIN_SEMANTIC_VIEW)", "Cortex Search (ACCOUNTING_POLICY_SEARCH_SVC)"],
+            "procedural_memory_#8": "System Message (Enterprise Financial & Operations Rules + MEM_3_SESSION_SUMMARY + MEM_4_USER_ENTITY_PROFILE)",
+        }
 
     def _is_technical_memory_table(self, table_name: str) -> bool:
         """Return True if `table_name` is a technical agent-memory backing table (`W2-R4-06B`, `CTX-ARCH-07` #4)."""
@@ -4863,7 +5927,11 @@ def register_snowflake_fastapi_routes(app: Any) -> None:
                 "memories": LIVE_BRIDGE.memories_registry,
                 "memories_catalog": LIVE_BRIDGE.memories_catalog,
                 "agent_memory_types": list(AGENT_MEMORY_TYPES),
+                "coming_soon_memory_types": list(COMING_SOON_MEMORY_TYPES),
+                "dropdown_memory_types": list(DROPDOWN_MEMORY_TYPES),
                 "legacy_memory_type_aliases": dict(LEGACY_MEMORY_TYPE_ALIASES),
+                "snowflake_embedding_sources": list(SNOWFLAKE_EMBEDDING_SOURCES),
+                "llm_preprocessing_engines": list(LLM_PREPROCESSING_ENGINES),
                 "external_embedding_providers": EXTERNAL_EMBEDDING_PROVIDERS,
                 "embedding_providers_catalog": list(EMBEDDING_PROVIDERS_CATALOG),
                 "supported_backends": [
@@ -4896,6 +5964,7 @@ def register_snowflake_fastapi_routes(app: Any) -> None:
                     "voyage-multilingual-2 (1024d)",
                     "nv-embed-qa-4 (1024d)",
                     "voyage-multimodal-3 (1024d)",
+                    "twelvelabs-marengo-embed-3-0 (512d)",
                     "text-embedding-3-small (1536d)",
                     "text-embedding-3-large (3072d)",
                     "text-embedding-ada-002 (1536d)",
@@ -4912,6 +5981,80 @@ def register_snowflake_fastapi_routes(app: Any) -> None:
         body = await request.json()
         res = await asyncio.to_thread(LIVE_BRIDGE.create_or_register_memory, body if isinstance(body, dict) else {})
         status_code = int(res.get("status_code") or (201 if res.get("ok") else 422))
+        return JSONResponse(status_code=status_code, content=res)
+
+    @sf_router.post("/memories/recall")
+    async def post_recall_memory(request: Request) -> JSONResponse:
+        body = await request.json()
+        payload = body if isinstance(body, dict) else {}
+        mem_ref = str(
+            payload.get("memory_ref")
+            or payload.get("memory_name")
+            or payload.get("memory_base")
+            or payload.get("name")
+            or payload.get("memory_id")
+            or ""
+        ).strip()
+        res = await asyncio.to_thread(
+            lambda: LIVE_BRIDGE.recall_memory(
+                mem_ref,
+                query=str(payload.get("query") or ""),
+                session_id=str(payload.get("session_id") or "default"),
+                thread_id=str(payload.get("thread_id") or "default"),
+                user_id=str(payload.get("user_id") or "default"),
+                entity_namespace=str(payload.get("entity_namespace") or "default"),
+                topic=str(payload.get("topic") or ""),
+                limit=int(payload.get("limit") or 10),
+            )
+        )
+        status_code = 200 if res.get("ok") else 404
+        return JSONResponse(status_code=status_code, content=res)
+
+    @sf_router.get("/memories/showcase/full-memory-enterprise-agent")
+    async def get_full_memory_showcase() -> JSONResponse:
+        res = await asyncio.to_thread(
+            lambda: LIVE_BRIDGE.bootstrap_full_memory_showcase_flow(dry_run=True, execute_simulation=True)
+        )
+        return JSONResponse(status_code=200, content=res)
+
+    @sf_router.post("/memories/showcase/full-memory-enterprise-agent")
+    async def post_full_memory_showcase(request: Request) -> JSONResponse:
+        try:
+            body = await request.json()
+            payload = body if isinstance(body, dict) else {}
+        except Exception:  # noqa: BLE001
+            payload = {}
+        dry_run = bool(payload.get("dry_run", True))
+        execute_sim = bool(payload.get("execute_simulation", True))
+        res = await asyncio.to_thread(
+            lambda: LIVE_BRIDGE.bootstrap_full_memory_showcase_flow(dry_run=dry_run, execute_simulation=execute_sim)
+        )
+        return JSONResponse(status_code=200, content=res)
+
+    @sf_router.get("/memories/{memory_id_or_name}")
+    async def get_memory_detail_route(memory_id_or_name: str, request: Request) -> JSONResponse:
+        session_filter = request.query_params.get("session_filter") or request.query_params.get("session")
+        res = await asyncio.to_thread(
+            lambda: LIVE_BRIDGE.get_memory_detail(memory_id_or_name, session_filter=session_filter)
+        )
+        status_code = int(res.get("status_code") or (200 if res.get("ok") else 404))
+        return JSONResponse(status_code=status_code, content=res)
+
+    @sf_router.post("/memories/{memory_id_or_name}/reload")
+    async def post_reload_memory_detail_route(memory_id_or_name: str, request: Request) -> JSONResponse:
+        try:
+            body = await request.json()
+            payload = body if isinstance(body, dict) else {}
+        except Exception:  # noqa: BLE001
+            payload = {}
+        res = await asyncio.to_thread(LIVE_BRIDGE.reload_memory_detail, memory_id_or_name, payload)
+        status_code = int(res.get("status_code") or (200 if res.get("ok") else 404))
+        return JSONResponse(status_code=status_code, content=res)
+
+    @sf_router.delete("/memories/{memory_id_or_name}")
+    async def delete_memory_route(memory_id_or_name: str) -> JSONResponse:
+        res = await asyncio.to_thread(LIVE_BRIDGE.delete_memory, memory_id_or_name)
+        status_code = int(res.get("status_code") or (200 if res.get("ok") else 404))
         return JSONResponse(status_code=status_code, content=res)
 
     @sf_router.post("/mcp/streamable")

@@ -110,14 +110,25 @@
       `<svg xmlns="http://www.w3.org/2000/svg" width="96" height="96" viewBox="0 0 64 64" fill="#29B5E8"><path d="${OFFICIAL_SNOWFLAKE_PATH}"/></svg>`
     );
 
-  // W2-R3-05 & W2-R2-13: 5 Canonical LangChain/Langflow Agent Memory Types + Legacy Aliases
+  // W2-R3-05, W2-R2-13 & W2-R4-02: 5 Canonical LangChain/Langflow Agent Memory Types + Slot #6 Coming Soon + Legacy Aliases
   const AGENT_MEMORY_TYPES = [
     {
       id: "graph_state_checkpointer",
       label: "#1 Short-Term: Graph State & Checkpointer",
+      short_label: "#1 Graph State & Checkpointer",
       category: "short_term",
       default_category: "postgres_non_vector",
+      default_storage_family: "snowflake_postgres",
       default_backend: "Snowflake Postgres (PostgresSaver)",
+      default_table_type: "HYBRID",
+      default_table_name: "AGENT_CHECKPOINTS",
+      default_hybrid_pk: "(thread_id, checkpoint_ns, step_id)",
+      default_hybrid_index: "(thread_id, updated_at)",
+      default_pg_table: "public.langgraph_checkpoints",
+      default_pg_mode: "PostgresSaver",
+      filter_by_session: true,
+      embedding_locked_off: true,
+      default_llm_preprocessing: false,
       recommended_snowflake_objects: [
         "Snowflake Postgres (PostgresSaver)",
         "Hybrid Table",
@@ -128,6 +139,8 @@
         "SELECT state_blob, checkpoint_ns, step_id FROM <fqn> WHERE thread_id = :thread_id ORDER BY step_id DESC LIMIT 1",
       when_embedding_useful:
         "Mai: lo stato del grafo viene recuperato sempre per chiave primaria thread_id.",
+      purpose:
+        "Salva e ripristina lo stato di esecuzione del grafo LangGraph/A2A (step, nodi visitati, interrupt Human-in-the-Loop) indicizzato per thread_id e checkpoint_ns.",
       required_inputs: ["thread_id", "checkpoint_ns", "ttl_hours"],
       default_enable_embedding: false,
       description:
@@ -136,9 +149,20 @@
     {
       id: "buffer_window_memory",
       label: "#2 Short-Term: Buffer / Window Memory (Storico Chat)",
+      short_label: "#2 Buffer / Window Memory (Storico Chat)",
       category: "short_term",
       default_category: "structured",
+      default_storage_family: "snowflake_sql",
       default_backend: "Hybrid Table",
+      default_table_type: "HYBRID",
+      default_table_name: "CHAT_WINDOW_HISTORY",
+      default_hybrid_pk: "(session_id, turn_id)",
+      default_hybrid_index: "(session_id, created_at)",
+      default_pg_table: "public.chat_message_history",
+      default_pg_mode: "Relational / JSONB",
+      filter_by_session: true,
+      embedding_locked_off: false,
+      default_llm_preprocessing: false,
       recommended_snowflake_objects: [
         "Snowflake Postgres (Relational / JSONB)",
         "Hybrid Table",
@@ -149,6 +173,8 @@
         "SELECT sender, message_text, created_at FROM <fqn> WHERE session_id = :session_id ORDER BY created_at DESC LIMIT :window_k",
       when_embedding_useful:
         "Utile solo per recuperare messaggi detti 500+ turni fa fuori dalla finestra K.",
+      purpose:
+        "Conserva gli ultimi K turni conversazionali ordinati cronologicamente per session_id per popolare Chat History dell'Agente senza latenza di vector search.",
       required_inputs: ["session_id", "window_k", "retention_days"],
       default_enable_embedding: false,
       description:
@@ -157,9 +183,20 @@
     {
       id: "summary_memory",
       label: "#3 Short-Term: Summary Memory (Riassunto)",
+      short_label: "#3 Summary Memory (Riassunto Progressivo)",
       category: "short_term",
       default_category: "structured",
+      default_storage_family: "snowflake_sql",
       default_backend: "Hybrid Table",
+      default_table_type: "HYBRID",
+      default_table_name: "CHAT_SESSION_SUMMARY",
+      default_hybrid_pk: "(session_id)",
+      default_hybrid_index: "(session_id, updated_at)",
+      default_pg_table: "public.chat_session_summaries",
+      default_pg_mode: "Relational / JSONB",
+      filter_by_session: true,
+      embedding_locked_off: true,
+      default_llm_preprocessing: true,
       recommended_snowflake_objects: [
         "Hybrid Table + AI_COMPLETE / AI_SUMMARIZE_AGG",
         "Standard Table + AI_COMPLETE",
@@ -170,6 +207,8 @@
         "SELECT running_summary, last_turn_id FROM <fqn> WHERE session_id = :session_id LIMIT 1 -- iniettato nel System Prompt",
       when_embedding_useful:
         "Mai: è un riassunto di 1 riga letto direttamente e aggiornato in background con AI_COMPLETE / AI_SUMMARIZE_AGG.",
+      purpose:
+        "Mantiene un riassunto progressivo compatto della sessione aggiornato con AI_COMPLETE / Proxy LLM e iniettato nel System Message dell'Agente.",
       required_inputs: ["session_id", "summarizer_model", "max_summary_tokens"],
       default_enable_embedding: false,
       description:
@@ -178,9 +217,20 @@
     {
       id: "user_profile_entity_memory",
       label: "#4 Long-Term Semantic: User Profile & Entity Memory",
+      short_label: "#4 User Profile & Entity Memory (Long-Term)",
       category: "long_term_semantic",
       default_category: "semi_structured",
+      default_storage_family: "snowflake_sql",
       default_backend: "Standard Table (VARIANT)",
+      default_table_type: "HYBRID",
+      default_table_name: "USER_ENTITY_PROFILE",
+      default_hybrid_pk: "(user_id, entity_namespace, chunk_id)",
+      default_hybrid_index: "(user_id, entity_namespace)",
+      default_pg_table: "public.user_entity_profiles",
+      default_pg_mode: "PostgresStore JSONB",
+      filter_by_session: false,
+      embedding_locked_off: false,
+      default_llm_preprocessing: true,
       recommended_snowflake_objects: [
         "Snowflake Postgres (PostgresStore)",
         "Hybrid Table (VARIANT)",
@@ -191,6 +241,8 @@
         "SELECT profile_json FROM <fqn> WHERE user_id = :user_id AND entity_namespace = :entity_namespace LIMIT 1 -- caricato a inizio sessione",
       when_embedding_useful:
         "Solo se l'utente accumula centinaia di fatti distinti e non entrano tutti nel prompt.",
+      purpose:
+        "Salva preferenze persistenti, fatti sull'utente e attributi di entità (VARIANT/JSONB) cross-sessione con distillazione LLM e Kill Phrase NO_INGEST.",
       required_inputs: ["user_id", "entity_namespace", "schema_keys"],
       default_enable_embedding: false,
       description:
@@ -199,25 +251,66 @@
     {
       id: "episodic_memory",
       label: "#5 Long-Term Semantic: Episodic Memory (Esperienze / Few-shot)",
+      short_label: "#5 Episodic Memory (Esperienze / Few-Shot)",
       category: "long_term_semantic",
       default_category: "structured",
+      default_storage_family: "snowflake_sql",
       default_backend: "Hybrid Table",
+      default_table_type: "HYBRID",
+      default_table_name: "AGENT_EPISODIC_MEMORY",
+      default_hybrid_pk: "(user_id, chunk_id)",
+      default_hybrid_index: "(user_id, topic, created_at)",
+      default_pg_table: "public.agent_episodes",
+      default_pg_mode: "JSONB + pgvector",
+      filter_by_session: false,
+      embedding_locked_off: false,
+      default_llm_preprocessing: false,
       recommended_snowflake_objects: [
         "Hybrid Table",
         "Standard Table",
+        "Interactive / Dynamic Table",
         "Snowflake Postgres",
       ],
-      needs_embedding_badge: "OPZIONALE",
+      needs_embedding_badge: "OPZIONALE (Default OFF)",
       how_to_feed_without_embedding:
         "SELECT topic, tool_used, outcome_score, episode_text FROM <fqn> WHERE topic = :topic ORDER BY outcome_score DESC, created_at DESC LIMIT :few_shot_k",
       when_embedding_useful:
-        "Utile quando i task passati non hanno categorie fisse e serve similarity search per trovare episodi simili.",
+        "Utile quando i task passati non hanno categorie fisse e serve similarity search (VECTOR_COSINE_SIMILARITY) per trovare episodi simili.",
+      purpose:
+        "Salva i task passati risolti con successo dall'agente (outcome_score >= threshold) per fornirli come esempi few-shot dinamici o Toolset all'Agente.",
       required_inputs: ["topic_column", "tool_used_column", "outcome_score_threshold", "few_shot_k"],
       default_enable_embedding: false,
       description:
         "Past agent experiences and high-scoring few-shot examples retrieved by topic/tool or optional vector similarity.",
     },
   ];
+
+  // W2-R4-02: Slot #6 Business Ontology / Cortex Sense (Coming Soon) kept separate so AGENT_MEMORY_TYPES.length === 5
+  const COMING_SOON_MEMORY_TYPES = [
+    {
+      id: "business_ontology_cortex_sense",
+      label: "#6 Long-Term: Business Ontology / Cortex Sense (Coming Soon)",
+      short_label: "#6 Business Ontology / Cortex Sense (Soon)",
+      category: "long_term_ontology",
+      enabled: false,
+      badge: "Coming Soon",
+      recommended_snowflake_objects: [
+        "Cortex Sense Context",
+        "Business Ontology Graph",
+        "Semantic View",
+      ],
+      needs_embedding_badge: "OPZIONALE — Gestito da Cortex Sense",
+      how_to_feed_without_embedding:
+        "-- Slot #6 (Coming Soon): risolto tramite Cortex Sense / Business Ontology",
+      when_embedding_useful:
+        "Gestito automaticamente dal grafo semantico Cortex Sense quando abilitato.",
+      purpose:
+        "Memoria ontologica aziendale basata su Cortex Sense e Business Ontology (concetti di dominio, relazioni semantiche, metriche canoniche e regole). In arrivo nelle prossime release.",
+      description:
+        "Enterprise Business Ontology and Cortex Sense semantic graph memory (Coming Soon).",
+    },
+  ];
+  window.SNOWFLAKE_COMING_SOON_MEMORY_TYPES = COMING_SOON_MEMORY_TYPES;
 
   const LEGACY_MEMORY_TYPE_ALIASES = {
     episodic_session: "buffer_window_memory",
@@ -226,6 +319,9 @@
   };
 
   function resolveCanonicalMemoryTypeSpec(typeId) {
+    if (typeId === "business_ontology_cortex_sense") {
+      return COMING_SOON_MEMORY_TYPES[0];
+    }
     const normalized = LEGACY_MEMORY_TYPE_ALIASES[typeId] || typeId || "buffer_window_memory";
     return (
       AGENT_MEMORY_TYPES.find(function (t) {
@@ -234,7 +330,7 @@
     );
   }
 
-  // Official AI_EMBED model catalog with locked vector dimensions (HUB-W2-05)
+  // Official AI_EMBED model catalog with locked vector dimensions (HUB-W2-05 & W2-R4-04)
   const OFFICIAL_AI_EMBED_MODELS = [
     { model_id: "snowflake-arctic-embed-m-v1.5", dimension: 768, label: "snowflake-arctic-embed-m-v1.5 (768d)" },
     { model_id: "snowflake-arctic-embed-m", dimension: 768, label: "snowflake-arctic-embed-m (768d)" },
@@ -246,19 +342,53 @@
     { model_id: "voyage-multilingual-2", dimension: 1024, label: "voyage-multilingual-2 (1024d)" },
     { model_id: "nv-embed-qa-4", dimension: 1024, label: "nv-embed-qa-4 (1024d)" },
     { model_id: "voyage-multimodal-3", dimension: 1024, label: "voyage-multimodal-3 (1024d)" },
+    { model_id: "twelvelabs-marengo-embed-3-0", dimension: 512, label: "twelvelabs-marengo-embed-3-0 (512d - AI_MULTI_EMBED)" },
   ];
 
-  // W2-R3-05: Optional Embedding Provider Catalog (Snowflake Cortex AI_EMBED + External Providers)
+  // W2-R3-05 & W2-R4-04: 4 Official Snowflake Embedding Sources + Backward-Compatible External Aliases
   const EMBEDDING_PROVIDERS_CATALOG = {
     snowflake_cortex: {
       id: "snowflake_cortex",
-      label: "Snowflake Cortex (AI_EMBED)",
+      label: "1. Snowflake Cortex Native (AI_EMBED / AI_MULTI_EMBED)",
       models: [
-        { model_id: "snowflake-arctic-embed-m-v1.5", dimension: 768, label: "snowflake-arctic-embed-m-v1.5 (768d)" },
-        { model_id: "e5-base-v2", dimension: 768, label: "e5-base-v2 (768d)" },
-        { model_id: "snowflake-arctic-embed-l-v2.0", dimension: 1024, label: "snowflake-arctic-embed-l-v2.0 (1024d)" },
-        { model_id: "nv-embed-qa-4", dimension: 1024, label: "nv-embed-qa-4 (1024d)" },
-        { model_id: "multilingual-e5-large", dimension: 1024, label: "multilingual-e5-large (1024d)" },
+        { model_id: "snowflake-arctic-embed-m-v1.5", dimension: 768, label: "snowflake-arctic-embed-m-v1.5 (768d - AI_EMBED)" },
+        { model_id: "snowflake-arctic-embed-m", dimension: 768, label: "snowflake-arctic-embed-m (768d - AI_EMBED)" },
+        { model_id: "e5-base-v2", dimension: 768, label: "e5-base-v2 (768d - AI_EMBED)" },
+        { model_id: "snowflake-arctic-embed-l-v2.0", dimension: 1024, label: "snowflake-arctic-embed-l-v2.0 (1024d - AI_EMBED)" },
+        { model_id: "snowflake-arctic-embed-l-v2.0-8k", dimension: 1024, label: "snowflake-arctic-embed-l-v2.0-8k (1024d - AI_EMBED)" },
+        { model_id: "multilingual-e5-large", dimension: 1024, label: "multilingual-e5-large (1024d - AI_EMBED)" },
+        { model_id: "voyage-multilingual-2", dimension: 1024, label: "voyage-multilingual-2 (1024d - AI_EMBED)" },
+        { model_id: "nv-embed-qa-4", dimension: 1024, label: "nv-embed-qa-4 (1024d - AI_EMBED)" },
+        { model_id: "voyage-multimodal-3", dimension: 1024, label: "voyage-multimodal-3 (1024d - AI_EMBED)" },
+        { model_id: "twelvelabs-marengo-embed-3-0", dimension: 512, label: "twelvelabs-marengo-embed-3-0 (512d - AI_MULTI_EMBED)" },
+      ],
+    },
+    spcs_model_registry: {
+      id: "spcs_model_registry",
+      label: "2. Snowflake Model Registry (Servizio su Compute Pool SPCS, 1..4096d)",
+      models: [
+        { model_id: "bge-large-en-v1.5-spcs", dimension: 1024, label: "bge-large-en-v1.5-spcs (1024d - SPCS Registry)" },
+        { model_id: "intfloat-e5-mistral-7b-spcs", dimension: 4096, label: "intfloat-e5-mistral-7b-spcs (4096d - SPCS Registry)" },
+        { model_id: "all-minilm-l6-v2-spcs", dimension: 384, label: "all-minilm-l6-v2-spcs (384d - SPCS Registry)" },
+      ],
+    },
+    spcs_ollama: {
+      id: "spcs_ollama",
+      label: "3. Private - Ollama (Container SPCS su Compute Pool)",
+      models: [
+        { model_id: "nomic-embed-text", dimension: 768, label: "nomic-embed-text (768d - SPCS Ollama)" },
+        { model_id: "bge-large-en-v1.5", dimension: 1024, label: "bge-large-en-v1.5 (1024d - SPCS Ollama)" },
+        { model_id: "mxbai-embed-large", dimension: 1024, label: "mxbai-embed-large (1024d - SPCS Ollama)" },
+      ],
+    },
+    spcs_llm_proxy: {
+      id: "spcs_llm_proxy",
+      label: "4. Snowflake Standard Proxy (Chat / Responses / Messages, 1..4096d)",
+      models: [
+        { model_id: "proxy-chat-text-embedding-3-small", dimension: 1536, label: "Proxy - Chat: text-embedding-3-small (1536d)" },
+        { model_id: "proxy-chat-text-embedding-3-large", dimension: 3072, label: "Proxy - Chat: text-embedding-3-large (3072d)" },
+        { model_id: "proxy-responses-embed-v1", dimension: 1024, label: "Proxy - Responses: embed-v1 (1024d)" },
+        { model_id: "proxy-messages-voyage-3", dimension: 1024, label: "Proxy - Messages: voyage-3 (1024d)" },
       ],
     },
     openai: {
@@ -672,8 +802,9 @@
     return false;
   }
 
-  // W2-R2-13, W2-R2-14, W2-R3-05 & W2-R3-06: Companion `+ Snowflake` button in official #29B5E8
+  // W2-R2-13, W2-R2-14, W2-R3-05, W2-R3-06 & W2-R4-01: Companion `[ + ❄️ Snowflake ]` button in official #29B5E8
   // Strictly shown ONLY on the Memories view, placed inline next to `+ Create` with normal z-index (z-index: 10),
+  // element order `+` BEFORE the Snowflake icon and text `Snowflake` (`[ + ❄️ Snowflake ]`),
   // and hidden/inert whenever any modal dialog is open.
   function ensureMemoriesPageSnowflakeButton() {
     if (!document.body) return;
@@ -690,14 +821,14 @@
       btn.setAttribute("data-testid", "memories-plus-snowflake-btn");
       btn.style.cssText =
         "position:fixed;top:72px;left:132px;z-index:10;display:none;align-items:center;gap:6px;background:#29B5E8;color:#ffffff;border:1px solid #29B5E8;border-radius:10px;padding:6px 12px;font-family:Inter,sans-serif;font-size:12px;font-weight:600;cursor:pointer;box-shadow:0 1px 3px rgba(41,181,232,0.28);white-space:nowrap;";
-      btn.innerHTML = `${buildOfficialSnowflakeSvg("#ffffff", 14)}<span>+ Snowflake</span>`;
-      btn.onclick = function () {
-        openCreateSnowflakeMemoryModal();
+      btn.innerHTML = '<span>+</span>' + buildOfficialSnowflakeSvg("#ffffff", 14) + '<span>Snowflake ▾</span>';
+      btn.onclick = function (ev) {
+        openSnowflakeMemoryTypeDropdown(extractCurrentFlowId(), ev || btn);
       };
       document.body.appendChild(btn);
     }
     if (nativeReactBtn) {
-      // React Too component already rendered the inline '+ Snowflake' button right next to '+ Create'
+      // React Too component already rendered the inline '[ + ❄️ Snowflake ]' button right next to '+ Create'
       btn.style.display = "none";
       btn.style.pointerEvents = "none";
       if (isMemoriesView) {
@@ -732,6 +863,10 @@
       if (cardsGrid && !isMemoriesView) {
         cardsGrid.style.display = "none";
       }
+      const detailView = document.getElementById("sflf-memory-detail-view");
+      if (detailView && !isMemoriesView) {
+        detailView.style.display = "none";
+      }
     }
   }
 
@@ -758,10 +893,30 @@
   window.getActiveWorkflowFlowId = getActiveWorkflowFlowId;
   window.extractCurrentFlowId = extractCurrentFlowId;
 
-  // CTX-ARCH-05B, W2-R2-00, W2-R2-04A, W2-R2-14 & W2-R4-01:
+  // CTX-ARCH-05B, W2-R2-00, W2-R2-04A, W2-R2-14, W2-R4-01 & W2-R4-06B:
   // 3-Level Live Canvas Node Auto-Sync (Backend updated_node_templates + React Fiber template mutation + Radix combobox DOM sync)
   function _resolveFieldCategoryAndOptions(fieldName, dbs, primaryDb, schemasForDb, primarySchema, vis, pgInstances, pgTablesMap, activeCtx) {
     const key = String(fieldName || "").toLowerCase();
+    if (
+      key === "memory_base" ||
+      key === "memory_catalog_ref" ||
+      key === "memory_name" ||
+      key.includes("memory_base") ||
+      key.includes("memory_catalog")
+    ) {
+      const rawMems =
+        Array.isArray(sfState.memories) && sfState.memories.length > 0
+          ? sfState.memories
+          : vis && Array.isArray(vis.memories)
+            ? vis.memories
+            : [];
+      const memNames = rawMems
+        .map(function (m) {
+          return typeof m === "string" ? m : (m && m.name) || "";
+        })
+        .filter(Boolean);
+      return { options: memNames, fallbackValue: memNames[0] || "" };
+    }
     if (key === "database" || key.endsWith("_database") || key.includes("input-database") || key.includes("dropdown-database")) {
       return { options: dbs, fallbackValue: primaryDb, isDb: true };
     }
@@ -2928,148 +3083,419 @@
     }
   }
 
-  // W2-R3-05 & W2-R3-06: Dedicated Light-Themed "Create a Snowflake Memory" Modal & Searchable Memory Cards
+  // W2-R3-05, W2-R3-06, W2-R4-02, W2-R4-03, W2-R4-04 & W2-R4-05:
+  // Intermediate Hover Dropdown (#1..#5 + #6 Coming Soon), Compact 3-Step Paginated Wizard, & Memory Detail View
 
-  function openCreateSnowflakeMemoryModal(flowIdFromReact) {
+  function closeSnowflakeMemoryTypeDropdown() {
+    const dd = document.getElementById("sflf-memory-type-dropdown");
+    if (dd) {
+      dd.style.display = "none";
+    }
+  }
+
+  function openSnowflakeMemoryTypeDropdown(flowIdFromReact, anchorEventOrEl) {
     if (flowIdFromReact && typeof flowIdFromReact === "string") {
       _activeMemoryFlowId = flowIdFromReact;
     }
-    let modal = document.getElementById("sflf-create-memory-modal");
-    if (modal) {
-      modal.style.display = "flex";
-      ensureMemoriesPageSnowflakeButton();
-      return;
+    if (!document.body) return;
+    let dd = document.getElementById("sflf-memory-type-dropdown");
+    if (!dd) {
+      dd = document.createElement("div");
+      dd.id = "sflf-memory-type-dropdown";
+      dd.setAttribute("data-testid", "snowflake-memory-type-dropdown");
+      dd.style.cssText =
+        "position:fixed;top:114px;left:24px;z-index:99995;display:none;background:#ffffff;color:#0f172a;border:1px solid #cbd5e1;border-radius:12px;box-shadow:0 18px 42px rgba(15,23,42,0.20);padding:10px;font-family:Inter,sans-serif;font-size:12px;width:min(94vw,680px);grid-template-columns:minmax(250px,1.08fr) minmax(240px,1fr);gap:10px;box-sizing:border-box;";
+      document.body.appendChild(dd);
     }
 
-    modal = document.createElement("div");
-    modal.id = "sflf-create-memory-modal";
-    modal.setAttribute("data-testid", "create-snowflake-memory-modal");
-    modal.setAttribute("role", "dialog");
-    modal.style.cssText =
-      "position:fixed;inset:0;background:rgba(15,23,42,0.45);backdrop-filter:blur(3px);z-index:99998;display:flex;align-items:center;justify-content:center;padding:16px;box-sizing:border-box;font-family:Inter,sans-serif;";
-
-    const lightInputStyle =
-      "background:#ffffff;color:#0f172a;border:1px solid #cbd5e1;padding:7px 10px;border-radius:8px;width:100%;min-width:0;box-sizing:border-box;font-size:12px;";
-    const lightSelectStyle =
-      "background:#ffffff;color:#0f172a;border:1px solid #cbd5e1;padding:7px 10px;border-radius:8px;width:100%;min-width:0;box-sizing:border-box;font-size:12px;";
-
-    const typeOptionsHtml = AGENT_MEMORY_TYPES.map(function (t) {
-      return `<option value="${t.id}">${t.label}</option>`;
-    }).join("");
-
-    const providerOptionsHtml = Object.keys(EMBEDDING_PROVIDERS_CATALOG)
-      .map(function (k) {
-        const p = EMBEDDING_PROVIDERS_CATALOG[k];
-        return `<option value="${p.id}">${p.label}</option>`;
+    const allItems = AGENT_MEMORY_TYPES.concat(COMING_SOON_MEMORY_TYPES);
+    const itemsHtml = allItems
+      .map(function (item) {
+        const isDisabled = item.enabled === false || item.id === "business_ontology_cortex_sense";
+        const badgeText = isDisabled ? item.badge || "Coming Soon" : item.needs_embedding_badge || "NO";
+        return `<button type="button"
+          class="sflf-mem-type-dd-item"
+          data-testid="snowflake-memory-type-item-${item.id}"
+          data-memory-type-id="${item.id}"
+          ${isDisabled ? 'disabled aria-disabled="true"' : ""}
+          style="display:flex;align-items:center;justify-content:space-between;gap:8px;width:100%;text-align:left;padding:8px 10px;border-radius:8px;border:1px solid ${
+            isDisabled ? "#e2e8f0" : "#bae6fd"
+          };background:${isDisabled ? "#f8fafc" : "#ffffff"};color:${
+            isDisabled ? "#94a3b8" : "#0f172a"
+          };opacity:${isDisabled ? "0.55" : "1"};cursor:${
+            isDisabled ? "not-allowed" : "pointer"
+          };font-size:11.5px;font-weight:600;box-sizing:border-box;">
+          <span>${item.short_label || item.label}</span>
+          <span style="font-size:10px;padding:1px 7px;border-radius:999px;background:${
+            isDisabled ? "#e2e8f0" : "rgba(41,181,232,0.14)"
+          };color:${isDisabled ? "#64748b" : "#0284c7"};white-space:nowrap;">${badgeText}</span>
+        </button>`;
       })
       .join("");
 
-    modal.innerHTML = `
-      <div class="sflf-modal-dialog-surface" style="background:#ffffff;color:#0f172a;border:1px solid #e2e8f0;border-radius:12px;width:clamp(320px,94vw,860px);max-width:96vw;max-height:min(90dvh,90vh);display:flex;flex-direction:column;overflow:hidden;padding:20px 24px;box-shadow:0 20px 50px rgba(15,23,42,0.18);font-size:12px;box-sizing:border-box;">
-        <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;border-bottom:1px solid #e2e8f0;padding-bottom:12px;margin-bottom:14px;flex-shrink:0;">
-          <div style="display:flex;align-items:center;gap:8px;">
-            <span style="display:inline-flex;">${buildOfficialSnowflakeSvg("#29B5E8", 20)}</span>
-            <strong style="font-size:15px;color:#0f172a;">Create a Snowflake Memory</strong>
-            <span style="background:rgba(41,181,232,0.12);color:#0284c7;border:1px solid #29B5E8;border-radius:6px;padding:2px 8px;font-size:11px;font-weight:600;">Role: <span id="sflf-light-mem-role">${sfState.active_role}</span></span>
-          </div>
-          <button type="button" id="sflf-light-mem-close" style="background:#f8fafc;border:1px solid #cbd5e1;color:#334155;padding:5px 10px;border-radius:8px;font-size:12px;font-weight:600;cursor:pointer;">Cancel</button>
+    dd.innerHTML = `
+      <div style="display:flex;flex-direction:column;gap:5px;border-right:1px solid #e2e8f0;padding-right:8px;">
+        <div style="display:flex;align-items:center;justify-content:space-between;padding:2px 4px 6px 4px;border-bottom:1px solid #f1f5f9;">
+          <strong style="color:#0284c7;font-size:11.5px;">Select Snowflake Memory Type (#1..#5)</strong>
+          <button type="button" id="sflf-memory-type-dd-close" style="background:transparent;border:none;color:#64748b;cursor:pointer;font-size:12px;">✕</button>
         </div>
-
-        <div class="sflf-modal-scroll-body" style="flex:1 1 auto;overflow-y:auto;overflow-x:hidden;min-height:0;display:flex;flex-direction:column;gap:12px;">
-          <div class="sflf-responsive-grid" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,260px),1fr));gap:12px;">
-            <div>
-              <label style="display:block;font-size:11px;font-weight:600;color:#334155;margin-bottom:4px;">Memory Name</label>
-              <input id="sflf-light-mem-name" data-testid="snowflake-memory-name-input" value="AGENT_MEMORY_STORE" placeholder="e.g. AGENT_CHAT_BUFFER" style="${lightInputStyle}" />
-            </div>
-            <div>
-              <label style="display:block;font-size:11px;font-weight:600;color:#334155;margin-bottom:4px;">LangChain / Langflow Memory Type (5 Tipologie)</label>
-              <select id="sflf-light-mem-type" data-testid="snowflake-memory-type-select" style="${lightSelectStyle}">
-                ${typeOptionsHtml}
-              </select>
-            </div>
-          </div>
-
-          <div id="sflf-light-mem-guidance-card" style="background:#f8fafc;border:1px solid #bae6fd;border-radius:10px;padding:12px 14px;display:flex;flex-direction:column;gap:6px;">
-            <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;">
-              <strong id="sflf-light-mem-guidance-title" style="color:#0284c7;font-size:12.5px;"></strong>
-              <span id="sflf-light-mem-embed-badge" style="background:#e0f2fe;color:#0369a1;border:1px solid #38bdf8;border-radius:999px;padding:2px 10px;font-size:10.5px;font-weight:700;"></span>
-            </div>
-            <div style="font-size:11px;color:#334155;"><strong>Oggetto Snowflake Consigliato:</strong> <span id="sflf-light-mem-rec-objs"></span></div>
-            <div style="font-size:11px;color:#334155;"><strong>Come si passa all'Agente SENZA Embedding:</strong> <code id="sflf-light-mem-sql-preview" style="display:block;margin-top:3px;background:#0f172a;color:#e2e8f0;padding:6px 8px;border-radius:6px;font-family:'JetBrains Mono',monospace;font-size:10.5px;white-space:pre-wrap;"></code></div>
-            <div style="font-size:11px;color:#475569;"><strong>Quando l'Embedding diventa utile:</strong> <span id="sflf-light-mem-when-embed"></span></div>
-          </div>
-
-          <div class="sflf-responsive-grid" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,220px),1fr));gap:12px;">
-            <div>
-              <label style="display:block;font-size:11px;font-weight:600;color:#334155;margin-bottom:4px;">Database</label>
-              <input id="sflf-light-mem-db" value="${sfState.database}" style="${lightInputStyle}" />
-            </div>
-            <div>
-              <label style="display:block;font-size:11px;font-weight:600;color:#334155;margin-bottom:4px;">Schema</label>
-              <input id="sflf-light-mem-schema" value="${sfState.schema}" style="${lightInputStyle}" />
-            </div>
-            <div>
-              <label style="display:block;font-size:11px;font-weight:600;color:#334155;margin-bottom:4px;">Recommended Snowflake Target Object</label>
-              <select id="sflf-light-mem-target-obj" style="${lightSelectStyle}"></select>
-            </div>
-          </div>
-
-          <div id="sflf-light-mem-type-params" class="sflf-responsive-grid" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,200px),1fr));gap:10px;">
-            <div>
-              <label style="display:block;font-size:10.5px;font-weight:600;color:#475569;margin-bottom:3px;">Session / Thread / User Key</label>
-              <input id="sflf-light-mem-key-param" value="session_default" placeholder="thread_id / session_id / user_id" style="${lightInputStyle}" />
-            </div>
-            <div>
-              <label style="display:block;font-size:10.5px;font-weight:600;color:#475569;margin-bottom:3px;">Window K / Few-Shot K / TTL Hours</label>
-              <input id="sflf-light-mem-k-param" type="number" value="12" min="1" max="500" style="${lightInputStyle}" />
-            </div>
-            <div>
-              <label style="display:block;font-size:10.5px;font-weight:600;color:#475569;margin-bottom:3px;">Summarizer / Entity Namespace / Topic</label>
-              <input id="sflf-light-mem-extra-param" value="claude-sonnet-5-5" placeholder="model / namespace / topic" style="${lightInputStyle}" />
-            </div>
-          </div>
-
-          <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:10px;padding:10px 14px;">
-            <label style="display:inline-flex;align-items:center;gap:8px;font-size:12px;font-weight:600;color:#0f172a;cursor:pointer;">
-              <input type="checkbox" id="sflf-light-mem-enable-embedding" data-testid="snowflake-memory-enable-embedding" />
-              <span>Enable Embedding (Optional — disabled by default; direct SQL lookup used when off)</span>
-            </label>
-            <div id="sflf-light-mem-embedding-box" style="display:none;margin-top:10px;grid-template-columns:repeat(auto-fit,minmax(min(100%,200px),1fr));gap:10px;">
-              <div>
-                <label style="display:block;font-size:10.5px;font-weight:600;color:#475569;margin-bottom:3px;">Embedding Provider (Snowflake AI_EMBED or External)</label>
-                <select id="sflf-light-mem-embed-provider" data-testid="snowflake-memory-embedding-provider" style="${lightSelectStyle}">
-                  ${providerOptionsHtml}
-                </select>
-              </div>
-              <div>
-                <label style="display:block;font-size:10.5px;font-weight:600;color:#475569;margin-bottom:3px;">Embedding Model</label>
-                <select id="sflf-light-mem-embed-model" data-testid="snowflake-memory-embedding-model" style="${lightSelectStyle}"></select>
-              </div>
-              <div>
-                <label style="display:block;font-size:10.5px;font-weight:600;color:#475569;margin-bottom:3px;">Vector Dimension</label>
-                <input id="sflf-light-mem-embed-dim" type="number" value="768" min="1" max="4096" style="${lightInputStyle}" />
-              </div>
-            </div>
-          </div>
-
-          <div id="sflf-light-mem-out" style="background:#0f172a;color:#e2e8f0;padding:8px 12px;border-radius:8px;font-family:'JetBrains Mono',monospace;font-size:11px;max-height:110px;overflow-y:auto;">Ready to create or bind Snowflake Agent Memory under active role ${sfState.active_role}.</div>
+        ${itemsHtml}
+      </div>
+      <div id="sflf-memory-type-hover-card" data-testid="snowflake-memory-type-hover-tooltip" style="background:#f8fafc;border:1px solid #bae6fd;border-radius:10px;padding:10px 12px;display:flex;flex-direction:column;gap:7px;justify-content:space-between;">
+        <div>
+          <div id="sflf-dd-hover-title" style="font-weight:700;color:#0284c7;font-size:12px;margin-bottom:4px;"></div>
+          <div style="font-size:11px;color:#334155;margin-bottom:6px;"><strong>Per cosa usarla (Purpose):</strong> <span id="sflf-dd-hover-purpose"></span></div>
+          <div style="font-size:11px;color:#334155;margin-bottom:6px;"><strong>Oggetti Snowflake consigliati (Recommended Objects):</strong> <span id="sflf-dd-hover-objects"></span></div>
+          <div style="font-size:11px;color:#334155;"><strong>Serve Embedding?:</strong> <span id="sflf-dd-hover-embed" style="color:#0369a1;font-weight:700;"></span></div>
         </div>
-
-        <div style="display:flex;justify-content:flex-end;gap:10px;border-top:1px solid #e2e8f0;padding-top:12px;margin-top:12px;flex-shrink:0;">
-          <button type="button" id="sflf-light-mem-cancel-btn" style="background:#ffffff;border:1px solid #cbd5e1;color:#334155;padding:7px 14px;border-radius:8px;font-size:12px;font-weight:600;cursor:pointer;">Cancel</button>
-          <button type="button" id="sflf-light-mem-submit-btn" data-testid="btn-submit-snowflake-memory" style="background:#29B5E8;border:1px solid #29B5E8;color:#ffffff;padding:7px 16px;border-radius:8px;font-size:12px;font-weight:600;cursor:pointer;">Create Snowflake Memory</button>
+        <div style="font-size:10px;color:#64748b;border-top:1px solid #e2e8f0;padding-top:6px;">
+          Branch A: <code>Database ▸ Schema ▸ Table</code> · Branch B: <code>Snowflake Postgres (:5432)</code>
         </div>
       </div>
     `;
-    document.body.appendChild(modal);
+
+    function updateHoverTooltip(typeId) {
+      const spec = resolveCanonicalMemoryTypeSpec(typeId);
+      const tEl = document.getElementById("sflf-dd-hover-title");
+      const pEl = document.getElementById("sflf-dd-hover-purpose");
+      const oEl = document.getElementById("sflf-dd-hover-objects");
+      const eEl = document.getElementById("sflf-dd-hover-embed");
+      if (tEl) tEl.textContent = spec.label || "";
+      if (pEl) pEl.textContent = spec.purpose || spec.description || "";
+      if (oEl) oEl.textContent = (spec.recommended_snowflake_objects || []).join(" · ");
+      if (eEl) eEl.textContent = spec.needs_embedding_badge || "NO";
+    }
+
+    updateHoverTooltip("graph_state_checkpointer");
+
+    Array.from(dd.querySelectorAll(".sflf-mem-type-dd-item")).forEach(function (btnEl) {
+      const tid = btnEl.getAttribute("data-memory-type-id") || "graph_state_checkpointer";
+      btnEl.addEventListener("mouseenter", function () {
+        updateHoverTooltip(tid);
+      });
+      btnEl.addEventListener("focus", function () {
+        updateHoverTooltip(tid);
+      });
+      btnEl.addEventListener("click", function () {
+        if (tid === "business_ontology_cortex_sense" || btnEl.disabled) {
+          return;
+        }
+        closeSnowflakeMemoryTypeDropdown();
+        openCreateSnowflakeMemoryModal(extractCurrentFlowId(), tid);
+      });
+    });
+
+    const closeBtn = document.getElementById("sflf-memory-type-dd-close");
+    if (closeBtn) {
+      closeBtn.onclick = closeSnowflakeMemoryTypeDropdown;
+    }
+
+    let anchorRect = null;
+    if (anchorEventOrEl && typeof anchorEventOrEl.getBoundingClientRect === "function") {
+      anchorRect = anchorEventOrEl.getBoundingClientRect();
+    } else if (anchorEventOrEl && anchorEventOrEl.currentTarget && typeof anchorEventOrEl.currentTarget.getBoundingClientRect === "function") {
+      anchorRect = anchorEventOrEl.currentTarget.getBoundingClientRect();
+    } else {
+      const btnCandidate =
+        document.querySelector('aside button[data-testid="memories-plus-snowflake-btn"]') ||
+        document.getElementById("sflf-memories-plus-snowflake-btn");
+      if (btnCandidate && typeof btnCandidate.getBoundingClientRect === "function") {
+        anchorRect = btnCandidate.getBoundingClientRect();
+      }
+    }
+    if (anchorRect && anchorRect.width > 0) {
+      dd.style.top = Math.min(window.innerHeight - 320, Math.round(anchorRect.bottom + 6)) + "px";
+      dd.style.left = Math.max(12, Math.min(window.innerWidth - 690, Math.round(anchorRect.left))) + "px";
+    }
+    dd.style.display = "grid";
+  }
+  window.openSnowflakeMemoryTypeDropdown = openSnowflakeMemoryTypeDropdown;
+
+  function openCreateSnowflakeMemoryModal(flowIdFromReact, preselectedTypeId) {
+    if (flowIdFromReact && typeof flowIdFromReact === "string") {
+      _activeMemoryFlowId = flowIdFromReact;
+    }
+    closeSnowflakeMemoryTypeDropdown();
+
+    let modal = document.getElementById("sflf-create-memory-modal");
+    if (!modal) {
+      modal = document.createElement("div");
+      modal.id = "sflf-create-memory-modal";
+      modal.setAttribute("data-testid", "create-snowflake-memory-modal");
+      modal.setAttribute("role", "dialog");
+      modal.style.cssText =
+        "position:fixed;inset:0;background:rgba(15,23,42,0.45);backdrop-filter:blur(3px);z-index:99998;display:flex;align-items:center;justify-content:center;padding:16px;box-sizing:border-box;font-family:Inter,sans-serif;";
+
+      const lightInputStyle =
+        "background:#ffffff;color:#0f172a;border:1px solid #cbd5e1;padding:6px 9px;border-radius:8px;width:100%;min-width:0;box-sizing:border-box;font-size:12px;";
+      const lightSelectStyle =
+        "background:#ffffff;color:#0f172a;border:1px solid #cbd5e1;padding:6px 9px;border-radius:8px;width:100%;min-width:0;box-sizing:border-box;font-size:12px;";
+
+      const typeOptionsHtml = AGENT_MEMORY_TYPES.map(function (t) {
+        return `<option value="${t.id}">${t.label}</option>`;
+      }).join("");
+
+      const providerOptionsHtml = Object.keys(EMBEDDING_PROVIDERS_CATALOG)
+        .map(function (k) {
+          const p = EMBEDDING_PROVIDERS_CATALOG[k];
+          return `<option value="${p.id}">${p.label}</option>`;
+        })
+        .join("");
+
+      modal.innerHTML = `
+        <div class="sflf-modal-dialog-surface" style="background:#ffffff;color:#0f172a;border:1px solid #e2e8f0;border-radius:12px;width:clamp(340px,94vw,860px);max-width:96vw;display:flex;flex-direction:column;overflow:hidden;padding:18px 22px;box-shadow:0 20px 50px rgba(15,23,42,0.18);font-size:12px;box-sizing:border-box;">
+          <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;border-bottom:1px solid #e2e8f0;padding-bottom:10px;margin-bottom:12px;flex-shrink:0;">
+            <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+              <span style="display:inline-flex;">${buildOfficialSnowflakeSvg("#29B5E8", 20)}</span>
+              <strong style="font-size:15px;color:#0f172a;">Create a Snowflake Memory</strong>
+              <span id="sflf-mem-wizard-step-badge" data-testid="snowflake-memory-wizard-step-badge" style="background:#e0f2fe;color:#0369a1;border:1px solid #38bdf8;border-radius:999px;padding:2px 9px;font-size:11px;font-weight:700;">Step 1 of 3 · Storage Target</span>
+              <span style="background:rgba(41,181,232,0.12);color:#0284c7;border:1px solid #29B5E8;border-radius:6px;padding:2px 8px;font-size:11px;font-weight:600;">Role: <span id="sflf-light-mem-role">${sfState.active_role}</span></span>
+            </div>
+            <button type="button" id="sflf-light-mem-close" style="background:#f8fafc;border:1px solid #cbd5e1;color:#334155;padding:4px 10px;border-radius:8px;font-size:12px;font-weight:600;cursor:pointer;">✕</button>
+          </div>
+
+          <!-- Wizard Step 1 of 3: Storage Target (Flow Context & Branch A vs Branch B) -->
+          <div id="sflf-mem-wizard-step-1" data-testid="snowflake-memory-wizard-step-1" style="display:flex;flex-direction:column;gap:10px;">
+            <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,250px),1fr));gap:10px;">
+              <div>
+                <label style="display:block;font-size:11px;font-weight:600;color:#334155;margin-bottom:3px;">Memory Name</label>
+                <input id="sflf-light-mem-name" data-testid="snowflake-memory-name-input" value="AGENT_MEMORY_STORE" placeholder="e.g. MEM_1_GRAPH_CHECKPOINTER" style="${lightInputStyle}" />
+              </div>
+              <div>
+                <label style="display:block;font-size:11px;font-weight:600;color:#334155;margin-bottom:3px;">Snowflake Memory Type (#1..#5)</label>
+                <select id="sflf-light-mem-type" data-testid="snowflake-memory-type-select" style="${lightSelectStyle}">
+                  ${typeOptionsHtml}
+                </select>
+              </div>
+            </div>
+
+            <div id="sflf-light-mem-guidance-card" style="background:#f8fafc;border:1px solid #bae6fd;border-radius:10px;padding:9px 12px;display:flex;flex-direction:column;gap:4px;">
+              <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;">
+                <strong id="sflf-light-mem-guidance-title" style="color:#0284c7;font-size:12px;"></strong>
+                <span id="sflf-light-mem-embed-badge" style="background:#e0f2fe;color:#0369a1;border:1px solid #38bdf8;border-radius:999px;padding:1px 9px;font-size:10px;font-weight:700;"></span>
+              </div>
+              <div style="font-size:11px;color:#334155;"><strong>Oggetto Snowflake Consigliato:</strong> <span id="sflf-light-mem-rec-objs"></span></div>
+              <div style="font-size:11px;color:#475569;"><strong>Quando l'Embedding diventa utile:</strong> <span id="sflf-light-mem-when-embed"></span></div>
+            </div>
+
+            <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:10px;padding:9px 12px;display:flex;flex-direction:column;gap:8px;">
+              <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;">
+                <label style="font-size:11px;font-weight:700;color:#0f172a;">Storage Backend Family (Flow Context):</label>
+                <select id="sflf-light-mem-storage-family" data-testid="snowflake-memory-storage-family" style="background:#ffffff;color:#0f172a;border:1px solid #29B5E8;padding:4px 10px;border-radius:8px;font-size:11.5px;font-weight:600;">
+                  <option value="snowflake_sql">Branch A — Snowflake SQL (Database ▸ Schema ▸ Table)</option>
+                  <option value="snowflake_postgres">Branch B — Snowflake Postgres (Account-Level :5432)</option>
+                </select>
+              </div>
+
+              <!-- Branch A: Database ▸ Schema ▸ Table -->
+              <div id="sflf-mem-branch-a-sql-box" data-testid="snowflake-memory-branch-a-sql" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,180px),1fr));gap:10px;">
+                <div>
+                  <label style="display:block;font-size:10.5px;font-weight:600;color:#334155;margin-bottom:3px;">1. Database (from Flow Context)</label>
+                  <input id="sflf-light-mem-db" value="${sfState.database}" style="${lightInputStyle}" />
+                </div>
+                <div>
+                  <label style="display:block;font-size:10.5px;font-weight:600;color:#334155;margin-bottom:3px;">2. Schema (from Flow Context)</label>
+                  <input id="sflf-light-mem-schema" value="${sfState.schema}" style="${lightInputStyle}" />
+                </div>
+                <div>
+                  <label style="display:block;font-size:10.5px;font-weight:600;color:#334155;margin-bottom:3px;">3. Snowflake Table Subtype</label>
+                  <select id="sflf-light-mem-target-obj" style="${lightSelectStyle}"></select>
+                </div>
+                <div>
+                  <label style="display:block;font-size:10.5px;font-weight:600;color:#334155;margin-bottom:3px;">Action Mode</label>
+                  <select id="sflf-light-mem-action-mode" style="${lightSelectStyle}">
+                    <option value="create_new">Create New Table in Schema</option>
+                    <option value="bind_existing">Use Existing Table in Context</option>
+                  </select>
+                </div>
+              </div>
+
+              <!-- Branch B: Account-Level Snowflake Postgres (:5432) outside Database ▸ Schema -->
+              <div id="sflf-mem-branch-b-pg-box" data-testid="snowflake-memory-branch-b-postgres" style="display:none;grid-template-columns:repeat(auto-fit,minmax(min(100%,180px),1fr));gap:10px;">
+                <div>
+                  <label style="display:block;font-size:10.5px;font-weight:600;color:#334155;margin-bottom:3px;">Postgres Instance (:5432 Account-Level)</label>
+                  <input id="sflf-light-mem-pg-instance" value="LANGFLOW_PG_INSTANCE" style="${lightInputStyle}" />
+                </div>
+                <div>
+                  <label style="display:block;font-size:10.5px;font-weight:600;color:#334155;margin-bottom:3px;">Postgres DB / Schema</label>
+                  <input id="sflf-light-mem-pg-schema" value="postgres.public" style="${lightInputStyle}" />
+                </div>
+                <div>
+                  <label style="display:block;font-size:10.5px;font-weight:600;color:#334155;margin-bottom:3px;">Postgres Table Mode</label>
+                  <select id="sflf-light-mem-pg-mode" style="${lightSelectStyle}">
+                    <option value="PostgresSaver">PostgresSaver (#1 Checkpointer)</option>
+                    <option value="Relational / JSONB">Relational / JSONB (#2 Window / #3 Summary)</option>
+                    <option value="PostgresStore JSONB">PostgresStore JSONB (#4 User Profile)</option>
+                    <option value="JSONB + pgvector">JSONB + pgvector (#5 Episodic)</option>
+                  </select>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Wizard Step 2 of 3: Object & Memory Configuration (Dynamic Peculiarities Matrix) -->
+          <div id="sflf-mem-wizard-step-2" data-testid="snowflake-memory-wizard-step-2" style="display:none;flex-direction:column;gap:10px;">
+            <div id="sflf-mem-object-peculiarities-box" data-testid="snowflake-memory-object-peculiarities" style="background:#f8fafc;border:1px solid #bae6fd;border-radius:10px;padding:10px 12px;display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,195px),1fr));gap:10px;">
+              <div>
+                <label style="display:block;font-size:10.5px;font-weight:600;color:#334155;margin-bottom:3px;">Primary Key / Cluster By (No VECTOR in PK)</label>
+                <input id="sflf-light-mem-hybrid-pk" value="(session_id, turn_id)" style="${lightInputStyle}" />
+              </div>
+              <div>
+                <label style="display:block;font-size:10.5px;font-weight:600;color:#334155;margin-bottom:3px;">Secondary Index / PG Table</label>
+                <input id="sflf-light-mem-hybrid-idx" value="(session_id, created_at)" style="${lightInputStyle}" />
+              </div>
+              <div>
+                <label style="display:block;font-size:10.5px;font-weight:600;color:#334155;margin-bottom:3px;">Target Lag (Dynamic / Interactive Table)</label>
+                <input id="sflf-light-mem-target-lag" value="5 minutes" style="${lightInputStyle}" />
+              </div>
+              <div>
+                <label style="display:block;font-size:10.5px;font-weight:600;color:#334155;margin-bottom:3px;">Warehouse & Refresh Mode</label>
+                <select id="sflf-light-mem-refresh-mode" style="${lightSelectStyle}">
+                  <option value="INCREMENTAL">COMPUTE_WH · INCREMENTAL</option>
+                  <option value="FULL">COMPUTE_WH · FULL</option>
+                  <option value="AUTO">COMPUTE_WH · AUTO</option>
+                </select>
+              </div>
+            </div>
+
+            <div id="sflf-light-mem-type-params" style="background:#ffffff;border:1px solid #e2e8f0;border-radius:10px;padding:10px 12px;display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,190px),1fr));gap:10px;">
+              <div>
+                <label style="display:block;font-size:10.5px;font-weight:600;color:#475569;margin-bottom:3px;">Session / Thread / User Key</label>
+                <input id="sflf-light-mem-key-param" value="session_default" placeholder="thread_id / session_id / user_id" style="${lightInputStyle}" />
+              </div>
+              <div>
+                <label style="display:block;font-size:10.5px;font-weight:600;color:#475569;margin-bottom:3px;">Window K / Few-Shot K / TTL Hours</label>
+                <input id="sflf-light-mem-k-param" type="number" value="8" min="1" max="500" style="${lightInputStyle}" />
+              </div>
+              <div>
+                <label style="display:block;font-size:10.5px;font-weight:600;color:#475569;margin-bottom:3px;">Summarizer / Entity Namespace / Topic</label>
+                <input id="sflf-light-mem-extra-param" value="claude-sonnet-5-5" placeholder="model / namespace / topic" style="${lightInputStyle}" />
+              </div>
+              <div>
+                <label style="display:block;font-size:10.5px;font-weight:600;color:#475569;margin-bottom:3px;">Min Outcome Score (#5) / Retention Days</label>
+                <input id="sflf-light-mem-score-param" type="number" step="0.05" value="0.70" style="${lightInputStyle}" />
+              </div>
+            </div>
+          </div>
+
+          <!-- Wizard Step 3 of 3: Optional Embedding, LLM Preprocessing & Create -->
+          <div id="sflf-mem-wizard-step-3" data-testid="snowflake-memory-wizard-step-3" style="display:none;flex-direction:column;gap:10px;">
+            <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:10px;padding:9px 12px;">
+              <label style="display:inline-flex;align-items:center;gap:8px;font-size:12px;font-weight:600;color:#0f172a;cursor:pointer;">
+                <input type="checkbox" id="sflf-light-mem-enable-embedding" data-testid="snowflake-memory-enable-embedding" />
+                <span>Enable Embedding Vectorization (Optional — Default OFF; locked OFF for #1 and #3)</span>
+              </label>
+              <div id="sflf-light-mem-embedding-box" style="display:none;margin-top:8px;grid-template-columns:repeat(auto-fit,minmax(min(100%,185px),1fr));gap:8px;">
+                <div>
+                  <label style="display:block;font-size:10px;font-weight:600;color:#475569;margin-bottom:2px;">Snowflake Embedding Source (4 Sources)</label>
+                  <select id="sflf-light-mem-embed-provider" data-testid="snowflake-memory-embedding-provider" style="${lightSelectStyle}">
+                    ${providerOptionsHtml}
+                  </select>
+                </div>
+                <div>
+                  <label style="display:block;font-size:10px;font-weight:600;color:#475569;margin-bottom:2px;">Embedding Model</label>
+                  <select id="sflf-light-mem-embed-model" data-testid="snowflake-memory-embedding-model" style="${lightSelectStyle}"></select>
+                </div>
+                <div>
+                  <label style="display:block;font-size:10px;font-weight:600;color:#475569;margin-bottom:2px;">Vector Dimension (1..4096)</label>
+                  <input id="sflf-light-mem-embed-dim" type="number" value="768" min="1" max="4096" style="${lightInputStyle}" />
+                </div>
+              </div>
+            </div>
+
+            <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:10px;padding:9px 12px;display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,180px),1fr));gap:8px;">
+              <label style="display:inline-flex;align-items:center;gap:6px;font-size:11.5px;font-weight:600;color:#0f172a;">
+                <input type="checkbox" id="sflf-light-mem-auto-capture" checked />
+                <span>Auto-capture flow runs</span>
+              </label>
+              <label style="display:inline-flex;align-items:center;gap:6px;font-size:11.5px;font-weight:600;color:#0f172a;">
+                <input type="checkbox" id="sflf-light-mem-preproc-enabled" data-testid="snowflake-memory-preproc-enabled" />
+                <span>Enable LLM Preprocessing</span>
+              </label>
+              <div>
+                <select id="sflf-light-mem-preproc-engine" style="${lightSelectStyle}">
+                  <option value="cortex_sql">Cortex SQL (AI_COMPLETE / AI_SUMMARIZE_AGG)</option>
+                  <option value="proxy_chat">Proxy - Chat (openai-gpt-6-luna)</option>
+                  <option value="proxy_messages">Proxy - Messages (claude-sonnet-5-5)</option>
+                  <option value="proxy_responses">Proxy - Responses</option>
+                  <option value="spcs_ollama">Private - Ollama (SPCS)</option>
+                  <option value="spcs_model_registry">Model Registry SPCS</option>
+                </select>
+              </div>
+              <div>
+                <input id="sflf-light-mem-kill-phrase" data-testid="snowflake-memory-kill-phrase" value="NO_INGEST" placeholder="Kill Phrase (NO_INGEST)" style="${lightInputStyle}" />
+              </div>
+            </div>
+
+            <div>
+              <div style="font-size:10.5px;font-weight:600;color:#334155;margin-bottom:3px;">Preview Query / DDL (without & with Embedding):</div>
+              <code id="sflf-light-mem-sql-preview" style="display:block;background:#0f172a;color:#e2e8f0;padding:7px 10px;border-radius:8px;font-family:'JetBrains Mono',monospace;font-size:10.5px;white-space:pre-wrap;max-height:76px;overflow-y:auto;"></code>
+            </div>
+
+            <div id="sflf-light-mem-out" style="background:#0f172a;color:#e2e8f0;padding:6px 10px;border-radius:8px;font-family:'JetBrains Mono',monospace;font-size:10.5px;max-height:72px;overflow-y:auto;">Ready to create or bind Snowflake Agent Memory under active role ${sfState.active_role}.</div>
+          </div>
+
+          <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;border-top:1px solid #e2e8f0;padding-top:10px;margin-top:10px;flex-shrink:0;">
+            <div>
+              <button type="button" id="sflf-mem-wizard-back-btn" data-testid="btn-back-snowflake-memory" style="display:none;background:#f8fafc;border:1px solid #cbd5e1;color:#334155;padding:6px 14px;border-radius:8px;font-size:12px;font-weight:600;cursor:pointer;">&lt; Back</button>
+            </div>
+            <div style="display:flex;align-items:center;gap:8px;">
+              <button type="button" id="sflf-light-mem-cancel-btn" data-testid="btn-cancel-snowflake-memory" style="background:#ffffff;border:1px solid #cbd5e1;color:#334155;padding:6px 14px;border-radius:8px;font-size:12px;font-weight:600;cursor:pointer;">Cancel</button>
+              <button type="button" id="sflf-mem-wizard-next-btn" data-testid="btn-next-snowflake-memory" style="background:#29B5E8;border:1px solid #29B5E8;color:#ffffff;padding:6px 16px;border-radius:8px;font-size:12px;font-weight:600;cursor:pointer;">Next &gt;</button>
+              <button type="button" id="sflf-light-mem-submit-btn" data-testid="btn-submit-snowflake-memory" style="display:none;background:#29B5E8;border:1px solid #29B5E8;color:#ffffff;padding:6px 16px;border-radius:8px;font-size:12px;font-weight:600;cursor:pointer;">+ ❄️ Create Memory</button>
+            </div>
+          </div>
+        </div>
+      `;
+      document.body.appendChild(modal);
+    }
 
     const typeSel = document.getElementById("sflf-light-mem-type");
+    const storageFamilySel = document.getElementById("sflf-light-mem-storage-family");
+    const branchASqlBox = document.getElementById("sflf-mem-branch-a-sql-box");
+    const branchBPgBox = document.getElementById("sflf-mem-branch-b-pg-box");
     const targetObjSel = document.getElementById("sflf-light-mem-target-obj");
     const enableEmbedCb = document.getElementById("sflf-light-mem-enable-embedding");
     const embedBox = document.getElementById("sflf-light-mem-embedding-box");
     const providerSel = document.getElementById("sflf-light-mem-embed-provider");
     const modelSel = document.getElementById("sflf-light-mem-embed-model");
     const dimInput = document.getElementById("sflf-light-mem-embed-dim");
+    const preprocCb = document.getElementById("sflf-light-mem-preproc-enabled");
+
+    if (preselectedTypeId && typeSel) {
+      typeSel.value = preselectedTypeId;
+    }
+
+    let wizardStep = 1;
+    function setWizardStep(stepNum) {
+      wizardStep = Math.max(1, Math.min(3, stepNum));
+      const s1 = document.getElementById("sflf-mem-wizard-step-1");
+      const s2 = document.getElementById("sflf-mem-wizard-step-2");
+      const s3 = document.getElementById("sflf-mem-wizard-step-3");
+      const badge = document.getElementById("sflf-mem-wizard-step-badge");
+      const backBtn = document.getElementById("sflf-mem-wizard-back-btn");
+      const nextBtn = document.getElementById("sflf-mem-wizard-next-btn");
+      const submitBtn = document.getElementById("sflf-light-mem-submit-btn");
+
+      if (s1) s1.style.display = wizardStep === 1 ? "flex" : "none";
+      if (s2) s2.style.display = wizardStep === 2 ? "flex" : "none";
+      if (s3) s3.style.display = wizardStep === 3 ? "flex" : "none";
+      const stepTitles = {
+        1: "Step 1 of 3 · Storage Target",
+        2: "Step 2 of 3 · Object & Memory Configuration",
+        3: "Step 3 of 3 · Optional Embedding, Preprocessing & Create",
+      };
+      if (badge) badge.textContent = stepTitles[wizardStep];
+      if (backBtn) backBtn.style.display = wizardStep > 1 ? "inline-flex" : "none";
+      if (nextBtn) nextBtn.style.display = wizardStep < 3 ? "inline-flex" : "none";
+      if (submitBtn) submitBtn.style.display = wizardStep === 3 ? "inline-flex" : "none";
+    }
+
+    function syncStorageFamilyBoxes() {
+      const fam = (storageFamilySel && storageFamilySel.value) || "snowflake_sql";
+      if (branchASqlBox) branchASqlBox.style.display = fam === "snowflake_postgres" ? "none" : "grid";
+      if (branchBPgBox) branchBPgBox.style.display = fam === "snowflake_postgres" ? "grid" : "none";
+    }
 
     function syncLightMemoryModalTypeState() {
       const spec = resolveCanonicalMemoryTypeSpec(typeSel ? typeSel.value : "buffer_window_memory");
@@ -3078,9 +3504,11 @@
       const recEl = document.getElementById("sflf-light-mem-rec-objs");
       const sqlEl = document.getElementById("sflf-light-mem-sql-preview");
       const whenEl = document.getElementById("sflf-light-mem-when-embed");
+      const pkEl = document.getElementById("sflf-light-mem-hybrid-pk");
+      const idxEl = document.getElementById("sflf-light-mem-hybrid-idx");
       const dbVal = (document.getElementById("sflf-light-mem-db") || {}).value || sfState.database;
       const schVal = (document.getElementById("sflf-light-mem-schema") || {}).value || sfState.schema;
-      const nameVal = (document.getElementById("sflf-light-mem-name") || {}).value || "AGENT_MEMORY_STORE";
+      const nameVal = (document.getElementById("sflf-light-mem-name") || {}).value || spec.default_table_name || "AGENT_MEMORY_STORE";
 
       if (titleEl) titleEl.textContent = spec.label;
       if (badgeEl) badgeEl.textContent = `Serve Embedding? ${spec.needs_embedding_badge}`;
@@ -3092,6 +3520,24 @@
         );
       }
       if (whenEl) whenEl.textContent = spec.when_embedding_useful || "";
+      if (pkEl && spec.default_hybrid_pk) pkEl.value = spec.default_hybrid_pk;
+      if (idxEl && spec.default_hybrid_index) idxEl.value = spec.default_hybrid_index;
+      if (storageFamilySel && spec.default_storage_family) {
+        storageFamilySel.value = spec.default_storage_family;
+        syncStorageFamilyBoxes();
+      }
+      if (preprocCb) {
+        preprocCb.checked = !!spec.default_llm_preprocessing;
+      }
+      if (enableEmbedCb) {
+        if (spec.embedding_locked_off) {
+          enableEmbedCb.checked = false;
+          enableEmbedCb.disabled = true;
+          if (embedBox) embedBox.style.display = "none";
+        } else {
+          enableEmbedCb.disabled = false;
+        }
+      }
       if (targetObjSel) {
         populateSelectOptions(
           targetObjSel,
@@ -3115,11 +3561,12 @@
       }
       if (dimInput && prov.models && prov.models[0]) {
         dimInput.value = String(prov.models[0].dimension || 768);
-        dimInput.readOnly = provKey !== "custom_endpoint";
+        dimInput.readOnly = ["custom_endpoint", "spcs_model_registry", "spcs_llm_proxy"].indexOf(provKey) === -1;
       }
     }
 
     if (typeSel) typeSel.onchange = syncLightMemoryModalTypeState;
+    if (storageFamilySel) storageFamilySel.onchange = syncStorageFamilyBoxes;
     if (enableEmbedCb) {
       enableEmbedCb.onchange = function () {
         if (embedBox) embedBox.style.display = enableEmbedCb.checked ? "grid" : "none";
@@ -3143,18 +3590,35 @@
     }
     document.getElementById("sflf-light-mem-close").onclick = closeLightModal;
     document.getElementById("sflf-light-mem-cancel-btn").onclick = closeLightModal;
+    document.getElementById("sflf-mem-wizard-back-btn").onclick = function () {
+      setWizardStep(wizardStep - 1);
+    };
+    document.getElementById("sflf-mem-wizard-next-btn").onclick = function () {
+      setWizardStep(wizardStep + 1);
+    };
 
     document.getElementById("sflf-light-mem-submit-btn").onclick = async function () {
       const nameVal = (document.getElementById("sflf-light-mem-name") || {}).value || "AGENT_MEMORY_STORE";
       const dbVal = (document.getElementById("sflf-light-mem-db") || {}).value || sfState.database;
       const schVal = (document.getElementById("sflf-light-mem-schema") || {}).value || sfState.schema;
+      const storageFamily = (storageFamilySel && storageFamilySel.value) || "snowflake_sql";
+      const pgInstance = (document.getElementById("sflf-light-mem-pg-instance") || {}).value || "LANGFLOW_PG_INSTANCE";
+      const pgMode = (document.getElementById("sflf-light-mem-pg-mode") || {}).value || "PostgresSaver";
+      const actionMode = (document.getElementById("sflf-light-mem-action-mode") || {}).value || "create_new";
       const chosenType = (typeSel && typeSel.value) || "buffer_window_memory";
       const spec = resolveCanonicalMemoryTypeSpec(chosenType);
-      const targetBackend = (targetObjSel && targetObjSel.value) || spec.default_backend;
-      const enableEmbedding = !!(enableEmbedCb && enableEmbedCb.checked);
+      const targetBackend =
+        storageFamily === "snowflake_postgres"
+          ? `Snowflake Postgres (${pgMode})`
+          : (targetObjSel && targetObjSel.value) || spec.default_backend;
+      const enableEmbedding = !!(enableEmbedCb && enableEmbedCb.checked && !spec.embedding_locked_off);
       const embProvider = (providerSel && providerSel.value) || "snowflake_cortex";
       const embModel = (modelSel && modelSel.value) || "snowflake-arctic-embed-m-v1.5";
       const embDim = parseInt((dimInput && dimInput.value) || "768", 10);
+      const autoCapture = !!((document.getElementById("sflf-light-mem-auto-capture") || {}).checked !== false);
+      const preprocEnabled = !!(preprocCb && preprocCb.checked);
+      const preprocEngine = (document.getElementById("sflf-light-mem-preproc-engine") || {}).value || "cortex_sql";
+      const killPhrase = (document.getElementById("sflf-light-mem-kill-phrase") || {}).value || "NO_INGEST";
       const outEl = document.getElementById("sflf-light-mem-out");
 
       const resp = await fetch("/api/v1/snowflake/memories", {
@@ -3165,6 +3629,10 @@
           database: dbVal,
           schema: schVal,
           flow_id: extractCurrentFlowId(),
+          storage_family: storageFamily,
+          postgres_instance: storageFamily === "snowflake_postgres" ? pgInstance : null,
+          pg_table_mode: storageFamily === "snowflake_postgres" ? pgMode : null,
+          create_new_physical_store: actionMode !== "bind_existing",
           agent_memory_type: chosenType,
           memory_category: enableEmbedding ? "vector_table" : spec.default_category,
           vector_database: targetBackend,
@@ -3173,6 +3641,13 @@
           embedding_model: enableEmbedding ? embModel : null,
           dimension: enableEmbedding ? embDim : null,
           vector_dimension: enableEmbedding ? embDim : null,
+          auto_capture: autoCapture,
+          filter_by_session: spec.filter_by_session,
+          llm_preprocessing: {
+            enabled: preprocEnabled,
+            engine: preprocEngine,
+            kill_phrase: killPhrase,
+          },
         }),
       });
       const data = await resp.json();
@@ -3189,6 +3664,10 @@
         }
         showDenialOrStatusBanner("ok", "MEMORY_CREATED", `Snowflake Memory ${nameVal} (${chosenType}) creata.`);
         ensureSnowflakeMemoriesSearchableCards();
+        if (data.memory) {
+          renderSnowflakeMemoryDetailView(data.memory);
+        }
+        syncNodesToCurrentContext(sfState);
         window.dispatchEvent(new Event("focus"));
         setTimeout(function () {
           closeLightModal();
@@ -3196,11 +3675,212 @@
       }
     };
 
+    modal.style.display = "flex";
+    setWizardStep(1);
     syncLightMemoryModalTypeState();
     syncLightMemoryEmbeddingProviderModels();
     ensureMemoriesPageSnowflakeButton();
   }
   window.openCreateSnowflakeMemoryModal = openCreateSnowflakeMemoryModal;
+
+  // W2-R4-05: Full Langflow-Compliant Memory Detail View in the Memories Right Pane
+  let _selectedSnowflakeMemoryName = null;
+  function renderSnowflakeMemoryDetailView(memoryOrRef) {
+    if (!document.body || !isStrictMemoriesView()) return;
+    let memObj = null;
+    if (typeof memoryOrRef === "string") {
+      const clean = memoryOrRef.replace(/^sf-/, "").trim();
+      memObj = (sfState.memories || []).find(function (m) {
+        return (typeof m === "string" ? m : m.name) === clean || (m && m.langflow_memory_id === memoryOrRef);
+      });
+      if (!memObj) {
+        memObj = { name: clean, agent_memory_type: "buffer_window_memory" };
+      }
+    } else if (memoryOrRef && typeof memoryOrRef === "object") {
+      const candidateName = memoryOrRef.name || "";
+      memObj =
+        (sfState.memories || []).find(function (m) {
+          return (typeof m === "string" ? m : m.name) === candidateName;
+        }) || memoryOrRef;
+    }
+    if (!memObj) return;
+    if (typeof memObj === "string") {
+      memObj = { name: memObj, agent_memory_type: "buffer_window_memory" };
+    }
+    _selectedSnowflakeMemoryName = memObj.name;
+
+    const spec = resolveCanonicalMemoryTypeSpec(memObj.canonical_memory_type || memObj.agent_memory_type);
+    const storageFamily =
+      memObj.storage_family ||
+      ((memObj.vector_database || "").toLowerCase().includes("postgres") || (memObj.table_fqn || "").includes(":5432")
+        ? "snowflake_postgres"
+        : "snowflake_sql");
+    const fqn =
+      memObj.table_fqn ||
+      memObj.fqn ||
+      `${memObj.database || sfState.database}.${memObj.schema || sfState.schema}.${memObj.name}`;
+    const embSummary = memObj.enable_embedding
+      ? `${memObj.embedding_provider || "snowflake_cortex"} · ${memObj.embedding_model || "AI_EMBED"} (${memObj.dimension || 768}d)`
+      : "Disabled (Direct SQL / Key-Value Lookup)";
+    const preprocObj = memObj.llm_preprocessing || {};
+    const preprocSummary = preprocObj.enabled
+      ? `Enabled (${preprocObj.engine || "cortex_sql"} · Kill Phrase: ${preprocObj.kill_phrase || "NO_INGEST"})`
+      : `Optional / Off (Kill Phrase: ${preprocObj.kill_phrase || "NO_INGEST"})`;
+    const activeSql = (spec.how_to_feed_without_embedding || "").replace("<fqn>", fqn);
+    const autoCaptureOn = memObj.auto_capture !== false;
+
+    let panel = document.getElementById("sflf-memory-detail-view");
+    if (!panel) {
+      panel = document.createElement("section");
+      panel.id = "sflf-memory-detail-view";
+      panel.setAttribute("data-testid", "snowflake-memory-detail-view");
+      panel.style.cssText =
+        "margin:14px 24px;background:#ffffff;color:#0f172a;border:1px solid #e2e8f0;border-radius:12px;padding:18px 22px;box-shadow:0 4px 16px rgba(15,23,42,0.06);font-family:Inter,sans-serif;font-size:12px;display:flex;flex-direction:column;gap:14px;";
+      const mainTarget =
+        document.querySelector("main") ||
+        document.getElementById("sflf-memories-cards-grid") ||
+        document.body;
+      mainTarget.appendChild(panel);
+    }
+    panel.style.display = "flex";
+
+    const sampleRecords = Array.isArray(memObj.stored_records) && memObj.stored_records.length > 0
+      ? memObj.stored_records
+      : [
+          {
+            session_id: memObj.session_id || memObj.thread_id || memObj.user_id || "fin-reconcile-session-001",
+            topic_or_key: memObj.topic || memObj.entity_namespace || spec.id,
+            metric: memObj.window_k ? `window_k=${memObj.window_k}` : "score=0.95",
+            status: "Ingested",
+            updated_at: "2026-10-26T10:00:00Z",
+          },
+          {
+            session_id: "turn-preproc-check",
+            topic_or_key: "trivial_greeting_check",
+            metric: "NO_INGEST",
+            status: "Skipped",
+            updated_at: "2026-10-26T10:01:00Z",
+          },
+        ];
+
+    const rowsHtml = sampleRecords
+      .map(function (r) {
+        const st = r.status || "Processed";
+        const badgeColor =
+          st === "Skipped"
+            ? "background:#fef3c7;color:#92400e;"
+            : st === "Empty"
+              ? "background:#f1f5f9;color:#64748b;"
+              : "background:#dcfce7;color:#166534;";
+        return `<tr>
+          <td style="padding:7px 10px;border-bottom:1px solid #f1f5f9;font-family:'JetBrains Mono',monospace;">${r.session_id || "default"}</td>
+          <td style="padding:7px 10px;border-bottom:1px solid #f1f5f9;">${r.topic_or_key || "-"}</td>
+          <td style="padding:7px 10px;border-bottom:1px solid #f1f5f9;">${r.metric || "-"}</td>
+          <td style="padding:7px 10px;border-bottom:1px solid #f1f5f9;"><span style="padding:2px 8px;border-radius:999px;font-size:10.5px;font-weight:700;${badgeColor}">${st}</span></td>
+          <td style="padding:7px 10px;border-bottom:1px solid #f1f5f9;color:#64748b;">${r.updated_at || "Just now"}</td>
+        </tr>`;
+      })
+      .join("");
+
+    panel.innerHTML = `
+      <!-- Header Controls -->
+      <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;border-bottom:1px solid #e2e8f0;padding-bottom:12px;">
+        <div style="display:flex;flex-direction:column;gap:3px;">
+          <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+            ${buildOfficialSnowflakeSvg("#29B5E8", 18)}
+            <strong style="font-size:15px;color:#0f172a;">${memObj.name}</strong>
+            <span style="background:rgba(41,181,232,0.12);color:#0284c7;border:1px solid #29B5E8;border-radius:6px;padding:1px 8px;font-size:11px;font-weight:600;">Role: ${sfState.active_role}</span>
+          </div>
+          <div style="font-size:11px;color:#475569;">${spec.label} • ${storageFamily === "snowflake_postgres" ? "Snowflake Postgres (:5432)" : "Snowflake SQL (Database ▸ Schema)"} • Flow: ${memObj.flow_id || extractCurrentFlowId() || "Global"}</div>
+        </div>
+        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+          <select id="sflf-memory-detail-session-filter" data-testid="snowflake-memory-session-filter" style="background:#ffffff;color:#0f172a;border:1px solid #cbd5e1;padding:5px 9px;border-radius:8px;font-size:11.5px;">
+            <option value="all">All Sessions (Cross-Session)</option>
+            <option value="${memObj.session_id || "fin-reconcile-session-001"}">${memObj.session_id || "fin-reconcile-session-001"}</option>
+          </select>
+          <button type="button" id="sflf-memory-detail-reload-btn" data-testid="snowflake-memory-reload-btn" style="background:#f8fafc;border:1px solid #cbd5e1;color:#0f172a;padding:5px 11px;border-radius:8px;font-size:11.5px;font-weight:600;cursor:pointer;">↻ Reload sessions and messages</button>
+          <span id="sflf-memory-detail-autocapture" data-testid="snowflake-memory-autocapture-toggle" style="background:${autoCaptureOn ? "#dcfce7" : "#f1f5f9"};color:${autoCaptureOn ? "#166534" : "#475569"};border:1px solid ${autoCaptureOn ? "#86efac" : "#cbd5e1"};padding:4px 10px;border-radius:999px;font-size:11px;font-weight:700;">Auto-capture: ${autoCaptureOn ? "● ON" : "○ OFF"}</span>
+          <button type="button" id="sflf-memory-detail-delete-btn" data-testid="snowflake-memory-delete-btn" style="background:#fef2f2;border:1px solid #fecaca;color:#b91c1c;padding:5px 11px;border-radius:8px;font-size:11.5px;font-weight:600;cursor:pointer;">🗑 Delete</button>
+        </div>
+      </div>
+
+      <!-- Expandable Configuration Summary -->
+      <details open data-testid="snowflake-memory-config-summary" style="background:#f8fafc;border:1px solid #bae6fd;border-radius:10px;padding:10px 14px;">
+        <summary style="font-weight:700;color:#0284c7;cursor:pointer;font-size:12.5px;">Configuration Summary</summary>
+        <div style="margin-top:8px;display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,230px),1fr));gap:8px;font-size:11px;">
+          <div><strong>Name:</strong> ${memObj.name}</div>
+          <div><strong>Memory Type (#1..#5):</strong> ${spec.label}</div>
+          <div><strong>Storage Target:</strong> ${storageFamily === "snowflake_postgres" ? "Snowflake Postgres (:5432)" : "Snowflake SQL (Database ▸ Schema)"}</div>
+          <div><strong>Snowflake Object / FQN:</strong> <code>${fqn}</code></div>
+          <div><strong>Object Subtype & PK/Lag:</strong> ${memObj.vector_database || spec.default_backend} (${spec.default_hybrid_pk || "PK"})</div>
+          <div><strong>Filter by Session:</strong> ${spec.filter_by_session ? "True (Session-Scoped)" : "False (Cross-Session User/Role Scoped)"}</div>
+          <div><strong>Embedding Model & Source:</strong> ${embSummary}</div>
+          <div><strong>LLM Preprocessing & Kill Phrase:</strong> ${preprocSummary}</div>
+        </div>
+        <div style="margin-top:8px;font-size:11px;">
+          <strong>Active SQL Query:</strong>
+          <code style="display:block;margin-top:3px;background:#0f172a;color:#e2e8f0;padding:6px 9px;border-radius:6px;font-family:'JetBrains Mono',monospace;font-size:10.5px;white-space:pre-wrap;">${activeSql}</code>
+        </div>
+      </details>
+
+      <!-- Session History & Stored Records Table -->
+      <div>
+        <div style="font-weight:700;color:#0f172a;font-size:12.5px;margin-bottom:6px;">Session History & Stored Records</div>
+        <table data-testid="snowflake-memory-records-table" style="width:100%;border-collapse:collapse;font-size:11.5px;">
+          <thead>
+            <tr style="background:#f8fafc;text-align:left;color:#475569;">
+              <th style="padding:7px 10px;border-bottom:1px solid #cbd5e1;">Session / ID</th>
+              <th style="padding:7px 10px;border-bottom:1px solid #cbd5e1;">Topic / Key</th>
+              <th style="padding:7px 10px;border-bottom:1px solid #cbd5e1;">Outcome Score / Turn</th>
+              <th style="padding:7px 10px;border-bottom:1px solid #cbd5e1;">Status</th>
+              <th style="padding:7px 10px;border-bottom:1px solid #cbd5e1;">Updated</th>
+            </tr>
+          </thead>
+          <tbody>${rowsHtml}</tbody>
+        </table>
+      </div>
+    `;
+
+    const reloadBtn = document.getElementById("sflf-memory-detail-reload-btn");
+    if (reloadBtn) {
+      reloadBtn.onclick = async function () {
+        try {
+          const resp = await fetch(`/api/v1/snowflake/memories/${encodeURIComponent(memObj.name)}/reload`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({}),
+          });
+          if (resp.ok) {
+            const d = await resp.json();
+            if (d.memory) renderSnowflakeMemoryDetailView(d.memory);
+          }
+        } catch (_e) {
+          // ignore
+        }
+      };
+    }
+
+    const deleteBtn = document.getElementById("sflf-memory-detail-delete-btn");
+    if (deleteBtn) {
+      deleteBtn.onclick = async function () {
+        try {
+          const resp = await fetch(`/api/v1/snowflake/memories/${encodeURIComponent(memObj.name)}`, {
+            method: "DELETE",
+          });
+          if (resp.ok) {
+            sfState.memories = (sfState.memories || []).filter(function (m) {
+              return (typeof m === "string" ? m : m.name) !== memObj.name;
+            });
+            panel.style.display = "none";
+            ensureSnowflakeMemoriesSearchableCards();
+          }
+        } catch (_e) {
+          // ignore
+        }
+      };
+    }
+  }
+  window.renderSnowflakeMemoryDetailView = renderSnowflakeMemoryDetailView;
 
   function syncSnowflakeMemoriesWindowList(rawMemories) {
     if (typeof window === "undefined") return;
@@ -3307,7 +3987,7 @@
               m.dimension || 768
             }d)`
           : "No Embedding — Direct SQL Lookup";
-        return `<div class="sflf-memory-card" data-memory-name="${m.name}" style="background:#ffffff;color:#0f172a;border:1px solid #e2e8f0;border-left:4px solid #29B5E8;border-radius:10px;padding:12px 14px;box-shadow:0 2px 8px rgba(15,23,42,0.06);display:flex;flex-direction:column;gap:4px;">
+        return `<div class="sflf-memory-card" data-memory-name="${m.name}" style="background:#ffffff;color:#0f172a;border:1px solid #e2e8f0;border-left:4px solid #29B5E8;border-radius:10px;padding:12px 14px;box-shadow:0 2px 8px rgba(15,23,42,0.06);display:flex;flex-direction:column;gap:4px;cursor:pointer;">
           <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;">
             <strong style="font-size:13px;color:#0f172a;">${m.name}</strong>
             <span style="background:rgba(41,181,232,0.12);color:#0284c7;border:1px solid #29B5E8;border-radius:999px;padding:1px 8px;font-size:10px;font-weight:600;">${spec.label}</span>
@@ -3317,6 +3997,17 @@
         </div>`;
       })
       .join("");
+
+    Array.from(grid.querySelectorAll(".sflf-memory-card")).forEach(function (cardEl) {
+      cardEl.onclick = function () {
+        const mName = cardEl.getAttribute("data-memory-name");
+        if (mName) renderSnowflakeMemoryDetailView(mName);
+      };
+    });
+
+    if (filtered.length > 0 && !_selectedSnowflakeMemoryName) {
+      renderSnowflakeMemoryDetailView(filtered[0]);
+    }
   }
 
   async function runProvisionCall(dryRun) {

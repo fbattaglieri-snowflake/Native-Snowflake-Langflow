@@ -52,13 +52,28 @@ TECHNICAL_MEMORY_TABLE_NAMES: frozenset[str] = frozenset(
         "MEM_RUNNING_SUMMARIES",
         "MEM_USER_ENTITY_PROFILES",
         "MEM_EPISODIC_EXPERIENCES",
+        "AGENT_CHECKPOINTS",
+        "CHAT_WINDOW_HISTORY",
+        "CHAT_WINDOW_BUFFER",
+        "CHAT_SESSION_SUMMARY",
+        "AGENT_SUMMARY_STORE",
+        "USER_ENTITY_PROFILE",
         "AGENT_EPISODIC_MEMORY",
         "AGENT_EPISODIC_TURNS",
         "AGENT_SEMANTIC_VEC",
         "AGENT_LONG_TERM_FACTS",
         "CHAT_MESSAGE_HISTORY",
         "LANGGRAPH_CHECKPOINTS",
+        "CHECKPOINTS",
+        "CHECKPOINT_BLOBS",
+        "CHECKPOINT_WRITES",
+        "AGENT_EPISODES",
         "SNOWFLAKE_KB_MEM",
+        "MEM_1_GRAPH_CHECKPOINTER",
+        "MEM_2_CHAT_WINDOW",
+        "MEM_3_SESSION_SUMMARY",
+        "MEM_4_USER_ENTITY_PROFILE",
+        "MEM_5_EPISODIC_FEWSHOT",
     }
 )
 
@@ -69,6 +84,11 @@ TECHNICAL_MEMORY_TABLE_PREFIXES: tuple[str, ...] = (
     "MEM_RUNNING_SUMMAR",
     "MEM_USER_ENTITY_",
     "MEM_EPISODIC_",
+    "MEM_1_",
+    "MEM_2_",
+    "MEM_3_",
+    "MEM_4_",
+    "MEM_5_",
 )
 
 
@@ -80,7 +100,7 @@ def is_technical_memory_table(
     raw = (object_name or "").strip()
     if not raw:
         return False
-    short_upper = raw.split(".")[-1].strip().strip('"').upper()
+    short_upper = raw.split("/")[-1].split(".")[-1].strip().strip('"').upper()
     full_upper = raw.replace('"', "").upper()
     if short_upper in TECHNICAL_MEMORY_TABLE_NAMES:
         return True
@@ -89,12 +109,12 @@ def is_technical_memory_table(
     for entry in memories_registry or []:
         if not isinstance(entry, dict):
             continue
-        for key in ("name", "table_name", "target_table", "backing_table", "qualified_name", "table_fqn"):
+        for key in ("name", "table_name", "target_table", "backing_table", "qualified_name", "table_fqn", "pg_table"):
             val = str(entry.get(key) or "").strip()
             if not val:
                 continue
             val_upper = val.replace('"', "").upper()
-            val_short = val_upper.split(".")[-1]
+            val_short = val_upper.split("/")[-1].split(".")[-1]
             if short_upper == val_short or full_upper == val_upper:
                 return True
     return False

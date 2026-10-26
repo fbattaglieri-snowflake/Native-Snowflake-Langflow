@@ -414,6 +414,14 @@ SNOWFLAKE_BUNDLE_COMPONENTS: tuple[BundleComponentSpec, ...] = (
         description="Cascading Database -> Schema -> Cortex Agent & internal Langflow A2A client with thread continuity.",
         required_privileges=("USAGE ON AGENT",),
     ),
+    BundleComponentSpec(
+        component_id="snowflake_message_history",
+        display_name="Message History",
+        category="Models & Agents",
+        release_phase="W2-R4",
+        description="Store or retrieve #2 Short-Term Buffer / Window Memory chat turns on Snowflake Postgres (:5432) or Snowflake Hybrid/Standard Tables.",
+        required_privileges=("SELECT/INSERT ON TABLE", "USAGE ON POSTGRES INSTANCE"),
+    ),
     # LLM Operations (8)
     BundleComponentSpec(
         component_id="snowflake_object_provisioner_llm",
@@ -479,7 +487,15 @@ SNOWFLAKE_BUNDLE_COMPONENTS: tuple[BundleComponentSpec, ...] = (
         description="Structured AI_COMPLETE decision router with capability-filtered model catalog and Cortex SystemOne API node.",
         required_privileges=("CORTEX AI_COMPLETE",),
     ),
-    # Files & Knowledge (6)
+    # Files & Knowledge (7)
+    BundleComponentSpec(
+        component_id="snowflake_memory_base",
+        display_name="Memory Base",
+        category="Files & Knowledge",
+        release_phase="W2-R4",
+        description="Dynamic Snowflake Memory Base component (#1..#5) adapting fields and output ports to Memories on Snowflake SQL or Snowflake Postgres.",
+        required_privileges=("SELECT/INSERT ON TABLE", "USAGE ON POSTGRES INSTANCE"),
+    ),
     BundleComponentSpec(
         component_id="snowflake_object_provisioner_fk",
         display_name="Object Provisioner",

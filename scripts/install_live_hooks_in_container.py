@@ -374,11 +374,12 @@ def install_all() -> None:
     )
     too_fn_new = (
         'function Too({filteredMemories:_origE,memoriesSearch:t,setMemoriesSearch:n,fetchNextPage:o,hasNextPage:s,'
-        'isFetchingNextPage:a,selectedMemoryId:c,currentFlowId:u,onSelectMemory:h,onCreateMemory:f}){'
+        'isFetchingNextPage:a,selectedMemoryId:c,currentFlowId:u,onSelectMemory:_origH,onCreateMemory:f}){'
         'const _sfMems=(typeof window!=="undefined"&&Array.isArray(window.SNOWFLAKE_MEMORIES_LIST)?window.SNOWFLAKE_MEMORIES_LIST:[])'
         '.filter(_m=>{const _q=(t||"").trim().toLowerCase();return!_q||`${_m.name||""} ${_m.description||""}`.toLowerCase().includes(_q);});'
         'const _existingNames=new Set((_origE||[]).map(_x=>(_x.name||"").toUpperCase()));'
         'const e=[..._sfMems.filter(_m=>!_existingNames.has((_m.name||"").toUpperCase())),...(_origE||[])];'
+        'const h=(_sel)=>{if(typeof _origH==="function")_origH(_sel);if(typeof window!=="undefined"&&typeof window.renderSnowflakeMemoryDetailView==="function")window.renderSnowflakeMemoryDetailView(_sel);};'
     )
 
     too_orig = (
@@ -389,9 +390,10 @@ def install_all() -> None:
         'v.jsxs("div",{className:"border-b border-border px-4 py-3",children:[v.jsxs("div",{className:"flex items-center gap-2",children:[v.jsx(qe,{name:"BrainCog",className:"h-4 w-4 text-muted-foreground"}),v.jsx("h2",{className:"text-sm font-semibold",children:p("memory.sidebarTitle")})]}),'
         'v.jsxs("div",{className:"mt-3 flex items-center gap-2 flex-wrap",children:['
         'v.jsxs(qt,{size:"sm",variant:"outline",onClick:f,disabled:!u,className:"rounded-[10px]",children:[v.jsx(qe,{name:"Plus",className:"h-3.5 w-3.5"}),p("memory.createButton")]}),'
-        'v.jsxs(qt,{size:"sm",variant:"outline","data-testid":"memories-plus-snowflake-btn",onClick:()=>window.openCreateSnowflakeMemoryModal&&window.openCreateSnowflakeMemoryModal(u),style:{backgroundColor:"#29B5E8",borderColor:"#29B5E8",color:"#ffffff"},className:"rounded-[10px] font-semibold flex items-center gap-1.5",children:['
+        'v.jsxs(qt,{size:"sm",variant:"outline","data-testid":"memories-plus-snowflake-btn",onClick:(ev)=>window.openSnowflakeMemoryTypeDropdown?window.openSnowflakeMemoryTypeDropdown(u,ev):window.openCreateSnowflakeMemoryModal&&window.openCreateSnowflakeMemoryModal(u),style:{backgroundColor:"#29B5E8",borderColor:"#29B5E8",color:"#ffffff"},className:"rounded-[10px] font-semibold flex items-center gap-1.5",children:['
+        'v.jsx(qe,{name:"Plus",className:"h-3.5 w-3.5"}),'
         + sf_svg_inline_xs_white
-        + ',"+ Snowflake"]})'
+        + ',"Snowflake"]})'
         ']})]})'
     )
 

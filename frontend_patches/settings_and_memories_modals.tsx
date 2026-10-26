@@ -523,6 +523,24 @@ export const SNOWFLAKE_AGENT_MEMORY_TYPES = [
   },
 ] as const;
 
+export const COMING_SOON_MEMORY_TYPES = [
+  {
+    id: "business_ontology_cortex_sense",
+    label: "#6 Long-Term: Business Ontology / Cortex Sense (Coming Soon)",
+    category: "long_term_ontology",
+    enabled: false,
+    badge: "Coming Soon",
+    needsEmbeddingBadge: "OPZIONALE — Gestito da Cortex Sense",
+    recommendedSnowflakeObjects: [
+      "Cortex Sense Context",
+      "Business Ontology Graph",
+      "Semantic View",
+    ],
+    description:
+      "Enterprise Business Ontology and Cortex Sense semantic graph memory (Coming Soon).",
+  },
+] as const;
+
 export const LEGACY_MEMORY_TYPE_ALIASES = {
   episodic_session: "buffer_window_memory",
   semantic_vector: "episodic_memory",
@@ -532,13 +550,38 @@ export const LEGACY_MEMORY_TYPE_ALIASES = {
 export const EMBEDDING_PROVIDERS_CATALOG = {
   snowflake_cortex: {
     id: "snowflake_cortex",
-    label: "Snowflake Cortex (AI_EMBED)",
+    label: "1. Snowflake Cortex Native (AI_EMBED / AI_MULTI_EMBED)",
     models: [
       { modelId: "snowflake-arctic-embed-m-v1.5", dimension: 768 },
       { modelId: "e5-base-v2", dimension: 768 },
       { modelId: "snowflake-arctic-embed-l-v2.0", dimension: 1024 },
       { modelId: "nv-embed-qa-4", dimension: 1024 },
       { modelId: "multilingual-e5-large", dimension: 1024 },
+      { modelId: "twelvelabs-marengo-embed-3-0", dimension: 512 },
+    ],
+  },
+  spcs_model_registry: {
+    id: "spcs_model_registry",
+    label: "2. Snowflake Model Registry (SPCS Compute Pool, 1..4096d)",
+    models: [
+      { modelId: "bge-large-en-v1.5-spcs", dimension: 1024 },
+      { modelId: "intfloat-e5-mistral-7b-spcs", dimension: 4096 },
+    ],
+  },
+  spcs_ollama: {
+    id: "spcs_ollama",
+    label: "3. Private - Ollama (SPCS Compute Pool)",
+    models: [
+      { modelId: "nomic-embed-text", dimension: 768 },
+      { modelId: "bge-large-en-v1.5", dimension: 1024 },
+    ],
+  },
+  spcs_llm_proxy: {
+    id: "spcs_llm_proxy",
+    label: "4. Snowflake Standard Proxy (Chat / Responses / Messages)",
+    models: [
+      { modelId: "proxy-chat-text-embedding-3-small", dimension: 1536 },
+      { modelId: "proxy-responses-embed-v1", dimension: 1024 },
     ],
   },
   openai: {
@@ -598,9 +641,9 @@ export interface CreateMemoryDialogProps {
 }
 
 /**
- * `+ Snowflake` Button on the Langflow `Memories` Page (`W2-R2-13`, `W2-R2-14`, `W2-R3-06`):
- * Styled in official Snowflake Blue (`#29B5E8`), strictly scoped to the Memories view
- * with normal toolbar stacking order (`zIndex: 10`) and hidden when any modal dialog is open.
+ * `+ Snowflake` (`[ + ❄️ Snowflake ]`) Button on the Langflow `Memories` Page (`W2-R2-13`, `W2-R2-14`, `W2-R3-06`, `W2-R4-01`):
+ * Styled in official Snowflake Blue (`#29B5E8`), with `+` before the Snowflake icon and text `Snowflake`,
+ * strictly scoped to the Memories view with normal toolbar stacking order (`zIndex: 10`) and hidden when any modal dialog is open.
  */
 export const MemoriesPlusSnowflakeButton: React.FC<{
   onClick: () => void;
@@ -623,7 +666,9 @@ export const MemoriesPlusSnowflakeButton: React.FC<{
         zIndex: 10,
       }}
     >
-      <span>+ Snowflake</span>
+      <span data-testid="memories-plus-snowflake-plus">+</span>
+      <span data-testid="memories-plus-snowflake-icon" aria-hidden="true">❄️</span>
+      <span data-testid="memories-plus-snowflake-label">Snowflake</span>
     </button>
   );
 };

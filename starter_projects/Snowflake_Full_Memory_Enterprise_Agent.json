@@ -1,0 +1,697 @@
+{
+  "id": "snowflake-full-memory-enterprise-agent-001",
+  "name": "Snowflake_Full_Memory_Enterprise_Agent",
+  "description": "End-to-end Enterprise Financial & Operations Assistant combining all 5 canonical Snowflake Memory types (#1 Graph Checkpointer on Snowflake Postgres, #2 Buffer/Window Message History on Snowflake Postgres, #3 Summary Memory on Hybrid Table, #4 Cross-Session User Profile & Entity Memory on Hybrid Table VARIANT with claude-sonnet-5-5 + NO_INGEST, #5 Episodic Few-Shot Memory in Tool Mode with Snowflake Cortex AI_EMBED 1024d) alongside #7 Cortex Analyst & Cortex Search and #8 Procedural System Message.",
+  "endpoint_name": "snowflake-full-memory-enterprise-agent",
+  "is_component": false,
+  "data": {
+    "nodes": [
+      {
+        "id": "ChatInput-showcase01",
+        "type": "genericNode",
+        "position": {
+          "x": 80,
+          "y": 320
+        },
+        "data": {
+          "id": "ChatInput-showcase01",
+          "type": "ChatInput",
+          "node": {
+            "display_name": "Chat Input",
+            "description": "Financial analyst prompt input.",
+            "template": {
+              "input_value": {
+                "name": "input_value",
+                "value": "Riconcilia lo scostamento di margine Q4 come abbiamo fatto per le chiusure passate"
+              },
+              "session_id": {
+                "name": "session_id",
+                "value": "fin-reconcile-session-001"
+              }
+            }
+          }
+        }
+      },
+      {
+        "id": "SnowflakeMemoryBase-mem1",
+        "type": "genericNode",
+        "position": {
+          "x": 420,
+          "y": 40
+        },
+        "data": {
+          "id": "SnowflakeMemoryBase-mem1",
+          "type": "SnowflakeMemoryBase",
+          "node": {
+            "display_name": "Memory Base (#1 Checkpointer)",
+            "category": "files_and_knowledge",
+            "icon": "Snowflake",
+            "template": {
+              "memory_base": {
+                "name": "memory_base",
+                "value": "MEM_1_GRAPH_CHECKPOINTER"
+              },
+              "canonical_memory_type": {
+                "name": "canonical_memory_type",
+                "value": "graph_state_checkpointer"
+              },
+              "thread_id": {
+                "name": "thread_id",
+                "value": "fin-reconcile-thread-001",
+                "show": true
+              },
+              "checkpoint_ns": {
+                "name": "checkpoint_ns",
+                "value": "fin_reconciliation_hitl",
+                "show": true
+              },
+              "ttl_hours": {
+                "name": "ttl_hours",
+                "value": 72,
+                "show": true
+              },
+              "filter_by_session": {
+                "name": "filter_by_session",
+                "value": true,
+                "show": true
+              },
+              "tool_mode": {
+                "name": "tool_mode",
+                "value": false,
+                "show": false
+              }
+            }
+          }
+        }
+      },
+      {
+        "id": "SnowflakeMessageHistory-mem2",
+        "type": "genericNode",
+        "position": {
+          "x": 420,
+          "y": 190
+        },
+        "data": {
+          "id": "SnowflakeMessageHistory-mem2",
+          "type": "SnowflakeMessageHistory",
+          "node": {
+            "display_name": "Snowflake Message History (#2 Buffer / Window)",
+            "category": "models_and_agents",
+            "icon": "Snowflake",
+            "template": {
+              "memory_base": {
+                "name": "memory_base",
+                "value": "MEM_2_CHAT_WINDOW"
+              },
+              "storage_family": {
+                "name": "storage_family",
+                "value": "snowflake_postgres"
+              },
+              "postgres_instance": {
+                "name": "postgres_instance",
+                "value": "LANGFLOW_PG_INSTANCE"
+              },
+              "pg_table": {
+                "name": "pg_table",
+                "value": "public.chat_message_history"
+              },
+              "session_id": {
+                "name": "session_id",
+                "value": "fin-reconcile-session-001"
+              },
+              "window_k": {
+                "name": "window_k",
+                "value": 8
+              },
+              "filter_by_session": {
+                "name": "filter_by_session",
+                "value": true
+              }
+            }
+          }
+        }
+      },
+      {
+        "id": "SnowflakeMemoryBase-mem3",
+        "type": "genericNode",
+        "position": {
+          "x": 420,
+          "y": 340
+        },
+        "data": {
+          "id": "SnowflakeMemoryBase-mem3",
+          "type": "SnowflakeMemoryBase",
+          "node": {
+            "display_name": "Memory Base (#3 Session Summary)",
+            "category": "files_and_knowledge",
+            "icon": "Snowflake",
+            "template": {
+              "memory_base": {
+                "name": "memory_base",
+                "value": "MEM_3_SESSION_SUMMARY"
+              },
+              "canonical_memory_type": {
+                "name": "canonical_memory_type",
+                "value": "summary_memory"
+              },
+              "session_id": {
+                "name": "session_id",
+                "value": "fin-reconcile-session-001",
+                "show": true
+              },
+              "summarizer_model": {
+                "name": "summarizer_model",
+                "value": "openai-gpt-6-luna",
+                "show": true
+              },
+              "max_summary_tokens": {
+                "name": "max_summary_tokens",
+                "value": 512,
+                "show": true
+              },
+              "filter_by_session": {
+                "name": "filter_by_session",
+                "value": true,
+                "show": true
+              },
+              "tool_mode": {
+                "name": "tool_mode",
+                "value": false,
+                "show": false
+              }
+            }
+          }
+        }
+      },
+      {
+        "id": "SnowflakeMemoryBase-mem4",
+        "type": "genericNode",
+        "position": {
+          "x": 420,
+          "y": 490
+        },
+        "data": {
+          "id": "SnowflakeMemoryBase-mem4",
+          "type": "SnowflakeMemoryBase",
+          "node": {
+            "display_name": "Memory Base (#4 User Profile & Entity)",
+            "category": "files_and_knowledge",
+            "icon": "Snowflake",
+            "template": {
+              "memory_base": {
+                "name": "memory_base",
+                "value": "MEM_4_USER_ENTITY_PROFILE"
+              },
+              "canonical_memory_type": {
+                "name": "canonical_memory_type",
+                "value": "user_profile_entity_memory"
+              },
+              "user_id": {
+                "name": "user_id",
+                "value": "fin_analyst_01",
+                "show": true
+              },
+              "entity_namespace": {
+                "name": "entity_namespace",
+                "value": "financial_reporting_prefs",
+                "show": true
+              },
+              "filter_by_session": {
+                "name": "filter_by_session",
+                "value": false,
+                "show": true
+              },
+              "tool_mode": {
+                "name": "tool_mode",
+                "value": false,
+                "show": true
+              }
+            }
+          }
+        }
+      },
+      {
+        "id": "SnowflakeMemoryBase-mem5",
+        "type": "genericNode",
+        "position": {
+          "x": 420,
+          "y": 640
+        },
+        "data": {
+          "id": "SnowflakeMemoryBase-mem5",
+          "type": "SnowflakeMemoryBase",
+          "node": {
+            "display_name": "Memory Base (#5 Episodic Few-Shot Tool)",
+            "category": "files_and_knowledge",
+            "icon": "Snowflake",
+            "template": {
+              "memory_base": {
+                "name": "memory_base",
+                "value": "MEM_5_EPISODIC_FEWSHOT"
+              },
+              "canonical_memory_type": {
+                "name": "canonical_memory_type",
+                "value": "episodic_memory"
+              },
+              "topic": {
+                "name": "topic",
+                "value": "q4_margin_reconciliation",
+                "show": true
+              },
+              "outcome_score_threshold": {
+                "name": "outcome_score_threshold",
+                "value": 0.9,
+                "show": true
+              },
+              "few_shot_k": {
+                "name": "few_shot_k",
+                "value": 3,
+                "show": true
+              },
+              "filter_by_session": {
+                "name": "filter_by_session",
+                "value": false,
+                "show": true
+              },
+              "tool_mode": {
+                "name": "tool_mode",
+                "value": true,
+                "show": true
+              }
+            }
+          }
+        }
+      },
+      {
+        "id": "SnowflakeCortexAnalyst-domain7a",
+        "type": "genericNode",
+        "position": {
+          "x": 420,
+          "y": 790
+        },
+        "data": {
+          "id": "SnowflakeCortexAnalyst-domain7a",
+          "type": "SnowflakeDataSourceCortexAnalyst",
+          "node": {
+            "display_name": "Cortex Analyst (#7 Financial Semantic View)",
+            "category": "data_source",
+            "icon": "Snowflake",
+            "template": {
+              "database": {
+                "name": "database",
+                "value": "SNOWFLAKE_LANGFLOW"
+              },
+              "schema_name": {
+                "name": "schema_name",
+                "value": "CORE"
+              },
+              "semantic_view": {
+                "name": "semantic_view",
+                "value": "FIN_OPERATIONS_SV"
+              },
+              "tool_mode": {
+                "name": "tool_mode",
+                "value": true
+              }
+            }
+          }
+        }
+      },
+      {
+        "id": "SnowflakeCortexSearch-domain7b",
+        "type": "genericNode",
+        "position": {
+          "x": 420,
+          "y": 930
+        },
+        "data": {
+          "id": "SnowflakeCortexSearch-domain7b",
+          "type": "SnowflakeDataSourceCortexSearch",
+          "node": {
+            "display_name": "Cortex Search (#7 Accounting Policy Manuals)",
+            "category": "data_source",
+            "icon": "Snowflake",
+            "template": {
+              "database": {
+                "name": "database",
+                "value": "SNOWFLAKE_LANGFLOW"
+              },
+              "schema_name": {
+                "name": "schema_name",
+                "value": "CORE"
+              },
+              "search_service": {
+                "name": "search_service",
+                "value": "FIN_POLICY_SEARCH_SVC"
+              },
+              "tool_mode": {
+                "name": "tool_mode",
+                "value": true
+              }
+            }
+          }
+        }
+      },
+      {
+        "id": "SnowflakeStandardChat-agent8",
+        "type": "genericNode",
+        "position": {
+          "x": 860,
+          "y": 420
+        },
+        "data": {
+          "id": "SnowflakeStandardChat-agent8",
+          "type": "SnowflakeStandardChatModel",
+          "node": {
+            "display_name": "Enterprise Financial Agent (Proxy - Chat + #8 Procedural System Message)",
+            "category": "models_and_agents",
+            "icon": "Snowflake",
+            "template": {
+              "model_name": {
+                "name": "model_name",
+                "value": "openai-gpt-6-luna"
+              },
+              "system_message": {
+                "name": "system_message",
+                "value": "Sei l'Assistente Enterprise Snowflake Financial & Operations (#8 Procedural Memory).\nRegole operative obbligatorie:\n1. Rispetta il profilo utente cross-sessione (#4 MEM_4_USER_ENTITY_PROFILE): usa valuta Euro (€), lingua italiana e focus prioritario sul margine netto Q3/Q4.\n2. Tieni conto del riassunto della sessione corrente (#3 MEM_3_SESSION_SUMMARY) per i turni 1..N-8 e degli ultimi 8 messaggi verbatim (#2 MEM_2_CHAT_WINDOW).\n3. Prima di eseguire riconciliazioni complesse, consulta il tool #5 MEM_5_EPISODIC_FEWSHOT (outcome_score >= 0.9, top-k = 3) per riutilizzare le traiettorie SQL vincenti passate.\n4. Per i dati di business (#7), interroga esclusivamente Cortex Analyst (FIN_OPERATIONS_SV) e Cortex Search (FIN_POLICY_SEARCH_SVC) sotto il ruolo attivo CURRENT_ROLE()."
+              },
+              "checkpointer_memory": {
+                "name": "checkpointer_memory",
+                "value": "MEM_1_GRAPH_CHECKPOINTER"
+              }
+            }
+          }
+        }
+      },
+      {
+        "id": "ChatOutput-showcase01",
+        "type": "genericNode",
+        "position": {
+          "x": 1240,
+          "y": 420
+        },
+        "data": {
+          "id": "ChatOutput-showcase01",
+          "type": "ChatOutput",
+          "node": {
+            "display_name": "Chat Output",
+            "description": "Reconciled financial analysis response in Italian & Euro (€).",
+            "template": {}
+          }
+        }
+      }
+    ],
+    "edges": [
+      {
+        "id": "edge-input-to-agent",
+        "source": "ChatInput-showcase01",
+        "target": "SnowflakeStandardChat-agent8",
+        "sourceHandle": "message",
+        "targetHandle": "input_value"
+      },
+      {
+        "id": "edge-mem1-checkpointer-to-agent",
+        "source": "SnowflakeMemoryBase-mem1",
+        "target": "SnowflakeStandardChat-agent8",
+        "sourceHandle": "checkpoint_state",
+        "targetHandle": "checkpointer_state"
+      },
+      {
+        "id": "edge-mem2-window-to-agent-history",
+        "source": "SnowflakeMessageHistory-mem2",
+        "target": "SnowflakeStandardChat-agent8",
+        "sourceHandle": "messages",
+        "targetHandle": "chat_history"
+      },
+      {
+        "id": "edge-mem3-summary-to-agent-sysmsg",
+        "source": "SnowflakeMemoryBase-mem3",
+        "target": "SnowflakeStandardChat-agent8",
+        "sourceHandle": "running_summary",
+        "targetHandle": "system_message"
+      },
+      {
+        "id": "edge-mem4-profile-to-agent-sysmsg",
+        "source": "SnowflakeMemoryBase-mem4",
+        "target": "SnowflakeStandardChat-agent8",
+        "sourceHandle": "profile_context",
+        "targetHandle": "system_message"
+      },
+      {
+        "id": "edge-mem5-episodic-tool-to-agent-tools",
+        "source": "SnowflakeMemoryBase-mem5",
+        "target": "SnowflakeStandardChat-agent8",
+        "sourceHandle": "component_as_tool",
+        "targetHandle": "tools"
+      },
+      {
+        "id": "edge-domain7a-analyst-to-agent-tools",
+        "source": "SnowflakeCortexAnalyst-domain7a",
+        "target": "SnowflakeStandardChat-agent8",
+        "sourceHandle": "component_as_tool",
+        "targetHandle": "tools"
+      },
+      {
+        "id": "edge-domain7b-search-to-agent-tools",
+        "source": "SnowflakeCortexSearch-domain7b",
+        "target": "SnowflakeStandardChat-agent8",
+        "sourceHandle": "component_as_tool",
+        "targetHandle": "tools"
+      },
+      {
+        "id": "edge-agent-to-output",
+        "source": "SnowflakeStandardChat-agent8",
+        "target": "ChatOutput-showcase01",
+        "sourceHandle": "text_output",
+        "targetHandle": "input_value"
+      }
+    ],
+    "viewport": {
+      "x": 0,
+      "y": 0,
+      "zoom": 0.85
+    },
+    "snowflake_context": {
+      "flow_id": "snowflake-full-memory-enterprise-agent-001",
+      "databases": [
+        "SNOWFLAKE_LANGFLOW"
+      ],
+      "schemas_by_db": {
+        "SNOWFLAKE_LANGFLOW": [
+          "CORE"
+        ]
+      },
+      "warehouses": [
+        "COMPUTE_WH"
+      ],
+      "compute_pools": [
+        "LANGFLOW_COMPUTE_POOL"
+      ],
+      "postgres_instances": [
+        "LANGFLOW_PG_INSTANCE"
+      ],
+      "selected_objects": {
+        "SNOWFLAKE_LANGFLOW.CORE": {
+          "tables": [
+            "FIN_GL_TRANSACTIONS",
+            "FIN_Q3_Q4_MARGIN_LEDGER"
+          ],
+          "views": [
+            "FIN_NET_MARGIN_VARIANCE_V"
+          ],
+          "semantic_views": [
+            "FIN_OPERATIONS_SV"
+          ],
+          "cortex_search_services": [
+            "FIN_POLICY_SEARCH_SVC"
+          ],
+          "stages": [
+            "SNOWFLAKE_LANGFLOW_STAGE"
+          ]
+        }
+      },
+      "objects_by_db_schema": {
+        "SNOWFLAKE_LANGFLOW.CORE": {
+          "tables": [
+            "FIN_GL_TRANSACTIONS",
+            "FIN_Q3_Q4_MARGIN_LEDGER"
+          ],
+          "views": [
+            "FIN_NET_MARGIN_VARIANCE_V"
+          ],
+          "semantic_views": [
+            "FIN_OPERATIONS_SV"
+          ],
+          "cortex_search_services": [
+            "FIN_POLICY_SEARCH_SVC"
+          ],
+          "stages": [
+            "SNOWFLAKE_LANGFLOW_STAGE"
+          ]
+        }
+      }
+    },
+    "snowflake_memories": [
+      {
+        "name": "MEM_1_GRAPH_CHECKPOINTER",
+        "flow_id": "snowflake-full-memory-enterprise-agent-001",
+        "agent_memory_type": "graph_state_checkpointer",
+        "canonical_memory_type": "graph_state_checkpointer",
+        "storage_family": "snowflake_postgres",
+        "postgres_instance": "LANGFLOW_PG_INSTANCE",
+        "pg_database": "postgres",
+        "pg_schema": "public",
+        "pg_table": "langgraph_checkpoints",
+        "pg_table_mode": "PostgresSaver",
+        "fallback_table_fqn": "SNOWFLAKE_LANGFLOW.CORE.AGENT_CHECKPOINTS",
+        "database": "SNOWFLAKE_LANGFLOW",
+        "schema": "CORE",
+        "vector_database": "Snowflake Postgres (PostgresSaver)",
+        "table_fqn": "LANGFLOW_PG_INSTANCE:5432/postgres.public.langgraph_checkpoints",
+        "enable_embedding": false,
+        "embedding_provider": "none",
+        "filter_by_session": true,
+        "tool_mode": false,
+        "thread_id": "fin-reconcile-thread-001",
+        "checkpoint_ns": "fin_reconciliation_hitl",
+        "ttl_hours": 72,
+        "auto_capture": true,
+        "ingestion_threshold": 1,
+        "llm_preprocessing": {
+          "enabled": false,
+          "engine": "none",
+          "model": null,
+          "kill_phrase": "NO_INGEST"
+        }
+      },
+      {
+        "name": "MEM_2_CHAT_WINDOW",
+        "flow_id": "snowflake-full-memory-enterprise-agent-001",
+        "agent_memory_type": "buffer_window_memory",
+        "canonical_memory_type": "buffer_window_memory",
+        "storage_family": "snowflake_postgres",
+        "postgres_instance": "LANGFLOW_PG_INSTANCE",
+        "pg_database": "postgres",
+        "pg_schema": "public",
+        "pg_table": "chat_message_history",
+        "pg_table_mode": "Relational / JSONB",
+        "fallback_table_fqn": "SNOWFLAKE_LANGFLOW.CORE.CHAT_WINDOW_HISTORY",
+        "database": "SNOWFLAKE_LANGFLOW",
+        "schema": "CORE",
+        "vector_database": "Snowflake Postgres (Relational / JSONB)",
+        "table_fqn": "LANGFLOW_PG_INSTANCE:5432/postgres.public.chat_message_history",
+        "enable_embedding": false,
+        "embedding_provider": "none",
+        "filter_by_session": true,
+        "tool_mode": false,
+        "session_id": "fin-reconcile-session-001",
+        "window_k": 8,
+        "retention_days": 30,
+        "auto_capture": true,
+        "ingestion_threshold": 1,
+        "llm_preprocessing": {
+          "enabled": false,
+          "engine": "none",
+          "model": null,
+          "kill_phrase": "NO_INGEST"
+        }
+      },
+      {
+        "name": "MEM_3_SESSION_SUMMARY",
+        "flow_id": "snowflake-full-memory-enterprise-agent-001",
+        "agent_memory_type": "summary_memory",
+        "canonical_memory_type": "summary_memory",
+        "storage_family": "snowflake_sql",
+        "database": "SNOWFLAKE_LANGFLOW",
+        "schema": "CORE",
+        "object_subtype": "Hybrid Table",
+        "vector_database": "Hybrid Table",
+        "table_name": "CHAT_SESSION_SUMMARY",
+        "table_fqn": "SNOWFLAKE_LANGFLOW.CORE.CHAT_SESSION_SUMMARY",
+        "primary_key": "session_id",
+        "enable_embedding": false,
+        "embedding_provider": "none",
+        "filter_by_session": true,
+        "tool_mode": false,
+        "session_id": "fin-reconcile-session-001",
+        "summarizer_model": "openai-gpt-6-luna",
+        "max_summary_tokens": 512,
+        "auto_capture": true,
+        "ingestion_threshold": 1,
+        "llm_preprocessing": {
+          "enabled": true,
+          "engine": "proxy_chat",
+          "model": "openai-gpt-6-luna",
+          "fallback_sql_function": "SNOWFLAKE.CORTEX.AI_COMPLETE",
+          "kill_phrase": "NO_INGEST"
+        }
+      },
+      {
+        "name": "MEM_4_USER_ENTITY_PROFILE",
+        "flow_id": "snowflake-full-memory-enterprise-agent-001",
+        "agent_memory_type": "user_profile_entity_memory",
+        "canonical_memory_type": "user_profile_entity_memory",
+        "storage_family": "snowflake_sql",
+        "database": "SNOWFLAKE_LANGFLOW",
+        "schema": "CORE",
+        "object_subtype": "Hybrid Table",
+        "vector_database": "Hybrid Table (VARIANT)",
+        "table_name": "USER_ENTITY_PROFILE",
+        "table_fqn": "SNOWFLAKE_LANGFLOW.CORE.USER_ENTITY_PROFILE",
+        "primary_key": "user_id, entity_namespace, memory_key",
+        "payload_column_type": "VARIANT",
+        "enable_embedding": false,
+        "embedding_provider": "none",
+        "filter_by_session": false,
+        "tool_mode": false,
+        "user_id": "fin_analyst_01",
+        "entity_namespace": "financial_reporting_prefs",
+        "schema_keys": [
+          "currency",
+          "language",
+          "kpi_focus",
+          "department"
+        ],
+        "auto_capture": true,
+        "ingestion_threshold": 1,
+        "llm_preprocessing": {
+          "enabled": true,
+          "engine": "proxy_messages",
+          "model": "claude-sonnet-5-5",
+          "kill_phrase": "NO_INGEST"
+        }
+      },
+      {
+        "name": "MEM_5_EPISODIC_FEWSHOT",
+        "flow_id": "snowflake-full-memory-enterprise-agent-001",
+        "agent_memory_type": "episodic_memory",
+        "canonical_memory_type": "episodic_memory",
+        "storage_family": "snowflake_sql",
+        "database": "SNOWFLAKE_LANGFLOW",
+        "schema": "CORE",
+        "object_subtype": "Standard Table",
+        "vector_database": "Standard Table (VECTOR)",
+        "table_name": "AGENT_EPISODIC_MEMORY",
+        "table_fqn": "SNOWFLAKE_LANGFLOW.CORE.AGENT_EPISODIC_MEMORY",
+        "enable_embedding": true,
+        "embedding_provider": "snowflake_cortex",
+        "embedding_model": "snowflake-arctic-embed-l-v2.0",
+        "dimension": 1024,
+        "filter_by_session": false,
+        "tool_mode": true,
+        "topic_column": "topic",
+        "tool_used_column": "tool_used",
+        "outcome_score_threshold": 0.9,
+        "few_shot_k": 3,
+        "auto_capture": true,
+        "ingestion_threshold": 1,
+        "llm_preprocessing": {
+          "enabled": false,
+          "engine": "cortex_sql",
+          "model": "mistral-large2",
+          "kill_phrase": "NO_INGEST"
+        }
+      }
+    ]
+  }
+}

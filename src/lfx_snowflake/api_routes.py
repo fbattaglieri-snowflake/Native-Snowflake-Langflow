@@ -22,9 +22,13 @@ from .bundle_manifest import (
 from .fastapi_live_bridge import (
     AGENT_MEMORY_TYPES,
     CANONICAL_MEMORY_TYPES_BY_ID,
+    COMING_SOON_MEMORY_TYPES,
+    DROPDOWN_MEMORY_TYPES,
     EMBEDDING_PROVIDERS_CATALOG,
     EXTERNAL_EMBEDDING_PROVIDERS,
     LEGACY_MEMORY_TYPE_ALIASES,
+    LLM_PREPROCESSING_ENGINES,
+    SNOWFLAKE_EMBEDDING_SOURCES,
     get_current_snowflake_flow_id,
     resolve_canonical_memory_type,
     resolve_memory_embedding_dimension,
@@ -1177,7 +1181,7 @@ class SnowflakeAPIRouter:
         )
 
     # ------------------------------------------------------------------
-    # 5. Create Memory Dialog Endpoint (REQ-10, G-A4, W2-R3-05)
+    # 5. Create Memory Dialog Endpoint (REQ-10, G-A4, W2-R3-05, W2-R4-02..05)
     # ------------------------------------------------------------------
     def list_memories_catalog(self) -> SnowflakeAPIResponse:
         """GET /api/v1/snowflake/memories"""
@@ -1186,7 +1190,11 @@ class SnowflakeAPIRouter:
             body={
                 "memories": list(self.memories_registry.values()),
                 "agent_memory_types": list(AGENT_MEMORY_TYPES),
+                "coming_soon_memory_types": list(COMING_SOON_MEMORY_TYPES),
+                "dropdown_memory_types": list(DROPDOWN_MEMORY_TYPES),
                 "legacy_memory_type_aliases": dict(LEGACY_MEMORY_TYPE_ALIASES),
+                "snowflake_embedding_sources": list(SNOWFLAKE_EMBEDDING_SOURCES),
+                "llm_preprocessing_engines": list(LLM_PREPROCESSING_ENGINES),
                 "external_embedding_providers": EXTERNAL_EMBEDDING_PROVIDERS,
                 "embedding_providers_catalog": list(EMBEDDING_PROVIDERS_CATALOG),
                 "active_role": self.active_role,
@@ -1209,8 +1217,23 @@ class SnowflakeAPIRouter:
         embedding_provider: str = "snowflake_cortex",
         custom_dimension: int | None = None,
         endpoint_url: str | None = None,
+        storage_family: str | None = None,
+        postgres_instance: str | None = None,
+        kill_phrase: str = "NO_INGEST",
+        flow_id: str | None = None,
     ) -> SnowflakeAPIResponse:
         """POST /api/v1/snowflake/memories/create"""
+        if str(agent_memory_type or "").strip().lower() in (
+            "business_ontology_cortex_sense",
+            "cortex_sense",
+            "business_ontology",
+        ):
+            return self.build_error_response(
+                error_code="UNSUPPORTED_CAPABILITY",
+                operation="MEMORY_CREATE",
+                detail="Memory type '#6 Business Ontology / Cortex Sense' is Coming Soon and disabled in this release.",
+            )
+
         # Granular permission separation (G-A4): using an existing vector store does NOT require CREATE privilege
         required_perm = (
             "MEMORY_CREATE_PHYSICAL" if create_new_physical_store else "MEMORY_USE_EXISTING"
@@ -1233,7 +1256,14 @@ class SnowflakeAPIRouter:
             "snowflake_standard_vector",
             "snowflake_standard_table",
             "snowflake_hybrid_table",
+            "snowflake_dynamic_table",
+            "snowflake_interactive_table",
             "snowflake_postgres",
+            "Standard Table",
+            "Hybrid Table",
+            "Dynamic Table",
+            "Interactive Table",
+            "Snowflake Postgres",
         }
         for mem_spec in AGENT_MEMORY_TYPES:
             valid_backends.update(mem_spec.get("recommended_snowflake_objects", []))
@@ -1253,6 +1283,9 @@ class SnowflakeAPIRouter:
             )
 
         canonical_type = resolve_canonical_memory_type(agent_memory_type)
+        if canonical_type in ("graph_state_checkpointer", "summary_memory"):
+            enable_embedding = False
+
         type_spec = CANONICAL_MEMORY_TYPES_BY_ID[canonical_type]
         dim = (
             resolve_memory_embedding_dimension(
@@ -1265,18 +1298,33 @@ class SnowflakeAPIRouter:
             else None
         )
 
+        resolved_family = (
+            "snowflake_postgres"
+            if (
+                str(storage_family or "").strip().lower() in ("snowflake_postgres", "postgres", "branch_b")
+                or postgres_instance
+                or "POSTGRES" in str(vector_database or "").upper()
+            )
+            else "snowflake_sql"
+        )
+
         memory_id = str(uuid.uuid4())
         record = {
             "memory_id": memory_id,
             "name": name,
+            "flow_id": flow_id or get_current_snowflake_flow_id(),
+            "storage_family": resolved_family,
+            "postgres_instance": postgres_instance if resolved_family == "snowflake_postgres" else None,
             "agent_memory_type": agent_memory_type,
             "canonical_memory_type": canonical_type,
             "label": type_spec["label"],
+            "purpose": type_spec["purpose"],
             "recommended_snowflake_objects": list(type_spec["recommended_snowflake_objects"]),
             "needs_embedding_badge": type_spec["needs_embedding_badge"],
             "how_to_feed_without_embedding": type_spec["how_to_feed_without_embedding"],
             "when_embedding_useful": type_spec["when_embedding_useful"],
             "required_inputs": list(type_spec["required_inputs"]),
+            "filter_by_session": type_spec.get("filter_by_session", canonical_type in ("graph_state_checkpointer", "buffer_window_memory", "summary_memory")),
             "enable_embedding": bool(enable_embedding),
             "embedding_provider": embedding_provider if enable_embedding else "none",
             "embedding_model": embedding_model,
@@ -1288,6 +1336,7 @@ class SnowflakeAPIRouter:
             "llm_preprocessing_provider": (
                 llm_preprocessing_provider if llm_preprocessing_enabled else None
             ),
+            "kill_phrase": str(kill_phrase or "NO_INGEST"),
             "llm_calls_when_disabled": 0,
             "created_physical_store": bool(create_new_physical_store),
             "owner_role": self.active_role,
@@ -1302,11 +1351,13 @@ class SnowflakeAPIRouter:
             details={
                 "agent_memory_type": agent_memory_type,
                 "canonical_memory_type": canonical_type,
+                "storage_family": resolved_family,
                 "enable_embedding": enable_embedding,
                 "embedding_provider": embedding_provider,
                 "vector_database": vector_database,
                 "create_new_physical_store": create_new_physical_store,
                 "llm_preprocessing_enabled": llm_preprocessing_enabled,
+                "kill_phrase": str(kill_phrase or "NO_INGEST"),
             },
         )
         return SnowflakeAPIResponse(status_code=201, body={"memory": record})
