@@ -730,7 +730,7 @@ def install_all() -> None:
         "      }\n"
         "    </style>\n"
         '    <script defer src="./preserved_provisioning_and_memories_concept.js?v=sflf046"></script>\n'
-        '    <script defer src="./snowflake-ui-integration.js?v=sflf046"></script>\n'
+        '    <script defer src="./snowflake-ui-integration.js?v=sflf046&r=2"></script>\n'
         "  </head>"
     )
     if "snowflake-ui-integration.js" not in html_text:

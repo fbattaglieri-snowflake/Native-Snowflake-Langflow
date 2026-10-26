@@ -85,7 +85,7 @@ export const SnowflakeRoleSelector: React.FC<SnowflakeRoleSelectorProps> = ({
           className="inline-flex items-center gap-1 rounded px-2 py-0.5 text-xs font-semibold text-white"
           style={{ backgroundColor: "#29B5E8", color: "#ffffff" }}
         >
-          [ ❄️ Context ]
+          <span>Context</span>
         </button>
       )}
     </div>

@@ -1017,7 +1017,7 @@
           cbBtn.id ||
           ""
         ).toLowerCase();
-        const wrapper = cbBtn.closest ? cbBtn.closest("[data-testid], . flex, div") : null;
+        const wrapper = cbBtn.closest ? cbBtn.closest("[data-testid], .flex, div") : null;
         const wrapperTid = wrapper ? (wrapper.getAttribute("data-testid") || "").toLowerCase() : "";
         const lookupKey = tid || wrapperTid;
         const resolved = _resolveFieldCategoryAndOptions(
@@ -1401,7 +1401,7 @@
       };align-items:center;gap:4px;background:#29B5E8;color:#ffffff;border:none;border-radius:5px;padding:2px 8px;height:24px;font-size:11px;font-weight:600;cursor:pointer;white-space:nowrap;flex-shrink:0;">${buildOfficialSnowflakeSvg(
         "#ffffff",
         12
-      )}<span>[ ❄️ Context ]</span></button>
+      )}<span>Context</span></button>
     `;
     document.body.appendChild(ctrl);
     alignTopbarControls();
@@ -2605,7 +2605,7 @@
         <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;border-bottom:1px solid #27272a;padding-bottom:12px;margin-bottom:14px;flex-shrink:0;">
           <div style="display:flex;align-items:center;gap:8px;min-width:0;flex-wrap:wrap;">
             <span style="display:inline-flex;flex-shrink:0;">${buildOfficialSnowflakeSvg("#29B5E8", 20)}</span>
-            <strong style="font-size:14px;color:#29B5E8;white-space:nowrap;">❄️ Flow Context</strong>
+            <strong style="font-size:14px;color:#29B5E8;white-space:nowrap;">Flow Context</strong>
             <span style="background:#27272a;color:#29B5E8;border:1px solid #29B5E8;border-radius:5px;padding:2px 8px;font-size:11px;font-weight:600;white-space:nowrap;">Role: <span id="sflf-modal-role">${sfState.active_role}</span> · <span id="sflf-epoch-badge">epoch #${sfState.context_epoch}</span></span>
             <span id="sflf-modal-flow-scope-badge" data-testid="hub-workflow-scope-badge" data-flow-id="${activeFlowId || ""}" style="background:rgba(41,181,232,0.12);color:#29B5E8;border:1px solid rgba(41,181,232,0.55);border-radius:5px;padding:2px 8px;font-size:11px;font-weight:600;white-space:nowrap;">${flowScopeLabel}</span>
           </div>

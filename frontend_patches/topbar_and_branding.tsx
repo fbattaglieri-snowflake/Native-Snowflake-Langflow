@@ -213,7 +213,8 @@ export const SnowflakeLangflowTopbar: React.FC<TopbarBrandingProps> = ({
             className="inline-flex items-center gap-1.5 rounded px-2.5 py-1 text-xs font-semibold text-white"
             style={{ backgroundColor: SNOWFLAKE_BLUE, color: "#ffffff" }}
           >
-            <span>[ ❄️ Context ]</span>
+            <OfficialSnowflakeBlueLogo className="h-3 w-3 text-white" size={12} />
+            <span>Context</span>
           </button>
         )}
 

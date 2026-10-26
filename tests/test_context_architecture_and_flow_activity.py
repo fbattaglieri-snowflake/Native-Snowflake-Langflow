@@ -86,16 +86,20 @@ def test_ctx_arch_01_02_04_frontend_topbar_and_streamlined_context_modal() -> No
         encoding="utf-8"
     )
 
-    # 1. Single [ ❄️ Context ] button in topbar with #29B5E8 styling, hidden outside /flow/<flow_id>
-    assert "❄️ Context" in ui_js
+    # 1. Single Context button in topbar with official SVG logo + "Context" (no brackets or duplicate emoji), hidden outside /flow/<flow_id>
+    assert "<span>Context</span>" in ui_js
+    assert "[ ❄️ Context ]" not in ui_js.split('id="sflf-open-hub-btn"')[1][:300]
     assert 'data-testid="sflf-context-btn"' in ui_js
     assert "#29B5E8" in ui_js
     assert 'hubBtn.style.display = currentFlowId ? "inline-flex" : "none"' in ui_js
-    assert "❄️ Context" in topbar_tsx
-    assert "❄️ Context" in role_tsx
+    assert "<span>Context</span>" in topbar_tsx
+    assert "<span>Context</span>" in role_tsx
 
-    # 2. Modal header renamed to ❄️ Flow Context and redundant #sflf-ctx-db / #sflf-ctx-schema dropdowns removed from active DOM
-    assert "❄️ Flow Context" in ui_js
+    # 2. Modal header renamed to Flow Context (with single official SVG logo, no duplicate emoji) and redundant #sflf-ctx-db / #sflf-ctx-schema dropdowns removed from active DOM
+    assert ">Flow Context</strong>" in ui_js
+    assert ">❄️ Flow Context</strong>" not in ui_js
+    assert 'cbBtn.closest("[data-testid], .flex, div")' in ui_js
+    assert ". flex" not in ui_js
     assert 'id="sflf-ctx-db"' not in ui_js
     assert 'id="sflf-ctx-schema"' not in ui_js
     assert 'data-hub-mode="context-only"' in ui_js
