@@ -15,6 +15,7 @@ import orjson
 os.environ.setdefault("UV_CACHE_DIR", "/tmp/uv-cache")
 os.environ.setdefault("XDG_CACHE_HOME", "/tmp/.cache")
 os.environ.setdefault("SQLITE_TMPDIR", "/tmp")
+os.environ.setdefault("LANGFLOW_A2A_ENABLED", "true")
 
 SITE_PACKAGES = Path("/app/.venv/lib64/python3.14/site-packages")
 LANGFLOW_MAIN = SITE_PACKAGES / "langflow" / "main.py"
@@ -33,10 +34,11 @@ WRITABLE_CACHE_DIRS = (
 
 def ensure_container_stability_and_sqlite_wal() -> None:
     """Configure writable UV_CACHE_DIR (0777) and SQLite WAL + busy_timeout=30000 on /persist/langflow.db."""
-    # ENV UV_CACHE_DIR=/tmp/uv-cache XDG_CACHE_HOME=/tmp/.cache SQLITE_TMPDIR=/tmp
+    # ENV UV_CACHE_DIR=/tmp/uv-cache XDG_CACHE_HOME=/tmp/.cache SQLITE_TMPDIR=/tmp LANGFLOW_A2A_ENABLED=true
     os.environ["UV_CACHE_DIR"] = os.environ.get("UV_CACHE_DIR") or "/tmp/uv-cache"
     os.environ["XDG_CACHE_HOME"] = os.environ.get("XDG_CACHE_HOME") or "/tmp/.cache"
     os.environ["SQLITE_TMPDIR"] = os.environ.get("SQLITE_TMPDIR") or "/tmp"
+    os.environ["LANGFLOW_A2A_ENABLED"] = os.environ.get("LANGFLOW_A2A_ENABLED") or "true"
 
     for cache_dir in WRITABLE_CACHE_DIRS:
         try:
@@ -104,6 +106,378 @@ OFFICIAL_SNOWFLAKE_PATH = (
 def _svg_data_uri(fill: str) -> str:
     raw = f'<svg xmlns="http://www.w3.org/2000/svg" width="96" height="96" viewBox="0 0 64 64" fill="{fill}"><path d="{OFFICIAL_SNOWFLAKE_PATH}"/></svg>'
     return "data:image/svg+xml;utf8," + urllib.parse.quote(raw)
+
+
+def _patch_upstream_models_and_agents_files() -> None:
+    """Patch upstream `language_model.py`, `agent.py`, and `a2a_agent.py` in `lfx/components/models_and_agents` (`MA-W2-R6-02..05`)."""
+    import importlib
+    import sys
+
+    ma_dir = LFX_COMPONENTS_DIR / "models_and_agents"
+    if not ma_dir.exists():
+        return
+
+    # 1. Patch language_model.py on disk so LanguageModelComponent exposes Snowflake providers & reasoning inputs
+    lm_file = ma_dir / "language_model.py"
+    if lm_file.exists():
+        lm_txt = lm_file.read_text(encoding="utf-8")
+        if "register_snowflake_language_model_providers" not in lm_txt:
+            lm_txt = lm_txt.replace(
+                "from lfx.base.models.unified_models import (\n"
+                "    get_language_model_options,\n"
+                "    get_llm,\n"
+                "    handle_model_input_update,\n"
+                ")",
+                "from lfx_snowflake.providers.language_models import (\n"
+                "    get_snowflake_reasoning_inputs,\n"
+                "    register_snowflake_language_model_providers,\n"
+                ")\n"
+                "register_snowflake_language_model_providers()\n"
+                "from lfx.base.models.unified_models import (\n"
+                "    get_language_model_options,\n"
+                "    get_llm,\n"
+                "    handle_model_input_update,\n"
+                ")",
+                1,
+            )
+            lm_txt = lm_txt.replace(
+                '            range_spec=RangeSpec(min=0, max=128000, step=1, step_type="int"),\n        ),\n    ]',
+                '            range_spec=RangeSpec(min=0, max=128000, step=1, step_type="int"),\n        ),\n        *get_snowflake_reasoning_inputs(),\n    ]',
+                1,
+            )
+            lm_txt = lm_txt.replace(
+                '            ollama_base_url=getattr(self, "ollama_base_url", None),\n        )',
+                '            ollama_base_url=getattr(self, "ollama_base_url", None),\n'
+                '            reasoning_effort=getattr(self, "reasoning_effort", None),\n'
+                '            extended_thinking=getattr(self, "extended_thinking", "disabled"),\n'
+                '            thinking_budget_tokens=int(getattr(self, "thinking_budget_tokens", 2048) or 2048),\n'
+                "        )",
+                1,
+            )
+            lm_file.write_text(lm_txt, encoding="utf-8")
+            print("[install_live_hooks] Patched lfx/components/models_and_agents/language_model.py")
+
+    # 2. Patch agent.py on disk so AgentComponent exposes Snowflake providers, reasoning inputs, and multi-tool is_list=True
+    ag_file = ma_dir / "agent.py"
+    if ag_file.exists():
+        ag_txt = ag_file.read_text(encoding="utf-8")
+        if "register_snowflake_language_model_providers" not in ag_txt:
+            ag_txt = ag_txt.replace(
+                "from lfx.base.models.unified_models import (\n"
+                "    get_language_model_options,\n"
+                "    get_llm,\n"
+                "    handle_model_input_update,\n"
+                ")",
+                "from lfx_snowflake.providers.language_models import (\n"
+                "    get_snowflake_reasoning_inputs,\n"
+                "    register_snowflake_language_model_providers,\n"
+                ")\n"
+                "register_snowflake_language_model_providers()\n"
+                "from lfx.base.models.unified_models import (\n"
+                "    get_language_model_options,\n"
+                "    get_llm,\n"
+                "    handle_model_input_update,\n"
+                ")",
+                1,
+            )
+            ag_txt = ag_txt.replace(
+                '            info=(\n'
+                '                "If true, adds a zero-config arithmetic calculator tool to the agent "\n'
+                '                "(safe: only +, -, *, /, ** operators via AST)."\n'
+                "            ),\n"
+                "            value=True,\n"
+                "        ),\n"
+                "    ]",
+                '            info=(\n'
+                '                "If true, adds a zero-config arithmetic calculator tool to the agent "\n'
+                '                "(safe: only +, -, *, /, ** operators via AST)."\n'
+                "            ),\n"
+                "            value=True,\n"
+                "        ),\n"
+                "        *get_snowflake_reasoning_inputs(),\n"
+                "    ]",
+                1,
+            )
+            ag_txt = ag_txt.replace(
+                '            overrides=getattr(self, "_model_overrides", None),\n        )',
+                '            overrides=getattr(self, "_model_overrides", None),\n'
+                '            reasoning_effort=getattr(self, "reasoning_effort", None),\n'
+                '            extended_thinking=getattr(self, "extended_thinking", "disabled"),\n'
+                '            thinking_budget_tokens=int(getattr(self, "thinking_budget_tokens", 2048) or 2048),\n'
+                "        )",
+                1,
+            )
+            ag_file.write_text(ag_txt, encoding="utf-8")
+            print("[install_live_hooks] Patched lfx/components/models_and_agents/agent.py")
+
+    # 3. Patch a2a_agent.py on disk so A2AAgentComponent supports Internal & External Langflow A2A Flows + Snowflake Cortex Agents
+    a2a_file = ma_dir / "a2a_agent.py"
+    if a2a_file.exists():
+        a2a_txt = a2a_file.read_text(encoding="utf-8")
+        if "quick_fill_endpoint" not in a2a_txt:
+            a2a_txt = a2a_txt.replace(
+                '        # External: a remote A2A agent by URL.\n'
+                '        MessageTextInput(\n'
+                '            name="agent_url",',
+                '        DropdownInput(\n'
+                '            name="quick_fill_endpoint",\n'
+                '            display_name="Quick Fill Endpoint (Langflow A2A Flows & Snowflake Cortex Agents)",\n'
+                '            info="Select a local Langflow A2A Flow or a [ ❄️ Context ] Snowflake Cortex Agent to auto-fill Agent URL.",\n'
+                '            options=[],\n'
+                '            value="",\n'
+                '            real_time_refresh=True,\n'
+                '            refresh_button=True,\n'
+                '            combobox=True,\n'
+                '            required=False,\n'
+                '            show=True,\n'
+                '        ),\n'
+                '        # External: a remote A2A agent by URL.\n'
+                '        MessageTextInput(\n'
+                '            name="agent_url",',
+                1,
+            )
+            a2a_patch_block = '''
+
+    async def _populate_internal_agents(self, build_config: dotdict) -> None:
+        """Fill the Internal dropdown with both published Langflow A2A flows and [ ❄️ Context ] Snowflake Cortex Agents (`MA-W2-R6-05`)."""
+        from lfx_snowflake.fastapi_live_bridge import LIVE_BRIDGE
+        from lfx_snowflake.native_category_components.llm_operations.snowflake_object_provisioner import _resolve_flow_id
+
+        flow_id = _resolve_flow_id(self, build_config)
+        options: list[str] = []
+        metadata: list[dict] = []
+        try:
+            agents = await self.alist_a2a_agents_by_flow_folder()
+            for agent in agents:
+                fid = str(agent.data["id"])
+                fname = str(agent.data["name"])
+                lbl = f"[Langflow Flow] {fname} ({fid})"
+                options.append(lbl)
+                metadata.append({"id": fid, "kind": "langflow_flow", "updated_at": agent.data.get("updated_at")})
+        except Exception:  # noqa: BLE001
+            pass
+
+        sf_targets = LIVE_BRIDGE.list_internal_and_external_a2a_targets(flow_id=flow_id)
+        for lbl, meta in zip(sf_targets.get("internal_options", []), sf_targets.get("internal_metadata", [])):
+            if lbl not in options:
+                options.append(lbl)
+                metadata.append(meta)
+
+        build_config["agent_name_selected"]["options"] = options
+        build_config["agent_name_selected"]["options_metadata"] = metadata
+        if options and build_config["agent_name_selected"].get("value") not in options:
+            build_config["agent_name_selected"]["value"] = options[0]
+
+    def _populate_quick_fill_endpoints(self, build_config: dotdict) -> dict[str, str]:
+        from lfx_snowflake.fastapi_live_bridge import LIVE_BRIDGE
+        from lfx_snowflake.native_category_components.llm_operations.snowflake_object_provisioner import _resolve_flow_id
+
+        flow_id = _resolve_flow_id(self, build_config)
+        sf_targets = LIVE_BRIDGE.list_internal_and_external_a2a_targets(flow_id=flow_id)
+        qf_opts = list(sf_targets.get("quick_fill_options", []))
+        qf_map = dict(sf_targets.get("quick_fill_map", {}))
+        if "quick_fill_endpoint" in build_config:
+            build_config["quick_fill_endpoint"]["options"] = qf_opts
+        return qf_map
+
+    async def update_build_config(
+        self,
+        build_config: dotdict,
+        field_value: Any,
+        field_name: str | None = None,
+    ) -> dotdict:
+        qf_map = self._populate_quick_fill_endpoints(build_config)
+        if field_name == "mode":
+            internal = field_value == "Internal"
+            build_config["agent_name_selected"]["show"] = internal
+            if "quick_fill_endpoint" in build_config:
+                build_config["quick_fill_endpoint"]["show"] = not internal
+            build_config["agent_url"]["show"] = not internal
+            build_config["agent_url"]["required"] = not internal
+            build_config["api_key"]["show"] = not internal
+            build_config["timeout"]["show"] = not internal
+            if internal:
+                build_config["agent_card"]["show"] = False
+                await self._populate_internal_agents(build_config)
+            else:
+                await self._apply_external_card(build_config, build_config["agent_url"].get("value"))
+        elif field_name == "agent_name_selected" and (build_config.get("is_refresh") or field_value is None):
+            await self._populate_internal_agents(build_config)
+        elif field_name == "quick_fill_endpoint" and isinstance(field_value, str) and field_value:
+            resolved_url = qf_map.get(field_value) or (field_value.split("->", 1)[1].strip() if "->" in field_value else field_value)
+            if "agent_url" in build_config and resolved_url:
+                build_config["agent_url"]["value"] = resolved_url
+                await self._apply_external_card(build_config, resolved_url)
+        elif field_name == "agent_url":
+            await self._apply_external_card(build_config, field_value)
+        return build_config
+
+    async def _run_internal_agent(self) -> Message:
+        import json as _json
+        import re as _re
+        from lfx_snowflake.fastapi_live_bridge import LIVE_BRIDGE
+        from lfx_snowflake.native_category_components.llm_operations.snowflake_object_provisioner import _resolve_flow_id
+
+        agent_name = (self.agent_name_selected or "").strip()
+        if not agent_name:
+            raise ValueError("Select an A2A agent ([Langflow Flow] or [Cortex Agent]) to call.")
+
+        if agent_name.startswith("[Cortex Agent]") or (not agent_name.startswith("[Langflow Flow]") and agent_name.count(".") == 2):
+            fqn = agent_name.replace("[Cortex Agent]", "").strip()
+            parts = [p.strip() for p in fqn.split(".") if p.strip()]
+            if len(parts) != 3:
+                raise ValueError(f"Invalid Cortex Agent FQN: {agent_name!r}")
+            flow_id = _resolve_flow_id(self) or "default"
+            sess_id = getattr(getattr(self, "graph", None), "session_id", None) or flow_id
+            res = LIVE_BRIDGE.invoke_cortex_agent(
+                database=parts[0],
+                schema=parts[1],
+                agent_name=parts[2],
+                user_message=str(self.input_value or ""),
+                flow_id=flow_id,
+                session_id=str(sess_id),
+                resume_thread=True,
+            )
+            if not res.get("ok", True):
+                raise ValueError(str(res.get("message") or "Cortex Agent invocation failed"))
+            msg = Message(text=str(res.get("text") or _json.dumps(res, indent=2)))
+            self.status = res.get("thread_indicator") or msg
+            return msg
+
+        from lfx.helpers import get_flow_by_id_or_name
+
+        m_fid = _re.search(r"\\(([^()]+)\\)\\s*$", agent_name)
+        explicit_fid = m_fid.group(1).strip() if m_fid else None
+        published = await self.alist_a2a_agents_by_flow_folder()
+        published_ids = {str(agent.data["id"]) for agent in published}
+        clean_name = _re.sub(r"^\\[Langflow Flow\\]\\s*", "", agent_name)
+        clean_name = _re.sub(r"\\s*\\([^()]+\\)\\s*$", "", clean_name).strip()
+        flow_id = explicit_fid or self._selected_agent_flow_id() or self._agent_id_by_name(published, clean_name)
+        if flow_id is None or (published_ids and flow_id not in published_ids and explicit_fid is None):
+            raise ValueError(
+                f"Agent flow '{agent_name}' is not published as an A2A agent in this project. "
+                "Turn on 'Serve as an A2A agent' for it, or select another agent."
+            )
+        flow = await get_flow_by_id_or_name(user_id=self.user_id, flow_id=flow_id)
+        if not flow or not flow.data:
+            raise ValueError(f"Agent flow '{agent_name}' could not be found.")
+
+        graph = await self.load_flow(flow_id)
+        run_outputs = await self._run_target_isolated(graph, flow_id)
+        answer = self._reply_from_run(run_outputs)
+        message = Message(text=answer or "No response received from the agent.")
+        self.status = message
+        return message
+
+    async def _call_external_agent(self) -> Message:
+        import json as _json
+        import re as _re
+        from lfx_snowflake.fastapi_live_bridge import LIVE_BRIDGE
+        from lfx_snowflake.native_category_components.llm_operations.snowflake_object_provisioner import _resolve_flow_id
+
+        raw_url = str(self.agent_url or "").strip()
+        if "->" in raw_url:
+            raw_url = raw_url.split("->", 1)[1].strip()
+
+        m_run = _re.search(
+            r"/api/v2/databases/([^/]+)/schemas/([^/]+)/agents/([^/:]+):run",
+            raw_url,
+            flags=_re.IGNORECASE,
+        )
+        if m_run:
+            flow_id = _resolve_flow_id(self) or "default"
+            sess_id = getattr(getattr(self, "graph", None), "session_id", None) or flow_id
+            res = LIVE_BRIDGE.invoke_cortex_agent(
+                database=m_run.group(1),
+                schema=m_run.group(2),
+                agent_name=m_run.group(3),
+                user_message=str(self.input_value or ""),
+                flow_id=flow_id,
+                session_id=str(sess_id),
+                resume_thread=True,
+            )
+            if not res.get("ok", True):
+                raise ValueError(str(res.get("message") or "Cortex Agent REST :run failed"))
+            message = Message(text=str(res.get("text") or _json.dumps(res, indent=2)))
+            self.status = res.get("thread_indicator") or message
+            return message
+
+        m_bridge = _re.search(
+            r"/api/v1/snowflake/a2a/cortex-agents/([^/]+)/([^/]+)/([^/.]+)",
+            raw_url,
+            flags=_re.IGNORECASE,
+        )
+        if m_bridge and (not raw_url.startswith("http") or "127.0.0.1" in raw_url or "localhost" in raw_url):
+            flow_id = _resolve_flow_id(self) or "default"
+            sess_id = getattr(getattr(self, "graph", None), "session_id", None) or flow_id
+            rpc = LIVE_BRIDGE.handle_cortex_agent_a2a_jsonrpc(
+                m_bridge.group(1),
+                m_bridge.group(2),
+                m_bridge.group(3),
+                {
+                    "jsonrpc": "2.0",
+                    "id": "a2a-ext-1",
+                    "method": "message/send",
+                    "params": {
+                        "message": {
+                            "role": "user",
+                            "contextId": str(sess_id),
+                            "parts": [{"kind": "text", "text": str(self.input_value or "")}],
+                        }
+                    },
+                },
+                flow_id=flow_id,
+            )
+            if "error" in rpc:
+                raise ValueError(str(rpc["error"].get("message") or "A2A Server Bridge error"))
+            task_res = rpc.get("result") or {}
+            parts = ((task_res.get("status") or {}).get("message") or {}).get("parts") or []
+            reply_txt = "\\n".join(str(p.get("text") or "") for p in parts if isinstance(p, dict) and p.get("text"))
+            message = Message(text=reply_txt or "No response received from the A2A agent.")
+            self.status = message
+            return message
+
+        try:
+            timeout = float(self.timeout)
+        except (TypeError, ValueError):
+            timeout = DEFAULT_TIMEOUT
+
+        agent_url = _agent_base_url(raw_url)
+        try:
+            _validated_url, validated_ips = await asyncio.to_thread(validate_and_resolve_connector_url, agent_url)
+        except SSRFProtectionError as e:
+            msg = f"SSRF Protection: {e}"
+            raise ValueError(msg) from e
+
+        client = build_a2a_client(agent_url, validated_ips, api_key=self.api_key, timeout=timeout)
+        try:
+            async with client:
+                answer = await call_a2a_agent(agent_url, self.input_value, httpx_client=client)
+        except SSRFProtectionError as e:
+            msg = f"SSRF Protection: {e}"
+            raise ValueError(msg) from e
+        except Exception as e:
+            msg = f"Failed to call A2A agent at {agent_url}: {e}"
+            raise ValueError(msg) from e
+
+        message = Message(text=answer or "No response received from the A2A agent.")
+        self.status = message
+        return message
+'''
+            a2a_txt = a2a_txt.rstrip() + "\n" + a2a_patch_block
+            a2a_file.write_text(a2a_txt, encoding="utf-8")
+            print("[install_live_hooks] Patched lfx/components/models_and_agents/a2a_agent.py")
+
+    for mod_name in (
+        "lfx.components.models_and_agents.language_model",
+        "lfx.components.models_and_agents.agent",
+        "lfx.components.models_and_agents.a2a_agent",
+    ):
+        if mod_name in sys.modules:
+            try:
+                importlib.reload(sys.modules[mod_name])
+            except Exception as exc:  # noqa: BLE001
+                print(f"[install_live_hooks] Warning reloading {mod_name}: {exc}")
 
 
 def install_all() -> None:
@@ -195,7 +569,7 @@ def install_all() -> None:
             stale_path.unlink()
             print(f"[install_live_hooks] Removed stale {stale_cat}/{stale_fname}")
 
-    # Register Snowflake Cortex embedding provider & vector store backends before component indexing
+    # Register Snowflake Cortex embedding provider, language model providers, & vector store backends before component indexing
     try:
         from lfx_snowflake.providers.embeddings import register_snowflake_cortex_embedding_provider
 
@@ -205,12 +579,29 @@ def install_all() -> None:
         print(f"[install_live_hooks] Warning registering Snowflake Cortex embedding provider: {exc}")
 
     try:
+        from lfx_snowflake.providers.language_models import register_snowflake_language_model_providers
+
+        register_snowflake_language_model_providers()
+        print("[install_live_hooks] Registered Snowflake Language Model providers (Chat, Responses, Messages, Ollama).")
+    except Exception as exc:
+        print(f"[install_live_hooks] Warning registering Snowflake Language Model providers: {exc}")
+
+    try:
         from lfx_snowflake.fastapi_live_bridge import register_snowflake_vector_store_backends
 
         register_snowflake_vector_store_backends()
         print("[install_live_hooks] Registered Snowflake Vector Store backends.")
     except Exception as exc:
         print(f"[install_live_hooks] Warning registering Snowflake Vector Store backends: {exc}")
+
+    _patch_upstream_models_and_agents_files()
+
+    try:
+        from lfx_snowflake.providers.language_models import register_snowflake_language_model_providers
+
+        register_snowflake_language_model_providers()
+    except Exception:
+        pass
 
     skipped_fk_component_files = {
         "snowflake_cortex_search_parse_document.py",
@@ -223,6 +614,12 @@ def install_all() -> None:
         "snowflake_stage_files.py",
         "snowflake_canonical_fk.py",
         "snowflake_memory_base.py",
+    }
+    non_indexed_ma_helper_files = {
+        "snowflake_standard_chat.py",
+        "snowflake_standard_responses.py",
+        "snowflake_standard_messages.py",
+        "snowflake_standard_ollama.py",
     }
 
     native_src = SOURCE_ROOT / "src" / "lfx_snowflake" / "native_category_components"
@@ -241,6 +638,9 @@ def install_all() -> None:
             shutil.copyfile(py_file, dest_file)
             if cat_dir.name == "files_and_knowledge" and py_file.name in non_indexed_fk_helper_files:
                 # Keep helper modules on disk for Python imports, while preserving the 5 original Langflow Files & Knowledge tabs
+                continue
+            if cat_dir.name == "models_and_agents" and py_file.name in non_indexed_ma_helper_files:
+                # Keep standalone proxy modules on disk for backward-compatible Python imports, while unifying sidebar into Language Model & Agent (MA-W2-R6-04)
                 continue
             mod_fqn = f"lfx.components.{cat_dir.name}.{py_file.stem}"
             installed_modules.append((cat_dir.name, mod_fqn))
@@ -266,6 +666,14 @@ def install_all() -> None:
         ("files_and_knowledge", "SnowflakeObjectProvisionerFK"),
         ("files_and_knowledge", "SnowflakeStageFileSystem"),
         ("files_and_knowledge", "SnowflakeMemoryBase"),
+        ("models_and_agents", "StandardChat"),
+        ("models_and_agents", "StandardResponses"),
+        ("models_and_agents", "StandardMessages"),
+        ("models_and_agents", "PrivateOllama"),
+        ("models_and_agents", "SnowflakeCortexAgentA2A"),
+        ("models_and_agents", "Memory"),
+        ("models_and_agents", "SnowflakeMessageHistory"),
+        ("models_and_agents", "MCPTools"),
         ("utilities", "SnowflakePythonInterpreterPyPI"),
     )
     for stale_cat, stale_comp in stale_index_entries:
@@ -280,6 +688,47 @@ def install_all() -> None:
         assert top_level == cat_name
         entries_map.setdefault(cat_name, {}).update(comp_templates)
         print(f"[install_live_hooks] Merged {list(comp_templates.keys())} into native category '{cat_name}'")
+
+    # Re-template patched upstream Models & Agents modules so component_index.json has the updated code & inputs
+    for ma_mod in ("language_model", "agent", "a2a_agent", "embedding_model", "prompt"):
+        ma_res = _process_single_module(f"lfx.components.models_and_agents.{ma_mod}")
+        if ma_res and ma_res[1]:
+            entries_map.setdefault("models_and_agents", {}).update(ma_res[1])
+
+    # Map SnowflakeMessageHistoryNativeComponent under canonical key "MessageHistory" and pop duplicate keys (MA-W2-R6-04)
+    ma_entries = entries_map.setdefault("models_and_agents", {})
+    if "SnowflakeMessageHistory" in ma_entries:
+        mh_entry = dict(ma_entries.pop("SnowflakeMessageHistory"))
+        mh_entry["display_name"] = "Message History"
+        mh_entry["icon"] = "Snowflake"
+        mh_entry["legacy"] = False
+        ma_entries["MessageHistory"] = mh_entry
+    for dup_ma in (
+        "StandardChat",
+        "StandardResponses",
+        "StandardMessages",
+        "PrivateOllama",
+        "SnowflakeCortexAgentA2A",
+        "Memory",
+        "SnowflakeMessageHistory",
+        "MCPTools",
+        "PoliciesComponent",
+    ):
+        ma_entries.pop(dup_ma, None)
+
+    canonical_ma_keys = {
+        "A2AAgent",
+        "Agent",
+        "SnowflakeCortexAgent",
+        "EmbeddingModel",
+        "LanguageModelComponent",
+        "MessageHistory",
+        "Prompt Template",
+    }
+    for extra_ma_key in list(ma_entries.keys()):
+        if extra_ma_key not in canonical_ma_keys:
+            if isinstance(ma_entries.get(extra_ma_key), dict) and not ma_entries[extra_ma_key].get("legacy"):
+                ma_entries.pop(extra_ma_key, None)
 
     # Restore and guarantee the 5 original Langflow components in files_and_knowledge (each from its own 1-class module)
     for orig_fk_mod in ("filesystem", "knowledge", "memory_retrieval", "file", "save_file"):
@@ -310,7 +759,7 @@ def install_all() -> None:
     LFX_INDEX_JSON.write_bytes(orjson.dumps(blob, option=orjson.OPT_SORT_KEYS))
     print(f"[install_live_hooks] Updated component_index.json (sha256={digest[:16]}...)")
 
-    # 4. Patch langflow/main.py to mount /api/v1/snowflake/* routes + SQLite WAL / busy_timeout=30000 + UV_CACHE_DIR
+    # 4. Patch langflow/main.py to mount /api/v1/snowflake/* routes + SQLite WAL / busy_timeout=30000 + UV_CACHE_DIR + LANGFLOW_A2A_ENABLED
     main_text = LANGFLOW_MAIN.read_text(encoding="utf-8")
     hook_snippet = (
         "    load_plugin_routes(app)\n"
@@ -319,6 +768,7 @@ def install_all() -> None:
         "    _sflf_os.environ.setdefault('UV_CACHE_DIR', '/tmp/uv-cache')\n"
         "    _sflf_os.environ.setdefault('XDG_CACHE_HOME', '/tmp/.cache')\n"
         "    _sflf_os.environ.setdefault('SQLITE_TMPDIR', '/tmp')\n"
+        "    _sflf_os.environ.setdefault('LANGFLOW_A2A_ENABLED', 'true')\n"
         "    for _d in ('/tmp/uv-cache', '/tmp/.cache', '/app/data/.cache/uv'):\n"
         "        try:\n"
         "            _SflfPath(_d).mkdir(parents=True, exist_ok=True)\n"
@@ -351,6 +801,11 @@ def install_all() -> None:
         "    except Exception:\n"
         "        pass\n"
         "    try:\n"
+        "        from lfx_snowflake.providers.language_models import register_snowflake_language_model_providers\n"
+        "        register_snowflake_language_model_providers()\n"
+        "    except Exception:\n"
+        "        pass\n"
+        "    try:\n"
         "        from lfx_snowflake.fastapi_live_bridge import register_snowflake_vector_store_backends\n"
         "        register_snowflake_vector_store_backends()\n"
         "    except Exception:\n"
@@ -364,7 +819,7 @@ def install_all() -> None:
         main_text = main_text.replace("    load_plugin_routes(app)\n", hook_snippet, 1)
         LANGFLOW_MAIN.write_text(main_text, encoding="utf-8")
         print("[install_live_hooks] Patched langflow/main.py with SQLite WAL connect listener and register_snowflake_fastapi_routes(app)")
-    elif "register_snowflake_cortex_embedding_provider" not in main_text:
+    elif "register_snowflake_language_model_providers" not in main_text:
         main_text = re.sub(
             r"    load_plugin_routes\(app\)\n[\s\S]*?register_snowflake_fastapi_routes\(app\)\n",
             hook_snippet,
@@ -372,7 +827,7 @@ def install_all() -> None:
             count=1,
         )
         LANGFLOW_MAIN.write_text(main_text, encoding="utf-8")
-        print("[install_live_hooks] Upgraded langflow/main.py hook with Snowflake Cortex embeddings & vector store backends")
+        print("[install_live_hooks] Upgraded langflow/main.py hook with Snowflake Language Model providers, Cortex embeddings & vector store backends")
 
     # 5. Patch compiled React bundle in langflow/frontend/assets/*.js (100% React Virtual-DOM safe!)
     sf_svg_inline_sm = (
@@ -1021,14 +1476,42 @@ def install_all() -> None:
     assert "SnowflakeObjectProvisioner" not in idx_cats["data_source"]
 
     for ma_comp in (
+        "A2AAgent",
+        "Agent",
+        "SnowflakeCortexAgent",
+        "EmbeddingModel",
+        "LanguageModelComponent",
+        "MessageHistory",
+        "Prompt Template",
+    ):
+        assert ma_comp in idx_cats["models_and_agents"], f"Missing {ma_comp} in models_and_agents"
+    non_legacy_ma = sorted(
+        k for k, v in idx_cats["models_and_agents"].items() if not (isinstance(v, dict) and v.get("legacy"))
+    )
+    assert non_legacy_ma == sorted(
+        [
+            "A2AAgent",
+            "Agent",
+            "SnowflakeCortexAgent",
+            "EmbeddingModel",
+            "LanguageModelComponent",
+            "MessageHistory",
+            "Prompt Template",
+        ]
+    ), f"Expected strictly 7 canonical non-legacy components in models_and_agents, got: {non_legacy_ma}"
+    for ma_removed in (
         "StandardChat",
         "StandardResponses",
         "StandardMessages",
         "PrivateOllama",
         "SnowflakeCortexAgentA2A",
+        "Memory",
         "SnowflakeMessageHistory",
+        "MCPTools",
     ):
-        assert ma_comp in idx_cats["models_and_agents"], f"Missing {ma_comp} in models_and_agents"
+        assert ma_removed not in idx_cats["models_and_agents"], (
+            f"Removed duplicate {ma_removed} still in models_and_agents"
+        )
 
     for llm_comp in (
         "SnowflakeObjectProvisioner",
@@ -1112,6 +1595,11 @@ def install_all() -> None:
         "/api/v1/snowflake/stages",
         "/api/v1/snowflake/external-volumes",
         "/api/v1/snowflake/embedding-models",
+        "/api/v1/snowflake/language-models",
+        "/api/v1/snowflake/cortex/threads",
+        "/api/v1/snowflake/a2a/targets",
+        "/api/v1/snowflake/a2a/cortex-agents/{database}/{schema}/{agent_name}/.well-known/agent-card.json",
+        "/api/v1/snowflake/a2a/cortex-agents/{database}/{schema}/{agent_name}/jsonrpc",
         "/api/v1/snowflake/traces",
     ):
         assert req_route in sf_paths, f"Missing route {req_route} in {sf_paths}"

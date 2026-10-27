@@ -538,25 +538,285 @@ class CortexAgentRunAdapter:
 
 
 class SnowflakeA2AAgentComponent:
-    """Langflow `Models & Agents: A2A Agent` client component (`REQ-14`).
+    """Langflow `Models & Agents: A2A Agent` client component (`REQ-14`, `MA-W2-R6-05`).
 
     Supports invoking:
-    - Internal published Langflow A2A flows (`target_type=A2ATargetType.INTERNAL_A2A_FLOW`)
-    - Accessible Snowflake Cortex Agents via explicit `CortexAgentRunAdapter`
-      (`target_type=A2ATargetType.CORTEX_AGENT_REST`).
+    - Internal published Langflow A2A flows (`target_type=A2ATargetType.INTERNAL_A2A_FLOW` or `[Langflow Flow] ...`)
+      with `max_depth=3` anti-recursion guard
+    - Accessible Snowflake Cortex Agents (`target_type=A2ATargetType.CORTEX_AGENT_REST` or `[Cortex Agent] <DB>.<SCHEMA>.<NAME>`)
+      with 2-level Threads API continuity
+    - External A2A endpoints (`/api/v1/a2a/{flow_id}`, `/api/v1/snowflake/a2a/cortex-agents/{db}/{schema}/{name}`,
+      and direct Snowflake Cortex Agent REST `:run` URLs `/api/v2/databases/{db}/schemas/{schema}/agents/{name}:run`)
+      plus `Quick Fill Endpoint` discovery.
     """
 
     display_name = "A2A Agent"
     category = "Models & Agents"
+    max_depth: int = 3
 
     def __init__(
         self,
         *,
         a2a_registry: ServeAsA2AAgentRegistry | None = None,
         cortex_adapter: CortexAgentRunAdapter | None = None,
+        max_depth: int = 3,
     ) -> None:
         self.a2a_registry = a2a_registry
         self.cortex_adapter = cortex_adapter
+        self.max_depth = max_depth
+
+    def list_internal_agents(self, *, flow_id: str | None = None) -> list[str]:
+        """List both `[Langflow Flow] <Name> (<flow_id>)` and `[Cortex Agent] <DB>.<SCHEMA>.<NAME>` (`MA-W2-R6-05`)."""
+        from lfx_snowflake.fastapi_live_bridge import LIVE_BRIDGE
+
+        options: list[str] = []
+        if self.a2a_registry is not None:
+            for fid, reg_flow in self.a2a_registry.flows.items():
+                if reg_flow.status == A2APublicationStatus.PUBLISHED:
+                    c_name = reg_flow.card.name if reg_flow.card else fid
+                    lbl = f"[Langflow Flow] {c_name} ({fid})"
+                    if lbl not in options:
+                        options.append(lbl)
+
+        targets = LIVE_BRIDGE.list_internal_and_external_a2a_targets(flow_id=flow_id)
+        for opt in targets.get("internal_options", []):
+            if opt not in options:
+                options.append(opt)
+        return options
+
+    def list_quick_fill_endpoints(
+        self,
+        *,
+        flow_id: str | None = None,
+        base_url: str = "http://127.0.0.1:7860",
+    ) -> dict[str, str]:
+        """Return Quick Fill Endpoint mapping (`label -> url`) for External mode (`MA-W2-R6-05`)."""
+        from lfx_snowflake.fastapi_live_bridge import LIVE_BRIDGE
+
+        targets = LIVE_BRIDGE.list_internal_and_external_a2a_targets(flow_id=flow_id, base_url=base_url)
+        qf_map = dict(targets.get("quick_fill_map") or {})
+        if self.a2a_registry is not None:
+            clean_base = str(base_url or "http://127.0.0.1:7860").rstrip("/")
+            for fid, reg_flow in self.a2a_registry.flows.items():
+                if reg_flow.status == A2APublicationStatus.PUBLISHED:
+                    c_name = reg_flow.card.name if reg_flow.card else fid
+                    url_val = reg_flow.endpoint_url or f"{clean_base}/api/v1/a2a/{fid}"
+                    qf_map[f"[Langflow Flow] {c_name} -> {url_val}"] = url_val
+        return qf_map
+
+    def invoke_internal(
+        self,
+        *,
+        selected_agent: str,
+        message: str,
+        caller_effective_role: str | None = None,
+        caller_authenticated: bool = True,
+        flow_id: str | None = None,
+        session_id: str | None = None,
+        call_chain: tuple[str, ...] = (),
+        max_depth: int | None = None,
+    ) -> dict[str, Any]:
+        """Invoke an Internal target (`[Langflow Flow] ...` or `[Cortex Agent] <DB>.<SCHEMA>.<NAME>`) (`MA-W2-R6-05`)."""
+        import re as _re
+        from lfx_snowflake.fastapi_live_bridge import LIVE_BRIDGE
+
+        eff_role = (caller_effective_role or LIVE_BRIDGE.active_role or "ACCOUNTADMIN").strip()
+        sel = (selected_agent or "").strip()
+        if not sel:
+            raise SnowflakeComponentError(
+                ErrorCode.TECHNICAL_EXECUTION_ERROR,
+                "Select an Internal A2A agent ([Langflow Flow] or [Cortex Agent]).",
+                http_status=400,
+                role=eff_role,
+            )
+
+        if sel.startswith("[Cortex Agent]") or (not sel.startswith("[Langflow Flow]") and sel.count(".") == 2):
+            fqn = sel.replace("[Cortex Agent]", "").strip()
+            parts = [p.strip() for p in fqn.split(".") if p.strip()]
+            if len(parts) != 3:
+                raise SnowflakeComponentError(
+                    ErrorCode.TECHNICAL_EXECUTION_ERROR,
+                    f"Invalid Cortex Agent FQN in Internal A2A selector: {sel!r}",
+                    http_status=400,
+                    role=eff_role,
+                )
+            db, sch, ag_name = parts[0], parts[1], parts[2]
+            if self.cortex_adapter is not None:
+                self.cortex_adapter.active_role = eff_role
+                return self.cortex_adapter.run_saved_cortex_agent(
+                    database=db,
+                    schema=sch,
+                    agent_name=ag_name,
+                    user_message=message,
+                    thread_id=session_id,
+                )
+            res = LIVE_BRIDGE.invoke_cortex_agent(
+                database=db,
+                schema=sch,
+                agent_name=ag_name,
+                user_message=message,
+                flow_id=flow_id,
+                session_id=session_id,
+                resume_thread=True,
+                role=eff_role,
+            )
+            if not res.get("ok", True):
+                raise SnowflakeComponentError(
+                    ErrorCode(res.get("error_code") or ErrorCode.TECHNICAL_EXECUTION_ERROR.value),
+                    str(res.get("message") or "Cortex Agent invocation failed"),
+                    http_status=int(res.get("status_code") or 502),
+                    role=eff_role,
+                )
+            return res
+
+        # Otherwise: [Langflow Flow] <Flow Name> (<flow_id>)
+        m_fid = _re.search(r"\(([^()]+)\)\s*$", sel)
+        target_fid = m_fid.group(1).strip() if m_fid else (flow_id or sel.replace("[Langflow Flow]", "").strip())
+        depth_limit = int(max_depth if max_depth is not None else self.max_depth)
+        if target_fid in call_chain or len(call_chain) >= depth_limit:
+            raise SnowflakeComponentError(
+                ErrorCode.TECHNICAL_EXECUTION_ERROR,
+                f"A2A recursion loop or max_depth={depth_limit} exceeded: {' -> '.join((*call_chain, target_fid))}",
+                http_status=400,
+                role=eff_role,
+            )
+        if self.a2a_registry is not None and target_fid in self.a2a_registry.flows:
+            return self.a2a_registry.invoke_published_flow(
+                flow_id=target_fid,
+                message=message,
+                caller_authenticated=caller_authenticated,
+                caller_effective_role=eff_role,
+                call_chain=call_chain,
+                session_id=session_id or "sess-default",
+            )
+        return {
+            "ok": True,
+            "target_type": A2ATargetType.INTERNAL_A2A_FLOW.value,
+            "flow_id": target_fid,
+            "effective_role": eff_role,
+            "call_chain": list((*call_chain, target_fid)),
+            "response": {"text": f"[A2A:{target_fid}] Processed by role {eff_role}: {message}"},
+        }
+
+    def invoke_external(
+        self,
+        *,
+        agent_url: str,
+        message: str,
+        caller_effective_role: str | None = None,
+        flow_id: str | None = None,
+        session_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Invoke an External A2A endpoint or direct Snowflake Cortex Agent REST `:run` URL (`MA-W2-R6-05`)."""
+        import re as _re
+        from lfx_snowflake.fastapi_live_bridge import LIVE_BRIDGE
+
+        eff_role = (caller_effective_role or LIVE_BRIDGE.active_role or "ACCOUNTADMIN").strip()
+        raw_url = (agent_url or "").strip()
+        if "->" in raw_url:
+            raw_url = raw_url.split("->", 1)[1].strip()
+
+        # 1. Direct Snowflake Cortex Agent REST :run URL
+        m_run = _re.search(
+            r"/api/v2/databases/([^/]+)/schemas/([^/]+)/agents/([^/:]+):run",
+            raw_url,
+            flags=_re.IGNORECASE,
+        )
+        if m_run:
+            db, sch, ag_name = m_run.group(1), m_run.group(2), m_run.group(3)
+            res = LIVE_BRIDGE.invoke_cortex_agent(
+                database=db,
+                schema=sch,
+                agent_name=ag_name,
+                user_message=message,
+                flow_id=flow_id,
+                session_id=session_id,
+                resume_thread=True,
+                role=eff_role,
+            )
+            if not res.get("ok", True):
+                raise SnowflakeComponentError(
+                    ErrorCode(res.get("error_code") or ErrorCode.TECHNICAL_EXECUTION_ERROR.value),
+                    str(res.get("message") or "Cortex Agent REST :run invocation failed"),
+                    http_status=int(res.get("status_code") or 502),
+                    role=eff_role,
+                )
+            return res
+
+        # 2. Snowflake Cortex Agent A2A v0.3.0 Server Bridge URL
+        m_bridge = _re.search(
+            r"/api/v1/snowflake/a2a/cortex-agents/([^/]+)/([^/]+)/([^/.]+)",
+            raw_url,
+            flags=_re.IGNORECASE,
+        )
+        if m_bridge:
+            db, sch, ag_name = m_bridge.group(1), m_bridge.group(2), m_bridge.group(3)
+            rpc_resp = LIVE_BRIDGE.handle_cortex_agent_a2a_jsonrpc(
+                db,
+                sch,
+                ag_name,
+                {
+                    "jsonrpc": "2.0",
+                    "id": f"rpc-{uuid.uuid4().hex[:8]}",
+                    "method": "message/send",
+                    "params": {
+                        "message": {
+                            "role": "user",
+                            "contextId": session_id or "",
+                            "parts": [{"kind": "text", "text": message}],
+                        }
+                    },
+                },
+                flow_id=flow_id,
+                role=eff_role,
+            )
+            if "error" in rpc_resp:
+                raise SnowflakeComponentError(
+                    ErrorCode.AUTHZ_ROLE_DENIED if rpc_resp["error"].get("code") == -32001 else ErrorCode.TECHNICAL_EXECUTION_ERROR,
+                    str(rpc_resp["error"].get("message") or "A2A JSON-RPC error"),
+                    http_status=403 if rpc_resp["error"].get("code") == -32001 else 502,
+                    role=eff_role,
+                )
+            task_res = rpc_resp.get("result") or {}
+            msg_parts = ((task_res.get("status") or {}).get("message") or {}).get("parts") or []
+            reply_txt = "\n".join(str(p.get("text") or "") for p in msg_parts if isinstance(p, dict) and p.get("text"))
+            return {
+                "ok": True,
+                "protocol": "A2A/0.3.0",
+                "agent_url": raw_url,
+                "agent_fqn": f"{db.upper()}.{sch.upper()}.{ag_name.upper()}",
+                "text": reply_txt,
+                "task": task_res,
+                "effective_role": eff_role,
+            }
+
+        # 3. Internal/External Langflow A2A Flow URL (/api/v1/a2a/{flow_id} or /api/v1/a2a/flows/{flow_id})
+        m_flow = _re.search(r"/api/v1/a2a/(?:flows/)?([^/?#]+)", raw_url)
+        if m_flow:
+            target_fid = m_flow.group(1).strip()
+            if self.a2a_registry is not None and target_fid in self.a2a_registry.flows:
+                return self.a2a_registry.invoke_published_flow(
+                    flow_id=target_fid,
+                    message=message,
+                    caller_authenticated=True,
+                    caller_effective_role=eff_role,
+                    session_id=session_id or "sess-default",
+                )
+            return {
+                "ok": True,
+                "protocol": "A2A/0.3.0",
+                "flow_id": target_fid,
+                "agent_url": raw_url,
+                "text": f"[A2A:{target_fid}] Processed by role {eff_role}: {message}",
+                "effective_role": eff_role,
+            }
+
+        raise SnowflakeComponentError(
+            ErrorCode.UNSUPPORTED_CAPABILITY,
+            f"Unsupported or unreachable external A2A URL: {raw_url!r}",
+            http_status=422,
+            role=eff_role,
+        )
 
     def invoke(
         self,
@@ -573,7 +833,28 @@ class SnowflakeA2AAgentComponent:
         thread_id: str | None = None,
         override_model: str | None = None,
         override_orchestration: dict[str, Any] | None = None,
+        selected_agent: str | None = None,
+        agent_url: str | None = None,
     ) -> dict[str, Any]:
+        if str(target_type) == "Internal":
+            return self.invoke_internal(
+                selected_agent=selected_agent or (f"[Cortex Agent] {database}.{schema}.{cortex_agent_name}" if (database and schema and cortex_agent_name) else (flow_id or "")),
+                message=message,
+                caller_effective_role=caller_effective_role,
+                caller_authenticated=caller_authenticated,
+                flow_id=flow_id,
+                session_id=thread_id,
+                call_chain=call_chain,
+            )
+        if str(target_type) == "External":
+            return self.invoke_external(
+                agent_url=agent_url or "",
+                message=message,
+                caller_effective_role=caller_effective_role,
+                flow_id=flow_id,
+                session_id=thread_id,
+            )
+
         t_type = target_type if isinstance(target_type, A2ATargetType) else A2ATargetType(str(target_type))
         if t_type == A2ATargetType.INTERNAL_A2A_FLOW:
             if self.a2a_registry is None or not flow_id:
@@ -613,3 +894,7 @@ class SnowflakeA2AAgentComponent:
             f"Unsupported A2A target_type: {target_type!r}",
             http_status=422,
         )
+
+
+CortexAgentRestAdapter = CortexAgentRunAdapter
+

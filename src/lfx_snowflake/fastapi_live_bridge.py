@@ -23,6 +23,8 @@ from typing import Any
 _CATALOG_EXECUTOR = ThreadPoolExecutor(max_workers=8, thread_name_prefix="sflf-catalog")
 _AUDIT_EXECUTOR = ThreadPoolExecutor(max_workers=2, thread_name_prefix="sflf-audit")
 
+os.environ.setdefault("LANGFLOW_A2A_ENABLED", "true")
+
 CURRENT_SNOWFLAKE_FLOW_ID: ContextVar[str | None] = ContextVar("current_snowflake_flow_id", default=None)
 
 CANONICAL_TECHNICAL_MEMORY_TABLES: frozenset[str] = frozenset(
@@ -1075,8 +1077,16 @@ class LiveSnowflakeBridge:
         self.synced_spans_count: int = 0
         self.synced_activity_count: int = 0
         self._http_client: Any = None
+        self._cortex_agent_threads_mem: dict[tuple[str, str, str, str], dict[str, Any]] = {}
+        self._cortex_threads_server_mem: dict[int, dict[str, Any]] = {}
+        self._a2a_cortex_tasks_mem: dict[str, dict[str, Any]] = {}
+        self._cortex_thread_seq: int = 100000
+        self._cortex_msg_seq: int = 100
+        self._cortex_rest_transport_fn: Any = None
         self._ensure_flow_contexts_sqlite_table()
         self._load_flow_contexts_sqlite()
+        self._ensure_cortex_agent_threads_sqlite_table()
+        self._load_cortex_agent_threads_sqlite()
         self._seed_default_showcase_memories()
 
     def _seed_default_showcase_memories(self) -> None:
@@ -6356,6 +6366,1569 @@ class LiveSnowflakeBridge:
             "context_epoch": self.context_epoch,
         }
 
+    # ------------------------------------------------------------------
+    # MA-W2-R6-01 & MA-W2-R6-05: Snowflake Cortex Agent (:run), 2-Level
+    # Threads API Tracking/Auto-Recovery & A2A v0.3.0 Server Bridge
+    # ------------------------------------------------------------------
+
+    def _ensure_cortex_agent_threads_sqlite_table(self) -> Path | None:
+        """Ensure `snowflake_cortex_agent_threads` table exists in SQLite (`langflow.db`) (`MA-W2-R6-01`)."""
+        try:
+            db_path = self._resolve_writable_sqlite_db_path()
+            conn = _open_sqlite_conn(db_path, readonly=False, timeout=30.0)
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS snowflake_cortex_agent_threads (
+                    flow_id TEXT NOT NULL,
+                    session_id TEXT NOT NULL,
+                    agent_fqn TEXT NOT NULL,
+                    active_role TEXT NOT NULL,
+                    thread_id INTEGER NOT NULL,
+                    thread_name TEXT,
+                    last_user_message_id INTEGER,
+                    last_assistant_message_id INTEGER NOT NULL DEFAULT 0,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (flow_id, session_id, agent_fqn, active_role)
+                )
+                """
+            )
+            conn.commit()
+            conn.close()
+            return db_path
+        except Exception:  # noqa: BLE001
+            return None
+
+    def _load_cortex_agent_threads_sqlite(self) -> dict[tuple[str, str, str, str], dict[str, Any]]:
+        """Hydrate `_cortex_agent_threads_mem` and `_cortex_threads_server_mem` from SQLite `snowflake_cortex_agent_threads`."""
+        loaded: dict[tuple[str, str, str, str], dict[str, Any]] = {}
+        try:
+            db_path = self._resolve_writable_sqlite_db_path()
+            if not db_path.exists():
+                return loaded
+            conn = _open_sqlite_conn(db_path, readonly=True, timeout=30.0)
+            conn.row_factory = sqlite3.Row
+            cur = conn.cursor()
+            tables = {r[0] for r in cur.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+            if "snowflake_cortex_agent_threads" in tables:
+                rows = cur.execute("SELECT * FROM snowflake_cortex_agent_threads ORDER BY updated_at ASC").fetchall()
+                for r in rows:
+                    d = dict(r)
+                    fid = str(d.get("flow_id") or "default")
+                    sid = str(d.get("session_id") or "default")
+                    afqn = str(d.get("agent_fqn") or "").upper()
+                    rl = str(d.get("active_role") or self.active_role).upper()
+                    tid = int(d.get("thread_id") or 0)
+                    if not afqn or tid <= 0:
+                        continue
+                    rec = {
+                        "flow_id": fid,
+                        "session_id": sid,
+                        "agent_fqn": afqn,
+                        "active_role": rl,
+                        "thread_id": tid,
+                        "thread_name": str(d.get("thread_name") or f"lf:{fid[:8]}:{sid[:16]}:{afqn.split('.')[-1]}"),
+                        "last_user_message_id": int(d["last_user_message_id"]) if d.get("last_user_message_id") is not None else None,
+                        "last_assistant_message_id": int(d.get("last_assistant_message_id") or 0),
+                        "updated_at": str(d.get("updated_at") or datetime.now(timezone.utc).isoformat()),
+                    }
+                    key = (fid, sid, afqn, rl)
+                    self._cortex_agent_threads_mem[key] = rec
+                    loaded[key] = rec
+                    if tid > self._cortex_thread_seq:
+                        self._cortex_thread_seq = tid
+                    self._cortex_threads_server_mem.setdefault(
+                        tid,
+                        {
+                            "metadata": {
+                                "thread_id": tid,
+                                "thread_name": rec["thread_name"],
+                                "origin_application": "langflow",
+                                "created_on": rec["updated_at"],
+                                "updated_on": rec["updated_at"],
+                            },
+                            "messages": [],
+                        },
+                    )
+            conn.close()
+        except Exception:  # noqa: BLE001
+            pass
+        return loaded
+
+    def _save_cortex_agent_thread_pointer(
+        self,
+        *,
+        flow_id: str,
+        session_id: str,
+        agent_fqn: str,
+        active_role: str,
+        thread_id: int,
+        thread_name: str | None = None,
+        last_user_message_id: int | None = None,
+        last_assistant_message_id: int = 0,
+    ) -> dict[str, Any]:
+        """Persist `(flow_id, session_id, agent_fqn, active_role)` thread pointer in memory and SQLite `snowflake_cortex_agent_threads`."""
+        norm_fid = self._normalize_flow_id(flow_id) or str(flow_id or "default").strip() or "default"
+        norm_sid = str(session_id or norm_fid or "default").strip() or "default"
+        norm_fqn = str(agent_fqn or "").strip().upper()
+        norm_role = str(active_role or self.active_role or "ACCOUNTADMIN").strip().upper()
+        tid = int(thread_id)
+        now_iso = datetime.now(timezone.utc).isoformat()
+        short_agent = norm_fqn.split(".")[-1] if norm_fqn else "AGENT"
+        t_name = str(thread_name or f"lf:{norm_fid[:8]}:{norm_sid[:16]}:{short_agent}")
+        rec = {
+            "flow_id": norm_fid,
+            "session_id": norm_sid,
+            "agent_fqn": norm_fqn,
+            "active_role": norm_role,
+            "thread_id": tid,
+            "thread_name": t_name,
+            "last_user_message_id": int(last_user_message_id) if last_user_message_id is not None else None,
+            "last_assistant_message_id": int(last_assistant_message_id or 0),
+            "updated_at": now_iso,
+        }
+        self._cortex_agent_threads_mem[(norm_fid, norm_sid, norm_fqn, norm_role)] = rec
+        try:
+            db_path = self._ensure_cortex_agent_threads_sqlite_table()
+            if db_path is not None:
+                conn = _open_sqlite_conn(db_path, readonly=False, timeout=30.0)
+                conn.execute(
+                    """
+                    INSERT OR REPLACE INTO snowflake_cortex_agent_threads (
+                        flow_id, session_id, agent_fqn, active_role,
+                        thread_id, thread_name, last_user_message_id, last_assistant_message_id, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        norm_fid,
+                        norm_sid,
+                        norm_fqn,
+                        norm_role,
+                        tid,
+                        t_name,
+                        rec["last_user_message_id"],
+                        rec["last_assistant_message_id"],
+                        now_iso,
+                    ),
+                )
+                conn.commit()
+                conn.close()
+        except Exception:  # noqa: BLE001
+            pass
+        return rec
+
+    def _get_cortex_agent_thread_pointer(
+        self,
+        *,
+        flow_id: str,
+        session_id: str | None = None,
+        agent_fqn: str,
+        active_role: str | None = None,
+        latest_for_agent: bool = False,
+    ) -> dict[str, Any] | None:
+        """Lookup persisted Cortex Agent thread pointer from SQLite or in-memory mirror."""
+        norm_fid = self._normalize_flow_id(flow_id) or str(flow_id or "default").strip() or "default"
+        norm_sid = str(session_id or norm_fid or "default").strip() or "default"
+        norm_fqn = str(agent_fqn or "").strip().upper()
+        norm_role = str(active_role or self.active_role or "ACCOUNTADMIN").strip().upper()
+
+        try:
+            db_path = self._resolve_writable_sqlite_db_path()
+            if db_path.exists():
+                conn = _open_sqlite_conn(db_path, readonly=True, timeout=15.0)
+                conn.row_factory = sqlite3.Row
+                cur = conn.cursor()
+                tables = {r[0] for r in cur.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+                if "snowflake_cortex_agent_threads" in tables:
+                    if latest_for_agent:
+                        row = cur.execute(
+                            """
+                            SELECT * FROM snowflake_cortex_agent_threads
+                            WHERE flow_id = ? AND agent_fqn = ? AND active_role = ?
+                            ORDER BY updated_at DESC LIMIT 1
+                            """,
+                            (norm_fid, norm_fqn, norm_role),
+                        ).fetchone()
+                    else:
+                        row = cur.execute(
+                            """
+                            SELECT * FROM snowflake_cortex_agent_threads
+                            WHERE flow_id = ? AND session_id = ? AND agent_fqn = ? AND active_role = ?
+                            ORDER BY updated_at DESC LIMIT 1
+                            """,
+                            (norm_fid, norm_sid, norm_fqn, norm_role),
+                        ).fetchone()
+                    conn.close()
+                    if row is not None:
+                        d = dict(row)
+                        rec = {
+                            "flow_id": str(d["flow_id"]),
+                            "session_id": str(d["session_id"]),
+                            "agent_fqn": str(d["agent_fqn"]).upper(),
+                            "active_role": str(d["active_role"]).upper(),
+                            "thread_id": int(d["thread_id"]),
+                            "thread_name": str(d.get("thread_name") or ""),
+                            "last_user_message_id": int(d["last_user_message_id"]) if d.get("last_user_message_id") is not None else None,
+                            "last_assistant_message_id": int(d.get("last_assistant_message_id") or 0),
+                            "updated_at": str(d.get("updated_at") or ""),
+                        }
+                        self._cortex_agent_threads_mem[(rec["flow_id"], rec["session_id"], rec["agent_fqn"], rec["active_role"])] = rec
+                        return rec
+                else:
+                    conn.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+        if not latest_for_agent:
+            exact = self._cortex_agent_threads_mem.get((norm_fid, norm_sid, norm_fqn, norm_role))
+            if exact is not None:
+                return dict(exact)
+            return None
+
+        candidates = [
+            rec
+            for (fid, _sid, fqn, rl), rec in self._cortex_agent_threads_mem.items()
+            if fid == norm_fid and fqn == norm_fqn and rl == norm_role
+        ]
+        if not candidates:
+            return None
+        candidates.sort(key=lambda r: str(r.get("updated_at") or ""), reverse=True)
+        return dict(candidates[0])
+
+    def create_cortex_thread(
+        self,
+        *,
+        flow_id: str | None = None,
+        session_id: str | None = None,
+        agent_name: str | None = None,
+        origin_application: str = "langflow",
+    ) -> dict[str, Any]:
+        """Create a new Snowflake Cortex Thread via `POST /api/v2/cortex/threads` and name it via `POST /api/v2/cortex/threads/{id}` (`MA-W2-R6-01`)."""
+        norm_fid = self._normalize_flow_id(flow_id) or str(flow_id or self.active_flow_id or "default").strip() or "default"
+        norm_sid = str(session_id or norm_fid or "default").strip() or "default"
+        short_agent = str(agent_name or "AGENT").strip().split(".")[-1] or "AGENT"
+        origin_app = str(origin_application or "langflow").strip()[:16] or "langflow"
+        thread_name = f"lf:{norm_fid[:8]}:{norm_sid[:16]}:{short_agent}"
+        now_iso = datetime.now(timezone.utc).isoformat()
+
+        created_tid: int | None = None
+        if callable(self._cortex_rest_transport_fn):
+            raw = self._cortex_rest_transport_fn("POST", "/api/v2/cortex/threads", {"origin_application": origin_app})
+            if isinstance(raw, dict) and raw.get("thread_id") is not None:
+                created_tid = int(raw["thread_id"])
+            elif isinstance(raw, (int, str)) and str(raw).strip().isdigit():
+                created_tid = int(str(raw).strip())
+            if created_tid is not None:
+                self._cortex_rest_transport_fn(
+                    "POST",
+                    f"/api/v2/cortex/threads/{created_tid}",
+                    {"thread_name": thread_name},
+                )
+        elif self._has_spcs_token() and httpx is not None:
+            host = os.environ["SNOWFLAKE_HOST"]
+            try:
+                with httpx.Client(timeout=30.0, verify=True) as client:
+                    resp = client.post(
+                        f"https://{host}/api/v2/cortex/threads",
+                        headers=self._get_spcs_headers(),
+                        json={"origin_application": origin_app},
+                    )
+                    if resp.status_code < 400 and resp.content:
+                        body = resp.json()
+                        if isinstance(body, dict) and body.get("thread_id") is not None:
+                            created_tid = int(body["thread_id"])
+                        elif isinstance(body, (int, str)) and str(body).strip().isdigit():
+                            created_tid = int(str(body).strip())
+                    if created_tid is not None:
+                        client.post(
+                            f"https://{host}/api/v2/cortex/threads/{created_tid}",
+                            headers=self._get_spcs_headers(),
+                            json={"thread_name": thread_name},
+                        )
+            except Exception:  # noqa: BLE001
+                pass
+
+        if created_tid is None:
+            self._cortex_thread_seq += 1
+            created_tid = self._cortex_thread_seq
+
+        meta = {
+            "thread_id": int(created_tid),
+            "thread_name": thread_name,
+            "origin_application": origin_app,
+            "created_on": now_iso,
+            "updated_on": now_iso,
+        }
+        self._cortex_threads_server_mem[int(created_tid)] = {
+            "metadata": meta,
+            "messages": [],
+        }
+        return {"ok": True, **meta}
+
+    def list_cortex_threads(
+        self,
+        *,
+        origin_application: str = "langflow",
+        flow_id: str | None = None,
+        agent_fqn: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """List Snowflake Cortex Threads via `GET /api/v2/cortex/threads?origin_application=langflow` (`MA-W2-R6-01`)."""
+        origin_app = str(origin_application or "langflow").strip()[:16] or "langflow"
+        threads_by_id: dict[int, dict[str, Any]] = {}
+
+        for tid, entry in self._cortex_threads_server_mem.items():
+            meta = dict(entry.get("metadata") or {})
+            if meta.get("thread_id") is not None:
+                threads_by_id[int(tid)] = meta
+
+        for (_fid, _sid, _afqn, _rl), ptr in self._cortex_agent_threads_mem.items():
+            tid = int(ptr.get("thread_id") or 0)
+            if tid > 0 and tid not in threads_by_id:
+                threads_by_id[tid] = {
+                    "thread_id": tid,
+                    "thread_name": str(ptr.get("thread_name") or f"lf:{_fid[:8]}:{_sid[:16]}:{_afqn.split('.')[-1]}"),
+                    "origin_application": origin_app,
+                    "created_on": str(ptr.get("updated_at") or ""),
+                    "updated_on": str(ptr.get("updated_at") or ""),
+                }
+
+        remote_list: list[Any] = []
+        if callable(self._cortex_rest_transport_fn):
+            raw = self._cortex_rest_transport_fn(
+                "GET",
+                f"/api/v2/cortex/threads?origin_application={origin_app}",
+                None,
+            )
+            if isinstance(raw, list):
+                remote_list = raw
+            elif isinstance(raw, dict) and isinstance(raw.get("threads"), list):
+                remote_list = raw["threads"]
+            elif isinstance(raw, dict) and isinstance(raw.get("data"), list):
+                remote_list = raw["data"]
+        elif self._has_spcs_token() and httpx is not None:
+            host = os.environ["SNOWFLAKE_HOST"]
+            try:
+                with httpx.Client(timeout=20.0, verify=True) as client:
+                    resp = client.get(
+                        f"https://{host}/api/v2/cortex/threads",
+                        params={"origin_application": origin_app},
+                        headers=self._get_spcs_headers(),
+                    )
+                    if resp.status_code < 400 and resp.content:
+                        body = resp.json()
+                        if isinstance(body, list):
+                            remote_list = body
+                        elif isinstance(body, dict):
+                            remote_list = body.get("threads") or body.get("data") or []
+            except Exception:  # noqa: BLE001
+                pass
+
+        for item in remote_list:
+            if not isinstance(item, dict):
+                continue
+            raw_tid = item.get("thread_id") or item.get("id")
+            if raw_tid is None:
+                continue
+            try:
+                tid = int(raw_tid)
+            except (TypeError, ValueError):
+                continue
+            meta = {
+                "thread_id": tid,
+                "thread_name": str(item.get("thread_name") or item.get("name") or f"Thread #{tid}"),
+                "origin_application": str(item.get("origin_application") or origin_app),
+                "created_on": str(item.get("created_on") or item.get("created_at") or ""),
+                "updated_on": str(item.get("updated_on") or item.get("updated_at") or item.get("created_on") or ""),
+            }
+            threads_by_id[tid] = meta
+            self._cortex_threads_server_mem.setdefault(tid, {"metadata": meta, "messages": []})["metadata"] = meta
+
+        results = list(threads_by_id.values())
+        if flow_id:
+            norm_fid = self._normalize_flow_id(flow_id) or str(flow_id).strip()
+            fid_prefix = f"lf:{norm_fid[:8]}:"
+            filtered = [t for t in results if str(t.get("thread_name") or "").startswith(fid_prefix)]
+            if filtered:
+                results = filtered
+        if agent_fqn:
+            short_ag = str(agent_fqn).strip().split(".")[-1].upper()
+            filtered_ag = [
+                t
+                for t in results
+                if short_ag in str(t.get("thread_name") or "").upper()
+            ]
+            if filtered_ag:
+                results = filtered_ag
+
+        results.sort(key=lambda x: (str(x.get("updated_on") or ""), int(x.get("thread_id") or 0)), reverse=True)
+        return results
+
+    def describe_cortex_thread(
+        self,
+        thread_id: int | str,
+        *,
+        page_size: int = 20,
+        last_message_id: int | None = None,
+    ) -> dict[str, Any]:
+        """Describe a Snowflake Cortex Thread via `GET /api/v2/cortex/threads/{thread_id}?message_type=conversation&page_size=20` (`MA-W2-R6-01`).
+
+        Note: Snowflake returns `messages` in descending order of creation (newest first).
+        """
+        raw_str = str(thread_id).strip()
+        m_num = re.search(r"(\d+)", raw_str)
+        tid = int(m_num.group(1)) if m_num else 0
+        bounded_size = max(1, min(int(page_size or 20), 100))
+        query_path = f"/api/v2/cortex/threads/{tid}?message_type=conversation&page_size={bounded_size}"
+        if last_message_id is not None:
+            query_path += f"&last_message_id={int(last_message_id)}"
+
+        if callable(self._cortex_rest_transport_fn):
+            raw = self._cortex_rest_transport_fn("GET", query_path, None)
+            if isinstance(raw, dict):
+                meta = dict(raw.get("metadata") or {"thread_id": tid})
+                msgs = list(raw.get("messages") or [])
+                self._cortex_threads_server_mem[tid] = {"metadata": meta, "messages": msgs}
+                return {"metadata": meta, "messages": msgs[:bounded_size]}
+
+        if self._has_spcs_token() and httpx is not None and tid > 0:
+            host = os.environ["SNOWFLAKE_HOST"]
+            params: dict[str, Any] = {"message_type": "conversation", "page_size": bounded_size}
+            if last_message_id is not None:
+                params["last_message_id"] = int(last_message_id)
+            try:
+                with httpx.Client(timeout=20.0, verify=True) as client:
+                    resp = client.get(
+                        f"https://{host}/api/v2/cortex/threads/{tid}",
+                        params=params,
+                        headers=self._get_spcs_headers(),
+                    )
+                    if resp.status_code < 400 and resp.content:
+                        body = resp.json()
+                        if isinstance(body, dict):
+                            meta = dict(body.get("metadata") or {"thread_id": tid})
+                            msgs = list(body.get("messages") or [])
+                            self._cortex_threads_server_mem[tid] = {"metadata": meta, "messages": msgs}
+                            return {"metadata": meta, "messages": msgs[:bounded_size]}
+            except Exception:  # noqa: BLE001
+                pass
+
+        mem_entry = self._cortex_threads_server_mem.get(tid) or {
+            "metadata": {"thread_id": tid, "thread_name": f"Thread #{tid}", "origin_application": "langflow"},
+            "messages": [],
+        }
+        msgs = list(mem_entry.get("messages") or [])
+        if last_message_id is not None:
+            msgs = [m for m in msgs if int(m.get("message_id") or 0) < int(last_message_id)]
+        return {
+            "metadata": dict(mem_entry.get("metadata") or {"thread_id": tid}),
+            "messages": msgs[:bounded_size],
+        }
+
+    def resolve_last_assistant_message_id(self, thread_id: int | str, *, page_size: int = 20) -> int:
+        """Recover the last successful `assistant` `message_id` from Snowflake Threads API (`MA-W2-R6-01`).
+
+        Calls `GET /api/v2/cortex/threads/{thread_id}?message_type=conversation&page_size=20` and takes
+        the FIRST element of `messages` with `role == "assistant"` (since Snowflake returns messages
+        in descending order of creation, newest first). Returns `0` if the thread has no assistant reply yet.
+        """
+        described = self.describe_cortex_thread(thread_id, page_size=page_size)
+        for msg in described.get("messages") or []:
+            if not isinstance(msg, dict):
+                continue
+            if str(msg.get("role") or "").strip().lower() == "assistant":
+                raw_mid = msg.get("message_id")
+                if raw_mid is not None:
+                    try:
+                        return int(raw_mid)
+                    except (TypeError, ValueError):
+                        continue
+        return 0
+
+    def sync_cortex_thread_to_playground_messages(
+        self,
+        *,
+        thread_id: int | str,
+        flow_id: str | None = None,
+        session_id: str | None = None,
+        agent_name: str | None = None,
+    ) -> int:
+        """Synchronize recovered Snowflake Cortex Thread messages into Langflow's `message` table for Playground visibility (`MA-W2-R6-01`)."""
+        described = self.describe_cortex_thread(thread_id, page_size=20)
+        messages_desc = list(described.get("messages") or [])
+        if not messages_desc:
+            return 0
+        norm_fid = self._normalize_flow_id(flow_id) or str(flow_id or self.active_flow_id or "default")
+        norm_sid = str(session_id or norm_fid or "default")
+        short_agent = str(agent_name or "Cortex Agent").split(".")[-1]
+        chronological = list(reversed(messages_desc))
+        synced_count = 0
+        try:
+            db_path = self._resolve_writable_sqlite_db_path()
+            conn = _open_sqlite_conn(db_path, readonly=False, timeout=15.0)
+            conn.row_factory = sqlite3.Row
+            cur = conn.cursor()
+            tables = {r[0] for r in cur.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+            if "message" not in tables:
+                conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS message (
+                        id TEXT PRIMARY KEY,
+                        flow_id TEXT,
+                        session_id TEXT,
+                        sender TEXT,
+                        sender_name TEXT,
+                        text TEXT,
+                        timestamp TEXT,
+                        properties TEXT,
+                        files TEXT,
+                        error INTEGER DEFAULT 0,
+                        edit INTEGER DEFAULT 0,
+                        category TEXT DEFAULT 'message'
+                    )
+                    """
+                )
+            for msg in chronological:
+                if not isinstance(msg, dict):
+                    continue
+                mid = msg.get("message_id")
+                role = str(msg.get("role") or "user").lower()
+                raw_body = msg.get("message_payload") or msg.get("content") or msg.get("text") or ""
+                text_val = ""
+                if isinstance(raw_body, str):
+                    if raw_body.strip().startswith(("{", "[")):
+                        try:
+                            parsed_b = json.loads(raw_body)
+                            if isinstance(parsed_b, dict) and isinstance(parsed_b.get("content"), list):
+                                text_val = "\n".join(
+                                    str(b.get("text") or "") for b in parsed_b["content"] if isinstance(b, dict) and b.get("text")
+                                )
+                            elif isinstance(parsed_b, list):
+                                text_val = "\n".join(
+                                    str(b.get("text") or "") for b in parsed_b if isinstance(b, dict) and b.get("text")
+                                )
+                        except Exception:  # noqa: BLE001
+                            text_val = raw_body
+                    else:
+                        text_val = raw_body
+                elif isinstance(raw_body, list):
+                    text_val = "\n".join(
+                        str(b.get("text") or "") for b in raw_body if isinstance(b, dict) and b.get("text")
+                    )
+                elif isinstance(raw_body, dict):
+                    text_val = str(raw_body.get("text") or json.dumps(raw_body))
+                det_msg_uuid = str(uuid.uuid5(uuid.NAMESPACE_OID, f"cortex-thread-{thread_id}-msg-{mid}-{role}"))
+                existing = cur.execute("SELECT id FROM message WHERE id = ?", (det_msg_uuid,)).fetchone()
+                if existing is not None:
+                    continue
+                sender = "Machine" if role == "assistant" else "User"
+                sender_name = f"❄️ {short_agent}" if role == "assistant" else "User"
+                ts = str(msg.get("created_on") or datetime.now(timezone.utc).isoformat())
+                props = json.dumps(
+                    {
+                        "thread_id": int(str(thread_id)) if str(thread_id).isdigit() else thread_id,
+                        "message_id": mid,
+                        "parent_id": msg.get("parent_id"),
+                        "source": "snowflake_cortex_threads_api",
+                    }
+                )
+                cur.execute(
+                    """
+                    INSERT INTO message (id, flow_id, session_id, sender, sender_name, text, timestamp, properties)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        det_msg_uuid,
+                        norm_fid.replace("-", "") if len(norm_fid) == 36 else norm_fid,
+                        norm_sid,
+                        sender,
+                        sender_name,
+                        text_val,
+                        ts,
+                        props,
+                    ),
+                )
+                synced_count += 1
+            conn.commit()
+            conn.close()
+        except Exception:  # noqa: BLE001
+            pass
+        return synced_count
+
+    @staticmethod
+    def parse_cortex_agent_sse_or_json(raw_payload: Any) -> dict[str, Any]:
+        """Parse Snowflake Cortex Agent `:run` SSE stream (`event: metadata`, `event: response.*`) or JSON payload (`MA-W2-R6-01`)."""
+        result: dict[str, Any] = {
+            "status": "SUCCESS",
+            "text": "",
+            "thinking": "",
+            "user_message_id": None,
+            "assistant_message_id": None,
+            "tool_uses": [],
+            "tool_results": [],
+            "sql_queries": [],
+            "citations": [],
+            "charts": [],
+            "tables": [],
+            "error_message": None,
+        }
+        if isinstance(raw_payload, bytes):
+            raw_payload = raw_payload.decode("utf-8", errors="replace")
+
+        if isinstance(raw_payload, dict):
+            if raw_payload.get("status") == "ERROR" or raw_payload.get("error"):
+                result["status"] = "ERROR"
+                result["error_message"] = str(
+                    raw_payload.get("error_message")
+                    or (raw_payload["error"].get("message") if isinstance(raw_payload.get("error"), dict) else raw_payload.get("error"))
+                    or raw_payload.get("message")
+                    or "Cortex Agent execution failed"
+                )
+                return result
+            if raw_payload.get("user_message_id") is not None:
+                result["user_message_id"] = int(raw_payload["user_message_id"])
+            if raw_payload.get("assistant_message_id") is not None:
+                result["assistant_message_id"] = int(raw_payload["assistant_message_id"])
+            meta_obj = raw_payload.get("metadata")
+            if isinstance(meta_obj, dict):
+                if meta_obj.get("role") == "user" and meta_obj.get("message_id") is not None:
+                    result["user_message_id"] = int(meta_obj["message_id"])
+                elif meta_obj.get("role") == "assistant" and meta_obj.get("message_id") is not None:
+                    result["assistant_message_id"] = int(meta_obj["message_id"])
+            if isinstance(raw_payload.get("text"), str):
+                result["text"] = raw_payload["text"]
+            if isinstance(raw_payload.get("thinking"), str):
+                result["thinking"] = raw_payload["thinking"]
+            for k in ("tool_uses", "tool_results", "sql_queries", "citations", "charts", "tables"):
+                if isinstance(raw_payload.get(k), list):
+                    result[k].extend(raw_payload[k])
+            if isinstance(raw_payload.get("content"), list):
+                LiveSnowflakeBridge._extract_cortex_content_blocks(raw_payload["content"], result)
+            return result
+
+        if not isinstance(raw_payload, str):
+            return result
+
+        text_deltas: list[str] = []
+        thinking_deltas: list[str] = []
+        final_text_blocks: list[str] = []
+        current_event = ""
+
+        for raw_line in raw_payload.splitlines():
+            line = raw_line.strip()
+            if not line:
+                continue
+            if line.startswith("event:"):
+                current_event = line[len("event:") :].strip()
+                continue
+            if not line.startswith("data:"):
+                continue
+            data_str = line[len("data:") :].strip()
+            if not data_str or data_str == "[DONE]":
+                continue
+            try:
+                data_obj = json.loads(data_str)
+            except Exception:  # noqa: BLE001
+                continue
+            if not isinstance(data_obj, dict):
+                continue
+
+            if current_event == "metadata" or "metadata" in data_obj:
+                meta = data_obj.get("metadata") if isinstance(data_obj.get("metadata"), dict) else data_obj
+                role = str(meta.get("role") or "").strip().lower()
+                mid = meta.get("message_id")
+                if mid is not None:
+                    try:
+                        if role == "user":
+                            result["user_message_id"] = int(mid)
+                        elif role == "assistant":
+                            result["assistant_message_id"] = int(mid)
+                    except (TypeError, ValueError):
+                        pass
+
+            if current_event == "error":
+                result["status"] = "ERROR"
+                result["error_message"] = str(data_obj.get("message") or data_obj.get("error") or "SSE error")
+                continue
+
+            if current_event == "response.text.delta":
+                if isinstance(data_obj.get("text"), str):
+                    text_deltas.append(data_obj["text"])
+            elif current_event == "response.text":
+                if isinstance(data_obj.get("text"), str):
+                    final_text_blocks.append(data_obj["text"])
+                if isinstance(data_obj.get("annotations"), list):
+                    result["citations"].extend(data_obj["annotations"])
+            elif current_event == "response.thinking.delta":
+                if isinstance(data_obj.get("text"), str):
+                    thinking_deltas.append(data_obj["text"])
+            elif current_event == "response.thinking":
+                if isinstance(data_obj.get("text"), str):
+                    result["thinking"] = data_obj["text"]
+            elif current_event == "response.tool_use":
+                result["tool_uses"].append(data_obj)
+            elif current_event == "response.tool_result":
+                result["tool_results"].append(data_obj)
+                LiveSnowflakeBridge._extract_tool_result_artifacts(data_obj, result)
+            elif current_event == "response.chart":
+                chart_spec = data_obj.get("chart_spec") or data_obj
+                if isinstance(chart_spec, str):
+                    try:
+                        chart_spec = json.loads(chart_spec)
+                    except Exception:  # noqa: BLE001
+                        pass
+                result["charts"].append(chart_spec)
+            elif current_event == "response":
+                if isinstance(data_obj.get("content"), list):
+                    LiveSnowflakeBridge._extract_cortex_content_blocks(data_obj["content"], result)
+
+        if not result["text"]:
+            if final_text_blocks:
+                result["text"] = "\n".join(final_text_blocks)
+            elif text_deltas:
+                result["text"] = "".join(text_deltas)
+        if not result["thinking"] and thinking_deltas:
+            result["thinking"] = "".join(thinking_deltas)
+        return result
+
+    @staticmethod
+    def _extract_tool_result_artifacts(tool_res: dict[str, Any], out: dict[str, Any]) -> None:
+        """Extract SQL queries, result sets, and search citations from a Cortex Agent `tool_result` block."""
+        for item in tool_res.get("content") or []:
+            if not isinstance(item, dict):
+                continue
+            j_obj = item.get("json")
+            if not isinstance(j_obj, dict):
+                continue
+            if isinstance(j_obj.get("sql"), str) and j_obj["sql"] not in out["sql_queries"]:
+                out["sql_queries"].append(j_obj["sql"])
+            if isinstance(j_obj.get("result_set"), dict):
+                out["tables"].append(j_obj["result_set"])
+            if isinstance(j_obj.get("search_results"), list):
+                out["citations"].extend(j_obj["search_results"])
+
+    @staticmethod
+    def _extract_cortex_content_blocks(content_list: list[Any], out: dict[str, Any]) -> None:
+        """Extract text, thinking, tool_use, tool_result, and chart blocks from final `response` content."""
+        texts: list[str] = []
+        for blk in content_list:
+            if not isinstance(blk, dict):
+                continue
+            b_type = str(blk.get("type") or "")
+            if b_type == "text" and isinstance(blk.get("text"), str):
+                texts.append(blk["text"])
+                if isinstance(blk.get("annotations"), list):
+                    out["citations"].extend(blk["annotations"])
+            elif b_type == "thinking" and isinstance(blk.get("thinking"), dict):
+                if isinstance(blk["thinking"].get("text"), str):
+                    out["thinking"] = blk["thinking"]["text"]
+            elif b_type == "tool_use" and isinstance(blk.get("tool_use"), dict):
+                out["tool_uses"].append(blk["tool_use"])
+            elif b_type == "tool_result" and isinstance(blk.get("tool_result"), dict):
+                out["tool_results"].append(blk["tool_result"])
+                LiveSnowflakeBridge._extract_tool_result_artifacts(blk["tool_result"], out)
+            elif b_type == "chart" and isinstance(blk.get("chart"), dict):
+                c_spec = blk["chart"].get("chart_spec") or blk["chart"]
+                if isinstance(c_spec, str):
+                    try:
+                        c_spec = json.loads(c_spec)
+                    except Exception:  # noqa: BLE001
+                        pass
+                out["charts"].append(c_spec)
+        if texts and not out["text"]:
+            out["text"] = "\n".join(texts)
+
+    def invoke_cortex_agent(
+        self,
+        *,
+        database: str,
+        schema: str,
+        agent_name: str,
+        user_message: str,
+        flow_id: str | None = None,
+        session_id: str | None = None,
+        resume_thread: bool = True,
+        thread_continuity_mode: str = "Resume Latest Thread of this Agent",
+        conversation_thread: str | None = None,
+        thread_id: int | str | None = None,
+        parent_message_id: int | str | None = None,
+        tool_choice: str = "auto",
+        role: str | None = None,
+    ) -> dict[str, Any]:
+        """Invoke a Snowflake Cortex Agent via `POST /api/v2/databases/{db}/schemas/{schema}/agents/{name}:run` with 2-level Threads API continuity (`MA-W2-R6-01`)."""
+        effective_role = (role or self.active_role or "ACCOUNTADMIN").strip().upper()
+        db = (database or self.database or "SNOWFLAKE_LANGFLOW").strip().upper()
+        sch = (schema or self.schema or "CORE").strip().upper()
+        raw_agent = (agent_name or "EXAMPLE_AGENT").strip()
+        if "." in raw_agent:
+            parts = [p.strip().upper() for p in raw_agent.split(".") if p.strip()]
+            if len(parts) == 3:
+                db, sch, short_agent = parts[0], parts[1], parts[2]
+            else:
+                short_agent = parts[-1]
+        else:
+            short_agent = raw_agent.upper()
+        agent_fqn = f"{db}.{sch}.{short_agent}"
+        prompt = (user_message or "Summarize active flow metrics").strip()
+        norm_fid = (
+            self._normalize_flow_id(flow_id)
+            or self._normalize_flow_id(CURRENT_SNOWFLAKE_FLOW_ID.get())
+            or self._normalize_flow_id(self.active_flow_id)
+            or "default"
+        )
+        eff_session_id = str(session_id or norm_fid or "default").strip() or "default"
+        rest_endpoint = f"/api/v2/databases/{db}/schemas/{sch}/agents/{short_agent}:run"
+
+        # Enforce active-role governance check when role is PUBLIC / denied
+        if effective_role in ("PUBLIC", "ANONYMOUS", "DENIED_ROLE"):
+            msg = f"Active role ({effective_role}) is not authorized to invoke Cortex Agent {agent_fqn}."
+            self.record_audit_event(
+                action="INVOKE_CORTEX_AGENT",
+                outcome="DENIED",
+                error_code=ErrorCode.AUTHZ_ROLE_DENIED.value,
+                target_object=agent_fqn,
+                flow_id=norm_fid,
+                details={"role": effective_role, "agent_fqn": agent_fqn},
+            )
+            return {
+                "ok": False,
+                "status": "ERROR",
+                "status_code": 403,
+                "error_code": ErrorCode.AUTHZ_ROLE_DENIED.value,
+                "message": msg,
+                "agent_fqn": agent_fqn,
+                "active_role": effective_role,
+                "context_epoch": self.context_epoch,
+            }
+
+        continuity_mode = str(thread_continuity_mode or "Resume Latest Thread of this Agent").strip()
+        conv_sel = str(conversation_thread or "").strip()
+        is_stateful = bool(resume_thread) and not continuity_mode.lower().startswith("stateless")
+
+        resolved_tid: int | None = None
+        resolved_parent_mid: int | None = None
+        resolved_thread_name: str | None = None
+
+        if is_stateful:
+            force_fresh = (
+                conv_sel.startswith("+ Start Fresh Thread")
+                or conv_sel.lower() in {"start fresh thread", "new", "new-thread", "fresh"}
+                or str(thread_id or "").strip().lower() in {"new", "new-thread", "fresh"}
+            )
+            explicit_tid: int | None = None
+            if not force_fresh:
+                if thread_id is not None and str(thread_id).strip():
+                    m_t = re.search(r"(\d+)", str(thread_id).strip())
+                    if m_t:
+                        explicit_tid = int(m_t.group(1))
+                if explicit_tid is None and conv_sel.startswith("Thread #"):
+                    m_c = re.search(r"Thread\s*#(\d+)", conv_sel)
+                    if m_c:
+                        explicit_tid = int(m_c.group(1))
+
+            if force_fresh:
+                created = self.create_cortex_thread(
+                    flow_id=norm_fid,
+                    session_id=eff_session_id,
+                    agent_name=short_agent,
+                )
+                resolved_tid = int(created["thread_id"])
+                resolved_thread_name = str(created.get("thread_name") or "")
+                resolved_parent_mid = 0
+            elif explicit_tid is not None:
+                resolved_tid = explicit_tid
+                if parent_message_id is not None and str(parent_message_id).strip().isdigit():
+                    resolved_parent_mid = int(str(parent_message_id).strip())
+                else:
+                    ptr = self._get_cortex_agent_thread_pointer(
+                        flow_id=norm_fid,
+                        session_id=eff_session_id,
+                        agent_fqn=agent_fqn,
+                        active_role=effective_role,
+                        latest_for_agent=True,
+                    )
+                    if ptr and int(ptr.get("thread_id") or 0) == resolved_tid and int(ptr.get("last_assistant_message_id") or 0) > 0:
+                        resolved_parent_mid = int(ptr["last_assistant_message_id"])
+                        resolved_thread_name = str(ptr.get("thread_name") or "")
+                    else:
+                        resolved_parent_mid = self.resolve_last_assistant_message_id(resolved_tid)
+            elif continuity_mode.startswith("One Thread per Playground Session"):
+                ptr = self._get_cortex_agent_thread_pointer(
+                    flow_id=norm_fid,
+                    session_id=eff_session_id,
+                    agent_fqn=agent_fqn,
+                    active_role=effective_role,
+                    latest_for_agent=False,
+                )
+                if ptr is not None:
+                    resolved_tid = int(ptr["thread_id"])
+                    resolved_thread_name = str(ptr.get("thread_name") or "")
+                    cached_amid = int(ptr.get("last_assistant_message_id") or 0)
+                    resolved_parent_mid = cached_amid if cached_amid > 0 else self.resolve_last_assistant_message_id(resolved_tid)
+                else:
+                    expected_prefix = f"lf:{norm_fid[:8]}:{eff_session_id[:16]}:{short_agent}".upper()
+                    remote_threads = self.list_cortex_threads(origin_application="langflow")
+                    matched_remote = [
+                        t
+                        for t in remote_threads
+                        if str(t.get("thread_name") or "").upper().startswith(expected_prefix)
+                    ]
+                    if matched_remote:
+                        resolved_tid = int(matched_remote[0]["thread_id"])
+                        resolved_thread_name = str(matched_remote[0].get("thread_name") or "")
+                        resolved_parent_mid = self.resolve_last_assistant_message_id(resolved_tid)
+                    else:
+                        created = self.create_cortex_thread(
+                            flow_id=norm_fid,
+                            session_id=eff_session_id,
+                            agent_name=short_agent,
+                        )
+                        resolved_tid = int(created["thread_id"])
+                        resolved_thread_name = str(created.get("thread_name") or "")
+                        resolved_parent_mid = 0
+            else:
+                # Default: "Resume Latest Thread of this Agent"
+                ptr = self._get_cortex_agent_thread_pointer(
+                    flow_id=norm_fid,
+                    session_id=eff_session_id,
+                    agent_fqn=agent_fqn,
+                    active_role=effective_role,
+                    latest_for_agent=True,
+                )
+                if ptr is not None:
+                    resolved_tid = int(ptr["thread_id"])
+                    resolved_thread_name = str(ptr.get("thread_name") or "")
+                    cached_amid = int(ptr.get("last_assistant_message_id") or 0)
+                    resolved_parent_mid = cached_amid if cached_amid > 0 else self.resolve_last_assistant_message_id(resolved_tid)
+                else:
+                    remote_threads = self.list_cortex_threads(
+                        origin_application="langflow",
+                        flow_id=norm_fid,
+                        agent_fqn=agent_fqn,
+                    )
+                    fid_prefix = f"lf:{norm_fid[:8]}:".upper()
+                    matched_remote = [
+                        t
+                        for t in remote_threads
+                        if str(t.get("thread_name") or "").upper().startswith(fid_prefix)
+                        and short_agent in str(t.get("thread_name") or "").upper()
+                    ]
+                    if matched_remote:
+                        resolved_tid = int(matched_remote[0]["thread_id"])
+                        resolved_thread_name = str(matched_remote[0].get("thread_name") or "")
+                        resolved_parent_mid = self.resolve_last_assistant_message_id(resolved_tid)
+                    else:
+                        created = self.create_cortex_thread(
+                            flow_id=norm_fid,
+                            session_id=eff_session_id,
+                            agent_name=short_agent,
+                        )
+                        resolved_tid = int(created["thread_id"])
+                        resolved_thread_name = str(created.get("thread_name") or "")
+                        resolved_parent_mid = 0
+
+            if parent_message_id is not None and str(parent_message_id).strip().isdigit():
+                resolved_parent_mid = int(str(parent_message_id).strip())
+
+        request_payload: dict[str, Any] = {
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [{"type": "text", "text": prompt}],
+                }
+            ],
+        }
+        tc = str(tool_choice or "auto").strip().lower()
+        if tc in ("auto", "required", "none"):
+            request_payload["tool_choice"] = {"type": tc}
+        if is_stateful and resolved_tid is not None:
+            request_payload["thread_id"] = int(resolved_tid)
+            request_payload["parent_message_id"] = int(resolved_parent_mid or 0)
+
+        parsed_run: dict[str, Any] | None = None
+        if callable(self._cortex_rest_transport_fn):
+            raw_resp = self._cortex_rest_transport_fn("POST", rest_endpoint, request_payload)
+            parsed_run = self.parse_cortex_agent_sse_or_json(raw_resp)
+        elif self._has_spcs_token() and httpx is not None:
+            host = os.environ["SNOWFLAKE_HOST"]
+            url = f"https://{host}{rest_endpoint}"
+            headers = self._get_spcs_headers()
+            headers["Accept"] = "text/event-stream, application/json"
+            try:
+                with httpx.Client(timeout=90.0, verify=True) as client:
+                    resp = client.post(url, headers=headers, json=request_payload)
+                    if resp.status_code < 400 and resp.content:
+                        ctype = str(resp.headers.get("content-type") or "").lower()
+                        if "text/event-stream" in ctype or b"event:" in resp.content[:256]:
+                            parsed_run = self.parse_cortex_agent_sse_or_json(resp.text)
+                        else:
+                            parsed_run = self.parse_cortex_agent_sse_or_json(resp.json())
+                    elif resp.status_code >= 400:
+                        parsed_run = {
+                            "status": "ERROR",
+                            "error_message": f"HTTP {resp.status_code}: {resp.text[:400]}",
+                        }
+            except Exception as exc:  # noqa: BLE001
+                parsed_run = {"status": "ERROR", "error_message": str(exc)}
+
+        if parsed_run is None:
+            self._cortex_msg_seq += 1
+            u_mid = self._cortex_msg_seq
+            self._cortex_msg_seq += 1
+            a_mid = self._cortex_msg_seq
+            parsed_run = {
+                "status": "SUCCESS",
+                "text": f"Cortex Agent {agent_fqn} response to: {prompt}",
+                "thinking": f"Evaluated request under role {effective_role} on {agent_fqn}.",
+                "user_message_id": u_mid,
+                "assistant_message_id": a_mid,
+                "tool_uses": [],
+                "tool_results": [],
+                "sql_queries": [],
+                "citations": [],
+                "charts": [],
+                "tables": [],
+                "error_message": None,
+            }
+
+        if parsed_run.get("status") == "ERROR":
+            # Do NOT advance last_assistant_message_id on error
+            return {
+                "ok": False,
+                "status": "ERROR",
+                "status_code": 502,
+                "error_code": ErrorCode.TECHNICAL_EXECUTION_ERROR.value,
+                "message": str(parsed_run.get("error_message") or "Cortex Agent execution failed"),
+                "database": db,
+                "schema_name": sch,
+                "cortex_agent": short_agent,
+                "agent_fqn": agent_fqn,
+                "rest_endpoint": rest_endpoint,
+                "thread_id": resolved_tid,
+                "parent_message_id": resolved_parent_mid,
+                "active_role": effective_role,
+                "context_epoch": self.context_epoch,
+            }
+
+        if parsed_run.get("assistant_message_id") is None:
+            self._cortex_msg_seq += 2
+            parsed_run["user_message_id"] = self._cortex_msg_seq - 1
+            parsed_run["assistant_message_id"] = self._cortex_msg_seq
+        elif parsed_run.get("user_message_id") is None:
+            parsed_run["user_message_id"] = max(1, int(parsed_run["assistant_message_id"]) - 1)
+
+        user_mid = int(parsed_run["user_message_id"])
+        assistant_mid = int(parsed_run["assistant_message_id"])
+        reply_text = str(parsed_run.get("text") or f"Cortex Agent {agent_fqn} response to: {prompt}")
+        now_iso = datetime.now(timezone.utc).isoformat()
+
+        if is_stateful and resolved_tid is not None:
+            t_entry = self._cortex_threads_server_mem.setdefault(
+                int(resolved_tid),
+                {
+                    "metadata": {
+                        "thread_id": int(resolved_tid),
+                        "thread_name": resolved_thread_name or f"lf:{norm_fid[:8]}:{eff_session_id[:16]}:{short_agent}",
+                        "origin_application": "langflow",
+                        "created_on": now_iso,
+                        "updated_on": now_iso,
+                    },
+                    "messages": [],
+                },
+            )
+            t_entry["metadata"]["updated_on"] = now_iso
+            # Insert user and assistant messages newest-first (assistant at index 0, user at index 1)
+            existing_mids = {int(m.get("message_id") or 0) for m in t_entry["messages"] if isinstance(m, dict)}
+            if user_mid not in existing_mids:
+                t_entry["messages"].insert(
+                    0,
+                    {
+                        "message_id": user_mid,
+                        "parent_id": int(resolved_parent_mid or 0),
+                        "created_on": now_iso,
+                        "role": "user",
+                        "message_payload": json.dumps({"content": [{"type": "text", "text": prompt}]}),
+                        "raw_message": prompt,
+                    },
+                )
+            if assistant_mid not in existing_mids:
+                t_entry["messages"].insert(
+                    0,
+                    {
+                        "message_id": assistant_mid,
+                        "parent_id": user_mid,
+                        "created_on": now_iso,
+                        "role": "assistant",
+                        "message_payload": json.dumps({"content": [{"type": "text", "text": reply_text}]}),
+                        "raw_message": reply_text,
+                    },
+                )
+
+            self._save_cortex_agent_thread_pointer(
+                flow_id=norm_fid,
+                session_id=eff_session_id,
+                agent_fqn=agent_fqn,
+                active_role=effective_role,
+                thread_id=int(resolved_tid),
+                thread_name=t_entry["metadata"].get("thread_name"),
+                last_user_message_id=user_mid,
+                last_assistant_message_id=assistant_mid,
+            )
+            self.sync_cortex_thread_to_playground_messages(
+                thread_id=int(resolved_tid),
+                flow_id=norm_fid,
+                session_id=eff_session_id,
+                agent_name=short_agent,
+            )
+
+        thread_indicator = (
+            f"Thread #{resolved_tid} · Parent Msg #{int(resolved_parent_mid or 0)} -> New Msg #{assistant_mid}"
+            if (is_stateful and resolved_tid is not None)
+            else "Stateless (Single Turn)"
+        )
+
+        return {
+            "ok": True,
+            "status": "SUCCESS",
+            "database": db,
+            "schema_name": sch,
+            "cortex_agent": short_agent,
+            "agent_fqn": agent_fqn,
+            "discovery_sql": f"SHOW CORTEX AGENTS IN SCHEMA {db}.{sch}",
+            "rest_endpoint": rest_endpoint,
+            "active_role": effective_role,
+            "context_epoch": self.context_epoch,
+            "flow_id": norm_fid,
+            "session_id": eff_session_id,
+            "resume_thread": is_stateful,
+            "thread_continuity_mode": continuity_mode,
+            "thread_id": int(resolved_tid) if (is_stateful and resolved_tid is not None) else None,
+            "thread_name": resolved_thread_name,
+            "parent_message_id": int(resolved_parent_mid or 0) if (is_stateful and resolved_tid is not None) else None,
+            "user_message_id": user_mid,
+            "assistant_message_id": assistant_mid,
+            "next_parent_message_id": assistant_mid if (is_stateful and resolved_tid is not None) else None,
+            "parent_message_id_for_next_turn": assistant_mid if (is_stateful and resolved_tid is not None) else None,
+            "thread_indicator": thread_indicator,
+            "user_message": prompt,
+            "prompt": prompt,
+            "text": reply_text,
+            "thinking": parsed_run.get("thinking") or "",
+            "tool_uses": parsed_run.get("tool_uses") or [],
+            "tool_results": parsed_run.get("tool_results") or [],
+            "sql_queries": parsed_run.get("sql_queries") or [],
+            "citations": parsed_run.get("citations") or [],
+            "charts": parsed_run.get("charts") or [],
+            "tables": parsed_run.get("tables") or [],
+            "request_payload": request_payload,
+        }
+
+    def get_cortex_agent_a2a_card(
+        self,
+        database: str,
+        schema: str,
+        agent_name: str,
+        *,
+        base_url: str = "",
+        flow_id: str | None = None,
+        role: str | None = None,
+    ) -> dict[str, Any]:
+        """Generate A2A v0.3.0 Agent Card for a Snowflake Cortex Agent via `DESCRIBE AGENT <DB>.<SCHEMA>.<NAME>` (`MA-W2-R6-05`)."""
+        effective_role = (role or self.active_role or "ACCOUNTADMIN").strip().upper()
+        db = (database or self.database or "SNOWFLAKE_LANGFLOW").strip().upper()
+        sch = (schema or self.schema or "CORE").strip().upper()
+        short_agent = (agent_name or "EXAMPLE_AGENT").strip().split(".")[-1].upper()
+        agent_fqn = f"{db}.{sch}.{short_agent}"
+
+        if effective_role in ("PUBLIC", "ANONYMOUS", "DENIED_ROLE"):
+            return {
+                "ok": False,
+                "status_code": 403,
+                "error_code": ErrorCode.AUTHZ_ROLE_DENIED.value,
+                "message": f"Active role ({effective_role}) is not authorized to access Cortex Agent {agent_fqn}.",
+            }
+
+        desc_res = self.execute_sql(f"DESCRIBE AGENT {agent_fqn}", role=effective_role, timeout=15)
+        description = (
+            f"Snowflake Cortex Agent {agent_fqn} exposed via Snowflake Langflow A2A v0.3.0 Server Bridge "
+            f"(governed by CURRENT_ROLE() = {effective_role})."
+        )
+        skills: list[dict[str, Any]] = [
+            {
+                "id": f"cortex_agent_{db.lower()}_{sch.lower()}_{short_agent.lower()}",
+                "name": f"Cortex Agent {short_agent}",
+                "description": f"Execute multi-turn reasoning, Cortex Analyst SQL, and Cortex Search on {agent_fqn}.",
+                "tags": ["snowflake", "cortex-agent", db.lower(), sch.lower()],
+                "examples": [f"Ask {short_agent} to summarize key metrics"],
+                "inputModes": ["text/plain", "application/json"],
+                "outputModes": ["text/plain", "application/json"],
+            }
+        ]
+        if desc_res.get("ok") and desc_res.get("rows"):
+            row0 = desc_res["rows"][0]
+            if row0.get("comment") or row0.get("description"):
+                description = str(row0.get("comment") or row0.get("description"))
+
+        clean_base = str(base_url or "").rstrip("/")
+        rpc_url = f"{clean_base}/api/v1/snowflake/a2a/cortex-agents/{db}/{sch}/{short_agent}/jsonrpc"
+        return {
+            "name": agent_fqn,
+            "description": description,
+            "url": rpc_url,
+            "version": "1.0.0",
+            "protocolVersion": "0.3.0",
+            "preferredTransport": "JSONRPC",
+            "capabilities": {
+                "streaming": False,
+                "pushNotifications": False,
+                "stateTransitionHistory": True,
+            },
+            "defaultInputModes": ["text/plain", "application/json"],
+            "defaultOutputModes": ["text/plain", "application/json"],
+            "skills": skills,
+            "metadata": {
+                "agent_fqn": agent_fqn,
+                "database": db,
+                "schema": sch,
+                "agent_name": short_agent,
+                "active_role": effective_role,
+                "describe_sql": f"DESCRIBE AGENT {agent_fqn}",
+                "run_endpoint": f"/api/v2/databases/{db}/schemas/{sch}/agents/{short_agent}:run",
+            },
+        }
+
+    def handle_cortex_agent_a2a_jsonrpc(
+        self,
+        database: str,
+        schema: str,
+        agent_name: str,
+        rpc_body: dict[str, Any],
+        *,
+        flow_id: str | None = None,
+        role: str | None = None,
+    ) -> dict[str, Any]:
+        """Handle A2A v0.3.0 JSON-RPC (`message/send`, `tasks/get`, `tasks/cancel`) for a Snowflake Cortex Agent (`MA-W2-R6-05`)."""
+        effective_role = (role or self.active_role or "ACCOUNTADMIN").strip().upper()
+        db = (database or self.database or "SNOWFLAKE_LANGFLOW").strip().upper()
+        sch = (schema or self.schema or "CORE").strip().upper()
+        short_agent = (agent_name or "EXAMPLE_AGENT").strip().split(".")[-1].upper()
+        agent_fqn = f"{db}.{sch}.{short_agent}"
+
+        rpc_id = rpc_body.get("id")
+        method = str(rpc_body.get("method") or "").strip()
+        params = rpc_body.get("params") if isinstance(rpc_body.get("params"), dict) else {}
+
+        if effective_role in ("PUBLIC", "ANONYMOUS", "DENIED_ROLE"):
+            return {
+                "jsonrpc": "2.0",
+                "id": rpc_id,
+                "error": {
+                    "code": -32001,
+                    "message": f"AUTHZ_ROLE_DENIED: Active role ({effective_role}) cannot invoke {agent_fqn}.",
+                },
+            }
+
+        if method in ("message/send", "message.send", "SendMessage", "tasks/send"):
+            msg_obj = params.get("message") if isinstance(params.get("message"), dict) else {}
+            user_text = ""
+            parts = msg_obj.get("parts") or params.get("parts") or []
+            if isinstance(parts, list):
+                extracted_parts: list[str] = []
+                for p in parts:
+                    if isinstance(p, dict) and isinstance(p.get("text"), str):
+                        extracted_parts.append(p["text"])
+                    elif isinstance(p, str):
+                        extracted_parts.append(p)
+                user_text = "\n".join(extracted_parts).strip()
+            if not user_text:
+                user_text = str(
+                    msg_obj.get("text")
+                    or msg_obj.get("content")
+                    or params.get("text")
+                    or params.get("message_text")
+                    or "Hello"
+                ).strip()
+
+            context_id = str(
+                msg_obj.get("contextId")
+                or msg_obj.get("context_id")
+                or params.get("contextId")
+                or params.get("sessionId")
+                or params.get("session_id")
+                or ""
+            ).strip()
+            task_id = str(
+                msg_obj.get("taskId")
+                or msg_obj.get("task_id")
+                or params.get("id")
+                or params.get("taskId")
+                or f"a2a-task-{uuid.uuid4().hex[:12]}"
+            ).strip()
+
+            explicit_tid: int | None = None
+            if context_id and context_id.isdigit():
+                explicit_tid = int(context_id)
+            elif task_id in self._a2a_cortex_tasks_mem:
+                prev_tid = self._a2a_cortex_tasks_mem[task_id].get("thread_id")
+                if prev_tid is not None:
+                    explicit_tid = int(prev_tid)
+
+            inv_res = self.invoke_cortex_agent(
+                database=db,
+                schema=sch,
+                agent_name=short_agent,
+                user_message=user_text,
+                flow_id=flow_id or "a2a-bridge",
+                session_id=context_id or task_id,
+                resume_thread=True,
+                thread_continuity_mode=(
+                    "Select Specific Thread / Start Fresh Thread"
+                    if explicit_tid is not None
+                    else "One Thread per Playground Session (Session ID)"
+                ),
+                thread_id=explicit_tid,
+                role=effective_role,
+            )
+            if not inv_res.get("ok"):
+                return {
+                    "jsonrpc": "2.0",
+                    "id": rpc_id,
+                    "error": {
+                        "code": -32000,
+                        "message": str(inv_res.get("message") or "Cortex Agent execution failed"),
+                    },
+                }
+
+            tid_str = str(inv_res.get("thread_id") or context_id or task_id)
+            reply_text = str(inv_res.get("text") or "")
+            agent_msg_id = str(inv_res.get("assistant_message_id") or uuid.uuid4().hex)
+            task_payload = {
+                "id": task_id,
+                "contextId": tid_str,
+                "kind": "task",
+                "status": {
+                    "state": "completed",
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "message": {
+                        "kind": "message",
+                        "messageId": agent_msg_id,
+                        "role": "agent",
+                        "contextId": tid_str,
+                        "taskId": task_id,
+                        "parts": [{"kind": "text", "text": reply_text}],
+                    },
+                },
+                "artifacts": [
+                    {
+                        "artifactId": f"art-{agent_msg_id}",
+                        "name": "cortex_agent_response",
+                        "parts": [
+                            {"kind": "text", "text": reply_text},
+                            {
+                                "kind": "data",
+                                "data": {
+                                    "agent_fqn": agent_fqn,
+                                    "thread_id": inv_res.get("thread_id"),
+                                    "parent_message_id": inv_res.get("parent_message_id"),
+                                    "user_message_id": inv_res.get("user_message_id"),
+                                    "assistant_message_id": inv_res.get("assistant_message_id"),
+                                    "next_parent_message_id": inv_res.get("next_parent_message_id"),
+                                    "sql_queries": inv_res.get("sql_queries", []),
+                                    "citations": inv_res.get("citations", []),
+                                    "charts": inv_res.get("charts", []),
+                                    "tool_uses": inv_res.get("tool_uses", []),
+                                    "active_role": effective_role,
+                                },
+                            },
+                        ],
+                    }
+                ],
+                "metadata": {
+                    "agent_fqn": agent_fqn,
+                    "thread_id": inv_res.get("thread_id"),
+                    "parent_message_id": inv_res.get("parent_message_id"),
+                    "assistant_message_id": inv_res.get("assistant_message_id"),
+                    "active_role": effective_role,
+                },
+            }
+            self._a2a_cortex_tasks_mem[task_id] = {
+                "task": task_payload,
+                "thread_id": inv_res.get("thread_id"),
+                "agent_fqn": agent_fqn,
+            }
+            return {"jsonrpc": "2.0", "id": rpc_id, "result": task_payload}
+
+        if method in ("tasks/get", "tasks.get", "GetTask"):
+            task_id = str(params.get("id") or params.get("taskId") or "").strip()
+            stored = self._a2a_cortex_tasks_mem.get(task_id)
+            if stored and isinstance(stored.get("task"), dict):
+                return {"jsonrpc": "2.0", "id": rpc_id, "result": stored["task"]}
+            if task_id.isdigit():
+                desc = self.describe_cortex_thread(int(task_id), page_size=20)
+                last_amid = self.resolve_last_assistant_message_id(int(task_id))
+                msgs = desc.get("messages") or []
+                latest_text = str(msgs[0].get("raw_message") or "") if msgs else ""
+                synth_task = {
+                    "id": task_id,
+                    "contextId": task_id,
+                    "kind": "task",
+                    "status": {
+                        "state": "completed",
+                        "message": {
+                            "kind": "message",
+                            "messageId": str(last_amid or 0),
+                            "role": "agent",
+                            "parts": [{"kind": "text", "text": latest_text}],
+                        },
+                    },
+                    "artifacts": [],
+                    "metadata": {"agent_fqn": agent_fqn, "thread_id": int(task_id), "last_assistant_message_id": last_amid},
+                }
+                return {"jsonrpc": "2.0", "id": rpc_id, "result": synth_task}
+            return {
+                "jsonrpc": "2.0",
+                "id": rpc_id,
+                "error": {"code": -32004, "message": f"Task '{task_id}' not found"},
+            }
+
+        if method in ("tasks/cancel", "tasks.cancel", "CancelTask"):
+            task_id = str(params.get("id") or params.get("taskId") or "").strip()
+            stored = self._a2a_cortex_tasks_mem.get(task_id)
+            if stored and isinstance(stored.get("task"), dict):
+                stored["task"]["status"]["state"] = "canceled"
+                return {"jsonrpc": "2.0", "id": rpc_id, "result": stored["task"]}
+            canceled_task = {
+                "id": task_id or "canceled-task",
+                "contextId": task_id or "canceled-context",
+                "kind": "task",
+                "status": {"state": "canceled", "timestamp": datetime.now(timezone.utc).isoformat()},
+                "artifacts": [],
+            }
+            self._a2a_cortex_tasks_mem[task_id] = {"task": canceled_task, "agent_fqn": agent_fqn}
+            return {"jsonrpc": "2.0", "id": rpc_id, "result": canceled_task}
+
+        return {
+            "jsonrpc": "2.0",
+            "id": rpc_id,
+            "error": {"code": -32601, "message": f"Unsupported A2A JSON-RPC method: {method}"},
+        }
+
+    def list_internal_and_external_a2a_targets(
+        self,
+        *,
+        flow_id: str | None = None,
+        base_url: str = "",
+    ) -> dict[str, Any]:
+        """List both Langflow A2A Flows and `[ ❄️ Context ]` Snowflake Cortex Agents for `A2A Agent` Internal & External modes (`MA-W2-R6-05`)."""
+        norm_fid = (
+            self._normalize_flow_id(flow_id)
+            or self._normalize_flow_id(CURRENT_SNOWFLAKE_FLOW_ID.get())
+            or self._normalize_flow_id(self.active_flow_id)
+        )
+        internal_options: list[str] = []
+        internal_metadata: list[dict[str, Any]] = []
+        quick_fill_options: list[str] = []
+        quick_fill_map: dict[str, str] = {}
+        clean_base = str(base_url or "http://127.0.0.1:7860").rstrip("/")
+
+        # 1. Discover Langflow flows in SQLite `flow` table
+        try:
+            db_path = self._resolve_writable_sqlite_db_path()
+            if db_path.exists():
+                conn = _open_sqlite_conn(db_path, readonly=True, timeout=10.0)
+                conn.row_factory = sqlite3.Row
+                cur = conn.cursor()
+                tables = {r[0] for r in cur.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+                if "flow" in tables:
+                    rows = cur.execute(
+                        "SELECT id, name, updated_at, is_component FROM flow ORDER BY updated_at DESC"
+                    ).fetchall()
+                    for r in rows:
+                        d = dict(r)
+                        if d.get("is_component") in (True, 1, "1"):
+                            continue
+                        fid = self._normalize_flow_id(str(d.get("id") or "")) or str(d.get("id") or "").strip()
+                        fname = str(d.get("name") or fid).strip()
+                        if not fid:
+                            continue
+                        label = f"[Langflow Flow] {fname} ({fid})"
+                        if label not in internal_options:
+                            internal_options.append(label)
+                            internal_metadata.append(
+                                {
+                                    "id": fid,
+                                    "kind": "langflow_flow",
+                                    "name": fname,
+                                    "updated_at": str(d.get("updated_at") or ""),
+                                }
+                            )
+                            url_val = f"{clean_base}/api/v1/a2a/{fid}"
+                            qf_label = f"[Langflow Flow] {fname} -> {url_val}"
+                            quick_fill_options.append(qf_label)
+                            quick_fill_map[qf_label] = url_val
+                conn.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+        # 2. Discover Cortex Agents visible in active `[ ❄️ Context ]` for `flow_id`
+        dbs = self.get_context_databases(flow_id=norm_fid)
+        seen_agents: set[str] = set()
+        for db in dbs:
+            for sch in self.get_context_schemas(db, flow_id=norm_fid):
+                for ag in self.get_context_objects(db, sch, "cortex_agents", flow_id=norm_fid):
+                    short_ag = str(ag).strip().split(".")[-1].upper()
+                    if not short_ag:
+                        continue
+                    fqn = f"{db.upper()}.{sch.upper()}.{short_ag}"
+                    if fqn in seen_agents:
+                        continue
+                    seen_agents.add(fqn)
+                    label = f"[Cortex Agent] {fqn}"
+                    internal_options.append(label)
+                    internal_metadata.append(
+                        {
+                            "id": fqn,
+                            "kind": "cortex_agent",
+                            "database": db.upper(),
+                            "schema": sch.upper(),
+                            "agent_name": short_ag,
+                        }
+                    )
+                    bridge_url = f"{clean_base}/api/v1/snowflake/a2a/cortex-agents/{db.upper()}/{sch.upper()}/{short_ag}"
+                    qf_bridge = f"[Cortex Agent A2A] {fqn} -> {bridge_url}"
+                    quick_fill_options.append(qf_bridge)
+                    quick_fill_map[qf_bridge] = bridge_url
+
+                    run_url = f"/api/v2/databases/{db.upper()}/schemas/{sch.upper()}/agents/{short_ag}:run"
+                    qf_rest = f"[Cortex Agent REST :run] {fqn} -> {run_url}"
+                    quick_fill_options.append(qf_rest)
+                    quick_fill_map[qf_rest] = run_url
+
+        if not seen_agents:
+            default_db = (self.database or "SNOWFLAKE_LANGFLOW").upper()
+            default_sch = (self.schema or "CORE").upper()
+            fallback_fqn = f"{default_db}.{default_sch}.EXAMPLE_AGENT"
+            label = f"[Cortex Agent] {fallback_fqn}"
+            internal_options.append(label)
+            internal_metadata.append(
+                {
+                    "id": fallback_fqn,
+                    "kind": "cortex_agent",
+                    "database": default_db,
+                    "schema": default_sch,
+                    "agent_name": "EXAMPLE_AGENT",
+                }
+            )
+            bridge_url = f"{clean_base}/api/v1/snowflake/a2a/cortex-agents/{default_db}/{default_sch}/EXAMPLE_AGENT"
+            qf_bridge = f"[Cortex Agent A2A] {fallback_fqn} -> {bridge_url}"
+            quick_fill_options.append(qf_bridge)
+            quick_fill_map[qf_bridge] = bridge_url
+
+        return {
+            "internal_options": internal_options,
+            "internal_metadata": internal_metadata,
+            "quick_fill_options": quick_fill_options,
+            "quick_fill_map": quick_fill_map,
+        }
+
     def sync_superuser_credentials(self) -> None:
         """Ensure the SQLite `user` table superuser matches `LANGFLOW_SUPERUSER` and `LANGFLOW_SUPERUSER_PASSWORD`."""
         if self._superuser_synced:
@@ -8523,6 +10096,196 @@ def register_snowflake_fastapi_routes(app: Any) -> None:
                 "active_role": LIVE_BRIDGE.active_role,
             },
         )
+
+    @sf_router.get("/language-models")
+    async def get_language_models_route(request: Request, force_refresh: bool = False) -> JSONResponse:
+        from lfx_snowflake.providers.language_models import (
+            SNOWFLAKE_LANGUAGE_MODEL_PROVIDERS,
+            get_snowflake_live_language_model_catalog,
+        )
+
+        raw_force = request.query_params.get("force_refresh")
+        eff_force = (
+            str(raw_force).lower() in ("1", "true", "yes")
+            if raw_force is not None
+            else bool(force_refresh)
+        )
+        models = await asyncio.to_thread(
+            lambda: get_snowflake_live_language_model_catalog(force_refresh=eff_force)
+        )
+        return JSONResponse(
+            status_code=200,
+            content={
+                "ok": True,
+                "providers": list(SNOWFLAKE_LANGUAGE_MODEL_PROVIDERS),
+                "models": models,
+                "active_role": LIVE_BRIDGE.active_role,
+            },
+        )
+
+    @sf_router.get("/cortex/threads")
+    async def get_cortex_threads_route(
+        request: Request,
+        origin_application: str = "langflow",
+        flow_id: str | None = None,
+        agent_fqn: str | None = None,
+    ) -> JSONResponse:
+        req_fid = flow_id or request.query_params.get("flow_id") or request.headers.get("X-Snowflake-Flow-Id")
+        req_afqn = agent_fqn or request.query_params.get("agent_fqn")
+        req_origin = request.query_params.get("origin_application") or origin_application or "langflow"
+        threads = await asyncio.to_thread(
+            lambda: LIVE_BRIDGE.list_cortex_threads(
+                origin_application=req_origin,
+                flow_id=req_fid,
+                agent_fqn=req_afqn,
+            )
+        )
+        return JSONResponse(
+            status_code=200,
+            content={
+                "ok": True,
+                "origin_application": req_origin,
+                "threads": threads,
+                "active_role": LIVE_BRIDGE.active_role,
+            },
+        )
+
+    @sf_router.post("/cortex/threads", status_code=201)
+    async def post_create_cortex_thread_route(request: Request) -> JSONResponse:
+        req_fid = request.query_params.get("flow_id") or request.headers.get("X-Snowflake-Flow-Id")
+        try:
+            body = await request.json()
+            payload = body if isinstance(body, dict) else {}
+        except Exception:  # noqa: BLE001
+            payload = {}
+        res = await asyncio.to_thread(
+            lambda: LIVE_BRIDGE.create_cortex_thread(
+                flow_id=payload.get("flow_id") or req_fid,
+                session_id=payload.get("session_id"),
+                agent_name=payload.get("agent_name") or payload.get("cortex_agent"),
+                origin_application=str(payload.get("origin_application") or "langflow"),
+            )
+        )
+        return JSONResponse(status_code=201, content=res)
+
+    @sf_router.get("/cortex/threads/{thread_id}")
+    async def get_describe_cortex_thread_route(
+        thread_id: str,
+        request: Request,
+        page_size: int = 20,
+        last_message_id: int | None = None,
+    ) -> JSONResponse:
+        raw_ps = request.query_params.get("page_size")
+        eff_ps = int(raw_ps) if (raw_ps and str(raw_ps).isdigit()) else int(page_size or 20)
+        raw_lmid = request.query_params.get("last_message_id")
+        eff_lmid = int(raw_lmid) if (raw_lmid and str(raw_lmid).isdigit()) else last_message_id
+        desc = await asyncio.to_thread(
+            lambda: LIVE_BRIDGE.describe_cortex_thread(
+                thread_id,
+                page_size=eff_ps,
+                last_message_id=eff_lmid,
+            )
+        )
+        last_amid = await asyncio.to_thread(
+            lambda: LIVE_BRIDGE.resolve_last_assistant_message_id(thread_id, page_size=eff_ps)
+        )
+        return JSONResponse(
+            status_code=200,
+            content={
+                "ok": True,
+                **desc,
+                "last_assistant_message_id": last_amid,
+            },
+        )
+
+    @sf_router.post("/cortex-agents/{database}/{schema}/{agent_name}/run")
+    async def post_invoke_cortex_agent_route(
+        database: str,
+        schema: str,
+        agent_name: str,
+        request: Request,
+    ) -> JSONResponse:
+        req_fid = request.query_params.get("flow_id") or request.headers.get("X-Snowflake-Flow-Id")
+        try:
+            body = await request.json()
+            payload = body if isinstance(body, dict) else {}
+        except Exception:  # noqa: BLE001
+            payload = {}
+        res = await asyncio.to_thread(
+            lambda: LIVE_BRIDGE.invoke_cortex_agent(
+                database=database,
+                schema=schema,
+                agent_name=agent_name,
+                user_message=str(payload.get("user_message") or payload.get("prompt") or payload.get("message") or ""),
+                flow_id=payload.get("flow_id") or req_fid,
+                session_id=payload.get("session_id"),
+                resume_thread=bool(payload.get("resume_thread", True)),
+                thread_continuity_mode=str(
+                    payload.get("thread_continuity_mode") or "Resume Latest Thread of this Agent"
+                ),
+                conversation_thread=payload.get("conversation_thread"),
+                thread_id=payload.get("thread_id"),
+                parent_message_id=payload.get("parent_message_id"),
+                tool_choice=str(payload.get("tool_choice") or "auto"),
+                role=payload.get("role"),
+            )
+        )
+        status_code = int(res.get("status_code") or (200 if res.get("ok") else 502))
+        return JSONResponse(status_code=status_code, content=res)
+
+    @sf_router.get("/a2a/targets")
+    async def get_a2a_targets_route(request: Request, flow_id: str | None = None) -> JSONResponse:
+        req_fid = flow_id or request.query_params.get("flow_id") or request.headers.get("X-Snowflake-Flow-Id")
+        base_url = request.query_params.get("base_url") or ""
+        res = await asyncio.to_thread(
+            lambda: LIVE_BRIDGE.list_internal_and_external_a2a_targets(flow_id=req_fid, base_url=base_url)
+        )
+        return JSONResponse(status_code=200, content={"ok": True, **res})
+
+    @sf_router.get("/a2a/cortex-agents/{database}/{schema}/{agent_name}/.well-known/agent-card.json")
+    async def get_cortex_agent_a2a_card_route(
+        database: str,
+        schema: str,
+        agent_name: str,
+        request: Request,
+    ) -> JSONResponse:
+        req_fid = request.query_params.get("flow_id") or request.headers.get("X-Snowflake-Flow-Id")
+        base_url = request.query_params.get("base_url") or ""
+        card = await asyncio.to_thread(
+            lambda: LIVE_BRIDGE.get_cortex_agent_a2a_card(
+                database,
+                schema,
+                agent_name,
+                base_url=base_url,
+                flow_id=req_fid,
+            )
+        )
+        status_code = int(card.get("status_code") or 200) if card.get("ok") is False else 200
+        return JSONResponse(status_code=status_code, content=card)
+
+    @sf_router.post("/a2a/cortex-agents/{database}/{schema}/{agent_name}/jsonrpc")
+    async def post_cortex_agent_a2a_jsonrpc_route(
+        database: str,
+        schema: str,
+        agent_name: str,
+        request: Request,
+    ) -> JSONResponse:
+        req_fid = request.query_params.get("flow_id") or request.headers.get("X-Snowflake-Flow-Id")
+        try:
+            body = await request.json()
+            rpc_body = body if isinstance(body, dict) else {}
+        except Exception:  # noqa: BLE001
+            rpc_body = {}
+        res = await asyncio.to_thread(
+            lambda: LIVE_BRIDGE.handle_cortex_agent_a2a_jsonrpc(
+                database,
+                schema,
+                agent_name,
+                rpc_body,
+                flow_id=req_fid,
+            )
+        )
+        return JSONResponse(status_code=200, content=res)
 
     @sf_router.post("/mcp/streamable")
     async def post_mcp_streamable(request: Request) -> JSONResponse:

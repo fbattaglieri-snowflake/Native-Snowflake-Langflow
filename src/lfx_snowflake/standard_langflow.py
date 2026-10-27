@@ -7,6 +7,8 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from functools import cached_property
 import os
+import time
+from typing import Any
 import weakref
 
 try:
@@ -144,6 +146,17 @@ CHAT_REASONING_UNSUPPORTED_MODELS = ('grok-4.6', 'grok-4.7', 'kimi-k3', 'glm-5.3
 VALID_CHAT_REASONING_EFFORTS = ('unspecified', 'none', 'low', 'medium', 'high')
 VALID_RESPONSES_REASONING_EFFORTS = ('unspecified', 'low', 'medium', 'high')
 
+CATALOG_CACHE_TTL_SECONDS = 15.0
+OLLAMA_NEGATIVE_CACHE_TTL_SECONDS = 1.5
+_CATALOG_CACHE: dict[tuple[str, bool], tuple[float, dict[str, dict[str, Any]]]] = {}
+_CATALOG_NEGATIVE_CACHE: dict[tuple[str, bool], tuple[float, Exception]] = {}
+
+
+def clear_catalog_cache() -> None:
+    """Clear the in-memory live model catalog cache (`MA-W2-R6-02`)."""
+    _CATALOG_CACHE.clear()
+    _CATALOG_NEGATIVE_CACHE.clear()
+
 
 def close_clients(clients):
     try:
@@ -167,26 +180,55 @@ def discovery_transport(protocol):
         close_clients(clients)
 
 
-def catalog(protocol, *, stream=False):
+def catalog_with_metadata(
+    protocol: str,
+    *,
+    stream: bool = False,
+    force_refresh: bool = False,
+) -> dict[str, dict[str, Any]]:
+    """Query the live `/models` endpoint for `protocol` and return `{model_id: metadata_dict}` with a 15s TTL cache (`MA-W2-R6-02`)."""
+    cache_key = (protocol, bool(stream))
+    now = time.monotonic()
+    if not force_refresh:
+        cached_entry = _CATALOG_CACHE.get(cache_key)
+        if cached_entry is not None:
+            cached_ts, cached_map = cached_entry
+            if now - cached_ts < CATALOG_CACHE_TTL_SECONDS:
+                return {k: dict(v) for k, v in cached_map.items()}
+        if protocol == 'ollama':
+            neg_entry = _CATALOG_NEGATIVE_CACHE.get(cache_key)
+            if neg_entry is not None:
+                neg_ts, neg_exc = neg_entry
+                if now - neg_ts < OLLAMA_NEGATIVE_CACHE_TTL_SECONDS:
+                    raise neg_exc
+
     base = _get_base(protocol)
     path = '/v1/models' if protocol == 'messages' else '/models'
-    with discovery_transport(protocol) as client:
-        response = client.get(
-            base + path,
-            params={'limit': 1000} if protocol == 'messages' else None,
-            timeout=20,
-            follow_redirects=False,
-        )
-        response.raise_for_status()
-        body = response.json()
+    try:
+        with discovery_transport(protocol) as client:
+            response = client.get(
+                base + path,
+                params={'limit': 1000} if protocol == 'messages' else None,
+                timeout=1.5 if protocol == 'ollama' else 20,
+                follow_redirects=False,
+            )
+            response.raise_for_status()
+            body = response.json()
+    except Exception as exc:
+        if protocol == 'ollama':
+            _CATALOG_NEGATIVE_CACHE[cache_key] = (time.monotonic(), exc)
+        raise
+
     if body.get('has_more'):
         raise ValueError('STANDARD_CATALOG_TRUNCATED')
     rows = body['data']
-    identifiers = []
+    seen_ids: set[str] = set()
+    entries: dict[str, dict[str, Any]] = {}
     for row in rows:
         identifier = row['id']
-        if not isinstance(identifier, str) or not identifier or identifier in identifiers:
+        if not isinstance(identifier, str) or not identifier or identifier in seen_ids:
             raise ValueError('STANDARD_CATALOG_INVALID')
+        seen_ids.add(identifier)
         if protocol != 'ollama':
             metadata = row['metadata']
             if metadata['release_status'] not in ('experimental', 'qualified'):
@@ -199,17 +241,76 @@ def catalog(protocol, *, stream=False):
                 and metadata.get('response_stream') != 'ordered-items'
             ):
                 continue
-        elif stream:
-            continue
-        identifiers.append(identifier)
-    return sorted(identifiers)
+            entries[identifier] = dict(metadata)
+        else:
+            if stream:
+                continue
+            raw_meta = row.get('metadata') if isinstance(row, dict) else None
+            entries[identifier] = (
+                dict(raw_meta)
+                if isinstance(raw_meta, dict)
+                else {'capabilities': ['chat', 'tool_calling'], 'reasoning': False}
+            )
+    sorted_entries = {k: entries[k] for k in sorted(entries.keys())}
+    _CATALOG_CACHE[cache_key] = (time.monotonic(), {k: dict(v) for k, v in sorted_entries.items()})
+    _CATALOG_NEGATIVE_CACHE.pop(cache_key, None)
+    return sorted_entries
+
+
+def catalog(protocol, *, stream=False, force_refresh=True):
+    return list(catalog_with_metadata(protocol, stream=stream, force_refresh=force_refresh).keys())
+
+
+def get_cached_model_metadata(protocol: str, identifier: str) -> dict[str, Any] | None:
+    """Return cached live metadata for `(protocol, identifier)` if present in `_CATALOG_CACHE`."""
+    for s_flag in (False, True):
+        cached_entry = _CATALOG_CACHE.get((protocol, s_flag))
+        if cached_entry is not None:
+            _, cached_map = cached_entry
+            if identifier in cached_map:
+                return dict(cached_map[identifier])
+    return None
+
+
+def model_supports_reasoning(
+    protocol: str,
+    identifier: str,
+    metadata: dict[str, Any] | None = None,
+) -> tuple[bool, bool]:
+    """Return `(supports_reasoning, reasoning_required)` for `(protocol, identifier)` using both static guards and live `/models` metadata (`MA-W2-R6-02`)."""
+    if protocol == 'responses':
+        return (True, True)
+    if protocol != 'chat':
+        return (False, False)
+    if identifier in CHAT_REASONING_UNSUPPORTED_MODELS:
+        return (False, False)
+    meta = metadata if isinstance(metadata, dict) else (get_cached_model_metadata('chat', identifier) or {})
+    caps = meta.get('capabilities') or []
+    meta_reasoning = meta.get('reasoning')
+    if (
+        meta_reasoning is False
+        or (isinstance(meta_reasoning, dict) and meta_reasoning.get('supported') is False)
+        or 'no_reasoning' in caps
+    ):
+        return (False, False)
+    if identifier in CHAT_REASONING_REQUIRED_MODELS or (
+        isinstance(meta_reasoning, dict) and meta_reasoning.get('required') is True
+    ):
+        return (True, True)
+    if (
+        meta_reasoning is True
+        or (isinstance(meta_reasoning, dict) and meta_reasoning.get('supported') is True)
+        or 'reasoning' in caps
+    ):
+        return (True, False)
+    return (True, False)
 
 
 def refresh(config, protocol):
     field = config['model_id']
     field['options'] = []
     try:
-        field['options'] = catalog(protocol)
+        field['options'] = list(catalog_with_metadata(protocol, force_refresh=True).keys())
     except Exception:
         field['info'] = 'Discovery unavailable. No cached fallback; retry Refresh explicitly.'
         raise ValueError('STANDARD_DISCOVERY_UNAVAILABLE') from None
@@ -240,8 +341,9 @@ def resolve_reasoning_options(
     extended_thinking: str = 'disabled',
     thinking_budget_tokens: int = 2048,
     max_tokens: int = 2048,
+    metadata: dict[str, Any] | None = None,
 ) -> dict:
-    """Resolve protocol-specific reasoning/thinking options without triggering ChatOpenAI extra_forbidden (`W2-R2-07`)."""
+    """Resolve protocol-specific reasoning/thinking options without triggering ChatOpenAI extra_forbidden (`W2-R2-07` & `MA-W2-R6-02`)."""
     effective_max_tokens = int(max_tokens or 2048)
     if effective_max_tokens < 1 or effective_max_tokens > 128000:
         raise ValueError('STANDARD_TOKEN_LIMIT_OUT_OF_RANGE')
@@ -252,9 +354,10 @@ def resolve_reasoning_options(
     if protocol == 'chat':
         if raw_effort not in VALID_CHAT_REASONING_EFFORTS:
             raise ValueError(f'Invalid chat reasoning_effort: {raw_effort}')
-        if identifier in CHAT_REASONING_UNSUPPORTED_MODELS:
+        supports_reasoning, reasoning_required = model_supports_reasoning('chat', identifier, metadata=metadata)
+        if not supports_reasoning:
             return {'max_tokens': effective_max_tokens, 'extra_body': None}
-        if identifier in CHAT_REASONING_REQUIRED_MODELS:
+        if reasoning_required:
             effort_val = 'none' if raw_effort == 'unspecified' else raw_effort
             return {'max_tokens': effective_max_tokens, 'extra_body': {'reasoning_effort': effort_val}}
         if raw_effort != 'unspecified':
@@ -298,6 +401,7 @@ def build(
     reasoning_effort=None,
     extended_thinking='disabled',
     thinking_budget_tokens=2048,
+    temperature=None,
 ):
     if type(stream) is not bool:
         raise ValueError('STANDARD_STREAM_BOOLEAN_REQUIRED')
@@ -330,6 +434,8 @@ def build(
             anth_kwargs = dict(common)
             if resolved.get('thinking'):
                 anth_kwargs['thinking'] = resolved['thinking']
+            elif temperature is not None:
+                anth_kwargs['temperature'] = float(temperature)
             model = ProtectedAnthropic(**anth_kwargs)
             model._transports = clients
         else:
@@ -343,7 +449,9 @@ def build(
             if resolved.get('extra_body'):
                 options['extra_body'] = resolved['extra_body']
             if protocol == 'ollama':
-                options['temperature'] = 0.1
+                options['temperature'] = float(temperature) if temperature is not None else 0.1
+            elif temperature is not None and not resolved.get('extra_body') and protocol == 'chat':
+                options['temperature'] = float(temperature)
             model = ChatOpenAI(
                 **common,
                 **clients,

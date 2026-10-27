@@ -12,6 +12,11 @@ from lfx.schema.message import Message
 from lfx_snowflake._lfx_compat import Tool
 from lfx_snowflake.components.llm_operations import SnowflakeCortexSearchQueryEngine
 from lfx_snowflake.fastapi_live_bridge import LIVE_BRIDGE
+from lfx_snowflake.providers.language_models import (
+    CortexSearchToolSchema,
+    build_structured_tool,
+    sanitize_tool_identifier,
+)
 
 
 def _resolve_flow_id(component: Any = None, build_config: dict[str, Any] | None = None) -> str | None:
@@ -262,20 +267,47 @@ class SnowflakeCortexSearchComponent(Component):
     def to_toolkit(self) -> list[Tool]:
         db = getattr(self, "database", "SNOWFLAKE_LANGFLOW") or "SNOWFLAKE_LANGFLOW"
         sch = getattr(self, "schema_name", "CORE") or "CORE"
-        svc = getattr(self, "search_service", "DOC_SEARCH_SERVICE") or "DOC_SEARCH_SERVICE"
+        svc = (getattr(self, "search_service", "DOC_SEARCH_SERVICE") or "DOC_SEARCH_SERVICE").strip()
+        svc_short = svc.split(".")[-1] if svc else "DOC_SEARCH_SERVICE"
         rest_ep = _search_rest_endpoint(db, sch, svc)
+        tool_name = (
+            f"cortex_search_{sanitize_tool_identifier(db)}_"
+            f"{sanitize_tool_identifier(sch)}_{sanitize_tool_identifier(svc_short)}"
+        )
 
-        def _invoke(tool_input: Any = None) -> dict[str, Any]:
-            if isinstance(tool_input, str) and tool_input.strip():
-                self.query = tool_input.strip()
-            return self.get_search_metadata().data
+        def _invoke(query: str = "", limit: int | None = None, **kwargs: Any) -> dict[str, Any]:
+            resolved_q = query
+            if not resolved_q and isinstance(kwargs.get("tool_input"), str):
+                resolved_q = kwargs["tool_input"]
+            if isinstance(resolved_q, str) and resolved_q.strip():
+                self.query = resolved_q.strip()
+            if limit is not None:
+                try:
+                    self.limit = int(limit)
+                except (TypeError, ValueError):
+                    pass
+            msg = self.run_search()
+            raw_text = getattr(msg, "text", "") or ""
+            try:
+                parsed = json.loads(raw_text)
+                if isinstance(parsed, dict):
+                    return parsed
+                return {"results": parsed}
+            except Exception:  # noqa: BLE001
+                return {"text": raw_text}
 
         return [
-            Tool(
-                name=f"snowflake_cortex_search_{svc.lower().replace('.', '_')}",
-                description=f"Hybrid lexical+vector search over Snowflake Cortex Search Service {db}.{sch}.{svc} ({rest_ep}) under active role {LIVE_BRIDGE.active_role}.",
+            build_structured_tool(
+                name=tool_name,
+                description=(
+                    f"Hybrid lexical+vector search over Snowflake Cortex Search Service {db}.{sch}.{svc_short} "
+                    f"({rest_ep}) under active role {LIVE_BRIDGE.active_role}."
+                ),
                 func=_invoke,
+                args_schema=CortexSearchToolSchema,
                 metadata={
+                    "database": db,
+                    "schema_name": sch,
                     "search_service": svc,
                     "rest_endpoint": rest_ep,
                     "component": "SnowflakeCortexSearch",

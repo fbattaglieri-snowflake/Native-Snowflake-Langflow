@@ -11,6 +11,11 @@ from lfx.schema.message import Message
 
 from lfx_snowflake._lfx_compat import Tool
 from lfx_snowflake.fastapi_live_bridge import LIVE_BRIDGE
+from lfx_snowflake.providers.language_models import (
+    CortexAnalystToolSchema,
+    build_structured_tool,
+    sanitize_tool_identifier,
+)
 
 
 def _resolve_flow_id(component: Any = None, build_config: dict[str, Any] | None = None) -> str | None:
@@ -225,18 +230,39 @@ class SnowflakeCortexAnalystComponent(Component):
         return DataFrame(res.get("rows", []))
 
     def to_toolkit(self) -> list[Tool]:
+        db = getattr(self, "database", "SNOWFLAKE_LANGFLOW") or "SNOWFLAKE_LANGFLOW"
+        sch = getattr(self, "schema_name", "CORE") or "CORE"
         src = (getattr(self, "semantic_source", "") or "EXAMPLE_SEMANTIC_VIEW").strip()
+        leaf_src = src.split("/")[-1].split(".")[-1] if src else "EXAMPLE_SEMANTIC_VIEW"
+        tool_name = (
+            f"cortex_analyst_{sanitize_tool_identifier(db)}_"
+            f"{sanitize_tool_identifier(sch)}_{sanitize_tool_identifier(leaf_src)}"
+        )
 
-        def _tool_fn(tool_input: Any = None) -> dict[str, Any]:
-            if isinstance(tool_input, str) and tool_input.strip():
-                self.question = tool_input.strip()
+        def _tool_fn(question: str = "", **kwargs: Any) -> dict[str, Any]:
+            resolved_q = question
+            if not resolved_q and isinstance(kwargs.get("tool_input"), str):
+                resolved_q = kwargs["tool_input"]
+            if isinstance(resolved_q, str) and resolved_q.strip():
+                self.question = resolved_q.strip()
             return self._invoke()
 
         return [
-            Tool(
-                name="snowflake_cortex_analyst",
-                description=f"Ask analytical questions in natural language via Snowflake Cortex Analyst ({src}) under active role {LIVE_BRIDGE.active_role}.",
+            build_structured_tool(
+                name=tool_name,
+                description=(
+                    f"Ask analytical questions in natural language via Snowflake Cortex Analyst ({src}) "
+                    f"under active role {LIVE_BRIDGE.active_role}."
+                ),
                 func=_tool_fn,
-                metadata={"semantic_source": src, "rest_endpoint": "/api/v2/cortex/analyst/message", "tool_mode": True},
+                args_schema=CortexAnalystToolSchema,
+                metadata={
+                    "database": db,
+                    "schema_name": sch,
+                    "semantic_source": src,
+                    "rest_endpoint": "/api/v2/cortex/analyst/message",
+                    "component": "SnowflakeCortexAnalyst",
+                    "tool_mode": True,
+                },
             )
         ]
