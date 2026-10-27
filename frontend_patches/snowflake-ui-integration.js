@@ -4341,11 +4341,22 @@
   let _lastCardsSignature = "";
   function renderSnowflakeMemoryDetailView(memoryOrRef) {
     if (!document.body || !isStrictMemoriesView()) return;
+    const hasNativeReactMemoriesBtn = !!document.querySelector(
+      'aside button[data-testid="memories-plus-snowflake-btn"]:not(#sflf-memories-plus-snowflake-btn)'
+    );
+    const existingPanel = document.getElementById("sflf-memory-detail-view");
+    if (hasNativeReactMemoriesBtn) {
+      // Native React Memories view (Too + Boo) is mounted: let Langflow's official Boo detail view occupy 100% of flex-1
+      if (existingPanel && existingPanel.parentNode) {
+        existingPanel.parentNode.removeChild(existingPanel);
+      }
+      return;
+    }
     let memObj = null;
     if (typeof memoryOrRef === "string") {
       const clean = memoryOrRef.replace(/^sf-/, "").trim();
       memObj = (sfState.memories || []).find(function (m) {
-        return (typeof m === "string" ? m : m.name) === clean || (m && m.langflow_memory_id === memoryOrRef);
+        return (typeof m === "string" ? m : m.name) === clean || (m && (m.langflow_memory_id === memoryOrRef || m.id === memoryOrRef));
       });
       if (!memObj) {
         memObj = { name: clean, agent_memory_type: "buffer_window_memory" };
@@ -4371,7 +4382,6 @@
       auto: memObj.auto_capture,
       recordsCount: Array.isArray(memObj.stored_records) ? memObj.stored_records.length : 0,
     });
-    const existingPanel = document.getElementById("sflf-memory-detail-view");
     if (existingPanel && existingPanel.style.display !== "none" && detailSig === _lastDetailSignature) {
       return;
     }
@@ -4614,20 +4624,35 @@
     });
     window.SNOWFLAKE_MEMORIES_LIST = contextVisible.map(function (m) {
       const obj = typeof m === "string" ? { name: m, agent_memory_type: "buffer_window_memory" } : m;
-      const spec = resolveCanonicalMemoryTypeSpec(obj.agent_memory_type);
+      const spec = resolveCanonicalMemoryTypeSpec(obj.agent_memory_type || obj.canonical_memory_type);
       const fqn = obj.table_fqn || obj.fqn || `${obj.database || sfState.database}.${obj.schema || sfState.schema}.${obj.name}`;
       const embBadge = obj.enable_embedding
-        ? `${obj.embedding_provider || "snowflake_cortex"} · ${obj.embedding_model || "AI_EMBED"} (${obj.dimension || 768}d)`
+        ? `${obj.embedding_provider || "Snowflake Cortex"} · ${obj.embedding_model || "AI_EMBED"} (${obj.dimension || 768}d)`
         : "No Embedding — Direct SQL";
+      const recs = Array.isArray(obj.stored_records) ? obj.stored_records : [];
       return {
-        id: obj.langflow_memory_id || `sf-${obj.name}`,
+        id: obj.id || obj.memory_id || obj.langflow_memory_id || `sf-${obj.name}`,
         name: obj.name,
+        kb_name: obj.kb_name || obj.name,
         storage_family: obj.storage_family,
         postgres_instance: obj.postgres_instance,
         database: obj.database,
         schema: obj.schema,
         table_fqn: fqn,
-        is_active: true,
+        embedding_model: obj.enable_embedding
+          ? `${obj.embedding_model || "snowflake-arctic-embed-m-v1.5"} (${obj.dimension || 768}d)`
+          : "No Embedding (Direct SQL)",
+        embedding_provider: obj.embedding_provider || (obj.enable_embedding ? "Snowflake Cortex" : "Snowflake Direct SQL"),
+        backend_type: obj.backend_type || `Snowflake · ${obj.vector_database || spec.default_backend} (${fqn})`,
+        backend_config: obj.backend_config || { mode: "snowflake", table_fqn: fqn },
+        preprocessing_enabled: obj.preprocessing !== undefined ? Boolean(obj.preprocessing) : true,
+        preprocessing_model: obj.preproc_model || obj.summarizer_model || "mistral-large2",
+        preproc_instructions: obj.preproc_instructions || `[${spec.label}] Store: ${fqn}`,
+        total_messages_processed: obj.total_messages_processed !== undefined ? obj.total_messages_processed : (recs.length || 2),
+        pending_messages_count: obj.pending_messages_count || 0,
+        last_generated_at: obj.last_generated_at || obj.created_at || new Date().toISOString(),
+        created_at: obj.created_at || new Date().toISOString(),
+        is_active: obj.auto_capture !== false,
         description: `${spec.label} · ${fqn} · ${embBadge}`,
       };
     });
@@ -5156,7 +5181,12 @@
     const matchedKey = Object.keys(selObjs).find(function (k) {
       return String(k).trim().toUpperCase() === schemaKey;
     });
-    if (matchedKey && selObjs[matchedKey] && Array.isArray(selObjs[matchedKey].stages)) {
+    if (
+      matchedKey &&
+      selObjs[matchedKey] &&
+      Array.isArray(selObjs[matchedKey].stages) &&
+      selObjs[matchedKey].stages.length > 0
+    ) {
       const allowedStages = selObjs[matchedKey].stages.map(function (s) {
         return String(s || "").replace(/^@/, "").split(".").pop().trim().toUpperCase();
       });
@@ -5498,9 +5528,6 @@
             <button id="sflf-stages-close-view-btn" type="button" title="Return to Flow Canvas" style="background:transparent;border:1px solid #cbd5e1;border-radius:6px;padding:2px 7px;font-size:11px;color:#475569;cursor:pointer;">✕</button>
           </div>
           <div style="margin-top:12px;display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
-            <button id="sflf-stages-create-btn" data-testid="stages-create-btn" type="button" style="display:inline-flex;align-items:center;gap:5px;background:#ffffff;color:#0f172a;border:1px solid #cbd5e1;border-radius:10px;padding:5px 11px;font-size:12px;font-weight:600;cursor:pointer;">
-              <span>+</span><span>Create</span>
-            </button>
             <button id="sflf-stages-plus-snowflake-btn" data-testid="stages-plus-snowflake-btn" type="button" style="display:inline-flex;align-items:center;gap:6px;background:#29B5E8;color:#ffffff;border:1px solid #29B5E8;border-radius:10px;padding:5px 11px;font-size:12px;font-weight:600;cursor:pointer;">
               <span>+</span>${buildOfficialSnowflakeSvg("#ffffff", 13)}<span>Snowflake</span>
             </button>
@@ -5509,7 +5536,7 @@
         <div style="padding:10px 12px;border-bottom:1px solid #e2e8f0;">
           <input id="sflf-stages-search-input" data-testid="search-stages-input" type="text" placeholder="Search stages & volumes..." style="width:100%;box-sizing:border-box;background:#ffffff;color:#0f172a;border:1px solid #cbd5e1;border-radius:8px;padding:6px 10px;font-size:12px;" />
         </div>
-        <div id="sflf-stages-context-summary" style="padding:6px 12px;background:rgba(41,181,232,0.08);border-bottom:1px solid #e2e8f0;font-size:10.5px;color:#0369a1;font-weight:600;"></div>
+        <div id="sflf-stages-context-summary" style="padding:6px 12px;background:rgba(41,181,232,0.08);border-bottom:1px solid #e2e8f0;font-size:10.5px;color:#0369a1;font-weight:600;display:flex;align-items:center;gap:6px;flex-wrap:wrap;"></div>
         <div id="sflf-stages-list-container" data-testid="snowflake-stages-list" style="flex:1;overflow-y:auto;padding:8px;"></div>
       </aside>
 
@@ -5523,12 +5550,6 @@
     if (closeBtn) {
       closeBtn.onclick = function () {
         closeSnowflakeStagesVolumesView();
-      };
-    }
-    const createBtn = document.getElementById("sflf-stages-create-btn");
-    if (createBtn) {
-      createBtn.onclick = function () {
-        openCreateSnowflakeStageModal("INTERNAL");
       };
     }
     const sfCreateBtn = document.getElementById("sflf-stages-plus-snowflake-btn");
@@ -5582,9 +5603,9 @@
     const selCtx = (sfState && sfState.selected_context) || {};
     const dbs = Array.isArray(selCtx.databases) ? selCtx.databases : [sfState.database || "SNOWFLAKE_LANGFLOW"];
     if (ctxSummary) {
-      ctxSummary.textContent = `[ ❄️ Context ] Active Role: ${sfState.active_role || "ACCOUNTADMIN"} · Databases: ${
-        dbs.length ? dbs.join(", ") : "None"
-      }`;
+      ctxSummary.innerHTML = `${buildOfficialSnowflakeSvg("#29B5E8", 12)} <span>Role: ${
+        sfState.active_role || "ACCOUNTADMIN"
+      } · Context Databases (${dbs.length})</span>`;
     }
 
     const searchInp = document.getElementById("sflf-stages-search-input");
@@ -5613,8 +5634,8 @@
       listContainer.innerHTML = `
         <div style="padding:24px 12px;text-align:center;color:#64748b;font-size:12px;">
           <div style="margin-bottom:8px;color:#94a3b8;">${buildBucketSvgIcon(28)}</div>
-          <div style="font-weight:600;color:#334155;">No stages or volumes in active [ ❄️ Context ]</div>
-          <div style="margin-top:4px;font-size:11px;">Select a schema in [ ❄️ Context ] or click <strong>+ ❄️ Snowflake</strong> to create a Stage or External Volume.</div>
+          <div style="font-weight:600;color:#334155;">No stages or volumes in active Context</div>
+          <div style="margin-top:4px;font-size:11px;">Select a schema in Context or click <strong>+ Snowflake</strong> to create a Stage or External Volume.</div>
         </div>
       `;
       renderSelectedStageOrVolumeDetail(null);

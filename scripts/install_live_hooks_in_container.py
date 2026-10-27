@@ -472,10 +472,58 @@ def install_all() -> None:
         '.filter(_m=>{const _q=(t||"").trim().toLowerCase();return!_q||`${_m.name||""} ${_m.description||""} ${_m.kb_name||""} ${_m.agent_memory_type||""} ${_m.backend_type||""}`.toLowerCase().includes(_q);});'
         'const _existingIds=new Set((_origE||[]).map(_x=>String(_x.id||"").toLowerCase()).filter(Boolean));'
         'const _existingNames=new Set((_origE||[]).map(_x=>(_x.name||"").toUpperCase()).filter(Boolean));'
-        'const _mergedE=[..._sfMems.filter(_m=>!_existingIds.has(String(_m.id||"").toLowerCase())&&!_existingNames.has((_m.name||"").toUpperCase())),...(_origE||[])];'
+        'const _mergedE=[...(_origE||[]),..._sfMems.filter(_m=>!_existingIds.has(String(_m.id||"").toLowerCase())&&!_existingNames.has((_m.name||"").toUpperCase()))];'
         'const e=typeof window!=="undefined"&&typeof window.filterSnowflakeMemoriesByContext==="function"?window.filterSnowflakeMemoriesByContext(_mergedE):_mergedE;'
         'const h=(_sel)=>{if(typeof _origH==="function")_origH(_sel);if(typeof window!=="undefined"&&typeof window.renderSnowflakeMemoryDetailView==="function")window.renderSnowflakeMemoryDetailView(_sel);};'
         'if(typeof window!=="undefined"){window.__sflfCurrentMemoryFlowId=u;window.__sflfSelectMemory=h;}'
+    )
+
+    ife_orig = (
+        'IFe=e=>({...hht,id:e.id,name:e.name,kb_name:e.kb_name,embedding_model:e.embedding_model,user_id:e.user_id,'
+        'flow_id:e.flow_id,created_at:e.created_at,is_active:e.auto_capture??hht.is_active,'
+        'preprocessing_enabled:e.preprocessing??hht.preprocessing_enabled,preprocessing_model:e.preproc_model,'
+        'preproc_instructions:e.preproc_instructions,batch_size:Math.max(1,Math.trunc(e.threshold??1)),'
+        'backend_type:e.backend_type,backend_config:e.backend_config})'
+    )
+    ife_new = (
+        'IFe=e=>({...hht,id:e.id,name:e.name,description:e.description??hht.description,kb_name:e.kb_name,'
+        'embedding_model:e.embedding_model,embedding_provider:e.embedding_provider??hht.embedding_provider,'
+        'user_id:e.user_id,flow_id:e.flow_id,created_at:e.created_at,'
+        'last_generated_at:e.last_generated_at??e.created_at,'
+        'total_messages_processed:e.total_messages_processed??hht.total_messages_processed,'
+        'pending_messages_count:e.pending_messages_count??hht.pending_messages_count,'
+        'sessions_count:e.sessions_count??hht.sessions_count,'
+        'is_active:e.auto_capture??e.is_active??hht.is_active,'
+        'preprocessing_enabled:e.preprocessing??e.preprocessing_enabled??hht.preprocessing_enabled,'
+        'preprocessing_model:e.preproc_model??e.preprocessing_model,'
+        'preproc_instructions:e.preproc_instructions,'
+        'batch_size:Math.max(1,Math.trunc(e.threshold??e.batch_size??1)),'
+        'backend_type:e.backend_type,backend_config:e.backend_config})'
+    )
+
+    nso_t_orig = (
+        'T=N.useMemo(()=>{const He=y?.pages??[];if(He.length===0)return gzn;'
+        'const et=He.flatMap(Te=>Te?.items??[]);return et.length?et:gzn},[y]);'
+    )
+    nso_t_new = (
+        'T=N.useMemo(()=>{const He=y?.pages??[],et=He.flatMap(Te=>Te?.items??[]),'
+        '_sf=typeof window!=="undefined"&&Array.isArray(window.SNOWFLAKE_MEMORIES_LIST)?window.SNOWFLAKE_MEMORIES_LIST:[],'
+        '_ids=new Set(et.map(Te=>String(Te.id||"").toLowerCase()).filter(Boolean)),'
+        '_nms=new Set(et.map(Te=>String(Te.name||"").toUpperCase()).filter(Boolean)),'
+        '_m=[...et,..._sf.filter(Te=>!_ids.has(String(Te.id||"").toLowerCase())&&!_nms.has(String(Te.name||"").toUpperCase()))],'
+        '_f=typeof window!=="undefined"&&typeof window.filterSnowflakeMemoriesByContext==="function"?window.filterSnowflakeMemoriesByContext(_m):_m;'
+        'return _f.length?_f:gzn},[y]);'
+    )
+
+    boo_cards_orig = (
+        'v.jsx(fht,{label:z("memory.processedMessages"),value:T?"—":e.total_messages_processed,icon:"MessageSquare"}),'
+        'v.jsx(fht,{label:k,value:T?"—":D,icon:"Timer"}),'
+        'v.jsx(fht,{label:z("memory.lastGenerated"),value:T?"—":Doo(e.last_generated_at),icon:"Clock"})'
+    )
+    boo_cards_new = (
+        'v.jsx(fht,{label:z("memory.processedMessages"),value:e.total_messages_processed??(T?"—":0),icon:"MessageSquare"}),'
+        'v.jsx(fht,{label:k,value:D??(T?"—":0),icon:"Timer"}),'
+        'v.jsx(fht,{label:z("memory.lastGenerated"),value:e.last_generated_at?Doo(e.last_generated_at):T?"—":Doo(e.created_at),icon:"Clock"})'
     )
 
     too_orig = (
@@ -685,6 +733,9 @@ def install_all() -> None:
             too_btn_canonical,
             txt,
         )
+        txt = txt.replace(ife_orig, ife_new)
+        txt = txt.replace(nso_t_orig, nso_t_new)
+        txt = txt.replace(boo_cards_orig, boo_cards_new)
         if "window.__sflfRefetchMemories=Ae" not in txt:
             txt = txt.replace(
                 "onRefresh:Ae",

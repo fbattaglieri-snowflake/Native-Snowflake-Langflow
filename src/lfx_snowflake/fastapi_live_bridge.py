@@ -1077,6 +1077,33 @@ class LiveSnowflakeBridge:
         self._http_client: Any = None
         self._ensure_flow_contexts_sqlite_table()
         self._load_flow_contexts_sqlite()
+        self._seed_default_showcase_memories()
+
+    def _seed_default_showcase_memories(self) -> None:
+        """Ensure the 5 canonical showcase memories (`MEM_1..MEM_5`) are pre-registered in `memories_registry` at startup."""
+        try:
+            from lfx_snowflake.showcase_full_memory_agent import SHOWCASE_MEMORIES_SPECS
+
+            existing_names = {str(m.get("name") or "").strip().upper() for m in self.memories_registry}
+            now_iso = datetime.now(timezone.utc).isoformat()
+            for spec in SHOWCASE_MEMORIES_SPECS:
+                m_name = str(spec.get("name") or "").strip()
+                if not m_name or m_name.upper() in existing_names:
+                    continue
+                det_id = compute_deterministic_memory_uuid(m_name)
+                entry = dict(spec)
+                entry.setdefault("id", det_id)
+                entry.setdefault("memory_id", det_id)
+                entry.setdefault("langflow_memory_id", det_id)
+                entry.setdefault("kb_name", m_name)
+                entry.setdefault("auto_capture", True)
+                entry.setdefault("created_by_role", self.active_role)
+                entry.setdefault("created_at", now_iso)
+                entry["stored_records"] = self._default_stored_records_for_memory(entry)
+                self.memories_registry.append(entry)
+                existing_names.add(m_name.upper())
+        except Exception:  # noqa: BLE001
+            pass
 
     @staticmethod
     def resolve_component_flow_id(
@@ -2711,18 +2738,22 @@ class LiveSnowflakeBridge:
             pass
 
     def _find_memory_entry(self, memory_id_or_name: str) -> dict[str, Any] | None:
-        """Locate a memory entry in `memories_registry` or `memories_catalog` by name, UUID, `.hex`, or FQN (`W2-R4-08G`)."""
+        """Locate a memory entry in `memories_registry` or `memories_catalog` by name, UUID, `.hex`, `sf-<name>`, or FQN (`W2-R4-08G`)."""
         target = str(memory_id_or_name or "").strip()
         if not target:
             return None
+        clean_target = re.sub(r"^sf-", "", target, flags=re.IGNORECASE).strip()
         target_upper = target.upper()
+        clean_target_upper = clean_target.upper()
         target_hex_upper = target_upper.replace("-", "")
+        clean_det_id_upper = compute_deterministic_memory_uuid(clean_target).upper() if clean_target else ""
         for source_list in (self.memories_registry, self.memories_catalog):
             for entry in source_list:
                 e_name = str(entry.get("name") or "").strip()
                 det_id = compute_deterministic_memory_uuid(e_name) if e_name else ""
                 cand_ids = {
                     e_name.upper(),
+                    f"SF-{e_name.upper()}",
                     str(entry.get("id") or "").strip().upper(),
                     str(entry.get("memory_id") or "").strip().upper(),
                     str(entry.get("langflow_memory_id") or "").strip().upper(),
@@ -2730,7 +2761,12 @@ class LiveSnowflakeBridge:
                     det_id.upper(),
                 }
                 cand_hexes = {c.replace("-", "") for c in cand_ids if c}
-                if target_upper in cand_ids or (len(target_hex_upper) == 32 and target_hex_upper in cand_hexes):
+                if (
+                    target_upper in cand_ids
+                    or clean_target_upper in cand_ids
+                    or (clean_det_id_upper and clean_det_id_upper in cand_ids)
+                    or (len(target_hex_upper) == 32 and target_hex_upper in cand_hexes)
+                ):
                     return entry
         return None
 
@@ -3125,11 +3161,22 @@ class LiveSnowflakeBridge:
         )
         threshold_val = max(1, int(entry.get("threshold") or entry.get("ingestion_threshold") or 1))
         detail_res = self.get_memory_detail(mem_name)
+        stored_recs = list(detail_res.get("stored_records") or [])
+        processed_cnt = sum(
+            1 for r in stored_recs if str(r.get("status") or "Ingested").lower() in ("ingested", "processed")
+        )
+        pending_cnt = sum(1 for r in stored_recs if str(r.get("status") or "").lower() == "pending")
+        created_iso = entry.get("created_at") or datetime.now(timezone.utc).isoformat()
+        desc_text = str(
+            entry.get("description")
+            or f"{entry.get('label') or type_spec['label']} · {entry.get('table_fqn') or ''} · {emb_model}"
+        )
         return {
             "id": mem_uuid,
             "memory_id": mem_uuid,
             "langflow_memory_id": mem_uuid,
             "name": mem_name,
+            "description": desc_text,
             "kb_name": str(entry.get("kb_name") or mem_name),
             "flow_id": entry.get("flow_id"),
             "embedding_model": emb_model,
@@ -3144,11 +3191,16 @@ class LiveSnowflakeBridge:
                 "enable_embedding": is_vec,
             },
             "auto_capture": bool(entry.get("auto_capture", True)),
+            "is_active": bool(entry.get("auto_capture", True)),
             "preprocessing": preproc_enabled,
             "preproc_model": preproc_model,
             "preproc_instructions": instructions,
             "preproc_kill_phrase": kill_phrase,
             "threshold": threshold_val,
+            "total_messages_processed": processed_cnt,
+            "pending_messages_count": pending_cnt,
+            "sessions_count": max(1, len({str(r.get("session_id") or "default") for r in stored_recs})),
+            "last_generated_at": created_iso,
             "agent_memory_type": entry.get("agent_memory_type") or c_type,
             "canonical_memory_type": c_type,
             "storage_family": entry.get("storage_family", "snowflake_sql"),
@@ -3156,12 +3208,12 @@ class LiveSnowflakeBridge:
             "schema": entry.get("schema"),
             "table_fqn": entry.get("table_fqn"),
             "vector_database": entry.get("vector_database"),
-            "created_at": entry.get("created_at") or datetime.now(timezone.utc).isoformat(),
+            "created_at": created_iso,
             "snowflake_memory": entry,
             "configuration_summary": detail_res.get("configuration_summary"),
             "active_sql_query": detail_res.get("active_sql_query"),
             "sessions": detail_res.get("sessions", []),
-            "stored_records": detail_res.get("stored_records", []),
+            "stored_records": stored_recs,
         }
 
     def list_native_memories(
@@ -3456,7 +3508,8 @@ class LiveSnowflakeBridge:
             txt = str(r.get("text") or r.get("message_text") or r.get("episode_text") or r.get("topic") or "")
             sender_val = str(r.get("sender") or "User")
             sender_name_val = str(r.get("sender_name") or sender_val)
-            ts_val = str(r.get("timestamp") or r.get("created_at") or now_iso)
+            ts_val = str(r.get("timestamp") or r.get("created_at") or r.get("updated") or now_iso)
+            job_val = str(r.get("job_id") or r.get("outcome_score") or f"sf-job-{idx + 1:03d}")
             msg_items.append(
                 {
                     "id": str(
@@ -3469,8 +3522,9 @@ class LiveSnowflakeBridge:
                     "session_id": s_id,
                     "text": txt,
                     "content_blocks": r.get("content_blocks") or [],
-                    "job_id": r.get("job_id"),
+                    "job_id": job_val,
                     "ingested_at": ts_val,
+                    "ingestion_timestamp": ts_val,
                     "status": str(r.get("status") or "Ingested"),
                     "outcome_score": r.get("outcome_score"),
                 }
