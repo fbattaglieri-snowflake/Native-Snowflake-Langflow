@@ -758,6 +758,18 @@ def test_w2_r5_06_files_and_knowledge_exact_5_canonical_components() -> None:
     ):
         assert f'"{removed_dup}"' in hooks_py
 
+    # Verify install_live_hooks_in_container.py enforces 5 distinct display_names & icons (never 4x 'File System')
+    assert "non_indexed_fk_helper_files" in hooks_py
+    assert "expected_fk_display_and_icons" in hooks_py
+    for fk_key, fk_disp, fk_icon in (
+        ("FileSystemTool", "File System", "folder"),
+        ("Knowledge", "Knowledge", "database"),
+        ("MemoryBase", "Memory Base", "brain"),
+        ("File", "Read File", "file-text"),
+        ("SaveToFile", "Write File", "file-text"),
+    ):
+        assert f'"{fk_key}": ("{fk_disp}", "{fk_icon}")' in hooks_py
+
 
 def test_w2_r5_07_data_sources_cortex_search_and_cortex_analyst_context_and_tool_mode() -> None:
     """Verify W2-R5-07: Data Sources -> Cortex Search & Cortex Analyst governed by [ ❄️ Context ], REST endpoints, and Tool Mode."""

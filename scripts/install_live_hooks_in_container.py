@@ -219,6 +219,11 @@ def install_all() -> None:
         "snowflake_cortex_search_stream_task.py",
         "snowflake_object_provisioner_fk.py",
     }
+    non_indexed_fk_helper_files = {
+        "snowflake_stage_files.py",
+        "snowflake_canonical_fk.py",
+        "snowflake_memory_base.py",
+    }
 
     native_src = SOURCE_ROOT / "src" / "lfx_snowflake" / "native_category_components"
     installed_modules: list[tuple[str, str]] = []
@@ -234,8 +239,8 @@ def install_all() -> None:
                 continue
             dest_file = target_cat_dir / py_file.name
             shutil.copyfile(py_file, dest_file)
-            if cat_dir.name == "files_and_knowledge" and py_file.name == "snowflake_stage_files.py":
-                # Keep helper module on disk for imports, but do not register duplicate SnowflakeStageFileSystem in sidebar
+            if cat_dir.name == "files_and_knowledge" and py_file.name in non_indexed_fk_helper_files:
+                # Keep helper modules on disk for Python imports, while preserving the 5 original Langflow Files & Knowledge tabs
                 continue
             mod_fqn = f"lfx.components.{cat_dir.name}.{py_file.stem}"
             installed_modules.append((cat_dir.name, mod_fqn))
@@ -273,25 +278,14 @@ def install_all() -> None:
             raise RuntimeError(f"Failed to template native component module: {mod_fqn}")
         top_level, comp_templates = res
         assert top_level == cat_name
-        if cat_name == "files_and_knowledge":
-            # Map SnowflakeMemoryBase into the single canonical 'MemoryBase' slot so there is zero duplication
-            if "SnowflakeMemoryBase" in comp_templates:
-                mem_tmpl = dict(comp_templates.pop("SnowflakeMemoryBase"))
-                mem_tmpl["display_name"] = "Memory Base"
-                mem_tmpl["legacy"] = False
-                entries_map.setdefault("files_and_knowledge", {})["MemoryBase"] = mem_tmpl
-            for dup_fk in (
-                "SnowflakeCortexSearchParseDocument",
-                "SnowflakeCortexSearchSplitText",
-                "SnowflakeCortexSearchServiceCreator",
-                "SnowflakeCortexSearchStreamTask",
-                "SnowflakeObjectProvisionerFK",
-                "SnowflakeStageFileSystem",
-                "SnowflakeMemoryBase",
-            ):
-                comp_templates.pop(dup_fk, None)
         entries_map.setdefault(cat_name, {}).update(comp_templates)
         print(f"[install_live_hooks] Merged {list(comp_templates.keys())} into native category '{cat_name}'")
+
+    # Restore and guarantee the 5 original Langflow components in files_and_knowledge (each from its own 1-class module)
+    for orig_fk_mod in ("filesystem", "knowledge", "memory_retrieval", "file", "save_file"):
+        fk_res = _process_single_module(f"lfx.components.files_and_knowledge.{orig_fk_mod}")
+        if fk_res and fk_res[1]:
+            entries_map.setdefault("files_and_knowledge", {}).update(fk_res[1])
 
     # Final cleanup of files_and_knowledge to guarantee strictly the 5 canonical non-legacy components
     for dup_fk in (
@@ -1000,14 +994,22 @@ def install_all() -> None:
     assert "SnowflakeCortexAnalystLLM" not in idx_cats["llm_operations"]
     assert "SnowflakeSmartRouter" not in idx_cats["llm_operations"]
 
-    for fk_canonical in (
-        "FileSystemTool",
-        "Knowledge",
-        "MemoryBase",
-        "File",
-        "SaveToFile",
-    ):
+    expected_fk_display_and_icons = {
+        "FileSystemTool": ("File System", "folder"),
+        "Knowledge": ("Knowledge", "database"),
+        "MemoryBase": ("Memory Base", "brain"),
+        "File": ("Read File", "file-text"),
+        "SaveToFile": ("Write File", "file-text"),
+    }
+    for fk_canonical, (exp_disp, exp_icon) in expected_fk_display_and_icons.items():
         assert fk_canonical in idx_cats["files_and_knowledge"], f"Missing canonical {fk_canonical} in files_and_knowledge"
+        actual_entry = idx_cats["files_and_knowledge"][fk_canonical]
+        assert actual_entry.get("display_name") == exp_disp, (
+            f"Expected {fk_canonical} display_name={exp_disp!r}, got {actual_entry.get('display_name')!r}"
+        )
+        assert actual_entry.get("icon") == exp_icon, (
+            f"Expected {fk_canonical} icon={exp_icon!r}, got {actual_entry.get('icon')!r}"
+        )
     non_legacy_fk = sorted(
         k for k, v in idx_cats["files_and_knowledge"].items() if not (isinstance(v, dict) and v.get("legacy"))
     )
