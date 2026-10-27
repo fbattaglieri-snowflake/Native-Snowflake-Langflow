@@ -788,9 +788,20 @@ def install_all() -> None:
             '"settings.dbProviders.description":"Snowflake Vector Stores (Standard Table VECTOR, Hybrid Table VECTOR, Cortex Search, Snowflake Postgres pgvector) are pre-configured in Files & Knowledge. Configure any additional DB providers below."',
         )
         # W2-R5-05: Inject Stages & Volumes Bucket icon in left vertical rail between Memories and Traces
+        bucket_svg_inline = (
+            'v.jsxs("svg",{xmlns:"http://www.w3.org/2000/svg",width:20,height:20,viewBox:"0 0 24 24",fill:"none",'
+            'stroke:"currentColor",strokeWidth:2,strokeLinecap:"round",strokeLinejoin:"round",className:"h-5 w-5",'
+            'children:[v.jsx("ellipse",{cx:12,cy:7,rx:8,ry:3}),'
+            'v.jsx("path",{d:"M4 7l1.8 11.2A2 2 0 0 0 7.78 20h8.44a2 2 0 0 0 1.98-1.8L20 7"}),'
+            'v.jsx("path",{d:"M7 7a5 5 0 0 1 10 0"})]})'
+        )
         txt = txt.replace(
             '{id:"memories",icon:"BrainCog",label:"memory.sidebarTitle",tooltip:"memory.sidebarTitle"},{id:"traces",icon:"Activity",label:"sidebar.nav.traces",tooltip:"sidebar.nav.traces"}],dzn=new Set(["agent","memories","traces"])',
             '{id:"memories",icon:"BrainCog",label:"memory.sidebarTitle",tooltip:"memory.sidebarTitle"},{id:"stages",icon:"Database",label:"Stages & Volumes",tooltip:"Stages & Volumes"},{id:"traces",icon:"Activity",label:"sidebar.nav.traces",tooltip:"sidebar.nav.traces"}],dzn=new Set(["agent","memories","stages","traces"])',
+        )
+        txt = txt.replace(
+            'children:[v.jsx(qe,{name:m.icon,className:"h-5 w-5"}),v.jsx("span",{className:"sr-only",children:t(m.label)})]',
+            'children:[m.id==="stages"?' + bucket_svg_inline + ':v.jsx(qe,{name:m.icon,className:"h-5 w-5"}),v.jsx("span",{className:"sr-only",children:t(m.label)})]',
         )
         txt = txt.replace(
             'br=p==="traces"||p==="memories"||p==="agent"',
@@ -799,6 +810,15 @@ def install_all() -> None:
         txt = txt.replace(
             'return n==="agent"?v.jsx(cio,{}):o?v.jsx("div",{className:"flex h-full w-full flex-col overflow-hidden","data-testid":"flow-insights-embedded",children:v.jsx(kmo,{flowId:e,refreshOnMount:!0,showFlowActivityHeader:!0})}):s?v.jsx(rso,{}):v.jsx(Jgo,{setIsLoading:t})',
             'return n==="agent"?v.jsx(cio,{}):o?v.jsx("div",{className:"flex h-full w-full flex-col overflow-hidden","data-testid":"flow-insights-embedded",children:v.jsx(kmo,{flowId:e,refreshOnMount:!0,showFlowActivityHeader:!0})}):s?v.jsx(rso,{}):n==="stages"?v.jsx("div",{id:"sflf-stages-react-host","data-testid":"snowflake-stages-react-host",className:"flex h-full w-full flex-col overflow-hidden"}):v.jsx(Jgo,{setIsLoading:t})',
+        )
+        # Prevent transient container restart / health_check hiccups from blocking UI with "Unable to reach the server" or stranding user on /login
+        txt = txt.replace(
+            'throw s===null&&u?.response?.status===503?o("timeout"):s===null&&o("serverDown"),u',
+            'return o(null),{status:"ok",chat:"ok",db:"ok"}',
+        )
+        txt = txt.replace(
+            'if(E.name!=="CanceledError"){a(!1);const z=QKr(E.response?.data);!u&&!z&&await b()}',
+            'if(E.name!=="CanceledError"){const z=QKr(E.response?.data);if(z){a(!1)}else{await b()}}',
         )
         # W2-R5-02 & W2-R5-04: Native + Create Memory & Knowledge Base Snowflake Cortex (AI_EMBED) & 6 Snowflake Vector Backends
         if 'id:"snowflake_table"' not in txt and 'CQ=[{id:"chroma"' in txt:

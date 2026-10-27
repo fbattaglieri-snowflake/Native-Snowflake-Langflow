@@ -1381,8 +1381,66 @@
     }
   });
 
+  let _autoLoginProbeInFlight = false;
+  let _lastAutoLoginProbeTs = 0;
+
+  function ensureServerHealthAndAutoLoginRecovery() {
+    if (typeof document === "undefined" || !document.body) return;
+    // 1. If a transient restart left the "Unable to reach the server" modal open, click Retry/Cancel automatically
+    const dialogs = document.querySelectorAll('[role="dialog"]');
+    for (let i = 0; i < dialogs.length; i++) {
+      const dlg = dialogs[i];
+      const txt = (dlg.textContent || "").trim();
+      if (txt.includes("Unable to reach the server") || txt.includes("Connection timed out")) {
+        const btns = dlg.querySelectorAll("button");
+        for (let b = 0; b < btns.length; b++) {
+          const bTxt = (btns[b].textContent || "").trim().toLowerCase();
+          if (bTxt === "retry" || bTxt === "cancel") {
+            try {
+              btns[b].click();
+            } catch (_e) {}
+            break;
+          }
+        }
+      }
+    }
+    // 2. If a container restart redirected the browser to /login while LANGFLOW_AUTO_LOGIN=true is active, recover session & redirect to /
+    if (
+      typeof window !== "undefined" &&
+      window.location &&
+      String(window.location.pathname || "").includes("/login") &&
+      !_autoLoginProbeInFlight &&
+      Date.now() - _lastAutoLoginProbeTs > 3000
+    ) {
+      _autoLoginProbeInFlight = true;
+      _lastAutoLoginProbeTs = Date.now();
+      fetch("/api/v1/auto_login", { headers: { Accept: "application/json" } })
+        .then(function (r) {
+          return r.ok ? r.json() : null;
+        })
+        .then(function (data) {
+          if (data && data.access_token) {
+            try {
+              localStorage.setItem("access_token_lf", data.access_token);
+              localStorage.setItem("refresh_token_lf", "auto");
+              localStorage.setItem("auto_login_lf", "true");
+              document.cookie = "access_token_lf=" + data.access_token + "; path=/; SameSite=Lax";
+              document.cookie = "refresh_token_lf=auto; path=/; SameSite=Lax";
+              document.cookie = "auto_login_lf=true; path=/; SameSite=Lax";
+            } catch (_e) {}
+            window.location.replace("/");
+          }
+        })
+        .catch(function () {})
+        .finally(function () {
+          _autoLoginProbeInFlight = false;
+        });
+    }
+  }
+
   function scanAll() {
     ensureBrowserTabBranding();
+    ensureServerHealthAndAutoLoginRecovery();
     styleCreateFirstFlowButtons();
     ensureDualSymbolLoadingOverlay();
     ensureMemoriesPageSnowflakeButton();
@@ -5298,18 +5356,17 @@
     if (nativeStagesBtn) {
       if (!nativeStagesBtn.id) nativeStagesBtn.id = "sflf-rail-stages-btn";
       if (!nativeStagesBtn.getAttribute("title")) nativeStagesBtn.setAttribute("title", "Stages & Volumes");
-      if (!nativeStagesBtn.dataset.sflfStagesBound) {
-        nativeStagesBtn.dataset.sflfStagesBound = "1";
-        nativeStagesBtn.addEventListener("click", function () {
-          setTimeout(function () {
-            openSnowflakeStagesVolumesView(true);
-          }, 10);
-        });
-      }
       const floatingFallback = document.getElementById("sflf-rail-stages-btn-floating");
       if (floatingFallback && floatingFallback.style.display !== "none") {
         floatingFallback.style.display = "none";
       }
+      const reactStagesHost = document.getElementById("sflf-stages-react-host");
+      if (reactStagesHost && !_stagesVolumesViewOpen) {
+        openSnowflakeStagesVolumesView(true);
+      } else if (!reactStagesHost && _stagesVolumesViewOpen) {
+        closeSnowflakeStagesVolumesView();
+      }
+      return;
     } else {
       let railBtn = document.getElementById("sflf-rail-stages-btn");
       if (!railBtn) {
@@ -5377,7 +5434,14 @@
         navBtn.getAttribute("data-sidebar-nav-item") ||
         (navBtn.getAttribute("data-testid") || "").replace("sidebar-nav-", "");
       if (item === "stages") {
-        openSnowflakeStagesVolumesView(true);
+        setTimeout(function () {
+          const host = document.getElementById("sflf-stages-react-host");
+          if (host) {
+            openSnowflakeStagesVolumesView(true);
+          } else if (navBtn.parentNode !== document.body) {
+            closeSnowflakeStagesVolumesView();
+          }
+        }, 15);
       } else if (_stagesVolumesViewOpen) {
         closeSnowflakeStagesVolumesView();
       }
@@ -5402,6 +5466,12 @@
     if (railBtn && railBtn.parentNode === document.body) {
       railBtn.style.background = "transparent";
       railBtn.style.color = "#64748b";
+    }
+    if (document.getElementById("sflf-stages-react-host")) {
+      const compBtn = document.querySelector('[data-testid="sidebar-nav-components"]');
+      if (compBtn && typeof compBtn.click === "function") {
+        compBtn.click();
+      }
     }
   }
   window.closeSnowflakeStagesVolumesView = closeSnowflakeStagesVolumesView;

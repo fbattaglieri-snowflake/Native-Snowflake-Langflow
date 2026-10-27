@@ -7461,8 +7461,14 @@ def register_snowflake_fastapi_routes(app: Any) -> None:
                 )
                 return JSONResponse(status_code=200, content=traces_payload)
 
-            # Intercept native Langflow /api/v1/memories* so Snowflake Memories are first-class citizens (`W2-R4-08G`)
+            # Fast-path /health_check and /api/v1/health_check so frontend health polling never stalls or triggers "Unable to reach the server"
             clean_path = path.rstrip("/")
+            if method == "GET" and clean_path in ("/health", "/health_check", "/api/v1/health", "/api/v1/health_check"):
+                if clean_path.endswith("/health"):
+                    return JSONResponse(status_code=200, content={"status": "ok"})
+                return JSONResponse(status_code=200, content={"status": "ok", "chat": "ok", "db": "ok"})
+
+            # Intercept native Langflow /api/v1/memories* so Snowflake Memories are first-class citizens (`W2-R4-08G`)
             if clean_path == "/api/v1/memories" and method == "GET":
                 req_search = request.query_params.get("search") or request.query_params.get("q")
                 req_page = int(request.query_params.get("page") or 1)

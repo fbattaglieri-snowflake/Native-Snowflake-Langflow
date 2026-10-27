@@ -643,6 +643,48 @@ def register_snowflake_cortex_embedding_provider() -> dict[str, Any]:
                 setattr(_em_mod, "get_embedding_model_options", _wrapped_get_embedding_model_options)
             except Exception:  # noqa: BLE001
                 pass
+        try:
+            from lfx.base.models.unified_models import model_catalog as _mc
+
+            orig_ollama = getattr(_mc, "get_ollama_models", None)
+            if callable(orig_ollama) and not getattr(orig_ollama, "__sflf_ollama_fast_fail__", False):
+
+                async def _fast_fail_get_ollama_models(
+                    base_url_value: str,
+                    desired_capability: str,
+                    json_models_key: str,
+                    json_name_key: str,
+                    json_capabilities_key: str,
+                ) -> list[str]:
+                    cache_key = (base_url_value, desired_capability)
+                    if hasattr(_mc, "_ollama_cache_get"):
+                        cached = _mc._ollama_cache_get(cache_key)
+                        if cached is not None:
+                            return cached
+                    try:
+                        import asyncio as _aio
+
+                        res = await _aio.wait_for(
+                            orig_ollama(
+                                base_url_value,
+                                desired_capability,
+                                json_models_key,
+                                json_name_key,
+                                json_capabilities_key,
+                            ),
+                            timeout=1.5,
+                        )
+                        return list(res) if res else []
+                    except Exception:  # noqa: BLE001
+                        if hasattr(_mc, "_ollama_cache_set"):
+                            _mc._ollama_cache_set(cache_key, [])
+                        return []
+
+                setattr(_fast_fail_get_ollama_models, "__sflf_ollama_fast_fail__", True)
+                setattr(_mc, "get_ollama_models", _fast_fail_get_ollama_models)
+                setattr(_um, "get_ollama_models", _fast_fail_get_ollama_models)
+        except Exception:  # noqa: BLE001
+            pass
         status["model_catalog_patched"] = True
     except Exception:  # noqa: BLE001
         pass
