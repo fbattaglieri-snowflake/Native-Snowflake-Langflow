@@ -514,6 +514,14 @@ def test_w2_r5_04_snowflake_cortex_embeddings_and_split_text_component() -> None
     assert reg_status["embedding_class"] == "SnowflakeCortexEmbeddings"
     assert set(reg_status["models"]) == set(expected_models.keys())
 
+    client = _make_client()
+    emb_resp = client.get("/api/v1/snowflake/embedding-models")
+    assert emb_resp.status_code == 200
+    emb_json = emb_resp.json()
+    assert emb_json["ok"] is True
+    assert emb_json["provider"] == "Snowflake Cortex"
+    assert len(emb_json["models"]) == 6
+
     for model_id, expected_dim in expected_models.items():
         emb = SnowflakeCortexEmbeddings(model=model_id)
         assert emb.dimension == expected_dim

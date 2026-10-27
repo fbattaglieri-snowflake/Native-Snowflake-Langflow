@@ -1036,6 +1036,9 @@ def install_all() -> None:
         "/api/v1/snowflake/memories",
         "/api/v1/snowflake/memories/recall",
         "/api/v1/snowflake/memories/showcase/full-memory-enterprise-agent",
+        "/api/v1/snowflake/stages",
+        "/api/v1/snowflake/external-volumes",
+        "/api/v1/snowflake/embedding-models",
         "/api/v1/snowflake/traces",
     ):
         assert req_route in sf_paths, f"Missing route {req_route} in {sf_paths}"

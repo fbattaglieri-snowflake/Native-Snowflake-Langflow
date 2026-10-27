@@ -8448,6 +8448,22 @@ def register_snowflake_fastapi_routes(app: Any) -> None:
         )
         return JSONResponse(status_code=200, content=res)
 
+    @sf_router.get("/embedding-models")
+    async def get_embedding_models_route() -> JSONResponse:
+        from lfx_snowflake.providers.embeddings import get_snowflake_cortex_embedding_catalog
+
+        models = await asyncio.to_thread(get_snowflake_cortex_embedding_catalog)
+        return JSONResponse(
+            status_code=200,
+            content={
+                "ok": True,
+                "provider": "Snowflake Cortex",
+                "models": models,
+                "vector_store_backends": list(SNOWFLAKE_VECTOR_STORE_BACKENDS.keys()),
+                "active_role": LIVE_BRIDGE.active_role,
+            },
+        )
+
     @sf_router.post("/mcp/streamable")
     async def post_mcp_streamable(request: Request) -> JSONResponse:
         """Native MCP Streamable HTTP JSON-RPC endpoint for Cortex Code CLI & Cortex Code Desktop."""
