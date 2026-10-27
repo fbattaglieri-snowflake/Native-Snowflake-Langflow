@@ -1125,3 +1125,215 @@ export const ServeAsA2AAgentPanel: React.FC<ServeAsA2AAgentPanelProps> = ({
     </div>
   );
 };
+
+// ============================================================================
+// W2-R5-02 & W2-R5-05: Official Snowflake AI_EMBED Models + Stages & Volumes Tab
+// ============================================================================
+
+export const OFFICIAL_SNOWFLAKE_AI_EMBED_MODELS = [
+  { model_name: "snowflake-arctic-embed-m-v1.5", dimensions: 768, max_tokens: 512, language: "English" },
+  { model_name: "snowflake-arctic-embed-m", dimensions: 768, max_tokens: 512, language: "English" },
+  { model_name: "e5-base-v2", dimensions: 768, max_tokens: 512, language: "English" },
+  { model_name: "snowflake-arctic-embed-l-v2.0", dimensions: 1024, max_tokens: 512, language: "Multilingual" },
+  { model_name: "voyage-multilingual-2", dimensions: 1024, max_tokens: 32000, language: "Multilingual" },
+  { model_name: "nv-embed-qa-4", dimensions: 1024, max_tokens: 512, language: "English" },
+] as const;
+
+export interface SnowflakeStageOrVolumeItem {
+  name: string;
+  stage_fqn?: string;
+  database?: string;
+  schema?: string;
+  stage_type: "INTERNAL" | "EXTERNAL" | "EXTERNAL_VOLUME";
+  encryption?: string;
+  directory_enabled?: boolean;
+  url?: string;
+  storage_integration?: string;
+  storage_provider?: string;
+  storage_base_url?: string;
+  allow_writes?: boolean;
+}
+
+export interface SnowflakeStagesAndVolumesViewProps {
+  activeRole: string;
+  database: string;
+  schema: string;
+  items: SnowflakeStageOrVolumeItem[];
+  canCreateStage?: boolean;
+  canCreateExternalVolume?: boolean;
+  onUploadFile?: (stageFqn: string, fileName: string, contentBase64: string) => Promise<void>;
+  onCreateStageOrVolume?: (payload: Record<string, unknown>) => Promise<void>;
+}
+
+export const SnowflakeStagesAndVolumesView: React.FC<SnowflakeStagesAndVolumesViewProps> = ({
+  activeRole,
+  database,
+  schema,
+  items,
+  canCreateExternalVolume = true,
+  onCreateStageOrVolume,
+}) => {
+  const [searchQuery, setSearchQuery] = useState("");
+  const [wizardOpen, setWizardOpen] = useState(false);
+  const [wizardKind, setWizardKind] = useState<"INTERNAL" | "EXTERNAL" | "EXTERNAL_VOLUME">("INTERNAL");
+  const [stageName, setStageName] = useState("DOCS_STAGE");
+  const [internalEncryption, setInternalEncryption] = useState<"SNOWFLAKE_SSE" | "SNOWFLAKE_FULL">("SNOWFLAKE_SSE");
+  const [cloudProvider, setCloudProvider] = useState<"S3" | "GCS" | "AZURE" | "S3COMPAT">("S3");
+  const [externalUrl, setExternalUrl] = useState("s3://enterprise-bucket/docs/");
+  const [storageIntegration, setStorageIntegration] = useState("S3_DOCS_INT");
+  const [volumeName, setVolumeName] = useState("ICEBERG_EXT_VOL");
+
+  const filtered = useMemo(() => {
+    const q = searchQuery.trim().toLowerCase();
+    if (!q) return items;
+    return items.filter((it) =>
+      `${it.name} ${it.stage_fqn || ""} ${it.stage_type}`.toLowerCase().includes(q)
+    );
+  }, [items, searchQuery]);
+
+  return (
+    <div id="sflf-stages-volumes-view" data-testid="snowflake-stages-view" className="flex h-full w-full">
+      <aside className="flex w-72 shrink-0 flex-col border-r border-border bg-background p-3">
+        <div className="flex items-center justify-between">
+          <h2 className="text-sm font-semibold">Stages &amp; Volumes</h2>
+          <button
+            id="sflf-rail-stages-btn"
+            data-testid="sidebar-nav-stages"
+            title="Stages & Volumes"
+            type="button"
+          >
+            Stages &amp; Volumes
+          </button>
+        </div>
+        <div className="mt-2 flex items-center gap-2">
+          <button
+            type="button"
+            data-testid="stages-create-btn"
+            onClick={() => setWizardOpen(true)}
+            className="rounded border border-border px-2.5 py-1 text-xs font-semibold"
+          >
+            + Create
+          </button>
+          <button
+            type="button"
+            data-testid="stages-plus-snowflake-btn"
+            onClick={() => setWizardOpen(true)}
+            style={{ backgroundColor: SNOWFLAKE_BLUE, color: "#ffffff" }}
+            className="rounded px-2.5 py-1 text-xs font-semibold text-white"
+          >
+            + Snowflake
+          </button>
+        </div>
+        <input
+          type="text"
+          data-testid="search-stages-input"
+          placeholder="Search stages & volumes..."
+          value={searchQuery}
+          onChange={(e) => setSearchQuery(e.target.value)}
+          className="mt-2 rounded border border-border px-2 py-1 text-xs"
+        />
+        <div data-testid="snowflake-stages-list" className="mt-2 flex-1 overflow-y-auto">
+          {filtered.map((it) => (
+            <div key={it.stage_fqn || it.name} className="rounded border border-border p-2 text-xs">
+              <strong>{it.stage_fqn || it.name}</strong> ({it.stage_type})
+            </div>
+          ))}
+        </div>
+      </aside>
+      <main data-testid="snowflake-stage-detail-panel" className="flex-1 p-4">
+        <button type="button" data-testid="stage-upload-file-btn" className="rounded px-3 py-1.5 text-xs">
+          Upload Files to Stage
+        </button>
+        <button type="button" data-testid="stage-refresh-btn" className="ml-2 rounded px-3 py-1.5 text-xs">
+          Refresh Stage
+        </button>
+        <table id="sflf-stage-files-table" data-testid="snowflake-stage-files-table" className="mt-3 w-full text-xs">
+          <thead>
+            <tr>
+              <th>Name / Path</th>
+              <th>Size</th>
+              <th>Last Modified</th>
+              <th>MD5</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody />
+        </table>
+      </main>
+      {wizardOpen && (
+        <div id="sflf-create-stage-modal" data-testid="create-snowflake-stage-modal" role="dialog">
+          {wizardKind === "EXTERNAL_VOLUME" && !canCreateExternalVolume && (
+            <div data-testid="external-volume-privilege-banner">
+              {`Active role ${activeRole} does not have CREATE EXTERNAL VOLUME privilege`}
+            </div>
+          )}
+          <select
+            data-testid="stage-wizard-kind-select"
+            value={wizardKind}
+            onChange={(e) => setWizardKind(e.target.value as "INTERNAL" | "EXTERNAL" | "EXTERNAL_VOLUME")}
+          >
+            <option value="INTERNAL">Internal Stage</option>
+            <option value="EXTERNAL">External Stage</option>
+            <option value="EXTERNAL_VOLUME">External Volume</option>
+          </select>
+          <input
+            data-testid="stage-wizard-name-input"
+            value={stageName}
+            onChange={(e) => setStageName(e.target.value)}
+          />
+          <select
+            data-testid="stage-wizard-internal-encryption"
+            value={internalEncryption}
+            onChange={(e) => setInternalEncryption(e.target.value as "SNOWFLAKE_SSE" | "SNOWFLAKE_FULL")}
+          >
+            <option value="SNOWFLAKE_SSE">SNOWFLAKE_SSE</option>
+            <option value="SNOWFLAKE_FULL">SNOWFLAKE_FULL</option>
+          </select>
+          <select
+            data-testid="stage-wizard-cloud-provider"
+            value={cloudProvider}
+            onChange={(e) => setCloudProvider(e.target.value as "S3" | "GCS" | "AZURE" | "S3COMPAT")}
+          >
+            <option value="S3">S3</option>
+            <option value="GCS">GCS</option>
+            <option value="AZURE">AZURE</option>
+            <option value="S3COMPAT">S3COMPAT</option>
+          </select>
+          <input
+            data-testid="stage-wizard-ext-url"
+            value={externalUrl}
+            onChange={(e) => setExternalUrl(e.target.value)}
+          />
+          <input
+            value={storageIntegration}
+            onChange={(e) => setStorageIntegration(e.target.value)}
+          />
+          <input
+            data-testid="stage-wizard-volume-name"
+            value={volumeName}
+            onChange={(e) => setVolumeName(e.target.value)}
+          />
+          <button
+            type="button"
+            data-testid="stage-wizard-submit-btn"
+            onClick={() =>
+              onCreateStageOrVolume?.({
+                database,
+                schema,
+                stage_type: wizardKind,
+                name: wizardKind === "EXTERNAL_VOLUME" ? volumeName : stageName,
+                encryption: internalEncryption,
+                cloud_provider: cloudProvider,
+                url: externalUrl,
+                storage_integration: storageIntegration,
+              })
+            }
+          >
+            Create &amp; Add to [ ❄️ Context ]
+          </button>
+        </div>
+      )}
+    </div>
+  );
+};
+

@@ -68,8 +68,16 @@ def _search_services(
     return svcs
 
 
-def _memory_catalog_options() -> list[str]:
-    return LIVE_BRIDGE.get_memory_catalog_options(include_none=True)
+def _memory_catalog_options(flow_id: str | None = None) -> list[str]:
+    try:
+        return LIVE_BRIDGE.get_memory_catalog_options(include_none=True, flow_id=flow_id)
+    except TypeError:
+        return LIVE_BRIDGE.get_memory_catalog_options(include_none=True)
+
+
+def _search_rest_endpoint(database: str, schema: str, search_service: str) -> str:
+    svc_short = (search_service or "DOC_SEARCH_SERVICE").strip().split(".")[-1]
+    return f"/api/v2/databases/{database}/schemas/{schema}/cortex-search-services/{svc_short}:query"
 
 
 class SnowflakeCortexSearchComponent(Component):
@@ -175,7 +183,7 @@ class SnowflakeCortexSearchComponent(Component):
             if svc_opts and build_config["search_service"].get("value") not in svc_opts:
                 build_config["search_service"]["value"] = svc_opts[0]
         if "memory_catalog_ref" in build_config:
-            build_config["memory_catalog_ref"]["options"] = _memory_catalog_options()
+            build_config["memory_catalog_ref"]["options"] = _memory_catalog_options(flow_id=flow_id)
         return build_config
 
     def _build_sql_and_payload(self) -> tuple[str, dict[str, Any]]:
@@ -200,13 +208,18 @@ class SnowflakeCortexSearchComponent(Component):
             )
             return Message(text=json.dumps(recalled, indent=2))
         sql_stmt, payload = self._build_sql_and_payload()
+        db = getattr(self, "database", "SNOWFLAKE_LANGFLOW") or "SNOWFLAKE_LANGFLOW"
+        sch = getattr(self, "schema_name", "CORE") or "CORE"
+        svc = getattr(self, "search_service", "DOC_SEARCH_SERVICE") or "DOC_SEARCH_SERVICE"
+        rest_ep = _search_rest_endpoint(db, sch, svc)
         res = LIVE_BRIDGE.execute_sql(sql_stmt)
         return Message(
             text=json.dumps(
                 {
-                    "database": getattr(self, "database", "SNOWFLAKE_LANGFLOW"),
-                    "schema_name": getattr(self, "schema_name", "CORE"),
-                    "search_service": getattr(self, "search_service", "DOC_SEARCH_SERVICE"),
+                    "database": db,
+                    "schema_name": sch,
+                    "search_service": svc,
+                    "rest_endpoint": rest_ep,
                     "active_role": LIVE_BRIDGE.active_role,
                     "request_payload": payload,
                     "sql": sql_stmt,
@@ -226,13 +239,16 @@ class SnowflakeCortexSearchComponent(Component):
             )
             return Data(data=recalled)
         sql_stmt, payload = self._build_sql_and_payload()
-        db = getattr(self, "database", "SNOWFLAKE_LANGFLOW")
-        sch = getattr(self, "schema_name", "CORE")
+        db = getattr(self, "database", "SNOWFLAKE_LANGFLOW") or "SNOWFLAKE_LANGFLOW"
+        sch = getattr(self, "schema_name", "CORE") or "CORE"
+        svc = getattr(self, "search_service", "DOC_SEARCH_SERVICE") or "DOC_SEARCH_SERVICE"
+        rest_ep = _search_rest_endpoint(db, sch, svc)
         return Data(
             data={
                 "database": db,
                 "schema_name": sch,
-                "search_service": getattr(self, "search_service", "DOC_SEARCH_SERVICE"),
+                "search_service": svc,
+                "rest_endpoint": rest_ep,
                 "discovery_sql": f"SHOW CORTEX SEARCH SERVICES IN SCHEMA {db}.{sch}",
                 "search_preview_sql": sql_stmt,
                 "request_payload": payload,
@@ -244,9 +260,10 @@ class SnowflakeCortexSearchComponent(Component):
         return self.get_search_metadata()
 
     def to_toolkit(self) -> list[Tool]:
-        db = getattr(self, "database", "SNOWFLAKE_LANGFLOW")
-        sch = getattr(self, "schema_name", "CORE")
-        svc = getattr(self, "search_service", "DOC_SEARCH_SERVICE")
+        db = getattr(self, "database", "SNOWFLAKE_LANGFLOW") or "SNOWFLAKE_LANGFLOW"
+        sch = getattr(self, "schema_name", "CORE") or "CORE"
+        svc = getattr(self, "search_service", "DOC_SEARCH_SERVICE") or "DOC_SEARCH_SERVICE"
+        rest_ep = _search_rest_endpoint(db, sch, svc)
 
         def _invoke(tool_input: Any = None) -> dict[str, Any]:
             if isinstance(tool_input, str) and tool_input.strip():
@@ -256,8 +273,13 @@ class SnowflakeCortexSearchComponent(Component):
         return [
             Tool(
                 name=f"snowflake_cortex_search_{svc.lower().replace('.', '_')}",
-                description=f"Hybrid lexical+vector search over Snowflake Cortex Search Service {db}.{sch}.{svc} under active role {LIVE_BRIDGE.active_role}.",
+                description=f"Hybrid lexical+vector search over Snowflake Cortex Search Service {db}.{sch}.{svc} ({rest_ep}) under active role {LIVE_BRIDGE.active_role}.",
                 func=_invoke,
-                metadata={"search_service": svc, "component": "SnowflakeCortexSearch", "tool_mode": True},
+                metadata={
+                    "search_service": svc,
+                    "rest_endpoint": rest_ep,
+                    "component": "SnowflakeCortexSearch",
+                    "tool_mode": True,
+                },
             )
         ]

@@ -40,9 +40,53 @@
     const _prevFetch = window.fetch;
     const _guardedFetch = function (input, init) {
       if (typeof input === "string" || (typeof URL === "function" && input instanceof URL)) {
+        const urlStr = String(input);
         const safeInit = init && typeof init === "object" ? Object.assign({}, init) : {};
         if (!safeInit.headers) {
           safeInit.headers = {};
+        }
+        // W2-R5-02: Intercept native POST /api/v1/memories from Langflow's + Create modal to attach active [ ❄️ Context ]
+        const methodUpper = String(safeInit.method || "GET").toUpperCase();
+        if (
+          methodUpper === "POST" &&
+          (/\/api\/v1\/memories\/?(?:\?|$)/i.test(urlStr) || urlStr.endsWith("/api/v1/memories") || urlStr.endsWith("/api/v1/memories/")) &&
+          typeof safeInit.body === "string"
+        ) {
+          try {
+            const parsed = JSON.parse(safeInit.body);
+            const activeCtx = (typeof window !== "undefined" && window.SNOWFLAKE_LANGFLOW_CONTEXT) || {};
+            const ov = (typeof window !== "undefined" && window.__sflfNativeCreateMemoryOverrides) || {};
+            if (!parsed.database) parsed.database = ov.database || activeCtx.database || "SNOWFLAKE_LANGFLOW";
+            if (!parsed.schema) parsed.schema = ov.schema || activeCtx.schema || "CORE";
+            if (!parsed.flow_id && typeof window.extractCurrentFlowId === "function") {
+              parsed.flow_id = window.extractCurrentFlowId();
+            }
+            if (ov.backend_type && (!parsed.backend_type || parsed.backend_type === "chroma")) {
+              parsed.backend_type = ov.backend_type;
+            }
+            if (ov.embedding_model && !parsed.embedding_model) {
+              parsed.embedding_model = ov.embedding_model;
+              parsed.embedding_provider = ov.embedding_provider || "Snowflake Cortex";
+            }
+            safeInit.body = JSON.stringify(parsed);
+          } catch (_e) {
+            // preserve original body if non-JSON
+          }
+          return _prevFetch.call(this, input, safeInit).then(function (resp) {
+            if (resp && resp.ok && typeof window !== "undefined") {
+              setTimeout(function () {
+                if (typeof window.fetchSnowflakeMemoriesRegistry === "function") {
+                  window.fetchSnowflakeMemoriesRegistry();
+                }
+                if (typeof window.__sflfRefetchMemories === "function") {
+                  try {
+                    window.__sflfRefetchMemories();
+                  } catch (_e) {}
+                }
+              }, 60);
+            }
+            return resp;
+          });
         }
         return _prevFetch.call(this, input, safeInit);
       }
@@ -805,6 +849,12 @@
               }
             }
             ensureMemoriesPageSnowflakeButton();
+            if (typeof enhanceNativeCreateMemoryDialog === "function") {
+              enhanceNativeCreateMemoryDialog();
+            }
+            if (typeof ensureLeftRailStagesVolumesTab === "function") {
+              ensureLeftRailStagesVolumesTab();
+            }
           } finally {
             _isApplyingDomPatch = false;
           }
@@ -833,6 +883,10 @@
     }
     const memModal = document.getElementById("sflf-create-memory-modal");
     if (memModal && memModal.style && memModal.style.display && memModal.style.display !== "none") {
+      return true;
+    }
+    const stgModal = document.getElementById("sflf-create-stage-modal");
+    if (stgModal && stgModal.style && stgModal.style.display && stgModal.style.display !== "none") {
       return true;
     }
     const nativeDialog = document.querySelector(
@@ -1172,12 +1226,11 @@
         : [activeCtx.schema || "CORE"];
     const primarySchema = schemasForDb[0] || activeCtx.schema || "CORE";
     const vis = selCtx.visible_objects || activeCtx.catalog || {};
-    const pgInstances =
-      (Array.isArray(selCtx.postgres_instances) && selCtx.postgres_instances.length > 0
-        ? selCtx.postgres_instances
-        : Array.isArray(vis.postgres_instances) && vis.postgres_instances.length > 0
-          ? vis.postgres_instances
-          : (activeCtx.catalog && activeCtx.catalog.postgres_instances) || []) || [];
+    const pgInstances = Array.isArray(selCtx.postgres_instances)
+      ? selCtx.postgres_instances
+      : Array.isArray(vis.postgres_instances)
+        ? vis.postgres_instances
+        : (activeCtx.catalog && activeCtx.catalog.postgres_instances) || [];
     const pgTablesMap =
       selCtx.postgres_tables_by_instance ||
       (activeCtx.catalog && activeCtx.catalog.postgres_tables_by_instance) ||
@@ -1313,12 +1366,18 @@
     if (typeof syncCreateMemoryModalWithFlowContext === "function") {
       syncCreateMemoryModalWithFlowContext(nextState);
     }
+    if (typeof syncStagesVolumesViewWithFlowContext === "function") {
+      syncStagesVolumesViewWithFlowContext(nextState);
+    }
   });
   window.addEventListener("snowflake:context-changed", function (ev) {
     const nextState = (ev && ev.detail) || sfState;
     syncCanvasNodesWithSnowflakeContext(nextState);
     if (typeof syncCreateMemoryModalWithFlowContext === "function") {
       syncCreateMemoryModalWithFlowContext(nextState);
+    }
+    if (typeof syncStagesVolumesViewWithFlowContext === "function") {
+      syncStagesVolumesViewWithFlowContext(nextState);
     }
   });
 
@@ -1327,6 +1386,12 @@
     styleCreateFirstFlowButtons();
     ensureDualSymbolLoadingOverlay();
     ensureMemoriesPageSnowflakeButton();
+    if (typeof enhanceNativeCreateMemoryDialog === "function") {
+      enhanceNativeCreateMemoryDialog();
+    }
+    if (typeof ensureLeftRailStagesVolumesTab === "function") {
+      ensureLeftRailStagesVolumesTab();
+    }
     alignTopbarControls();
 
     // CTX-ARCH-01 & CTX-ARCH-02: Per-workflow (/flow/<flow_id>) context lifecycle & [ ❄️ Context ] button visibility
@@ -1383,6 +1448,10 @@
       typeof serverPrivs.can_create_postgres === "boolean"
         ? serverPrivs.can_create_postgres
         : !isReadOnlyRole && (role === "ACCOUNTADMIN" || role.includes("ADMIN"));
+    const canCreateExternalVolume =
+      typeof serverPrivs.can_create_external_volume === "boolean"
+        ? serverPrivs.can_create_external_volume
+        : !isReadOnlyRole && (role === "ACCOUNTADMIN" || role === "SYSADMIN" || role.includes("ADMIN"));
     const canCreateObject =
       typeof serverPrivs.can_create_object === "boolean" ? serverPrivs.can_create_object : !isReadOnlyRole;
 
@@ -1393,6 +1462,7 @@
       can_create_stage: canCreateStage,
       can_create_view: canCreateView,
       can_create_postgres: canCreatePostgres,
+      can_create_external_volume: canCreateExternalVolume,
       can_create_object: canCreateObject,
     };
   }
@@ -1451,6 +1521,11 @@
       if (typeof syncCreateMemoryModalWithFlowContext === "function") {
         syncCreateMemoryModalWithFlowContext(sfState);
       }
+      await fetchSnowflakeMemoriesRegistry(effectiveFlowId);
+      if (typeof window.__sflfRefetchMemories === "function") {
+        try { window.__sflfRefetchMemories(); } catch (_e) {}
+      }
+      ensureSnowflakeMemoriesSearchableCards();
     } catch (_e) {
       // Keep default state until backend route responds
     }
@@ -1560,6 +1635,11 @@
       if (typeof syncCreateMemoryModalWithFlowContext === "function") {
         syncCreateMemoryModalWithFlowContext(sfState);
       }
+      await fetchSnowflakeMemoriesRegistry(effectiveFlowId);
+      if (typeof window.__sflfRefetchMemories === "function") {
+        try { window.__sflfRefetchMemories(); } catch (_e) {}
+      }
+      ensureSnowflakeMemoriesSearchableCards();
       window.dispatchEvent(new CustomEvent("snowflake:context-updated", { detail: sfState }));
       window.dispatchEvent(new CustomEvent("snowflake:context-changed", { detail: sfState }));
       if (!silentBanner) {
@@ -3393,15 +3473,20 @@
     }
 
     const pgInstSel = document.getElementById("sflf-light-mem-pg-instance");
-    const pgInstances = Array.isArray(selCtx.postgres_instances) && selCtx.postgres_instances.length
+    const pgInstances = Array.isArray(selCtx.postgres_instances)
       ? selCtx.postgres_instances.slice()
       : ["LANGFLOW_PG_INSTANCE", "SNOWFLAKE_PG_MEMORY_POOL"];
     if (pgInstSel && pgInstSel.tagName === "SELECT") {
       const prevPg = pgInstSel.value;
-      pgInstSel.innerHTML = pgInstances
-        .map(function (inst) { return `<option value="${inst}">${inst}</option>`; })
-        .join("");
-      pgInstSel.value = pgInstances.indexOf(prevPg) !== -1 ? prevPg : pgInstances[0];
+      if (pgInstances.length === 0) {
+        pgInstSel.innerHTML = `<option value="">(No Postgres Instance in ❄️ Context)</option>`;
+        pgInstSel.value = "";
+      } else {
+        pgInstSel.innerHTML = pgInstances
+          .map(function (inst) { return `<option value="${inst}">${inst}</option>`; })
+          .join("");
+        pgInstSel.value = pgInstances.indexOf(prevPg) !== -1 ? prevPg : pgInstances[0];
+      }
     }
 
     const pgTableSel = document.getElementById("sflf-light-mem-pg-table");
@@ -4407,9 +4492,69 @@
   }
   window.renderSnowflakeMemoryDetailView = renderSnowflakeMemoryDetailView;
 
+  function isMemoryVisibleInActiveContext(memObj, ctxState) {
+    if (!memObj) return false;
+    const obj = typeof memObj === "string" ? { name: memObj } : memObj;
+    const activeCtx = ctxState || sfState || {};
+    const selCtx = activeCtx.selected_context || {};
+    const fqn = String(obj.table_fqn || obj.fqn || obj.description || obj.backend_type || "").trim();
+    const storageFamily = String(obj.storage_family || (obj.backend_config && obj.backend_config.storage_family) || "").toLowerCase();
+    const vecDb = String(obj.vector_database || obj.backend_type || "").toLowerCase();
+    const isPg =
+      storageFamily === "snowflake_postgres" ||
+      vecDb.includes("postgres") ||
+      fqn.includes(":5432") ||
+      (obj.name && (obj.name.toUpperCase() === "MEM_1_GRAPH_CHECKPOINTER" || obj.name.toUpperCase() === "MEM_2_CHAT_WINDOW") && !storageFamily);
+    if (isPg) {
+      const pgList = Array.isArray(selCtx.postgres_instances)
+        ? selCtx.postgres_instances.map(function (p) { return String(p || "").trim().toUpperCase(); }).filter(Boolean)
+        : [];
+      if (pgList.length === 0) return false;
+      let pgInst = String(obj.postgres_instance || "").trim().toUpperCase();
+      if (!pgInst && fqn.includes(":5432")) {
+        const mPg = fqn.match(/([A-Za-z0-9_]+):5432/);
+        if (mPg && mPg[1]) pgInst = mPg[1].toUpperCase();
+      }
+      if (!pgInst) pgInst = "LANGFLOW_PG_INSTANCE";
+      return pgList.indexOf(pgInst) !== -1;
+    }
+    let memDb = String(obj.database || "").trim().toUpperCase();
+    let memSch = String(obj.schema || "").trim().toUpperCase();
+    if ((!memDb || !memSch) && fqn.includes(".") && !fqn.includes(":5432")) {
+      const mFqn = fqn.match(/([A-Za-z0-9_]+)\.([A-Za-z0-9_]+)\.[A-Za-z0-9_]+/);
+      if (mFqn) {
+        memDb = memDb || mFqn[1].toUpperCase();
+        memSch = memSch || mFqn[2].toUpperCase();
+      }
+    }
+    if (Array.isArray(selCtx.databases) && memDb) {
+      const activeDbs = selCtx.databases.map(function (d) { return String(d || "").trim().toUpperCase(); }).filter(Boolean);
+      if (activeDbs.indexOf(memDb) === -1) return false;
+    }
+    const schemasMap = selCtx.schemas_by_db || {};
+    if (memDb && memSch && schemasMap && typeof schemasMap === "object") {
+      const dbKey = Object.keys(schemasMap).find(function (k) { return String(k).trim().toUpperCase() === memDb; });
+      if (dbKey && Array.isArray(schemasMap[dbKey])) {
+        const activeSchemas = schemasMap[dbKey].map(function (s) { return String(s || "").trim().toUpperCase(); }).filter(Boolean);
+        if (activeSchemas.indexOf(memSch) === -1) return false;
+      }
+    }
+    return true;
+  }
+  window.isMemoryVisibleInActiveContext = isMemoryVisibleInActiveContext;
+  window.filterSnowflakeMemoriesByContext = function (list) {
+    if (!Array.isArray(list)) return [];
+    return list.filter(function (item) {
+      return isMemoryVisibleInActiveContext(item, sfState);
+    });
+  };
+
   function syncSnowflakeMemoriesWindowList(rawMemories) {
     if (typeof window === "undefined") return;
-    window.SNOWFLAKE_MEMORIES_LIST = (rawMemories || []).map(function (m) {
+    const contextVisible = (rawMemories || []).filter(function (m) {
+      return isMemoryVisibleInActiveContext(m, sfState);
+    });
+    window.SNOWFLAKE_MEMORIES_LIST = contextVisible.map(function (m) {
       const obj = typeof m === "string" ? { name: m, agent_memory_type: "buffer_window_memory" } : m;
       const spec = resolveCanonicalMemoryTypeSpec(obj.agent_memory_type);
       const fqn = obj.table_fqn || obj.fqn || `${obj.database || sfState.database}.${obj.schema || sfState.schema}.${obj.name}`;
@@ -4419,20 +4564,36 @@
       return {
         id: obj.langflow_memory_id || `sf-${obj.name}`,
         name: obj.name,
+        storage_family: obj.storage_family,
+        postgres_instance: obj.postgres_instance,
+        database: obj.database,
+        schema: obj.schema,
+        table_fqn: fqn,
         is_active: true,
         description: `${spec.label} · ${fqn} · ${embBadge}`,
       };
     });
   }
 
-  async function fetchSnowflakeMemoriesRegistry() {
+  async function fetchSnowflakeMemoriesRegistry(flowIdOverride) {
     try {
-      const resp = await fetch("/api/v1/snowflake/memories", { headers: { Accept: "application/json" } });
+      const effFlowId =
+        flowIdOverride !== undefined && flowIdOverride !== null
+          ? flowIdOverride
+          : extractCurrentFlowId();
+      const url = effFlowId
+        ? `/api/v1/snowflake/memories?flow_id=${encodeURIComponent(effFlowId)}`
+        : "/api/v1/snowflake/memories";
+      const headers = { Accept: "application/json" };
+      if (effFlowId) {
+        headers["X-Snowflake-Flow-Id"] = String(effFlowId);
+      }
+      const resp = await fetch(url, { headers: headers });
       if (!resp.ok) return;
       const data = await resp.json();
-      if (Array.isArray(data.memories_catalog) && data.memories_catalog.length > 0) {
+      if (Array.isArray(data.memories_catalog)) {
         sfState.memories = data.memories_catalog;
-      } else if (Array.isArray(data.memories) && data.memories.length > 0) {
+      } else if (Array.isArray(data.memories)) {
         sfState.memories = data.memories;
       }
       syncSnowflakeMemoriesWindowList(sfState.memories);
@@ -4462,7 +4623,7 @@
     }
     const query = searchInput ? (searchInput.value || "").trim().toLowerCase() : "";
     const rawMemories =
-      (Array.isArray(sfState.memories) && sfState.memories.length > 0
+      (Array.isArray(sfState.memories)
         ? sfState.memories
         : sfState.catalog && Array.isArray(sfState.catalog.memories)
           ? sfState.catalog.memories
@@ -4477,6 +4638,8 @@
           };
         }
         return m;
+      }).filter(function (m) {
+        return isMemoryVisibleInActiveContext(m, sfState);
       });
     syncSnowflakeMemoriesWindowList(rawMemories);
 
@@ -4502,6 +4665,24 @@
       }`.toLowerCase();
       return hay.includes(query);
     });
+
+    if (
+      _selectedSnowflakeMemoryName &&
+      !filtered.some(function (m) { return m.name === _selectedSnowflakeMemoryName; })
+    ) {
+      _selectedSnowflakeMemoryName = null;
+      if (filtered.length > 0) {
+        renderSnowflakeMemoryDetailView(filtered[0]);
+        if (typeof window.__sflfSelectMemory === "function") {
+          try {
+            window.__sflfSelectMemory(filtered[0].langflow_memory_id || filtered[0].id || filtered[0].name);
+          } catch (_e) {}
+        }
+      } else {
+        const existingDetail = document.getElementById("sflf-memory-detail-view");
+        if (existingDetail) existingDetail.style.display = "none";
+      }
+    }
 
     const cardsSig = JSON.stringify({
       q: query,
@@ -4716,6 +4897,1735 @@
     } catch (e) {
       if (out) out.textContent = String(e);
     }
+  }
+
+  window.fetchSnowflakeMemoriesRegistry = fetchSnowflakeMemoriesRegistry;
+
+  // =========================================================================
+  // W2-R5-02: Native `+ Create` Memory Dialog Enhancement (`Snowflake Cortex` 6 AI_EMBED Models + 6 Snowflake Backends)
+  // =========================================================================
+  const OFFICIAL_SNOWFLAKE_AI_EMBED_MODELS = [
+    { model_name: "snowflake-arctic-embed-m-v1.5", dimensions: 768, max_tokens: 512, language: "English" },
+    { model_name: "snowflake-arctic-embed-m", dimensions: 768, max_tokens: 512, language: "English" },
+    { model_name: "e5-base-v2", dimensions: 768, max_tokens: 512, language: "English" },
+    { model_name: "snowflake-arctic-embed-l-v2.0", dimensions: 1024, max_tokens: 512, language: "Multilingual" },
+    { model_name: "voyage-multilingual-2", dimensions: 1024, max_tokens: 32000, language: "Multilingual" },
+    { model_name: "nv-embed-qa-4", dimensions: 1024, max_tokens: 512, language: "English" },
+  ];
+
+  const SNOWFLAKE_NATIVE_MEMORY_BACKENDS = [
+    { id: "snowflake_table", label: "Snowflake Standard Table", table_type: "STANDARD", storage_family: "snowflake_sql" },
+    { id: "snowflake_hybrid", label: "Snowflake Hybrid Table", table_type: "HYBRID", storage_family: "snowflake_sql" },
+    { id: "snowflake_dynamic", label: "Snowflake Dynamic Table", table_type: "DYNAMIC", storage_family: "snowflake_sql" },
+    { id: "snowflake_interactive", label: "Snowflake Interactive Table", table_type: "INTERACTIVE", storage_family: "snowflake_sql" },
+    { id: "snowflake_iceberg", label: "Snowflake Iceberg Table", table_type: "ICEBERG", storage_family: "snowflake_sql" },
+    { id: "snowflake_postgres", label: "Snowflake Postgres (:5432)", table_type: "POSTGRES", storage_family: "snowflake_postgres" },
+  ];
+
+  if (typeof window !== "undefined") {
+    window.OFFICIAL_SNOWFLAKE_AI_EMBED_MODELS = OFFICIAL_SNOWFLAKE_AI_EMBED_MODELS;
+    window.SNOWFLAKE_NATIVE_MEMORY_BACKENDS = SNOWFLAKE_NATIVE_MEMORY_BACKENDS;
+    window.__sflfNativeCreateMemoryOverrides = {
+      database: "SNOWFLAKE_LANGFLOW",
+      schema: "CORE",
+      backend_type: "snowflake_table",
+      embedding_provider: "Snowflake Cortex",
+      embedding_model: "snowflake-arctic-embed-m-v1.5",
+    };
+  }
+
+  function enhanceNativeCreateMemoryDialog() {
+    if (typeof document === "undefined" || !document.body) return;
+    const nativeMemoryDialog =
+      document.querySelector('[role="dialog"] #memory-name') &&
+      document.querySelector('[role="dialog"] #memory-name').closest('[role="dialog"]');
+    let helperBar = document.getElementById("sflf-native-create-memory-helper");
+    if (!nativeMemoryDialog) {
+      if (helperBar && helperBar.style.display !== "none") {
+        helperBar.style.display = "none";
+      }
+      return;
+    }
+
+    const activeDb = (sfState && sfState.database) || "SNOWFLAKE_LANGFLOW";
+    const activeSch = (sfState && sfState.schema) || "CORE";
+    const activeRole = (sfState && sfState.active_role) || "ACCOUNTADMIN";
+    if (window.__sflfNativeCreateMemoryOverrides) {
+      window.__sflfNativeCreateMemoryOverrides.database = activeDb;
+      window.__sflfNativeCreateMemoryOverrides.schema = activeSch;
+    }
+
+    if (!helperBar) {
+      helperBar = document.createElement("div");
+      helperBar.id = "sflf-native-create-memory-helper";
+      helperBar.setAttribute("data-testid", "snowflake-native-create-memory-helper");
+      helperBar.style.cssText =
+        "position:fixed;z-index:100002;background:#f8fafc;color:#0f172a;border:1px solid #29B5E8;border-radius:10px;padding:10px 14px;font-family:Inter,sans-serif;font-size:11.5px;box-shadow:0 8px 24px rgba(15,23,42,0.18);display:none;flex-direction:column;gap:8px;max-width:440px;";
+      helperBar.innerHTML = `
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;">
+          <span style="display:inline-flex;align-items:center;gap:6px;font-weight:700;color:#0284c7;">
+            ${buildOfficialSnowflakeSvg("#29B5E8", 14)}
+            <span>Snowflake Cortex &amp; [ ❄️ Context ] Target</span>
+          </span>
+          <span id="sflf-native-create-ctx-badge" style="font-family:'JetBrains Mono',monospace;font-size:10.5px;background:rgba(41,181,232,0.12);color:#0369a1;padding:2px 7px;border-radius:999px;font-weight:600;">${activeDb}.${activeSch} (${activeRole})</span>
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">
+          <label style="display:flex;flex-direction:column;gap:3px;font-size:10.5px;font-weight:600;color:#334155;">
+            <span>Snowflake Cortex (AI_EMBED)</span>
+            <select id="sflf-native-create-embed-select" data-testid="native-create-memory-embed-select" style="background:#ffffff;color:#0f172a;border:1px solid #cbd5e1;border-radius:6px;padding:4px 6px;font-size:11px;">
+              ${OFFICIAL_SNOWFLAKE_AI_EMBED_MODELS.map(function (m) {
+                return `<option value="${m.model_name}">${m.model_name} (${m.dimensions}d · ${m.language})</option>`;
+              }).join("")}
+            </select>
+          </label>
+          <label style="display:flex;flex-direction:column;gap:3px;font-size:10.5px;font-weight:600;color:#334155;">
+            <span>Snowflake Vector Backend</span>
+            <select id="sflf-native-create-backend-select" data-testid="native-create-memory-backend-select" style="background:#ffffff;color:#0f172a;border:1px solid #cbd5e1;border-radius:6px;padding:4px 6px;font-size:11px;">
+              ${SNOWFLAKE_NATIVE_MEMORY_BACKENDS.map(function (b) {
+                return `<option value="${b.id}">${b.label}</option>`;
+              }).join("")}
+            </select>
+          </label>
+        </div>
+      `;
+      document.body.appendChild(helperBar);
+
+      const embSel = document.getElementById("sflf-native-create-embed-select");
+      if (embSel) {
+        embSel.onchange = function () {
+          window.__sflfNativeCreateMemoryOverrides.embedding_model = embSel.value;
+          window.__sflfNativeCreateMemoryOverrides.embedding_provider = "Snowflake Cortex";
+        };
+      }
+      const backSel = document.getElementById("sflf-native-create-backend-select");
+      if (backSel) {
+        backSel.onchange = function () {
+          window.__sflfNativeCreateMemoryOverrides.backend_type = backSel.value;
+        };
+      }
+    }
+
+    const badge = document.getElementById("sflf-native-create-ctx-badge");
+    if (badge) {
+      badge.textContent = `${activeDb}.${activeSch} (${activeRole})`;
+    }
+    const rect = nativeMemoryDialog.getBoundingClientRect();
+    if (rect && rect.width > 0) {
+      helperBar.style.width = Math.round(rect.width) + "px";
+      helperBar.style.maxWidth = Math.round(rect.width) + "px";
+      helperBar.style.left = Math.round(rect.left) + "px";
+      helperBar.style.top = Math.max(8, Math.round(rect.top - 96)) + "px";
+    }
+    if (helperBar.style.display !== "flex") {
+      helperBar.style.display = "flex";
+    }
+  }
+  window.enhanceNativeCreateMemoryDialog = enhanceNativeCreateMemoryDialog;
+
+  // =========================================================================
+  // W2-R5-05: Left-Rail Bucket Icon (`Stages & Volumes`) above `Traces` + View, File Browser/Upload & Create Wizard
+  // =========================================================================
+  let _stagesVolumesViewOpen = false;
+  let _selectedStageOrVolumeKey = null;
+  let _stagesVolumesState = {
+    stages: [],
+    external_volumes: [],
+    storage_integrations: ["S3_DOCS_INT", "GCS_DOCS_INT", "AZURE_DOCS_INT"],
+    files_by_stage: {},
+    last_loaded_flow_id: null,
+  };
+
+  function buildBucketSvgIcon(sizePx) {
+    const sz = sizePx || 20;
+    return `<svg xmlns="http://www.w3.org/2000/svg" width="${sz}" height="${sz}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:${sz}px;height:${sz}px;flex-shrink:0;" aria-hidden="true"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14c0 1.66 4.03 3 9 3s9-1.34 9-3V5"/><path d="M3 12c0 1.66 4.03 3 9 3s9-1.34 9-3"/></svg>`;
+  }
+
+  function isStageOrVolumeVisibleInActiveContext(item, ctxState) {
+    if (!item) return false;
+    const activeCtx = ctxState || sfState || {};
+    const selCtx = activeCtx.selected_context || {};
+    const kindUpper = String(item.object_kind || item.stage_type || item.type || "INTERNAL").toUpperCase();
+    if (kindUpper === "EXTERNAL_VOLUME" || item.is_external_volume) {
+      const volName = String(item.name || item.volume_name || "").trim().toUpperCase();
+      if (!volName) return false;
+      if (Array.isArray(selCtx.external_volumes) && selCtx.external_volumes.length > 0) {
+        const allowedVols = selCtx.external_volumes.map(function (v) {
+          return String(v || "").trim().toUpperCase();
+        });
+        return allowedVols.indexOf(volName) !== -1;
+      }
+      return true;
+    }
+
+    let db = String(item.database || "").trim().toUpperCase();
+    let sch = String(item.schema || item.schema_name || "").trim().toUpperCase();
+    let stgName = String(item.name || item.stage_name || "").trim();
+    const rawFqn = String(item.stage_fqn || item.fqn || "").replace(/^@/, "").trim();
+    if ((!db || !sch || !stgName) && rawFqn.includes(".")) {
+      const parts = rawFqn.split(".");
+      if (parts.length >= 3) {
+        db = db || parts[0].toUpperCase();
+        sch = sch || parts[1].toUpperCase();
+        stgName = stgName || parts.slice(2).join(".");
+      }
+    }
+    if (!db) db = String(activeCtx.database || "SNOWFLAKE_LANGFLOW").toUpperCase();
+    if (!sch) sch = String(activeCtx.schema || "CORE").toUpperCase();
+
+    if (Array.isArray(selCtx.databases) && selCtx.databases.length > 0) {
+      const activeDbs = selCtx.databases.map(function (d) {
+        return String(d || "").trim().toUpperCase();
+      });
+      if (activeDbs.indexOf(db) === -1) return false;
+    } else if (Array.isArray(selCtx.databases) && selCtx.databases.length === 0) {
+      return false;
+    }
+
+    const schemasMap = selCtx.schemas_by_db || {};
+    if (schemasMap && typeof schemasMap === "object" && Object.keys(schemasMap).length > 0) {
+      const dbKey = Object.keys(schemasMap).find(function (k) {
+        return String(k).trim().toUpperCase() === db;
+      });
+      if (!dbKey || !Array.isArray(schemasMap[dbKey])) return false;
+      const activeSchs = schemasMap[dbKey].map(function (s) {
+        return String(s || "").trim().toUpperCase();
+      });
+      if (activeSchs.indexOf(sch) === -1) return false;
+    }
+
+    const selObjs = selCtx.selected_objects || selCtx.objects_by_db_schema || {};
+    const schemaKey = `${db}.${sch}`;
+    const matchedKey = Object.keys(selObjs).find(function (k) {
+      return String(k).trim().toUpperCase() === schemaKey;
+    });
+    if (matchedKey && selObjs[matchedKey] && Array.isArray(selObjs[matchedKey].stages)) {
+      const allowedStages = selObjs[matchedKey].stages.map(function (s) {
+        return String(s || "").replace(/^@/, "").split(".").pop().trim().toUpperCase();
+      });
+      if (stgName && allowedStages.indexOf(stgName.toUpperCase()) === -1) {
+        return false;
+      }
+    }
+    return true;
+  }
+  window.isStageOrVolumeVisibleInActiveContext = isStageOrVolumeVisibleInActiveContext;
+
+  function collectContextStagesAndVolumes(ctxState) {
+    const activeCtx = ctxState || sfState || {};
+    const selCtx = activeCtx.selected_context || {};
+    const seenStageFqns = new Set();
+    const outStages = [];
+
+    function pushStage(stgObj) {
+      if (!stgObj) return;
+      const db = String(stgObj.database || activeCtx.database || "SNOWFLAKE_LANGFLOW").trim().toUpperCase();
+      const sch = String(stgObj.schema || stgObj.schema_name || activeCtx.schema || "CORE").trim().toUpperCase();
+      const name = String(stgObj.name || stgObj.stage_name || "").replace(/^@/, "").split(".").pop().trim();
+      if (!name) return;
+      const fqn = `@${db}.${sch}.${name}`;
+      const fqnKey = fqn.toUpperCase();
+      if (seenStageFqns.has(fqnKey)) return;
+      const normalized = {
+        key: fqn,
+        name: name,
+        stage_name: name,
+        database: db,
+        schema: sch,
+        stage_fqn: fqn,
+        fqn: fqn,
+        object_kind: "STAGE",
+        stage_type: String(stgObj.stage_type || stgObj.type || (stgObj.url ? "EXTERNAL" : "INTERNAL")).toUpperCase(),
+        encryption: stgObj.encryption || (stgObj.url ? "AWS_SSE_S3" : "SNOWFLAKE_SSE"),
+        directory_enabled: stgObj.directory_enabled !== undefined ? Boolean(stgObj.directory_enabled) : true,
+        auto_refresh: Boolean(stgObj.auto_refresh),
+        url: stgObj.url || "",
+        cloud_provider: stgObj.cloud_provider || (stgObj.url ? String(stgObj.url).split("://")[0].toUpperCase() : "SNOWFLAKE_MANAGED"),
+        storage_integration: stgObj.storage_integration || "",
+        file_format: stgObj.file_format || "NONE",
+        comment: stgObj.comment || "",
+      };
+      if (!isStageOrVolumeVisibleInActiveContext(normalized, activeCtx)) return;
+      seenStageFqns.add(fqnKey);
+      outStages.push(normalized);
+    }
+
+    (_stagesVolumesState.stages || []).forEach(pushStage);
+
+    const dbs = Array.isArray(selCtx.databases) ? selCtx.databases : [activeCtx.database || "SNOWFLAKE_LANGFLOW"];
+    const schemasMap = selCtx.schemas_by_db || {};
+    const objsMap = selCtx.selected_objects || selCtx.objects_by_db_schema || (activeCtx.catalog && activeCtx.catalog.objects_by_db_schema) || {};
+    dbs.forEach(function (db) {
+      const schList = Array.isArray(schemasMap[db]) ? schemasMap[db] : [activeCtx.schema || "CORE"];
+      schList.forEach(function (sch) {
+        const key = `${db}.${sch}`;
+        const bucket = objsMap[key] || {};
+        const stgArr = Array.isArray(bucket.stages) ? bucket.stages : [];
+        stgArr.forEach(function (sName) {
+          pushStage({
+            name: typeof sName === "string" ? sName : sName.name,
+            database: db,
+            schema: sch,
+            stage_type: typeof sName === "object" && sName.stage_type ? sName.stage_type : "INTERNAL",
+            url: typeof sName === "object" ? sName.url : "",
+            storage_integration: typeof sName === "object" ? sName.storage_integration : "",
+          });
+        });
+      });
+    });
+
+    const visStages = (selCtx.visible_objects && selCtx.visible_objects.stages) || [];
+    visStages.forEach(function (sName) {
+      pushStage({
+        name: sName,
+        database: activeCtx.database || "SNOWFLAKE_LANGFLOW",
+        schema: activeCtx.schema || "CORE",
+      });
+    });
+
+    const seenVols = new Set();
+    const outVolumes = [];
+    (_stagesVolumesState.external_volumes || []).forEach(function (v) {
+      const vName = String((typeof v === "string" ? v : v.name || v.volume_name) || "").trim();
+      if (!vName) return;
+      const vKey = vName.toUpperCase();
+      if (seenVols.has(vKey)) return;
+      const normVol = {
+        key: `VOL:${vName}`,
+        name: vName,
+        volume_name: vName,
+        object_kind: "EXTERNAL_VOLUME",
+        stage_type: "EXTERNAL_VOLUME",
+        is_external_volume: true,
+        allow_writes: typeof v === "object" && v.allow_writes !== undefined ? Boolean(v.allow_writes) : true,
+        storage_provider: (typeof v === "object" && v.storage_provider) || "S3",
+        storage_base_url: (typeof v === "object" && v.storage_base_url) || `s3://snowflake-iceberg-volume/${vName.toLowerCase()}/`,
+        encryption: (typeof v === "object" && v.encryption) || "AWS_SSE_S3",
+        comment: (typeof v === "object" && v.comment) || "Account-level External Volume for Apache Iceberg tables",
+      };
+      if (!isStageOrVolumeVisibleInActiveContext(normVol, activeCtx)) return;
+      seenVols.add(vKey);
+      outVolumes.push(normVol);
+    });
+
+    return { stages: outStages, external_volumes: outVolumes };
+  }
+
+  async function fetchSnowflakeStagesAndVolumes(flowIdOverride) {
+    const effFlowId =
+      flowIdOverride !== undefined && flowIdOverride !== null ? flowIdOverride : extractCurrentFlowId();
+    const qs = effFlowId ? `?flow_id=${encodeURIComponent(effFlowId)}` : "";
+    const headers = { Accept: "application/json" };
+    if (effFlowId) headers["X-Snowflake-Flow-Id"] = String(effFlowId);
+
+    try {
+      const resp = await fetch(`/api/v1/snowflake/stages${qs}`, { headers: headers });
+      if (resp.ok) {
+        const data = await resp.json();
+        if (Array.isArray(data.stages)) {
+          _stagesVolumesState.stages = data.stages;
+        }
+        if (Array.isArray(data.external_volumes)) {
+          _stagesVolumesState.external_volumes = data.external_volumes;
+        }
+        if (Array.isArray(data.storage_integrations) && data.storage_integrations.length > 0) {
+          _stagesVolumesState.storage_integrations = data.storage_integrations;
+        }
+        if (typeof data.can_create_stage === "boolean") {
+          sfState.role_privileges = sfState.role_privileges || {};
+          sfState.role_privileges.can_create_stage = data.can_create_stage;
+        }
+        if (typeof data.can_create_external_volume === "boolean") {
+          sfState.role_privileges = sfState.role_privileges || {};
+          sfState.role_privileges.can_create_external_volume = data.can_create_external_volume;
+        }
+      }
+    } catch (_e) {
+      // fallback to context state
+    }
+
+    try {
+      const volResp = await fetch(`/api/v1/snowflake/external-volumes${qs}`, { headers: headers });
+      if (volResp.ok) {
+        const volData = await volResp.json();
+        if (Array.isArray(volData.external_volumes)) {
+          _stagesVolumesState.external_volumes = volData.external_volumes;
+        }
+      }
+    } catch (_e) {
+      // ignore
+    }
+
+    _stagesVolumesState.last_loaded_flow_id = effFlowId;
+    renderSnowflakeStagesVolumesList();
+  }
+  window.fetchSnowflakeStagesAndVolumes = fetchSnowflakeStagesAndVolumes;
+
+  async function fetchStageFilesList(stageFqn) {
+    if (!stageFqn) return [];
+    const cleanFqn = String(stageFqn).replace(/^@/, "").trim();
+    const effFlowId = extractCurrentFlowId();
+    const headers = { Accept: "application/json" };
+    if (effFlowId) headers["X-Snowflake-Flow-Id"] = String(effFlowId);
+    try {
+      let resp = await fetch(`/api/v1/snowflake/stages/${encodeURIComponent(cleanFqn)}/files`, { headers: headers });
+      if (!resp.ok) {
+        resp = await fetch(`/api/v1/snowflake/stages/files?stage_fqn=${encodeURIComponent(cleanFqn)}`, {
+          headers: headers,
+        });
+      }
+      if (resp.ok) {
+        const data = await resp.json();
+        const files = Array.isArray(data.files) ? data.files : Array.isArray(data.rows) ? data.rows : [];
+        _stagesVolumesState.files_by_stage[`@${cleanFqn}`] = files;
+        return files;
+      }
+    } catch (_e) {
+      // ignore
+    }
+    return _stagesVolumesState.files_by_stage[`@${cleanFqn}`] || [];
+  }
+
+  function ensureLeftRailStagesVolumesTab() {
+    if (typeof document === "undefined" || !document.body) return;
+    const flowId = getActiveWorkflowFlowId();
+    const tracesBtn = document.querySelector(
+      '[data-testid="sidebar-nav-traces"], [data-sidebar-nav-item="traces"]'
+    );
+    const nativeStagesBtn = document.querySelector(
+      '[data-testid="sidebar-nav-stages"]:not(#sflf-rail-stages-btn-floating), [data-sidebar-nav-item="stages"]:not(#sflf-rail-stages-btn-floating)'
+    );
+
+    if (nativeStagesBtn) {
+      if (!nativeStagesBtn.id) nativeStagesBtn.id = "sflf-rail-stages-btn";
+      if (!nativeStagesBtn.getAttribute("title")) nativeStagesBtn.setAttribute("title", "Stages & Volumes");
+      if (!nativeStagesBtn.dataset.sflfStagesBound) {
+        nativeStagesBtn.dataset.sflfStagesBound = "1";
+        nativeStagesBtn.addEventListener("click", function () {
+          setTimeout(function () {
+            openSnowflakeStagesVolumesView(true);
+          }, 10);
+        });
+      }
+      const floatingFallback = document.getElementById("sflf-rail-stages-btn-floating");
+      if (floatingFallback && floatingFallback.style.display !== "none") {
+        floatingFallback.style.display = "none";
+      }
+    } else {
+      let railBtn = document.getElementById("sflf-rail-stages-btn");
+      if (!railBtn) {
+        railBtn = document.createElement("button");
+        railBtn.id = "sflf-rail-stages-btn";
+        railBtn.type = "button";
+        railBtn.setAttribute("data-testid", "sidebar-nav-stages");
+        railBtn.setAttribute("data-sidebar-nav-item", "stages");
+        railBtn.setAttribute("title", "Stages & Volumes");
+        railBtn.setAttribute("aria-label", "Stages & Volumes");
+        railBtn.style.cssText =
+          "position:fixed;left:4px;top:248px;z-index:45;width:32px;height:32px;display:none;align-items:center;justify-content:center;border-radius:6px;border:none;background:transparent;color:#64748b;cursor:pointer;transition:all 0.15s ease;";
+        railBtn.innerHTML = buildBucketSvgIcon(20);
+        railBtn.onclick = function (ev) {
+          ev.preventDefault();
+          ev.stopPropagation();
+          toggleSnowflakeStagesVolumesView();
+        };
+        document.body.appendChild(railBtn);
+      }
+      if (flowId && tracesBtn) {
+        const memBtn = document.querySelector(
+          '[data-testid="sidebar-nav-memories"], [data-sidebar-nav-item="memories"]'
+        );
+        const trRect = tracesBtn.getBoundingClientRect();
+        const memRect = memBtn ? memBtn.getBoundingClientRect() : null;
+        if (trRect && trRect.width > 0) {
+          // Place Bucket button at Traces' original vertical slot and shift Traces down by 40px so Bucket is directly above Traces
+          const targetTop = memRect && memRect.bottom > 0 ? Math.round(memRect.bottom + 8) : Math.round(trRect.top);
+          railBtn.style.left = Math.round(trRect.left) + "px";
+          railBtn.style.top = targetTop + "px";
+          const tracesLi = tracesBtn.closest("li") || tracesBtn;
+          if (tracesLi && tracesLi.style.marginTop !== "40px") {
+            tracesLi.style.marginTop = "40px";
+          }
+          railBtn.style.display = "inline-flex";
+          railBtn.style.background = _stagesVolumesViewOpen ? "rgba(41,181,232,0.16)" : "transparent";
+          railBtn.style.color = _stagesVolumesViewOpen ? "#29B5E8" : "#64748b";
+        }
+      } else if (railBtn.style.display !== "none") {
+        railBtn.style.display = "none";
+      }
+    }
+
+    // Close Stages & Volumes view automatically if user switches to another rail section or leaves /flow/<id>
+    const reactStagesHost = document.getElementById("sflf-stages-react-host");
+    if (reactStagesHost && !_stagesVolumesViewOpen) {
+      openSnowflakeStagesVolumesView(true);
+    } else if (!flowId && _stagesVolumesViewOpen) {
+      closeSnowflakeStagesVolumesView();
+    }
+  }
+  window.ensureLeftRailStagesVolumesTab = ensureLeftRailStagesVolumesTab;
+
+  // Close Stages view when any other sidebar-nav button (components, mcp, bundles, versions, agent, memories, traces) is clicked
+  document.addEventListener(
+    "click",
+    function (ev) {
+      const navBtn =
+        ev.target &&
+        ev.target.closest &&
+        ev.target.closest('[data-testid^="sidebar-nav-"], [data-sidebar-nav-item]');
+      if (!navBtn) return;
+      const item =
+        navBtn.getAttribute("data-sidebar-nav-item") ||
+        (navBtn.getAttribute("data-testid") || "").replace("sidebar-nav-", "");
+      if (item === "stages") {
+        openSnowflakeStagesVolumesView(true);
+      } else if (_stagesVolumesViewOpen) {
+        closeSnowflakeStagesVolumesView();
+      }
+    },
+    true
+  );
+
+  function toggleSnowflakeStagesVolumesView() {
+    if (_stagesVolumesViewOpen) {
+      closeSnowflakeStagesVolumesView();
+    } else {
+      openSnowflakeStagesVolumesView(true);
+    }
+  }
+  window.toggleSnowflakeStagesVolumesView = toggleSnowflakeStagesVolumesView;
+
+  function closeSnowflakeStagesVolumesView() {
+    _stagesVolumesViewOpen = false;
+    const viewEl = document.getElementById("sflf-stages-volumes-view");
+    if (viewEl) viewEl.style.display = "none";
+    const railBtn = document.getElementById("sflf-rail-stages-btn");
+    if (railBtn && railBtn.parentNode === document.body) {
+      railBtn.style.background = "transparent";
+      railBtn.style.color = "#64748b";
+    }
+  }
+  window.closeSnowflakeStagesVolumesView = closeSnowflakeStagesVolumesView;
+
+  function ensureStagesVolumesDomMounted() {
+    let viewEl = document.getElementById("sflf-stages-volumes-view");
+    if (viewEl) return viewEl;
+
+    viewEl = document.createElement("div");
+    viewEl.id = "sflf-stages-volumes-view";
+    viewEl.setAttribute("data-testid", "snowflake-stages-view");
+    viewEl.style.cssText =
+      "position:fixed;top:48px;left:40px;right:0;bottom:0;z-index:40;background:#ffffff;color:#0f172a;display:none;flex-direction:row;font-family:Inter,sans-serif;overflow:hidden;border-top:1px solid #e2e8f0;";
+
+    viewEl.innerHTML = `
+      <!-- Left Sidebar (288px, symmetrical to Memories view) -->
+      <aside style="width:288px;flex-shrink:0;border-right:1px solid #e2e8f0;background:#f8fafc;display:flex;flex-direction:column;height:100%;">
+        <div style="padding:14px 16px;border-bottom:1px solid #e2e8f0;">
+          <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;">
+            <div style="display:flex;align-items:center;gap:8px;">
+              <span style="color:#29B5E8;display:inline-flex;">${buildBucketSvgIcon(17)}</span>
+              <h2 style="margin:0;font-size:14px;font-weight:700;color:#0f172a;">Stages &amp; Volumes</h2>
+            </div>
+            <button id="sflf-stages-close-view-btn" type="button" title="Return to Flow Canvas" style="background:transparent;border:1px solid #cbd5e1;border-radius:6px;padding:2px 7px;font-size:11px;color:#475569;cursor:pointer;">✕</button>
+          </div>
+          <div style="margin-top:12px;display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+            <button id="sflf-stages-create-btn" data-testid="stages-create-btn" type="button" style="display:inline-flex;align-items:center;gap:5px;background:#ffffff;color:#0f172a;border:1px solid #cbd5e1;border-radius:10px;padding:5px 11px;font-size:12px;font-weight:600;cursor:pointer;">
+              <span>+</span><span>Create</span>
+            </button>
+            <button id="sflf-stages-plus-snowflake-btn" data-testid="stages-plus-snowflake-btn" type="button" style="display:inline-flex;align-items:center;gap:6px;background:#29B5E8;color:#ffffff;border:1px solid #29B5E8;border-radius:10px;padding:5px 11px;font-size:12px;font-weight:600;cursor:pointer;">
+              <span>+</span>${buildOfficialSnowflakeSvg("#ffffff", 13)}<span>Snowflake</span>
+            </button>
+          </div>
+        </div>
+        <div style="padding:10px 12px;border-bottom:1px solid #e2e8f0;">
+          <input id="sflf-stages-search-input" data-testid="search-stages-input" type="text" placeholder="Search stages & volumes..." style="width:100%;box-sizing:border-box;background:#ffffff;color:#0f172a;border:1px solid #cbd5e1;border-radius:8px;padding:6px 10px;font-size:12px;" />
+        </div>
+        <div id="sflf-stages-context-summary" style="padding:6px 12px;background:rgba(41,181,232,0.08);border-bottom:1px solid #e2e8f0;font-size:10.5px;color:#0369a1;font-weight:600;"></div>
+        <div id="sflf-stages-list-container" data-testid="snowflake-stages-list" style="flex:1;overflow-y:auto;padding:8px;"></div>
+      </aside>
+
+      <!-- Right Detail Panel (Stage File Browser & Native Upload to Snowflake Stage) -->
+      <main id="sflf-stage-detail-panel" data-testid="snowflake-stage-detail-panel" style="flex:1;display:flex;flex-direction:column;height:100%;overflow-y:auto;padding:20px 24px;background:#ffffff;"></main>
+    `;
+
+    document.body.appendChild(viewEl);
+
+    const closeBtn = document.getElementById("sflf-stages-close-view-btn");
+    if (closeBtn) {
+      closeBtn.onclick = function () {
+        closeSnowflakeStagesVolumesView();
+      };
+    }
+    const createBtn = document.getElementById("sflf-stages-create-btn");
+    if (createBtn) {
+      createBtn.onclick = function () {
+        openCreateSnowflakeStageModal("INTERNAL");
+      };
+    }
+    const sfCreateBtn = document.getElementById("sflf-stages-plus-snowflake-btn");
+    if (sfCreateBtn) {
+      sfCreateBtn.onclick = function () {
+        openCreateSnowflakeStageModal("INTERNAL");
+      };
+    }
+    const searchInp = document.getElementById("sflf-stages-search-input");
+    if (searchInp) {
+      searchInp.oninput = function () {
+        renderSnowflakeStagesVolumesList();
+      };
+    }
+    return viewEl;
+  }
+
+  function openSnowflakeStagesVolumesView(fetchFresh) {
+    const viewEl = ensureStagesVolumesDomMounted();
+    _stagesVolumesViewOpen = true;
+    viewEl.style.display = "flex";
+    const railBtn = document.getElementById("sflf-rail-stages-btn");
+    if (railBtn && railBtn.parentNode === document.body) {
+      railBtn.style.background = "rgba(41,181,232,0.16)";
+      railBtn.style.color = "#29B5E8";
+    }
+    renderSnowflakeStagesVolumesList();
+    if (fetchFresh !== false) {
+      fetchSnowflakeStagesAndVolumes();
+    }
+  }
+  window.openSnowflakeStagesVolumesView = openSnowflakeStagesVolumesView;
+
+  function syncStagesVolumesViewWithFlowContext(nextState) {
+    if (nextState && typeof nextState === "object") {
+      sfState = Object.assign(sfState, nextState);
+    }
+    renderSnowflakeStagesVolumesList();
+    const createModal = document.getElementById("sflf-create-stage-modal");
+    if (createModal && createModal.style.display && createModal.style.display !== "none") {
+      syncCreateStageModalWithFlowContext(sfState);
+    }
+  }
+  window.syncStagesVolumesViewWithFlowContext = syncStagesVolumesViewWithFlowContext;
+
+  function renderSnowflakeStagesVolumesList() {
+    const listContainer = document.getElementById("sflf-stages-list-container");
+    const ctxSummary = document.getElementById("sflf-stages-context-summary");
+    if (!listContainer) return;
+
+    const selCtx = (sfState && sfState.selected_context) || {};
+    const dbs = Array.isArray(selCtx.databases) ? selCtx.databases : [sfState.database || "SNOWFLAKE_LANGFLOW"];
+    if (ctxSummary) {
+      ctxSummary.textContent = `[ ❄️ Context ] Active Role: ${sfState.active_role || "ACCOUNTADMIN"} · Databases: ${
+        dbs.length ? dbs.join(", ") : "None"
+      }`;
+    }
+
+    const searchInp = document.getElementById("sflf-stages-search-input");
+    const q = searchInp ? (searchInp.value || "").trim().toLowerCase() : "";
+    const collected = collectContextStagesAndVolumes(sfState);
+    const allItems = collected.stages.concat(collected.external_volumes).filter(function (item) {
+      if (!q) return true;
+      const hay = `${item.name || ""} ${item.stage_fqn || ""} ${item.stage_type || ""} ${
+        item.cloud_provider || ""
+      } ${item.storage_base_url || ""}`.toLowerCase();
+      return hay.includes(q);
+    });
+
+    if (
+      _selectedStageOrVolumeKey &&
+      !allItems.some(function (it) {
+        return it.key === _selectedStageOrVolumeKey;
+      })
+    ) {
+      _selectedStageOrVolumeKey = allItems.length > 0 ? allItems[0].key : null;
+    } else if (!_selectedStageOrVolumeKey && allItems.length > 0) {
+      _selectedStageOrVolumeKey = allItems[0].key;
+    }
+
+    if (allItems.length === 0) {
+      listContainer.innerHTML = `
+        <div style="padding:24px 12px;text-align:center;color:#64748b;font-size:12px;">
+          <div style="margin-bottom:8px;color:#94a3b8;">${buildBucketSvgIcon(28)}</div>
+          <div style="font-weight:600;color:#334155;">No stages or volumes in active [ ❄️ Context ]</div>
+          <div style="margin-top:4px;font-size:11px;">Select a schema in [ ❄️ Context ] or click <strong>+ ❄️ Snowflake</strong> to create a Stage or External Volume.</div>
+        </div>
+      `;
+      renderSelectedStageOrVolumeDetail(null);
+      return;
+    }
+
+    listContainer.innerHTML = allItems
+      .map(function (item) {
+        const isSel = item.key === _selectedStageOrVolumeKey;
+        const badgeColor =
+          item.stage_type === "EXTERNAL_VOLUME"
+            ? "#7c3aed"
+            : item.stage_type === "EXTERNAL"
+              ? "#0284c7"
+              : "#059669";
+        const subtitle =
+          item.stage_type === "EXTERNAL_VOLUME"
+            ? `${item.storage_provider || "S3"} · ${item.storage_base_url || ""}`
+            : `${item.stage_fqn} · ${item.encryption || "SNOWFLAKE_SSE"}`;
+        return `
+          <div class="sflf-stage-list-item" data-stage-key="${item.key}" style="padding:10px 12px;margin-bottom:6px;border-radius:8px;cursor:pointer;border:1px solid ${
+            isSel ? "#29B5E8" : "#e2e8f0"
+          };background:${isSel ? "rgba(41,181,232,0.10)" : "#ffffff"};display:flex;flex-direction:column;gap:4px;">
+            <div style="display:flex;align-items:center;justify-content:space-between;gap:6px;">
+              <strong style="font-size:12.5px;color:#0f172a;word-break:break-all;">${
+                item.stage_type === "EXTERNAL_VOLUME" ? item.name : item.stage_fqn
+              }</strong>
+              <span style="background:rgba(41,181,232,0.12);color:${badgeColor};border:1px solid ${badgeColor};border-radius:999px;padding:1px 7px;font-size:9.5px;font-weight:700;white-space:nowrap;">${
+                item.stage_type
+              }</span>
+            </div>
+            <div style="font-size:10.5px;color:#64748b;font-family:'JetBrains Mono',monospace;word-break:break-all;">${subtitle}</div>
+          </div>
+        `;
+      })
+      .join("");
+
+    Array.from(listContainer.querySelectorAll(".sflf-stage-list-item")).forEach(function (el) {
+      el.onclick = function () {
+        const k = el.getAttribute("data-stage-key");
+        _selectedStageOrVolumeKey = k;
+        renderSnowflakeStagesVolumesList();
+      };
+    });
+
+    const selectedObj =
+      allItems.find(function (it) {
+        return it.key === _selectedStageOrVolumeKey;
+      }) || allItems[0];
+    renderSelectedStageOrVolumeDetail(selectedObj);
+  }
+
+  async function renderSelectedStageOrVolumeDetail(item) {
+    const panel = document.getElementById("sflf-stage-detail-panel");
+    if (!panel) return;
+    if (!item) {
+      panel.innerHTML = `
+        <div style="display:flex;flex-direction:column;align-items:center;justify-content:center;height:100%;color:#64748b;text-align:center;">
+          ${buildBucketSvgIcon(42)}
+          <h3 style="margin:12px 0 4px;font-size:15px;color:#0f172a;">No Stage or External Volume Selected</h3>
+          <p style="margin:0;font-size:12.5px;">Select a Stage or External Volume from the left sidebar or click <strong>+ ❄️ Snowflake</strong> to provision one.</p>
+        </div>
+      `;
+      return;
+    }
+
+    if (item.stage_type === "EXTERNAL_VOLUME") {
+      panel.innerHTML = `
+        <div style="display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid #e2e8f0;padding-bottom:14px;margin-bottom:16px;">
+          <div>
+            <div style="display:flex;align-items:center;gap:8px;">
+              <h3 style="margin:0;font-size:17px;font-weight:700;color:#0f172a;">${item.name}</h3>
+              <span style="background:#f3e8ff;color:#7c3aed;border:1px solid #7c3aed;border-radius:999px;padding:2px 9px;font-size:11px;font-weight:700;">EXTERNAL_VOLUME</span>
+            </div>
+            <div style="margin-top:4px;font-size:12px;color:#475569;">Account-level Snowflake External Volume for Apache Iceberg Tables</div>
+          </div>
+        </div>
+        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px;background:#f8fafc;border:1px solid #e2e8f0;border-radius:10px;padding:14px;">
+          <div><strong style="font-size:11px;color:#64748b;display:block;">Type</strong><span style="font-size:12.5px;font-weight:600;">EXTERNAL_VOLUME</span></div>
+          <div><strong style="font-size:11px;color:#64748b;display:block;">Cloud Provider</strong><span style="font-size:12.5px;font-weight:600;">${item.storage_provider || "S3"}</span></div>
+          <div><strong style="font-size:11px;color:#64748b;display:block;">Storage Base URL</strong><code style="font-size:11.5px;">${item.storage_base_url || ""}</code></div>
+          <div><strong style="font-size:11px;color:#64748b;display:block;">Allow Writes</strong><span style="font-size:12.5px;font-weight:600;">${item.allow_writes !== false ? "TRUE" : "FALSE"}</span></div>
+          <div><strong style="font-size:11px;color:#64748b;display:block;">Encryption</strong><span style="font-size:12.5px;font-weight:600;">${item.encryption || "AWS_SSE_S3"}</span></div>
+        </div>
+      `;
+      return;
+    }
+
+    const stageFqn = item.stage_fqn || `@${item.database}.${item.schema}.${item.name}`;
+    const cachedFiles = _stagesVolumesState.files_by_stage[stageFqn] || [];
+
+    panel.innerHTML = `
+      <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px;border-bottom:1px solid #e2e8f0;padding-bottom:14px;margin-bottom:14px;">
+        <div>
+          <div style="display:flex;align-items:center;gap:8px;">
+            <h3 style="margin:0;font-size:16px;font-weight:700;color:#0f172a;font-family:'JetBrains Mono',monospace;">${stageFqn}</h3>
+            <span style="background:rgba(41,181,232,0.14);color:#0284c7;border:1px solid #29B5E8;border-radius:999px;padding:2px 9px;font-size:10.5px;font-weight:700;">Type: ${item.stage_type}</span>
+          </div>
+          <div style="margin-top:4px;font-size:11.5px;color:#475569;">
+            Database.Schema: <code>${item.database}.${item.schema}</code> · Encryption: <code>${item.encryption || "SNOWFLAKE_SSE"}</code> · Directory Table: <code>${item.directory_enabled !== false ? "ENABLED" : "DISABLED"}</code>
+            ${item.url ? ` · Cloud URL: <code>${item.url}</code>` : ""}
+            ${item.storage_integration ? ` · Storage Integration: <code>${item.storage_integration}</code>` : ""}
+          </div>
+        </div>
+        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+          <input id="sflf-stage-upload-subpath" type="text" placeholder="Optional subpath (e.g. docs/)" style="background:#ffffff;color:#0f172a;border:1px solid #cbd5e1;border-radius:8px;padding:6px 10px;font-size:11.5px;width:170px;" />
+          <input id="sflf-stage-upload-input" type="file" multiple style="display:none;" />
+          <button id="sflf-stage-upload-file-btn" data-testid="stage-upload-file-btn" type="button" style="display:inline-flex;align-items:center;gap:6px;background:#29B5E8;color:#ffffff;border:1px solid #29B5E8;border-radius:8px;padding:6px 12px;font-size:12px;font-weight:600;cursor:pointer;">
+            <span>Upload Files to Stage</span>
+          </button>
+          <button id="sflf-stage-refresh-btn" data-testid="stage-refresh-btn" type="button" style="background:#f8fafc;color:#0f172a;border:1px solid #cbd5e1;border-radius:8px;padding:6px 10px;font-size:12px;font-weight:600;cursor:pointer;">
+            Refresh Stage
+          </button>
+          <button id="sflf-stage-copy-fqn-btn" type="button" style="background:#f8fafc;color:#0f172a;border:1px solid #cbd5e1;border-radius:8px;padding:6px 10px;font-size:12px;cursor:pointer;">
+            Copy @stage/path
+          </button>
+        </div>
+      </div>
+
+      <!-- Drag-and-Drop Stage Upload Zone -->
+      <div id="sflf-stage-dropzone" data-testid="stage-upload-dropzone" style="border:2px dashed #94a3b8;border-radius:10px;padding:12px 16px;margin-bottom:14px;background:#f8fafc;text-align:center;font-size:12px;color:#475569;cursor:pointer;">
+        Drag &amp; drop files here or click <strong>Upload Files to Stage</strong> to run governed <code>PUT</code> + <code>ALTER STAGE ${stageFqn.replace(/^@/, "")} REFRESH</code>
+      </div>
+
+      <div id="sflf-stage-file-preview-box" style="display:none;margin-bottom:14px;background:#0f172a;color:#e2e8f0;border-radius:8px;padding:10px 14px;font-family:'JetBrains Mono',monospace;font-size:11px;white-space:pre-wrap;"></div>
+
+      <!-- Stage File Browser Table -->
+      <div style="flex:1;overflow-x:auto;">
+        <table id="sflf-stage-files-table" data-testid="snowflake-stage-files-table" style="width:100%;border-collapse:collapse;font-size:12px;">
+          <thead>
+            <tr style="background:#f8fafc;text-align:left;color:#475569;">
+              <th style="padding:8px 10px;border-bottom:1px solid #cbd5e1;">Name / Path</th>
+              <th style="padding:8px 10px;border-bottom:1px solid #cbd5e1;">Size</th>
+              <th style="padding:8px 10px;border-bottom:1px solid #cbd5e1;">Last Modified</th>
+              <th style="padding:8px 10px;border-bottom:1px solid #cbd5e1;">MD5</th>
+              <th style="padding:8px 10px;border-bottom:1px solid #cbd5e1;">Actions</th>
+            </tr>
+          </thead>
+          <tbody id="sflf-stage-files-tbody">
+            ${renderStageFileRowsHtml(stageFqn, cachedFiles)}
+          </tbody>
+        </table>
+      </div>
+    `;
+
+    const fileInput = document.getElementById("sflf-stage-upload-input");
+    const uploadBtn = document.getElementById("sflf-stage-upload-file-btn");
+    const dropzone = document.getElementById("sflf-stage-dropzone");
+    if (uploadBtn && fileInput) {
+      uploadBtn.onclick = function () {
+        fileInput.click();
+      };
+      fileInput.onchange = function () {
+        if (fileInput.files && fileInput.files.length > 0) {
+          uploadFilesToSnowflakeStage(item, Array.from(fileInput.files));
+        }
+      };
+    }
+    if (dropzone && fileInput) {
+      dropzone.onclick = function () {
+        fileInput.click();
+      };
+      dropzone.ondragover = function (ev) {
+        ev.preventDefault();
+        dropzone.style.borderColor = "#29B5E8";
+      };
+      dropzone.ondragleave = function () {
+        dropzone.style.borderColor = "#94a3b8";
+      };
+      dropzone.ondrop = function (ev) {
+        ev.preventDefault();
+        dropzone.style.borderColor = "#94a3b8";
+        if (ev.dataTransfer && ev.dataTransfer.files && ev.dataTransfer.files.length > 0) {
+          uploadFilesToSnowflakeStage(item, Array.from(ev.dataTransfer.files));
+        }
+      };
+    }
+
+    const refreshBtn = document.getElementById("sflf-stage-refresh-btn");
+    if (refreshBtn) {
+      refreshBtn.onclick = async function () {
+        try {
+          await fetch("/api/v1/snowflake/stages/refresh", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              database: item.database,
+              schema: item.schema,
+              stage_name: item.name,
+              stage_fqn: stageFqn,
+            }),
+          });
+        } catch (_e) {}
+        const freshFiles = await fetchStageFilesList(stageFqn);
+        const tbody = document.getElementById("sflf-stage-files-tbody");
+        if (tbody) {
+          tbody.innerHTML = renderStageFileRowsHtml(stageFqn, freshFiles);
+          bindStageFileRowActions(item, stageFqn);
+        }
+      };
+    }
+
+    const copyBtn = document.getElementById("sflf-stage-copy-fqn-btn");
+    if (copyBtn) {
+      copyBtn.onclick = function () {
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          navigator.clipboard.writeText(stageFqn);
+        }
+        showDenialOrStatusBanner("ok", "STAGE_PATH_COPIED", `Copied ${stageFqn} to clipboard`);
+      };
+    }
+
+    bindStageFileRowActions(item, stageFqn);
+    const files = await fetchStageFilesList(stageFqn);
+    const tbody = document.getElementById("sflf-stage-files-tbody");
+    if (tbody) {
+      tbody.innerHTML = renderStageFileRowsHtml(stageFqn, files);
+      bindStageFileRowActions(item, stageFqn);
+    }
+  }
+
+  function renderStageFileRowsHtml(stageFqn, files) {
+    if (!Array.isArray(files) || files.length === 0) {
+      return `<tr><td colspan="5" style="padding:16px;text-align:center;color:#64748b;">No files found in ${stageFqn}. Click <strong>Upload Files to Stage</strong> to upload files.</td></tr>`;
+    }
+    return files
+      .map(function (f) {
+        const fName = f.name || f.NAME || f.file_name || "";
+        const fSize = f.size !== undefined ? f.size : f.SIZE !== undefined ? f.SIZE : 0;
+        const fMod = f.last_modified || f.LAST_MODIFIED || "—";
+        const fMd5 = f.md5 || f.MD5 || "—";
+        return `
+          <tr style="border-bottom:1px solid #f1f5f9;">
+            <td style="padding:8px 10px;font-family:'JetBrains Mono',monospace;font-size:11.5px;color:#0f172a;">${fName}</td>
+            <td style="padding:8px 10px;color:#475569;">${fSize} B</td>
+            <td style="padding:8px 10px;color:#475569;">${fMod}</td>
+            <td style="padding:8px 10px;font-family:'JetBrains Mono',monospace;font-size:10.5px;color:#64748b;">${fMd5}</td>
+            <td style="padding:8px 10px;display:flex;gap:6px;">
+              <button type="button" class="sflf-stage-row-btn" data-action="preview-file" data-file-path="${fName}" style="background:#f8fafc;border:1px solid #cbd5e1;border-radius:6px;padding:3px 8px;font-size:11px;cursor:pointer;">Preview / Read</button>
+              <button type="button" class="sflf-stage-row-btn" data-action="copy-file-path" data-file-path="${fName}" style="background:#f8fafc;border:1px solid #cbd5e1;border-radius:6px;padding:3px 8px;font-size:11px;cursor:pointer;">Copy @stage/path</button>
+              <button type="button" class="sflf-stage-row-btn" data-action="delete-file" data-file-path="${fName}" style="background:#fef2f2;color:#b91c1c;border:1px solid #fecaca;border-radius:6px;padding:3px 8px;font-size:11px;cursor:pointer;">Delete File</button>
+            </td>
+          </tr>
+        `;
+      })
+      .join("");
+  }
+
+  function bindStageFileRowActions(stageItem, stageFqn) {
+    const tbody = document.getElementById("sflf-stage-files-tbody");
+    if (!tbody) return;
+    const cleanFqn = String(stageFqn).replace(/^@/, "");
+    Array.from(tbody.querySelectorAll(".sflf-stage-row-btn")).forEach(function (btn) {
+      btn.onclick = async function () {
+        const action = btn.getAttribute("data-action");
+        const rawPath = btn.getAttribute("data-file-path") || "";
+        const relPath = rawPath.replace(/^@[^/]+\//, "").replace(new RegExp(`^${stageItem.name}/`, "i"), "");
+        const fullStagePath = `@${cleanFqn}/${relPath}`;
+        if (action === "copy-file-path") {
+          if (navigator.clipboard && navigator.clipboard.writeText) {
+            navigator.clipboard.writeText(fullStagePath);
+          }
+          showDenialOrStatusBanner("ok", "COPIED", `Copied ${fullStagePath}`);
+        } else if (action === "preview-file") {
+          const previewBox = document.getElementById("sflf-stage-file-preview-box");
+          if (previewBox) {
+            previewBox.style.display = "block";
+            previewBox.textContent = `Stage File Reference: ${fullStagePath}\nSQL Read: SELECT $1 FROM ${fullStagePath} (FILE_FORMAT => (TYPE = 'CSV'))\nCortex Parse: SELECT SNOWFLAKE.CORTEX.AI_PARSE_DOCUMENT(TO_FILE('${stageFqn}', '${relPath}'), {'mode': 'LAYOUT'})`;
+          }
+        } else if (action === "delete-file") {
+          try {
+            let delResp = await fetch(
+              `/api/v1/snowflake/stages/${encodeURIComponent(cleanFqn)}/files?file_path=${encodeURIComponent(relPath)}`,
+              { method: "DELETE" }
+            );
+            if (!delResp.ok) {
+              delResp = await fetch(
+                `/api/v1/snowflake/stages/files?stage_fqn=${encodeURIComponent(cleanFqn)}&file_path=${encodeURIComponent(relPath)}`,
+                { method: "DELETE" }
+              );
+            }
+            if (delResp.ok) {
+              showDenialOrStatusBanner("ok", "FILE_REMOVED", `Removed ${fullStagePath}`);
+              const fresh = await fetchStageFilesList(stageFqn);
+              tbody.innerHTML = renderStageFileRowsHtml(stageFqn, fresh);
+              bindStageFileRowActions(stageItem, stageFqn);
+            }
+          } catch (_e) {}
+        }
+      };
+    });
+  }
+
+  async function uploadFilesToSnowflakeStage(stageItem, fileList) {
+    if (!stageItem || !Array.isArray(fileList) || fileList.length === 0) return;
+    const subpathInp = document.getElementById("sflf-stage-upload-subpath");
+    const subpath = subpathInp ? (subpathInp.value || "").trim().replace(/^\/+|\/+$/g, "") : "";
+    const stageFqn = stageItem.stage_fqn || `@${stageItem.database}.${stageItem.schema}.${stageItem.name}`;
+
+    for (let i = 0; i < fileList.length; i += 1) {
+      const file = fileList[i];
+      const base64Content = await new Promise(function (resolve) {
+        const reader = new FileReader();
+        reader.onload = function () {
+          const res = String(reader.result || "");
+          const commaIdx = res.indexOf(",");
+          resolve(commaIdx !== -1 ? res.slice(commaIdx + 1) : res);
+        };
+        reader.onerror = function () {
+          resolve("");
+        };
+        reader.readAsDataURL(file);
+      });
+
+      try {
+        const resp = await fetch("/api/v1/snowflake/stages/upload", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            database: stageItem.database,
+            schema: stageItem.schema,
+            stage_name: stageItem.name,
+            stage_fqn: stageFqn,
+            subpath: subpath,
+            file_name: file.name,
+            content_base64: base64Content,
+            flow_id: extractCurrentFlowId(),
+          }),
+        });
+        const data = await resp.json();
+        if (!resp.ok || data.ok === false) {
+          showDenialOrStatusBanner("error", data.error_code || "STAGE_UPLOAD_FAILED", data.message || "Upload failed");
+        } else {
+          showDenialOrStatusBanner(
+            "ok",
+            "STAGE_FILE_UPLOADED",
+            `Uploaded ${file.name} to ${stageFqn}${subpath ? "/" + subpath : ""}`
+          );
+        }
+      } catch (err) {
+        showDenialOrStatusBanner("error", "STAGE_UPLOAD_ERROR", String(err));
+      }
+    }
+
+    const freshFiles = await fetchStageFilesList(stageFqn);
+    const tbody = document.getElementById("sflf-stage-files-tbody");
+    if (tbody) {
+      tbody.innerHTML = renderStageFileRowsHtml(stageFqn, freshFiles);
+      bindStageFileRowActions(stageItem, stageFqn);
+    }
+  }
+  window.uploadFilesToSnowflakeStage = uploadFilesToSnowflakeStage;
+
+  // =========================================================================
+  // W2-R5-05: `+ Create Stage / Volume` Wizard Modal (`id="sflf-create-stage-modal"`, `data-testid="create-snowflake-stage-modal"`)
+  // =========================================================================
+  function buildStageOrVolumeWizardDdlPreview() {
+    const kindEl = document.getElementById("sflf-stage-wiz-kind");
+    const kind = (kindEl && kindEl.value) || "INTERNAL";
+    const modeEl = document.getElementById("sflf-stage-wiz-create-mode");
+    const createMode = (modeEl && modeEl.value) || "IF_NOT_EXISTS";
+    const dbEl = document.getElementById("sflf-stage-wiz-db");
+    const newDbEl = document.getElementById("sflf-stage-wiz-new-db");
+    const schEl = document.getElementById("sflf-stage-wiz-schema");
+    const newSchEl = document.getElementById("sflf-stage-wiz-new-schema");
+    const db =
+      dbEl && dbEl.value === "__CREATE_NEW_DB__"
+        ? (newDbEl && newDbEl.value.trim()) || "NEW_DB"
+        : (dbEl && dbEl.value) || sfState.database || "SNOWFLAKE_LANGFLOW";
+    const sch =
+      schEl && schEl.value === "__CREATE_NEW_SCHEMA__"
+        ? (newSchEl && newSchEl.value.trim()) || "NEW_SCHEMA"
+        : (schEl && schEl.value) || sfState.schema || "CORE";
+
+    if (kind === "EXTERNAL_VOLUME") {
+      const volName = ((document.getElementById("sflf-stage-wiz-vol-name") || {}).value || "ICEBERG_EXT_VOL").trim();
+      const allowWrites = ((document.getElementById("sflf-stage-wiz-vol-allow-writes") || {}).value || "TRUE") === "TRUE";
+      const locName = ((document.getElementById("sflf-stage-wiz-vol-loc-name") || {}).value || "primary_loc").trim();
+      const provider = ((document.getElementById("sflf-stage-wiz-vol-provider") || {}).value || "S3").trim();
+      const baseUrl = ((document.getElementById("sflf-stage-wiz-vol-base-url") || {}).value || "s3://my-iceberg-bucket/warehouse/").trim();
+      const roleArn = ((document.getElementById("sflf-stage-wiz-vol-aws-role-arn") || {}).value || "").trim();
+      const extId = ((document.getElementById("sflf-stage-wiz-vol-aws-external-id") || {}).value || "").trim();
+      const apArn = ((document.getElementById("sflf-stage-wiz-vol-aws-access-point-arn") || {}).value || "").trim();
+      const tenantId = ((document.getElementById("sflf-stage-wiz-vol-azure-tenant-id") || {}).value || "").trim();
+      const storageEndpoint = ((document.getElementById("sflf-stage-wiz-vol-storage-endpoint") || {}).value || "").trim();
+      const encType = ((document.getElementById("sflf-stage-wiz-vol-encryption") || {}).value || "NONE").trim();
+      const kmsKey = ((document.getElementById("sflf-stage-wiz-vol-kms-key") || {}).value || "").trim();
+      const usePrivatelink = ((document.getElementById("sflf-stage-wiz-vol-privatelink") || {}).value || "FALSE") === "TRUE";
+      const comment = ((document.getElementById("sflf-stage-wiz-comment") || {}).value || "").trim();
+
+      const createVerb =
+        createMode === "OR_REPLACE"
+          ? "CREATE OR REPLACE EXTERNAL VOLUME"
+          : "CREATE EXTERNAL VOLUME IF NOT EXISTS";
+      const locParts = [
+        `NAME = '${locName}'`,
+        `STORAGE_PROVIDER = '${provider}'`,
+        `STORAGE_BASE_URL = '${baseUrl}'`,
+      ];
+      if (roleArn) locParts.push(`STORAGE_AWS_ROLE_ARN = '${roleArn}'`);
+      if (extId) locParts.push(`STORAGE_AWS_EXTERNAL_ID = '${extId}'`);
+      if (apArn) locParts.push(`STORAGE_AWS_ACCESS_POINT_ARN = '${apArn}'`);
+      if (tenantId) locParts.push(`AZURE_TENANT_ID = '${tenantId}'`);
+      if (storageEndpoint) locParts.push(`STORAGE_ENDPOINT = '${storageEndpoint}'`);
+      if (encType && encType !== "NONE") {
+        locParts.push(
+          kmsKey
+            ? `ENCRYPTION = (TYPE = '${encType}' KMS_KEY_ID = '${kmsKey}')`
+            : `ENCRYPTION = (TYPE = '${encType}')`
+        );
+      }
+      if (usePrivatelink) locParts.push("USE_PRIVATELINK_ENDPOINT = TRUE");
+      let ddl = `${createVerb} ${volName}\n  STORAGE_LOCATIONS = (\n    (\n      ${locParts.join("\n      ")}\n    )\n  )\n  ALLOW_WRITES = ${allowWrites ? "TRUE" : "FALSE"}`;
+      if (comment) {
+        ddl += `\n  COMMENT = '${comment.replace(/'/g, "''")}'`;
+      }
+      return ddl + ";";
+    }
+
+    const stageName = ((document.getElementById("sflf-stage-wiz-name") || {}).value || "DOCS_STAGE").trim();
+    const createPrefix =
+      createMode === "OR_REPLACE"
+        ? `CREATE OR REPLACE STAGE ${db}.${sch}.${stageName}`
+        : createMode === "TEMPORARY"
+          ? `CREATE TEMPORARY STAGE IF NOT EXISTS ${db}.${sch}.${stageName}`
+          : `CREATE STAGE IF NOT EXISTS ${db}.${sch}.${stageName}`;
+    const dirEnable = ((document.getElementById("sflf-stage-wiz-dir-enable") || {}).value || "TRUE") === "TRUE";
+    const dirAutoRefresh = ((document.getElementById("sflf-stage-wiz-dir-autorefresh") || {}).value || "FALSE") === "TRUE";
+    const notifInt = ((document.getElementById("sflf-stage-wiz-notif-int") || {}).value || "").trim();
+    const fileFmt = ((document.getElementById("sflf-stage-wiz-file-format") || {}).value || "NONE").trim();
+    const comment = ((document.getElementById("sflf-stage-wiz-comment") || {}).value || "").trim();
+
+    if (kind === "INTERNAL") {
+      const intEnc = ((document.getElementById("sflf-stage-wiz-internal-encryption") || {}).value || "SNOWFLAKE_SSE").trim();
+      const clauses = [`ENCRYPTION = (TYPE = '${intEnc}')`];
+      if (dirEnable) {
+        clauses.push(`DIRECTORY = (ENABLE = TRUE${dirAutoRefresh ? " AUTO_REFRESH = TRUE" : ""})`);
+      }
+      if (fileFmt && fileFmt !== "NONE") {
+        clauses.push(`FILE_FORMAT = (TYPE = '${fileFmt}')`);
+      }
+      if (comment) {
+        clauses.push(`COMMENT = '${comment.replace(/'/g, "''")}'`);
+      }
+      return `${createPrefix}\n  ${clauses.join("\n  ")};`;
+    }
+
+    // EXTERNAL STAGE (S3 / GCS / AZURE / S3COMPAT)
+    const extUrl = ((document.getElementById("sflf-stage-wiz-ext-url") || {}).value || "s3://enterprise-bucket/docs/").trim();
+    const authMode = ((document.getElementById("sflf-stage-wiz-auth-mode") || {}).value || "STORAGE_INTEGRATION").trim();
+    const storageInt = ((document.getElementById("sflf-stage-wiz-storage-integration") || {}).value || "S3_DOCS_INT").trim();
+    const credsRaw = ((document.getElementById("sflf-stage-wiz-credentials") || {}).value || "").trim();
+    const extEnc = ((document.getElementById("sflf-stage-wiz-ext-encryption") || {}).value || "AWS_SSE_S3").trim();
+    const kmsKey = ((document.getElementById("sflf-stage-wiz-ext-kms-key") || {}).value || "").trim();
+    const s3CompatEndpoint = ((document.getElementById("sflf-stage-wiz-s3compat-endpoint") || {}).value || "").trim();
+    const usePrivatelink = ((document.getElementById("sflf-stage-wiz-ext-privatelink") || {}).value || "FALSE") === "TRUE";
+
+    const extClauses = [`URL = '${extUrl}'`];
+    if (s3CompatEndpoint && extUrl.toLowerCase().startsWith("s3compat://")) {
+      extClauses.push(`ENDPOINT = '${s3CompatEndpoint}'`);
+    }
+    if (authMode === "STORAGE_INTEGRATION" && storageInt) {
+      extClauses.push(`STORAGE_INTEGRATION = ${storageInt}`);
+    } else if (authMode === "CREDENTIALS" && credsRaw) {
+      extClauses.push(`CREDENTIALS = (${credsRaw})`);
+    }
+    if (extEnc && extEnc !== "NONE") {
+      extClauses.push(
+        kmsKey
+          ? `ENCRYPTION = (TYPE = '${extEnc}' KMS_KEY_ID = '${kmsKey}')`
+          : `ENCRYPTION = (TYPE = '${extEnc}')`
+      );
+    }
+    if (usePrivatelink) {
+      extClauses.push("USE_PRIVATELINK_ENDPOINT = TRUE");
+    }
+    if (dirEnable) {
+      let dirSpec = `ENABLE = TRUE${dirAutoRefresh ? " AUTO_REFRESH = TRUE" : ""}`;
+      if (notifInt) dirSpec += ` NOTIFICATION_INTEGRATION = '${notifInt}'`;
+      extClauses.push(`DIRECTORY = (${dirSpec})`);
+    }
+    if (fileFmt && fileFmt !== "NONE") {
+      extClauses.push(`FILE_FORMAT = (TYPE = '${fileFmt}')`);
+    }
+    if (comment) {
+      extClauses.push(`COMMENT = '${comment.replace(/'/g, "''")}'`);
+    }
+    return `${createPrefix}\n  ${extClauses.join("\n  ")};`;
+  }
+
+  function syncCreateStageModalWithFlowContext(ctxState) {
+    const activeCtx = ctxState || sfState || {};
+    const selCtx = activeCtx.selected_context || {};
+    const privs = computeEffectivePrivileges();
+    const dbs =
+      Array.isArray(selCtx.databases) && selCtx.databases.length > 0
+        ? selCtx.databases.slice()
+        : [activeCtx.database || "SNOWFLAKE_LANGFLOW"];
+    const schemasMap = selCtx.schemas_by_db || {};
+
+    const dbSel = document.getElementById("sflf-stage-wiz-db");
+    const schSel = document.getElementById("sflf-stage-wiz-schema");
+    if (dbSel) {
+      const prevDb = dbSel.value;
+      const opts = dbs.map(function (d) {
+        return `<option value="${d}">${d}</option>`;
+      });
+      if (privs.can_create_database) {
+        opts.push('<option value="__CREATE_NEW_DB__">+ Create New Database...</option>');
+      }
+      dbSel.innerHTML = opts.join("");
+      if (prevDb && dbs.indexOf(prevDb) !== -1) {
+        dbSel.value = prevDb;
+      } else {
+        dbSel.value = dbs[0] || "SNOWFLAKE_LANGFLOW";
+      }
+    }
+    if (schSel) {
+      const curDb = (dbSel && dbSel.value) || dbs[0] || "SNOWFLAKE_LANGFLOW";
+      const schList =
+        Array.isArray(schemasMap[curDb]) && schemasMap[curDb].length > 0
+          ? schemasMap[curDb].slice()
+          : [activeCtx.schema || "CORE"];
+      const prevSch = schSel.value;
+      const schOpts = schList.map(function (s) {
+        return `<option value="${s}">${s}</option>`;
+      });
+      if (privs.can_create_schema) {
+        schOpts.push('<option value="__CREATE_NEW_SCHEMA__">+ Create New Schema...</option>');
+      }
+      schSel.innerHTML = schOpts.join("");
+      if (prevSch && schList.indexOf(prevSch) !== -1) {
+        schSel.value = prevSch;
+      } else {
+        schSel.value = schList[0] || "CORE";
+      }
+    }
+
+    const roleBadge = document.getElementById("sflf-stage-wiz-role-badge");
+    if (roleBadge) {
+      roleBadge.textContent = `Active Role: ${activeCtx.active_role || "ACCOUNTADMIN"}`;
+    }
+
+    const extVolBanner = document.getElementById("sflf-extvol-privilege-banner");
+    const kindEl = document.getElementById("sflf-stage-wiz-kind");
+    const curKind = (kindEl && kindEl.value) || "INTERNAL";
+    if (extVolBanner) {
+      if (curKind === "EXTERNAL_VOLUME" && !privs.can_create_external_volume) {
+        extVolBanner.style.display = "block";
+        extVolBanner.textContent = `Active role ${activeCtx.active_role || "PUBLIC"} does not have CREATE EXTERNAL VOLUME privilege`;
+      } else if (curKind !== "EXTERNAL_VOLUME" && !privs.can_create_stage) {
+        extVolBanner.style.display = "block";
+        extVolBanner.textContent = `Active role ${activeCtx.active_role || "PUBLIC"} does not have CREATE STAGE privilege`;
+      } else {
+        extVolBanner.style.display = "none";
+      }
+    }
+
+    const previewEl = document.getElementById("sflf-stage-wiz-ddl-preview");
+    if (previewEl) {
+      previewEl.textContent = buildStageOrVolumeWizardDdlPreview();
+    }
+  }
+  window.syncCreateStageModalWithFlowContext = syncCreateStageModalWithFlowContext;
+
+  function openCreateSnowflakeStageModal(initialKind) {
+    if (typeof document === "undefined" || !document.body) return;
+    let modal = document.getElementById("sflf-create-stage-modal");
+    if (!modal) {
+      modal = document.createElement("div");
+      modal.id = "sflf-create-stage-modal";
+      modal.setAttribute("data-testid", "create-snowflake-stage-modal");
+      modal.style.cssText =
+        "position:fixed;inset:0;z-index:100001;background:rgba(15,23,42,0.55);display:none;align-items:center;justify-content:center;padding:20px;font-family:Inter,sans-serif;";
+
+      modal.innerHTML = `
+        <div style="background:#ffffff;color:#0f172a;border:1px solid #cbd5e1;border-radius:14px;width:min(760px,96vw);max-height:90vh;display:flex;flex-direction:column;box-shadow:0 20px 50px rgba(15,23,42,0.3);overflow:hidden;">
+          <div style="padding:16px 20px;border-bottom:1px solid #e2e8f0;display:flex;align-items:center;justify-content:space-between;background:#f8fafc;">
+            <div style="display:flex;align-items:center;gap:10px;">
+              ${buildOfficialSnowflakeSvg("#29B5E8", 20)}
+              <div>
+                <h3 style="margin:0;font-size:15px;font-weight:700;color:#0f172a;">Create Snowflake Stage or External Volume</h3>
+                <div style="font-size:11.5px;color:#475569;">Governed SQL provisioning integrated with active workflow [ ❄️ Context ]</div>
+              </div>
+            </div>
+            <div style="display:flex;align-items:center;gap:10px;">
+              <span id="sflf-stage-wiz-role-badge" style="background:rgba(41,181,232,0.14);color:#0284c7;border:1px solid #29B5E8;border-radius:999px;padding:3px 10px;font-size:11px;font-weight:700;"></span>
+              <button id="sflf-stage-wiz-close-btn" type="button" style="background:transparent;border:none;font-size:16px;color:#64748b;cursor:pointer;">✕</button>
+            </div>
+          </div>
+
+          <div style="padding:18px 20px;overflow-y:auto;display:flex;flex-direction:column;gap:14px;">
+            <div id="sflf-extvol-privilege-banner" data-testid="external-volume-privilege-banner" style="display:none;background:#fef2f2;color:#991b1b;border:1px solid #f87171;border-radius:8px;padding:10px 12px;font-size:12px;font-weight:600;"></div>
+
+            <!-- Object Type Selector (Internal Stage | External Stage | External Volume) -->
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
+              <label style="display:flex;flex-direction:column;gap:4px;font-size:12px;font-weight:600;">
+                <span>1. Infrastructure Object Type</span>
+                <select id="sflf-stage-wiz-kind" data-testid="stage-wizard-kind-select" style="background:#ffffff;color:#0f172a;border:1px solid #cbd5e1;border-radius:8px;padding:7px 10px;font-size:12.5px;">
+                  <option value="INTERNAL">Option 1 — Internal Stage (SNOWFLAKE_SSE / SNOWFLAKE_FULL)</option>
+                  <option value="EXTERNAL">Option 2 — External Stage (S3 / GCS / Azure / S3-Compatible)</option>
+                  <option value="EXTERNAL_VOLUME">Option 3 — External Volume (Account-Level for Iceberg)</option>
+                </select>
+              </label>
+              <label style="display:flex;flex-direction:column;gap:4px;font-size:12px;font-weight:600;">
+                <span>2. DDL Creation Mode</span>
+                <select id="sflf-stage-wiz-create-mode" style="background:#ffffff;color:#0f172a;border:1px solid #cbd5e1;border-radius:8px;padding:7px 10px;font-size:12.5px;">
+                  <option value="IF_NOT_EXISTS">CREATE IF NOT EXISTS (Safe Idempotent)</option>
+                  <option value="OR_REPLACE">CREATE OR REPLACE</option>
+                  <option value="TEMPORARY">CREATE TEMPORARY STAGE</option>
+                </select>
+              </label>
+            </div>
+
+            <!-- Database & Schema Scope (for Internal & External Stages) -->
+            <div id="sflf-stage-wiz-db-schema-section" style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;">
+              <label style="display:flex;flex-direction:column;gap:4px;font-size:12px;font-weight:600;">
+                <span>Database ([ ❄️ Context ])</span>
+                <select id="sflf-stage-wiz-db" data-testid="stage-wizard-db-select" style="background:#ffffff;color:#0f172a;border:1px solid #cbd5e1;border-radius:8px;padding:7px 10px;font-size:12px;"></select>
+                <input id="sflf-stage-wiz-new-db" type="text" placeholder="NEW_DATABASE_NAME" style="display:none;margin-top:4px;background:#ffffff;color:#0f172a;border:1px solid #cbd5e1;border-radius:6px;padding:5px 8px;font-size:11.5px;" />
+              </label>
+              <label style="display:flex;flex-direction:column;gap:4px;font-size:12px;font-weight:600;">
+                <span>Schema ([ ❄️ Context ])</span>
+                <select id="sflf-stage-wiz-schema" data-testid="stage-wizard-schema-select" style="background:#ffffff;color:#0f172a;border:1px solid #cbd5e1;border-radius:8px;padding:7px 10px;font-size:12px;"></select>
+                <input id="sflf-stage-wiz-new-schema" type="text" placeholder="NEW_SCHEMA_NAME" style="display:none;margin-top:4px;background:#ffffff;color:#0f172a;border:1px solid #cbd5e1;border-radius:6px;padding:5px 8px;font-size:11.5px;" />
+              </label>
+              <label style="display:flex;flex-direction:column;gap:4px;font-size:12px;font-weight:600;">
+                <span>Stage Name</span>
+                <input id="sflf-stage-wiz-name" data-testid="stage-wizard-name-input" type="text" value="DOCS_STAGE" style="background:#ffffff;color:#0f172a;border:1px solid #cbd5e1;border-radius:8px;padding:7px 10px;font-size:12px;" />
+              </label>
+            </div>
+
+            <!-- Option 1: Internal Stage Section -->
+            <div id="sflf-stage-wiz-internal-section" style="display:grid;grid-template-columns:1fr 1fr;gap:12px;background:#f8fafc;border:1px solid #e2e8f0;border-radius:10px;padding:12px;">
+              <label style="display:flex;flex-direction:column;gap:4px;font-size:12px;font-weight:600;">
+                <span>Internal Stage Encryption</span>
+                <select id="sflf-stage-wiz-internal-encryption" data-testid="stage-wizard-internal-encryption" style="background:#ffffff;color:#0f172a;border:1px solid #cbd5e1;border-radius:8px;padding:6px 10px;font-size:12px;">
+                  <option value="SNOWFLAKE_SSE">SNOWFLAKE_SSE (Server-Side — Required for AI_PARSE_DOCUMENT &amp; Directory Tables)</option>
+                  <option value="SNOWFLAKE_FULL">SNOWFLAKE_FULL (Client + Server Encryption)</option>
+                </select>
+              </label>
+              <label style="display:flex;flex-direction:column;gap:4px;font-size:12px;font-weight:600;">
+                <span>Default File Format</span>
+                <select id="sflf-stage-wiz-file-format" style="background:#ffffff;color:#0f172a;border:1px solid #cbd5e1;border-radius:8px;padding:6px 10px;font-size:12px;">
+                  <option value="NONE">None (Unstructured PDF / DOCX / Images / Mixed)</option>
+                  <option value="CSV">CSV</option>
+                  <option value="JSON">JSON</option>
+                  <option value="PARQUET">PARQUET</option>
+                  <option value="AVRO">AVRO</option>
+                  <option value="ORC">ORC</option>
+                  <option value="XML">XML</option>
+                </select>
+              </label>
+            </div>
+
+            <!-- Option 2: External Stage Section -->
+            <div id="sflf-stage-wiz-external-section" style="display:none;flex-direction:column;gap:10px;background:#f8fafc;border:1px solid #e2e8f0;border-radius:10px;padding:12px;">
+              <div style="display:grid;grid-template-columns:1fr 2fr;gap:10px;">
+                <label style="display:flex;flex-direction:column;gap:4px;font-size:12px;font-weight:600;">
+                  <span>Cloud Provider</span>
+                  <select id="sflf-stage-wiz-cloud-provider" data-testid="stage-wizard-cloud-provider" style="background:#ffffff;color:#0f172a;border:1px solid #cbd5e1;border-radius:8px;padding:6px 10px;font-size:12px;">
+                    <option value="S3">AWS S3 (s3:// / s3gov://)</option>
+                    <option value="GCS">Google Cloud Storage (gcs://)</option>
+                    <option value="AZURE">Microsoft Azure Blob / ADLS Gen2 (azure://)</option>
+                    <option value="S3COMPAT">S3-Compatible Storage (s3compat://)</option>
+                  </select>
+                </label>
+                <label style="display:flex;flex-direction:column;gap:4px;font-size:12px;font-weight:600;">
+                  <span>Cloud Bucket / Container URL</span>
+                  <input id="sflf-stage-wiz-ext-url" data-testid="stage-wizard-ext-url" type="text" value="s3://enterprise-bucket/docs/" placeholder="s3://bucket/path/ | gcs://bucket/path/ | azure://account.blob.core.windows.net/container/" style="background:#ffffff;color:#0f172a;border:1px solid #cbd5e1;border-radius:8px;padding:6px 10px;font-size:12px;" />
+                </label>
+              </div>
+              <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;">
+                <label style="display:flex;flex-direction:column;gap:4px;font-size:12px;font-weight:600;">
+                  <span>Authentication Mode</span>
+                  <select id="sflf-stage-wiz-auth-mode" style="background:#ffffff;color:#0f172a;border:1px solid #cbd5e1;border-radius:8px;padding:6px 10px;font-size:12px;">
+                    <option value="STORAGE_INTEGRATION">STORAGE_INTEGRATION (Recommended)</option>
+                    <option value="CREDENTIALS">Direct Cloud CREDENTIALS</option>
+                  </select>
+                </label>
+                <label style="display:flex;flex-direction:column;gap:4px;font-size:12px;font-weight:600;">
+                  <span>Storage Integration</span>
+                  <select id="sflf-stage-wiz-storage-integration" style="background:#ffffff;color:#0f172a;border:1px solid #cbd5e1;border-radius:8px;padding:6px 10px;font-size:12px;">
+                    ${(_stagesVolumesState.storage_integrations || ["S3_DOCS_INT", "GCS_DOCS_INT", "AZURE_DOCS_INT"])
+                      .map(function (si) {
+                        return `<option value="${si}">${si}</option>`;
+                      })
+                      .join("")}
+                  </select>
+                </label>
+                <label style="display:flex;flex-direction:column;gap:4px;font-size:12px;font-weight:600;">
+                  <span>Cloud Encryption</span>
+                  <select id="sflf-stage-wiz-ext-encryption" style="background:#ffffff;color:#0f172a;border:1px solid #cbd5e1;border-radius:8px;padding:6px 10px;font-size:12px;">
+                    <option value="AWS_SSE_S3">AWS_SSE_S3</option>
+                    <option value="AWS_SSE_KMS">AWS_SSE_KMS</option>
+                    <option value="AWS_CSE">AWS_CSE</option>
+                    <option value="GCS_SSE_KMS">GCS_SSE_KMS</option>
+                    <option value="AZURE_CSE">AZURE_CSE</option>
+                    <option value="NONE">NONE</option>
+                  </select>
+                </label>
+              </div>
+              <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;">
+                <label style="display:flex;flex-direction:column;gap:4px;font-size:11.5px;font-weight:600;">
+                  <span>KMS Key ID (optional)</span>
+                  <input id="sflf-stage-wiz-ext-kms-key" type="text" placeholder="arn:aws:kms:..." style="background:#ffffff;color:#0f172a;border:1px solid #cbd5e1;border-radius:6px;padding:5px 8px;font-size:11.5px;" />
+                </label>
+                <label style="display:flex;flex-direction:column;gap:4px;font-size:11.5px;font-weight:600;">
+                  <span>S3-Compatible Endpoint (optional)</span>
+                  <input id="sflf-stage-wiz-s3compat-endpoint" type="text" placeholder="s3.my-domain.com" style="background:#ffffff;color:#0f172a;border:1px solid #cbd5e1;border-radius:6px;padding:5px 8px;font-size:11.5px;" />
+                </label>
+                <label style="display:flex;flex-direction:column;gap:4px;font-size:11.5px;font-weight:600;">
+                  <span>USE_PRIVATELINK_ENDPOINT</span>
+                  <select id="sflf-stage-wiz-ext-privatelink" style="background:#ffffff;color:#0f172a;border:1px solid #cbd5e1;border-radius:6px;padding:5px 8px;font-size:11.5px;">
+                    <option value="FALSE">FALSE</option>
+                    <option value="TRUE">TRUE</option>
+                  </select>
+                </label>
+              </div>
+              <label style="display:flex;flex-direction:column;gap:4px;font-size:11.5px;font-weight:600;">
+                <span>Direct Credentials Clause (only when Authentication Mode = CREDENTIALS)</span>
+                <input id="sflf-stage-wiz-credentials" type="text" placeholder="AWS_ROLE = 'arn:aws:iam::123456789012:role/myrole' | AZURE_SAS_TOKEN = '...'" style="background:#ffffff;color:#0f172a;border:1px solid #cbd5e1;border-radius:6px;padding:5px 8px;font-size:11.5px;" />
+              </label>
+            </div>
+
+            <!-- Directory Table Section (shared by Internal & External Stages) -->
+            <div id="sflf-stage-wiz-directory-section" style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;background:#f8fafc;border:1px solid #e2e8f0;border-radius:10px;padding:12px;">
+              <label style="display:flex;flex-direction:column;gap:4px;font-size:12px;font-weight:600;">
+                <span>Directory Table (DIRECTORY = ENABLE)</span>
+                <select id="sflf-stage-wiz-dir-enable" style="background:#ffffff;color:#0f172a;border:1px solid #cbd5e1;border-radius:8px;padding:6px 10px;font-size:12px;">
+                  <option value="TRUE">TRUE (Recommended for Cortex Search &amp; File Browser)</option>
+                  <option value="FALSE">FALSE</option>
+                </select>
+              </label>
+              <label style="display:flex;flex-direction:column;gap:4px;font-size:12px;font-weight:600;">
+                <span>AUTO_REFRESH</span>
+                <select id="sflf-stage-wiz-dir-autorefresh" style="background:#ffffff;color:#0f172a;border:1px solid #cbd5e1;border-radius:8px;padding:6px 10px;font-size:12px;">
+                  <option value="FALSE">FALSE</option>
+                  <option value="TRUE">TRUE</option>
+                </select>
+              </label>
+              <label style="display:flex;flex-direction:column;gap:4px;font-size:12px;font-weight:600;">
+                <span>Notification Integration (optional)</span>
+                <input id="sflf-stage-wiz-notif-int" type="text" placeholder="S3_EVENT_NOTIF_INT" style="background:#ffffff;color:#0f172a;border:1px solid #cbd5e1;border-radius:8px;padding:6px 10px;font-size:12px;" />
+              </label>
+            </div>
+
+            <!-- Option 3: External Volume Section -->
+            <div id="sflf-stage-wiz-extvol-section" style="display:none;flex-direction:column;gap:10px;background:#f8fafc;border:1px solid #e2e8f0;border-radius:10px;padding:12px;">
+              <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;">
+                <label style="display:flex;flex-direction:column;gap:4px;font-size:12px;font-weight:600;">
+                  <span>External Volume Name</span>
+                  <input id="sflf-stage-wiz-vol-name" data-testid="stage-wizard-volume-name" type="text" value="ICEBERG_EXT_VOL" style="background:#ffffff;color:#0f172a;border:1px solid #cbd5e1;border-radius:8px;padding:6px 10px;font-size:12px;" />
+                </label>
+                <label style="display:flex;flex-direction:column;gap:4px;font-size:12px;font-weight:600;">
+                  <span>ALLOW_WRITES</span>
+                  <select id="sflf-stage-wiz-vol-allow-writes" style="background:#ffffff;color:#0f172a;border:1px solid #cbd5e1;border-radius:8px;padding:6px 10px;font-size:12px;">
+                    <option value="TRUE">TRUE</option>
+                    <option value="FALSE">FALSE</option>
+                  </select>
+                </label>
+                <label style="display:flex;flex-direction:column;gap:4px;font-size:12px;font-weight:600;">
+                  <span>Storage Location NAME</span>
+                  <input id="sflf-stage-wiz-vol-loc-name" type="text" value="primary_s3_loc" style="background:#ffffff;color:#0f172a;border:1px solid #cbd5e1;border-radius:8px;padding:6px 10px;font-size:12px;" />
+                </label>
+              </div>
+              <div style="display:grid;grid-template-columns:1fr 2fr;gap:10px;">
+                <label style="display:flex;flex-direction:column;gap:4px;font-size:12px;font-weight:600;">
+                  <span>STORAGE_PROVIDER</span>
+                  <select id="sflf-stage-wiz-vol-provider" style="background:#ffffff;color:#0f172a;border:1px solid #cbd5e1;border-radius:8px;padding:6px 10px;font-size:12px;">
+                    <option value="S3">S3</option>
+                    <option value="S3GOV">S3GOV</option>
+                    <option value="GCS">GCS</option>
+                    <option value="AZURE">AZURE</option>
+                    <option value="S3COMPAT">S3COMPAT</option>
+                  </select>
+                </label>
+                <label style="display:flex;flex-direction:column;gap:4px;font-size:12px;font-weight:600;">
+                  <span>STORAGE_BASE_URL</span>
+                  <input id="sflf-stage-wiz-vol-base-url" type="text" value="s3://my-iceberg-bucket/warehouse/" style="background:#ffffff;color:#0f172a;border:1px solid #cbd5e1;border-radius:8px;padding:6px 10px;font-size:12px;" />
+                </label>
+              </div>
+              <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;">
+                <label style="display:flex;flex-direction:column;gap:4px;font-size:11.5px;font-weight:600;">
+                  <span>STORAGE_AWS_ROLE_ARN (S3)</span>
+                  <input id="sflf-stage-wiz-vol-aws-role-arn" type="text" placeholder="arn:aws:iam::123456789012:role/iceberg-role" style="background:#ffffff;color:#0f172a;border:1px solid #cbd5e1;border-radius:6px;padding:5px 8px;font-size:11.5px;" />
+                </label>
+                <label style="display:flex;flex-direction:column;gap:4px;font-size:11.5px;font-weight:600;">
+                  <span>STORAGE_AWS_EXTERNAL_ID</span>
+                  <input id="sflf-stage-wiz-vol-aws-external-id" type="text" placeholder="iceberg_ext_id" style="background:#ffffff;color:#0f172a;border:1px solid #cbd5e1;border-radius:6px;padding:5px 8px;font-size:11.5px;" />
+                </label>
+                <label style="display:flex;flex-direction:column;gap:4px;font-size:11.5px;font-weight:600;">
+                  <span>STORAGE_AWS_ACCESS_POINT_ARN</span>
+                  <input id="sflf-stage-wiz-vol-aws-access-point-arn" type="text" placeholder="arn:aws:s3:..." style="background:#ffffff;color:#0f172a;border:1px solid #cbd5e1;border-radius:6px;padding:5px 8px;font-size:11.5px;" />
+                </label>
+              </div>
+              <div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:10px;">
+                <label style="display:flex;flex-direction:column;gap:4px;font-size:11.5px;font-weight:600;">
+                  <span>AZURE_TENANT_ID</span>
+                  <input id="sflf-stage-wiz-vol-azure-tenant-id" type="text" placeholder="tenant-uuid" style="background:#ffffff;color:#0f172a;border:1px solid #cbd5e1;border-radius:6px;padding:5px 8px;font-size:11.5px;" />
+                </label>
+                <label style="display:flex;flex-direction:column;gap:4px;font-size:11.5px;font-weight:600;">
+                  <span>STORAGE_ENDPOINT (S3COMPAT)</span>
+                  <input id="sflf-stage-wiz-vol-storage-endpoint" type="text" placeholder="https://s3compat.local" style="background:#ffffff;color:#0f172a;border:1px solid #cbd5e1;border-radius:6px;padding:5px 8px;font-size:11.5px;" />
+                </label>
+                <label style="display:flex;flex-direction:column;gap:4px;font-size:11.5px;font-weight:600;">
+                  <span>ENCRYPTION TYPE</span>
+                  <select id="sflf-stage-wiz-vol-encryption" style="background:#ffffff;color:#0f172a;border:1px solid #cbd5e1;border-radius:6px;padding:5px 8px;font-size:11.5px;">
+                    <option value="AWS_SSE_S3">AWS_SSE_S3</option>
+                    <option value="AWS_SSE_KMS">AWS_SSE_KMS</option>
+                    <option value="GCS_SSE_KMS">GCS_SSE_KMS</option>
+                    <option value="NONE">NONE</option>
+                  </select>
+                </label>
+                <label style="display:flex;flex-direction:column;gap:4px;font-size:11.5px;font-weight:600;">
+                  <span>KMS_KEY_ID</span>
+                  <input id="sflf-stage-wiz-vol-kms-key" type="text" placeholder="kms-key-id" style="background:#ffffff;color:#0f172a;border:1px solid #cbd5e1;border-radius:6px;padding:5px 8px;font-size:11.5px;" />
+                </label>
+              </div>
+              <label style="display:flex;flex-direction:column;gap:4px;font-size:11.5px;font-weight:600;">
+                <span>USE_PRIVATELINK_ENDPOINT</span>
+                <select id="sflf-stage-wiz-vol-privatelink" style="background:#ffffff;color:#0f172a;border:1px solid #cbd5e1;border-radius:6px;padding:5px 8px;font-size:11.5px;max-width:180px;">
+                  <option value="FALSE">FALSE</option>
+                  <option value="TRUE">TRUE</option>
+                </select>
+              </label>
+            </div>
+
+            <label style="display:flex;flex-direction:column;gap:4px;font-size:12px;font-weight:600;">
+              <span>Comment (optional)</span>
+              <input id="sflf-stage-wiz-comment" type="text" placeholder="Governed Snowflake Stage / External Volume created from Snowflake Langflow" style="background:#ffffff;color:#0f172a;border:1px solid #cbd5e1;border-radius:8px;padding:6px 10px;font-size:12px;" />
+            </label>
+
+            <div>
+              <div style="font-size:11.5px;font-weight:700;color:#334155;margin-bottom:4px;">Live Governed Snowflake SQL DDL Preview</div>
+              <pre id="sflf-stage-wiz-ddl-preview" data-testid="stage-wizard-ddl-preview" style="margin:0;background:#0f172a;color:#e2e8f0;padding:10px 14px;border-radius:8px;font-family:'JetBrains Mono',monospace;font-size:11px;white-space:pre-wrap;overflow-x:auto;"></pre>
+            </div>
+          </div>
+
+          <div style="padding:14px 20px;border-top:1px solid #e2e8f0;background:#f8fafc;display:flex;align-items:center;justify-content:flex-end;gap:10px;">
+            <button id="sflf-stage-wiz-cancel-btn" type="button" style="background:#ffffff;color:#334155;border:1px solid #cbd5e1;border-radius:8px;padding:7px 14px;font-size:12.5px;font-weight:600;cursor:pointer;">Cancel</button>
+            <button id="sflf-stage-wiz-submit-btn" data-testid="stage-wizard-submit-btn" type="button" style="background:#29B5E8;color:#ffffff;border:1px solid #29B5E8;border-radius:8px;padding:7px 16px;font-size:12.5px;font-weight:700;cursor:pointer;">Create &amp; Add to [ ❄️ Context ]</button>
+          </div>
+        </div>
+      `;
+
+      document.body.appendChild(modal);
+
+      const updateKindVisibility = function () {
+        const k = (document.getElementById("sflf-stage-wiz-kind") || {}).value || "INTERNAL";
+        const dbSchSec = document.getElementById("sflf-stage-wiz-db-schema-section");
+        const intSec = document.getElementById("sflf-stage-wiz-internal-section");
+        const extSec = document.getElementById("sflf-stage-wiz-external-section");
+        const dirSec = document.getElementById("sflf-stage-wiz-directory-section");
+        const volSec = document.getElementById("sflf-stage-wiz-extvol-section");
+
+        if (dbSchSec) dbSchSec.style.display = k === "EXTERNAL_VOLUME" ? "none" : "grid";
+        if (intSec) intSec.style.display = k === "INTERNAL" ? "grid" : "none";
+        if (extSec) extSec.style.display = k === "EXTERNAL" ? "flex" : "none";
+        if (dirSec) dirSec.style.display = k === "EXTERNAL_VOLUME" ? "none" : "grid";
+        if (volSec) volSec.style.display = k === "EXTERNAL_VOLUME" ? "flex" : "none";
+        syncCreateStageModalWithFlowContext(sfState);
+      };
+
+      const kindSel = document.getElementById("sflf-stage-wiz-kind");
+      if (kindSel) kindSel.onchange = updateKindVisibility;
+
+      const dbSel = document.getElementById("sflf-stage-wiz-db");
+      if (dbSel) {
+        dbSel.onchange = function () {
+          const newDbInp = document.getElementById("sflf-stage-wiz-new-db");
+          if (newDbInp) newDbInp.style.display = dbSel.value === "__CREATE_NEW_DB__" ? "block" : "none";
+          syncCreateStageModalWithFlowContext(sfState);
+        };
+      }
+      const schSel = document.getElementById("sflf-stage-wiz-schema");
+      if (schSel) {
+        schSel.onchange = function () {
+          const newSchInp = document.getElementById("sflf-stage-wiz-new-schema");
+          if (newSchInp) newSchInp.style.display = schSel.value === "__CREATE_NEW_SCHEMA__" ? "block" : "none";
+          const previewEl = document.getElementById("sflf-stage-wiz-ddl-preview");
+          if (previewEl) previewEl.textContent = buildStageOrVolumeWizardDdlPreview();
+        };
+      }
+
+      Array.from(modal.querySelectorAll("input, select")).forEach(function (inp) {
+        inp.addEventListener("input", function () {
+          const previewEl = document.getElementById("sflf-stage-wiz-ddl-preview");
+          if (previewEl) previewEl.textContent = buildStageOrVolumeWizardDdlPreview();
+        });
+        inp.addEventListener("change", function () {
+          const previewEl = document.getElementById("sflf-stage-wiz-ddl-preview");
+          if (previewEl) previewEl.textContent = buildStageOrVolumeWizardDdlPreview();
+        });
+      });
+
+      const closeModal = function () {
+        modal.style.display = "none";
+      };
+      const closeBtn = document.getElementById("sflf-stage-wiz-close-btn");
+      if (closeBtn) closeBtn.onclick = closeModal;
+      const cancelBtn = document.getElementById("sflf-stage-wiz-cancel-btn");
+      if (cancelBtn) cancelBtn.onclick = closeModal;
+
+      const submitBtn = document.getElementById("sflf-stage-wiz-submit-btn");
+      if (submitBtn) {
+        submitBtn.onclick = async function () {
+          await submitCreateStageOrVolumeWizard();
+        };
+      }
+    }
+
+    const kindSel = document.getElementById("sflf-stage-wiz-kind");
+    if (kindSel && initialKind) {
+      kindSel.value = initialKind;
+      kindSel.dispatchEvent(new Event("change"));
+    }
+    syncCreateStageModalWithFlowContext(sfState);
+    modal.style.display = "flex";
+  }
+  window.openCreateSnowflakeStageModal = openCreateSnowflakeStageModal;
+
+  async function submitCreateStageOrVolumeWizard() {
+    const kind = ((document.getElementById("sflf-stage-wiz-kind") || {}).value || "INTERNAL").trim();
+    const createMode = ((document.getElementById("sflf-stage-wiz-create-mode") || {}).value || "IF_NOT_EXISTS").trim();
+    const comment = ((document.getElementById("sflf-stage-wiz-comment") || {}).value || "").trim();
+    const flowId = extractCurrentFlowId();
+
+    if (kind === "EXTERNAL_VOLUME") {
+      const volName = ((document.getElementById("sflf-stage-wiz-vol-name") || {}).value || "ICEBERG_EXT_VOL").trim();
+      const allowWrites = ((document.getElementById("sflf-stage-wiz-vol-allow-writes") || {}).value || "TRUE") === "TRUE";
+      const locName = ((document.getElementById("sflf-stage-wiz-vol-loc-name") || {}).value || "primary_s3_loc").trim();
+      const provider = ((document.getElementById("sflf-stage-wiz-vol-provider") || {}).value || "S3").trim();
+      const baseUrl = ((document.getElementById("sflf-stage-wiz-vol-base-url") || {}).value || "s3://my-iceberg-bucket/warehouse/").trim();
+      const roleArn = ((document.getElementById("sflf-stage-wiz-vol-aws-role-arn") || {}).value || "").trim();
+      const extId = ((document.getElementById("sflf-stage-wiz-vol-aws-external-id") || {}).value || "").trim();
+      const apArn = ((document.getElementById("sflf-stage-wiz-vol-aws-access-point-arn") || {}).value || "").trim();
+      const tenantId = ((document.getElementById("sflf-stage-wiz-vol-azure-tenant-id") || {}).value || "").trim();
+      const storageEndpoint = ((document.getElementById("sflf-stage-wiz-vol-storage-endpoint") || {}).value || "").trim();
+      const encType = ((document.getElementById("sflf-stage-wiz-vol-encryption") || {}).value || "AWS_SSE_S3").trim();
+      const kmsKey = ((document.getElementById("sflf-stage-wiz-vol-kms-key") || {}).value || "").trim();
+      const usePrivatelink = ((document.getElementById("sflf-stage-wiz-vol-privatelink") || {}).value || "FALSE") === "TRUE";
+
+      const resp = await fetch("/api/v1/snowflake/external-volumes/create", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name: volName,
+          volume_name: volName,
+          create_mode: createMode,
+          allow_writes: allowWrites,
+          location_name: locName,
+          storage_provider: provider,
+          storage_base_url: baseUrl,
+          storage_aws_role_arn: roleArn || undefined,
+          storage_aws_external_id: extId || undefined,
+          storage_aws_access_point_arn: apArn || undefined,
+          azure_tenant_id: tenantId || undefined,
+          storage_endpoint: storageEndpoint || undefined,
+          encryption_type: encType,
+          kms_key_id: kmsKey || undefined,
+          use_privatelink_endpoint: usePrivatelink,
+          comment: comment || undefined,
+          flow_id: flowId,
+        }),
+      });
+      const data = await resp.json();
+      if (!resp.ok || data.ok === false) {
+        const errMsg =
+          data.message ||
+          `Active role ${sfState.active_role || "PUBLIC"} does not have CREATE EXTERNAL VOLUME privilege`;
+        const banner = document.getElementById("sflf-extvol-privilege-banner");
+        if (banner) {
+          banner.style.display = "block";
+          banner.textContent = errMsg;
+        }
+        showDenialOrStatusBanner("error", data.error_code || "AUTHZ_ROLE_DENIED", errMsg);
+        return;
+      }
+
+      _stagesVolumesState.external_volumes.push({
+        name: volName,
+        volume_name: volName,
+        allow_writes: allowWrites,
+        storage_provider: provider,
+        storage_base_url: baseUrl,
+        encryption: encType,
+        comment: comment,
+      });
+      _selectedStageOrVolumeKey = `VOL:${volName}`;
+      showDenialOrStatusBanner("ok", "EXTERNAL_VOLUME_CREATED", `Created External Volume ${volName}`);
+      const modal = document.getElementById("sflf-create-stage-modal");
+      if (modal) modal.style.display = "none";
+      await fetchSnowflakeContext(flowId);
+      await fetchSnowflakeStagesAndVolumes(flowId);
+      return;
+    }
+
+    const dbEl = document.getElementById("sflf-stage-wiz-db");
+    const newDbEl = document.getElementById("sflf-stage-wiz-new-db");
+    const schEl = document.getElementById("sflf-stage-wiz-schema");
+    const newSchEl = document.getElementById("sflf-stage-wiz-new-schema");
+    const db =
+      dbEl && dbEl.value === "__CREATE_NEW_DB__"
+        ? (newDbEl && newDbEl.value.trim()) || "NEW_DB"
+        : (dbEl && dbEl.value) || sfState.database || "SNOWFLAKE_LANGFLOW";
+    const sch =
+      schEl && schEl.value === "__CREATE_NEW_SCHEMA__"
+        ? (newSchEl && newSchEl.value.trim()) || "NEW_SCHEMA"
+        : (schEl && schEl.value) || sfState.schema || "CORE";
+    const stageName = ((document.getElementById("sflf-stage-wiz-name") || {}).value || "DOCS_STAGE").trim();
+    const dirEnable = ((document.getElementById("sflf-stage-wiz-dir-enable") || {}).value || "TRUE") === "TRUE";
+    const dirAutoRefresh = ((document.getElementById("sflf-stage-wiz-dir-autorefresh") || {}).value || "FALSE") === "TRUE";
+    const notifInt = ((document.getElementById("sflf-stage-wiz-notif-int") || {}).value || "").trim();
+    const fileFmt = ((document.getElementById("sflf-stage-wiz-file-format") || {}).value || "NONE").trim();
+    const intEnc = ((document.getElementById("sflf-stage-wiz-internal-encryption") || {}).value || "SNOWFLAKE_SSE").trim();
+    const extUrl = ((document.getElementById("sflf-stage-wiz-ext-url") || {}).value || "").trim();
+    const cloudProvider = ((document.getElementById("sflf-stage-wiz-cloud-provider") || {}).value || "S3").trim();
+    const authMode = ((document.getElementById("sflf-stage-wiz-auth-mode") || {}).value || "STORAGE_INTEGRATION").trim();
+    const storageInt = ((document.getElementById("sflf-stage-wiz-storage-integration") || {}).value || "S3_DOCS_INT").trim();
+    const credsRaw = ((document.getElementById("sflf-stage-wiz-credentials") || {}).value || "").trim();
+    const extEnc = ((document.getElementById("sflf-stage-wiz-ext-encryption") || {}).value || "AWS_SSE_S3").trim();
+    const kmsKey = ((document.getElementById("sflf-stage-wiz-ext-kms-key") || {}).value || "").trim();
+    const s3CompatEndpoint = ((document.getElementById("sflf-stage-wiz-s3compat-endpoint") || {}).value || "").trim();
+    const usePrivatelink = ((document.getElementById("sflf-stage-wiz-ext-privatelink") || {}).value || "FALSE") === "TRUE";
+
+    const resp = await fetch("/api/v1/snowflake/stages/create", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        database: db,
+        schema: sch,
+        name: stageName,
+        stage_name: stageName,
+        stage_type: kind,
+        create_mode: createMode,
+        encryption: kind === "INTERNAL" ? intEnc : extEnc,
+        kms_key_id: kmsKey || undefined,
+        directory_enable: dirEnable,
+        auto_refresh: dirAutoRefresh,
+        notification_integration: notifInt || undefined,
+        file_format: fileFmt !== "NONE" ? fileFmt : undefined,
+        cloud_provider: kind === "EXTERNAL" ? cloudProvider : undefined,
+        url: kind === "EXTERNAL" ? extUrl : undefined,
+        auth_mode: kind === "EXTERNAL" ? authMode : undefined,
+        storage_integration: kind === "EXTERNAL" && authMode === "STORAGE_INTEGRATION" ? storageInt : undefined,
+        credentials: kind === "EXTERNAL" && authMode === "CREDENTIALS" ? credsRaw : undefined,
+        endpoint: kind === "EXTERNAL" && s3CompatEndpoint ? s3CompatEndpoint : undefined,
+        use_privatelink_endpoint: kind === "EXTERNAL" ? usePrivatelink : undefined,
+        comment: comment || undefined,
+        flow_id: flowId,
+      }),
+    });
+    const data = await resp.json();
+    if (!resp.ok || data.ok === false) {
+      showDenialOrStatusBanner("error", data.error_code || "AUTHZ_ROLE_DENIED", data.message || "Stage creation denied");
+      return;
+    }
+
+    const newFqn = `@${db.toUpperCase()}.${sch.toUpperCase()}.${stageName}`;
+    _stagesVolumesState.stages.push({
+      name: stageName,
+      stage_name: stageName,
+      database: db.toUpperCase(),
+      schema: sch.toUpperCase(),
+      stage_fqn: newFqn,
+      stage_type: kind,
+      encryption: kind === "INTERNAL" ? intEnc : extEnc,
+      directory_enabled: dirEnable,
+      auto_refresh: dirAutoRefresh,
+      url: kind === "EXTERNAL" ? extUrl : "",
+      storage_integration: kind === "EXTERNAL" ? storageInt : "",
+      file_format: fileFmt,
+      comment: comment,
+    });
+    _selectedStageOrVolumeKey = newFqn;
+    showDenialOrStatusBanner("ok", "STAGE_CREATED", `Created ${kind} Stage ${newFqn} and added to [ ❄️ Context ]`);
+    const modal = document.getElementById("sflf-create-stage-modal");
+    if (modal) modal.style.display = "none";
+    await fetchSnowflakeContext(flowId);
+    await fetchSnowflakeStagesAndVolumes(flowId);
   }
 
   function bootSnowflakeUI() {

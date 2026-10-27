@@ -1375,7 +1375,48 @@ def test_w2_r4_verifier_middleware_interception_and_bundle_patch_execution() -> 
         raw = getattr(resp, "body", b"{}")
         return json.loads(raw.decode("utf-8") if isinstance(raw, bytes) else str(raw))
 
-    # 1. Middleware intercepts GET /api/v1/memories even with a mismatched flow_id
+    # 1. Middleware intercepts GET /api/v1/memories and respects [ ❄️ Context ] filtering
+    LIVE_BRIDGE.update_selected_context(
+        {
+            "database": "SNOWFLAKE_LANGFLOW",
+            "schema": "CORE",
+            "databases": ["SNOWFLAKE_LANGFLOW"],
+            "schemas_by_db": {"SNOWFLAKE_LANGFLOW": ["CORE"]},
+            "postgres_instances": [],
+        },
+        flow_id="other-flow-123",
+    )
+    mem3_id = compute_deterministic_memory_uuid("MEM_3_SESSION_SUMMARY")
+    resp_list_sql = asyncio.run(
+        snowflake_flow_context_and_trace_middleware(
+            _FakeRequest("GET", "/api/v1/memories", {"flow_id": "other-flow-123", "search": "MEM_3_SESSION_SUMMARY"}),
+            _never_called,
+        )
+    )
+    assert resp_list_sql.status_code == 200
+    assert any(item["id"] == mem3_id for item in _resp_json(resp_list_sql)["items"])
+
+    # Without LANGFLOW_PG_INSTANCE in other-flow-123's context, MEM_2_CHAT_WINDOW (Postgres) is hidden
+    resp_list_no_pg = asyncio.run(
+        snowflake_flow_context_and_trace_middleware(
+            _FakeRequest("GET", "/api/v1/memories", {"flow_id": "other-flow-123", "search": "MEM_2_CHAT_WINDOW"}),
+            _never_called,
+        )
+    )
+    assert resp_list_no_pg.status_code == 200
+    assert not any(item["id"] == mem_id for item in _resp_json(resp_list_no_pg)["items"])
+
+    # Adding LANGFLOW_PG_INSTANCE to other-flow-123's context makes MEM_2_CHAT_WINDOW visible
+    LIVE_BRIDGE.update_selected_context(
+        {
+            "database": "SNOWFLAKE_LANGFLOW",
+            "schema": "CORE",
+            "databases": ["SNOWFLAKE_LANGFLOW"],
+            "schemas_by_db": {"SNOWFLAKE_LANGFLOW": ["CORE"]},
+            "postgres_instances": ["LANGFLOW_PG_INSTANCE"],
+        },
+        flow_id="other-flow-123",
+    )
     resp_list = asyncio.run(
         snowflake_flow_context_and_trace_middleware(
             _FakeRequest("GET", "/api/v1/memories", {"flow_id": "other-flow-123", "search": "MEM_2_CHAT_WINDOW"}),
@@ -1437,5 +1478,125 @@ def test_w2_r4_verifier_middleware_interception_and_bundle_patch_execution() -> 
     plus_idx = patched_bundle.index('data-testid":"memories-plus-snowflake-btn"')
     btn_slice = patched_bundle[plus_idx:]
     assert btn_slice.index('name:"Plus"') < btn_slice.index("viewBox") < btn_slice.index('"Snowflake"')
+
+
+def test_context_filters_visible_memories_when_postgres_or_schema_removed() -> None:
+    """Verify that removing Snowflake Postgres or a Database/Schema from [ ❄️ Context ] hides the corresponding memories immediately."""
+    client = _build_fastapi_test_client()
+    client.post("/api/v1/snowflake/role", json={"target_role": "ACCOUNTADMIN"})
+
+    from lfx_snowflake.showcase_full_memory_agent import bootstrap_full_memory_showcase_flow
+
+    flow_id = "ctx-memory-filter-flow-001"
+    bootstrap_full_memory_showcase_flow(LIVE_BRIDGE, dry_run=True)
+
+    # 1. With both SNOWFLAKE_LANGFLOW.CORE and LANGFLOW_PG_INSTANCE in context, all 5 showcase memories are visible
+    res_full = client.post(
+        "/api/v1/snowflake/context",
+        json={
+            "flow_id": flow_id,
+            "database": "SNOWFLAKE_LANGFLOW",
+            "schema": "CORE",
+            "databases": ["SNOWFLAKE_LANGFLOW"],
+            "schemas_by_db": {"SNOWFLAKE_LANGFLOW": ["CORE"]},
+            "postgres_instances": ["LANGFLOW_PG_INSTANCE"],
+            "visible_objects": {"postgres_instances": ["LANGFLOW_PG_INSTANCE"]},
+        },
+    )
+    assert res_full.status_code == 200
+    assert LIVE_BRIDGE.get_context_postgres_instances(flow_id=flow_id) == ["LANGFLOW_PG_INSTANCE"]
+
+    v1_full = client.get(f"/api/v1/memories?flow_id={flow_id}").json()
+    v1_full_names = {m["name"] for m in v1_full["items"]}
+    assert {
+        "MEM_1_GRAPH_CHECKPOINTER",
+        "MEM_2_CHAT_WINDOW",
+        "MEM_3_SESSION_SUMMARY",
+        "MEM_4_USER_ENTITY_PROFILE",
+        "MEM_5_EPISODIC_FEWSHOT",
+    }.issubset(v1_full_names)
+
+    sf_full = client.get(f"/api/v1/snowflake/memories?flow_id={flow_id}").json()
+    sf_full_names = {m["name"] for m in sf_full["memories_catalog"]}
+    assert {"MEM_1_GRAPH_CHECKPOINTER", "MEM_2_CHAT_WINDOW", "MEM_3_SESSION_SUMMARY"}.issubset(sf_full_names)
+
+    # 2. Remove LANGFLOW_PG_INSTANCE from [ ❄️ Context ] (postgres_instances: []) -> MEM_1 & MEM_2 must disappear immediately
+    res_no_pg = client.post(
+        "/api/v1/snowflake/context",
+        json={
+            "flow_id": flow_id,
+            "database": "SNOWFLAKE_LANGFLOW",
+            "schema": "CORE",
+            "databases": ["SNOWFLAKE_LANGFLOW"],
+            "schemas_by_db": {"SNOWFLAKE_LANGFLOW": ["CORE"]},
+            "postgres_instances": [],
+            "visible_objects": {"postgres_instances": []},
+        },
+    )
+    assert res_no_pg.status_code == 200
+    assert LIVE_BRIDGE.get_context_postgres_instances(flow_id=flow_id) == []
+
+    v1_no_pg = client.get(f"/api/v1/memories?flow_id={flow_id}").json()
+    v1_no_pg_names = {m["name"] for m in v1_no_pg["items"]}
+    assert "MEM_1_GRAPH_CHECKPOINTER" not in v1_no_pg_names
+    assert "MEM_2_CHAT_WINDOW" not in v1_no_pg_names
+    assert {
+        "MEM_3_SESSION_SUMMARY",
+        "MEM_4_USER_ENTITY_PROFILE",
+        "MEM_5_EPISODIC_FEWSHOT",
+    }.issubset(v1_no_pg_names)
+
+    sf_no_pg = client.get(f"/api/v1/snowflake/memories?flow_id={flow_id}").json()
+    sf_no_pg_names = {m["name"] for m in sf_no_pg["memories_catalog"]}
+    assert "MEM_1_GRAPH_CHECKPOINTER" not in sf_no_pg_names
+    assert "MEM_2_CHAT_WINDOW" not in sf_no_pg_names
+    assert "MEM_3_SESSION_SUMMARY" in sf_no_pg_names
+
+    # 3. Remove SNOWFLAKE_LANGFLOW.CORE from [ ❄️ Context ] (switch to RETAIL_DB.SALES only) -> MEM_3..5 also disappear
+    res_other_db = client.post(
+        "/api/v1/snowflake/context",
+        json={
+            "flow_id": flow_id,
+            "database": "RETAIL_DB",
+            "schema": "SALES",
+            "databases": ["RETAIL_DB"],
+            "schemas_by_db": {"RETAIL_DB": ["SALES"]},
+            "postgres_instances": [],
+        },
+    )
+    assert res_other_db.status_code == 200
+    v1_other_db = client.get(f"/api/v1/memories?flow_id={flow_id}").json()
+    v1_other_db_names = {m["name"] for m in v1_other_db["items"]}
+    for hidden_mem in (
+        "MEM_1_GRAPH_CHECKPOINTER",
+        "MEM_2_CHAT_WINDOW",
+        "MEM_3_SESSION_SUMMARY",
+        "MEM_4_USER_ENTITY_PROFILE",
+        "MEM_5_EPISODIC_FEWSHOT",
+    ):
+        assert hidden_mem not in v1_other_db_names
+
+    # 4. Restore SNOWFLAKE_LANGFLOW.CORE and LANGFLOW_PG_INSTANCE -> all 5 memories reappear
+    client.post(
+        "/api/v1/snowflake/context",
+        json={
+            "flow_id": flow_id,
+            "database": "SNOWFLAKE_LANGFLOW",
+            "schema": "CORE",
+            "databases": ["SNOWFLAKE_LANGFLOW"],
+            "schemas_by_db": {"SNOWFLAKE_LANGFLOW": ["CORE"]},
+            "postgres_instances": ["LANGFLOW_PG_INSTANCE"],
+        },
+    )
+    v1_restored = client.get(f"/api/v1/memories?flow_id={flow_id}").json()
+    v1_restored_names = {m["name"] for m in v1_restored["items"]}
+    assert {
+        "MEM_1_GRAPH_CHECKPOINTER",
+        "MEM_2_CHAT_WINDOW",
+        "MEM_3_SESSION_SUMMARY",
+        "MEM_4_USER_ENTITY_PROFILE",
+        "MEM_5_EPISODIC_FEWSHOT",
+    }.issubset(v1_restored_names)
+
 
 

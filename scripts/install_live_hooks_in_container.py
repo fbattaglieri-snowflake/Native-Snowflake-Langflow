@@ -173,7 +173,7 @@ def install_all() -> None:
                 child.unlink()
     print("[install_live_hooks] Cleared /opt/standard-components to eliminate separate bottom bundle tabs.")
 
-    # 2. Remove stale / relocated component files and copy all Round 2 component modules into lfx/components/<native_category>/
+    # 2. Remove stale / relocated component files and copy all Round 5 component modules into lfx/components/<native_category>/
     stale_component_files = (
         ("data_source", "snowflake_object_provisioner.py"),
         ("data_source", "snowflake_data_source.py"),
@@ -182,6 +182,11 @@ def install_all() -> None:
         ("llm_operations", "snowflake_smart_router.py"),
         ("files_and_knowledge", "snowflake_knowledge_memory.py"),
         ("files_and_knowledge", "snowflake_cortex_analyst_disabled.py"),
+        ("files_and_knowledge", "snowflake_cortex_search_parse_document.py"),
+        ("files_and_knowledge", "snowflake_cortex_search_split_text.py"),
+        ("files_and_knowledge", "snowflake_cortex_search_service_creator.py"),
+        ("files_and_knowledge", "snowflake_cortex_search_stream_task.py"),
+        ("files_and_knowledge", "snowflake_object_provisioner_fk.py"),
         ("utilities", "snowflake_python_pypi.py"),
     )
     for stale_cat, stale_fname in stale_component_files:
@@ -189,6 +194,31 @@ def install_all() -> None:
         if stale_path.exists():
             stale_path.unlink()
             print(f"[install_live_hooks] Removed stale {stale_cat}/{stale_fname}")
+
+    # Register Snowflake Cortex embedding provider & vector store backends before component indexing
+    try:
+        from lfx_snowflake.providers.embeddings import register_snowflake_cortex_embedding_provider
+
+        register_snowflake_cortex_embedding_provider()
+        print("[install_live_hooks] Registered Snowflake Cortex (AI_EMBED) embedding provider (6 models).")
+    except Exception as exc:
+        print(f"[install_live_hooks] Warning registering Snowflake Cortex embedding provider: {exc}")
+
+    try:
+        from lfx_snowflake.fastapi_live_bridge import register_snowflake_vector_store_backends
+
+        register_snowflake_vector_store_backends()
+        print("[install_live_hooks] Registered Snowflake Vector Store backends.")
+    except Exception as exc:
+        print(f"[install_live_hooks] Warning registering Snowflake Vector Store backends: {exc}")
+
+    skipped_fk_component_files = {
+        "snowflake_cortex_search_parse_document.py",
+        "snowflake_cortex_search_split_text.py",
+        "snowflake_cortex_search_service_creator.py",
+        "snowflake_cortex_search_stream_task.py",
+        "snowflake_object_provisioner_fk.py",
+    }
 
     native_src = SOURCE_ROOT / "src" / "lfx_snowflake" / "native_category_components"
     installed_modules: list[tuple[str, str]] = []
@@ -200,8 +230,13 @@ def install_all() -> None:
         for py_file in sorted(cat_dir.glob("*.py")):
             if py_file.name == "__init__.py":
                 continue
+            if cat_dir.name == "files_and_knowledge" and py_file.name in skipped_fk_component_files:
+                continue
             dest_file = target_cat_dir / py_file.name
             shutil.copyfile(py_file, dest_file)
+            if cat_dir.name == "files_and_knowledge" and py_file.name == "snowflake_stage_files.py":
+                # Keep helper module on disk for imports, but do not register duplicate SnowflakeStageFileSystem in sidebar
+                continue
             mod_fqn = f"lfx.components.{cat_dir.name}.{py_file.stem}"
             installed_modules.append((cat_dir.name, mod_fqn))
             print(f"[install_live_hooks] Installed native component module: {mod_fqn}")
@@ -219,6 +254,13 @@ def install_all() -> None:
         ("llm_operations", "SnowflakeSmartRouter"),
         ("files_and_knowledge", "SnowflakeKnowledgeMemory"),
         ("files_and_knowledge", "SnowflakeCortexAnalystDisabledCreator"),
+        ("files_and_knowledge", "SnowflakeCortexSearchParseDocument"),
+        ("files_and_knowledge", "SnowflakeCortexSearchSplitText"),
+        ("files_and_knowledge", "SnowflakeCortexSearchServiceCreator"),
+        ("files_and_knowledge", "SnowflakeCortexSearchStreamTask"),
+        ("files_and_knowledge", "SnowflakeObjectProvisionerFK"),
+        ("files_and_knowledge", "SnowflakeStageFileSystem"),
+        ("files_and_knowledge", "SnowflakeMemoryBase"),
         ("utilities", "SnowflakePythonInterpreterPyPI"),
     )
     for stale_cat, stale_comp in stale_index_entries:
@@ -231,8 +273,39 @@ def install_all() -> None:
             raise RuntimeError(f"Failed to template native component module: {mod_fqn}")
         top_level, comp_templates = res
         assert top_level == cat_name
+        if cat_name == "files_and_knowledge":
+            # Map SnowflakeMemoryBase into the single canonical 'MemoryBase' slot so there is zero duplication
+            if "SnowflakeMemoryBase" in comp_templates:
+                mem_tmpl = dict(comp_templates.pop("SnowflakeMemoryBase"))
+                mem_tmpl["display_name"] = "Memory Base"
+                mem_tmpl["legacy"] = False
+                entries_map.setdefault("files_and_knowledge", {})["MemoryBase"] = mem_tmpl
+            for dup_fk in (
+                "SnowflakeCortexSearchParseDocument",
+                "SnowflakeCortexSearchSplitText",
+                "SnowflakeCortexSearchServiceCreator",
+                "SnowflakeCortexSearchStreamTask",
+                "SnowflakeObjectProvisionerFK",
+                "SnowflakeStageFileSystem",
+                "SnowflakeMemoryBase",
+            ):
+                comp_templates.pop(dup_fk, None)
         entries_map.setdefault(cat_name, {}).update(comp_templates)
         print(f"[install_live_hooks] Merged {list(comp_templates.keys())} into native category '{cat_name}'")
+
+    # Final cleanup of files_and_knowledge to guarantee strictly the 5 canonical non-legacy components
+    for dup_fk in (
+        "SnowflakeCortexSearchParseDocument",
+        "SnowflakeCortexSearchSplitText",
+        "SnowflakeCortexSearchServiceCreator",
+        "SnowflakeCortexSearchStreamTask",
+        "SnowflakeObjectProvisionerFK",
+        "SnowflakeStageFileSystem",
+        "SnowflakeMemoryBase",
+        "SnowflakeKnowledgeMemory",
+        "SnowflakeCortexAnalystDisabledCreator",
+    ):
+        entries_map.get("files_and_knowledge", {}).pop(dup_fk, None)
 
     blob["entries"] = [[cat, comps] for cat, comps in entries_map.items()]
     blob["metadata"]["num_modules"] = len(blob["entries"])
@@ -278,6 +351,16 @@ def install_all() -> None:
         "            setattr(_SflfSaEngine, '_sflf_sqlite_wal_listener_registered', True)\n"
         "    except Exception:\n"
         "        pass\n"
+        "    try:\n"
+        "        from lfx_snowflake.providers.embeddings import register_snowflake_cortex_embedding_provider\n"
+        "        register_snowflake_cortex_embedding_provider()\n"
+        "    except Exception:\n"
+        "        pass\n"
+        "    try:\n"
+        "        from lfx_snowflake.fastapi_live_bridge import register_snowflake_vector_store_backends\n"
+        "        register_snowflake_vector_store_backends()\n"
+        "    except Exception:\n"
+        "        pass\n"
         "    from lfx_snowflake.fastapi_live_bridge import register_snowflake_fastapi_routes\n"
         "    register_snowflake_fastapi_routes(app)\n"
     )
@@ -287,16 +370,15 @@ def install_all() -> None:
         main_text = main_text.replace("    load_plugin_routes(app)\n", hook_snippet, 1)
         LANGFLOW_MAIN.write_text(main_text, encoding="utf-8")
         print("[install_live_hooks] Patched langflow/main.py with SQLite WAL connect listener and register_snowflake_fastapi_routes(app)")
-    elif "_sflf_sqlite_wal_listener_registered" not in main_text:
-        old_hook = (
-            "    load_plugin_routes(app)\n"
-            "    from lfx_snowflake.fastapi_live_bridge import register_snowflake_fastapi_routes\n"
-            "    register_snowflake_fastapi_routes(app)\n"
+    elif "register_snowflake_cortex_embedding_provider" not in main_text:
+        main_text = re.sub(
+            r"    load_plugin_routes\(app\)\n[\s\S]*?register_snowflake_fastapi_routes\(app\)\n",
+            hook_snippet,
+            main_text,
+            count=1,
         )
-        if old_hook in main_text:
-            main_text = main_text.replace(old_hook, hook_snippet, 1)
-            LANGFLOW_MAIN.write_text(main_text, encoding="utf-8")
-            print("[install_live_hooks] Upgraded langflow/main.py hook with SQLite WAL connect listener + UV_CACHE_DIR")
+        LANGFLOW_MAIN.write_text(main_text, encoding="utf-8")
+        print("[install_live_hooks] Upgraded langflow/main.py hook with Snowflake Cortex embeddings & vector store backends")
 
     # 5. Patch compiled React bundle in langflow/frontend/assets/*.js (100% React Virtual-DOM safe!)
     sf_svg_inline_sm = (
@@ -396,7 +478,8 @@ def install_all() -> None:
         '.filter(_m=>{const _q=(t||"").trim().toLowerCase();return!_q||`${_m.name||""} ${_m.description||""} ${_m.kb_name||""} ${_m.agent_memory_type||""} ${_m.backend_type||""}`.toLowerCase().includes(_q);});'
         'const _existingIds=new Set((_origE||[]).map(_x=>String(_x.id||"").toLowerCase()).filter(Boolean));'
         'const _existingNames=new Set((_origE||[]).map(_x=>(_x.name||"").toUpperCase()).filter(Boolean));'
-        'const e=[..._sfMems.filter(_m=>!_existingIds.has(String(_m.id||"").toLowerCase())&&!_existingNames.has((_m.name||"").toUpperCase())),...(_origE||[])];'
+        'const _mergedE=[..._sfMems.filter(_m=>!_existingIds.has(String(_m.id||"").toLowerCase())&&!_existingNames.has((_m.name||"").toUpperCase())),...(_origE||[])];'
+        'const e=typeof window!=="undefined"&&typeof window.filterSnowflakeMemoriesByContext==="function"?window.filterSnowflakeMemoriesByContext(_mergedE):_mergedE;'
         'const h=(_sel)=>{if(typeof _origH==="function")_origH(_sel);if(typeof window!=="undefined"&&typeof window.renderSnowflakeMemoryDetailView==="function")window.renderSnowflakeMemoryDetailView(_sel);};'
         'if(typeof window!=="undefined"){window.__sflfCurrentMemoryFlowId=u;window.__sflfSelectMemory=h;}'
     )
@@ -704,6 +787,42 @@ def install_all() -> None:
             '"settings.dbProviders.description":"Configure vector-store providers for Knowledge Bases."',
             '"settings.dbProviders.description":"Snowflake Vector Stores (Standard Table VECTOR, Hybrid Table VECTOR, Cortex Search, Snowflake Postgres pgvector) are pre-configured in Files & Knowledge. Configure any additional DB providers below."',
         )
+        # W2-R5-05: Inject Stages & Volumes Bucket icon in left vertical rail between Memories and Traces
+        txt = txt.replace(
+            '{id:"memories",icon:"BrainCog",label:"memory.sidebarTitle",tooltip:"memory.sidebarTitle"},{id:"traces",icon:"Activity",label:"sidebar.nav.traces",tooltip:"sidebar.nav.traces"}],dzn=new Set(["agent","memories","traces"])',
+            '{id:"memories",icon:"BrainCog",label:"memory.sidebarTitle",tooltip:"memory.sidebarTitle"},{id:"stages",icon:"Database",label:"Stages & Volumes",tooltip:"Stages & Volumes"},{id:"traces",icon:"Activity",label:"sidebar.nav.traces",tooltip:"sidebar.nav.traces"}],dzn=new Set(["agent","memories","stages","traces"])',
+        )
+        txt = txt.replace(
+            'br=p==="traces"||p==="memories"||p==="agent"',
+            'br=p==="traces"||p==="memories"||p==="stages"||p==="agent"',
+        )
+        txt = txt.replace(
+            'return n==="agent"?v.jsx(cio,{}):o?v.jsx("div",{className:"flex h-full w-full flex-col overflow-hidden","data-testid":"flow-insights-embedded",children:v.jsx(kmo,{flowId:e,refreshOnMount:!0,showFlowActivityHeader:!0})}):s?v.jsx(rso,{}):v.jsx(Jgo,{setIsLoading:t})',
+            'return n==="agent"?v.jsx(cio,{}):o?v.jsx("div",{className:"flex h-full w-full flex-col overflow-hidden","data-testid":"flow-insights-embedded",children:v.jsx(kmo,{flowId:e,refreshOnMount:!0,showFlowActivityHeader:!0})}):s?v.jsx(rso,{}):n==="stages"?v.jsx("div",{id:"sflf-stages-react-host","data-testid":"snowflake-stages-react-host",className:"flex h-full w-full flex-col overflow-hidden"}):v.jsx(Jgo,{setIsLoading:t})',
+        )
+        # W2-R5-02 & W2-R5-04: Native + Create Memory & Knowledge Base Snowflake Cortex (AI_EMBED) & 6 Snowflake Vector Backends
+        if 'id:"snowflake_table"' not in txt and 'CQ=[{id:"chroma"' in txt:
+            sf_cq_entries = (
+                '{id:"snowflake_table",label:"Snowflake Standard Table (VECTOR)",description:"Governed Snowflake Standard Table with VECTOR(FLOAT, 768|1024) and SNOWFLAKE.CORTEX.AI_EMBED in active [ ❄️ Context ].",icon:"Database",status:"available",defaultEnabled:!0,configFields:[]},'
+                '{id:"snowflake_hybrid",label:"Snowflake Hybrid Table (VECTOR)",description:"Low-latency Snowflake Hybrid Table with Primary Key + VECTOR(FLOAT, 768|1024) in active [ ❄️ Context ].",icon:"Database",status:"available",defaultEnabled:!0,configFields:[]},'
+                '{id:"snowflake_dynamic",label:"Snowflake Dynamic Table (VECTOR)",description:"Incremental Snowflake Dynamic Table with TARGET_LAG and VECTOR(FLOAT, 768|1024) in active [ ❄️ Context ].",icon:"Database",status:"available",defaultEnabled:!0,configFields:[]},'
+                '{id:"snowflake_interactive",label:"Snowflake Interactive Table (VECTOR)",description:"Sub-second Snowflake Interactive Table with VECTOR(FLOAT, 768|1024) in active [ ❄️ Context ].",icon:"Database",status:"available",defaultEnabled:!0,configFields:[]},'
+                '{id:"snowflake_iceberg",label:"Snowflake Iceberg Table (VECTOR)",description:"Open Apache Iceberg Table managed by Snowflake with VECTOR(FLOAT, 768|1024) in active [ ❄️ Context ].",icon:"Database",status:"available",defaultEnabled:!0,configFields:[]},'
+                '{id:"snowflake_postgres",label:"Snowflake Postgres (:5432 pgvector)",description:"Managed Snowflake Postgres (:5432) with pgvector HNSW index in active [ ❄️ Context ].",icon:"Postgres",status:"available",defaultEnabled:!0,configFields:[]},'
+            )
+            txt = txt.replace('CQ=[{id:"chroma"', "CQ=[" + sf_cq_entries + '{id:"chroma"')
+            txt = txt.replace(
+                'function DY(e,t,n=!0){return e==="chroma"?n:',
+                'function DY(e,t,n=!0){if(typeof e==="string"&&e.startsWith("snowflake_"))return!0;return e==="chroma"?n:',
+            )
+            txt = txt.replace(
+                'function hQn(e,t){return e==="opensearch"',
+                'function hQn(e,t){if(typeof e==="string"&&e.startsWith("snowflake_"))return e;return e==="opensearch"',
+            )
+            txt = txt.replace(
+                "function iIe(e,t,n,o){",
+                'function iIe(e,t,n,o){if(t==="Snowflake Cortex")return!0;',
+            )
         if js_asset.name.startswith("index-") and "__sflfPatched" not in txt:
             txt = dom_guard_banner + txt
         if js_asset.name.startswith("index-") and "memories-plus-snowflake-btn" in txt:
@@ -861,7 +980,21 @@ def install_all() -> None:
     assert "SnowflakeCortexAnalystLLM" not in idx_cats["llm_operations"]
     assert "SnowflakeSmartRouter" not in idx_cats["llm_operations"]
 
-    for fk_comp in (
+    for fk_canonical in (
+        "FileSystemTool",
+        "Knowledge",
+        "MemoryBase",
+        "File",
+        "SaveToFile",
+    ):
+        assert fk_canonical in idx_cats["files_and_knowledge"], f"Missing canonical {fk_canonical} in files_and_knowledge"
+    non_legacy_fk = sorted(
+        k for k, v in idx_cats["files_and_knowledge"].items() if not (isinstance(v, dict) and v.get("legacy"))
+    )
+    assert non_legacy_fk == sorted(["FileSystemTool", "Knowledge", "MemoryBase", "File", "SaveToFile"]), (
+        f"Expected strictly 5 canonical non-legacy components in files_and_knowledge, got: {non_legacy_fk}"
+    )
+    for fk_removed in (
         "SnowflakeObjectProvisionerFK",
         "SnowflakeStageFileSystem",
         "SnowflakeCortexSearchParseDocument",
@@ -869,10 +1002,11 @@ def install_all() -> None:
         "SnowflakeCortexSearchServiceCreator",
         "SnowflakeCortexSearchStreamTask",
         "SnowflakeMemoryBase",
+        "SnowflakeKnowledgeMemory",
     ):
-        assert fk_comp in idx_cats["files_and_knowledge"], f"Missing {fk_comp} in files_and_knowledge"
-    assert "SnowflakeKnowledgeMemory" not in idx_cats["files_and_knowledge"]
+        assert fk_removed not in idx_cats["files_and_knowledge"], f"Removed duplicate {fk_removed} still in files_and_knowledge"
 
+    assert "SplitText" in idx_cats["processing"], "Missing SplitText in processing"
     assert "SnowflakeToolGuardPolicies" in idx_cats["utilities"]
     assert "SnowflakePythonInterpreterPyPI" not in idx_cats["utilities"]
 

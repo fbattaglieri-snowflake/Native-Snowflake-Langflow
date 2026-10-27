@@ -136,6 +136,22 @@ def _stage_options(
     return stages
 
 
+def _stage_fqn_options(flow_id: str | None = None) -> list[str]:
+    """Return @<DB>.<SCHEMA>.<STAGE> options across all databases and schemas selected in [ ❄️ Context ]."""
+    eff_fid = flow_id or _resolve_flow_id()
+    out: list[str] = []
+    for db in _database_options(flow_id=eff_fid):
+        for sch in _schema_options(db, flow_id=eff_fid):
+            for stg in LIVE_BRIDGE.get_context_objects(db, sch, "stages", flow_id=eff_fid):
+                clean = str(stg).lstrip("@").strip()
+                fqn = f"@{clean}" if clean.count(".") >= 2 else f"@{db}.{sch}.{clean}"
+                if fqn not in out:
+                    out.append(fqn)
+    if not out:
+        out.append("@SNOWFLAKE_LANGFLOW.CORE.SNOWFLAKE_LANGFLOW_STAGE")
+    return out
+
+
 class SnowflakeStageFileSystemComponent(Component):
     display_name = "Stage File System"
     description = (

@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import copy
+import hashlib
 import json
 import os
 import re
@@ -954,6 +956,76 @@ class LiveSnowflakeBridge:
         self.context_epoch: int = 1
         self.secondary_roles_mode: str = "NONE"
         self.memories_registry: list[dict[str, Any]] = []
+        self.stages_registry: list[dict[str, Any]] = [
+            {
+                "name": self.stage_name,
+                "database": self.database,
+                "schema": self.schema,
+                "fqn": f"{self.database}.{self.schema}.{self.stage_name}",
+                "stage_fqn": f"@{self.database}.{self.schema}.{self.stage_name}",
+                "at_stage": f"@{self.database}.{self.schema}.{self.stage_name}",
+                "type": "INTERNAL",
+                "stage_type": "INTERNAL",
+                "kind": "INTERNAL_STAGE",
+                "encryption": "SNOWFLAKE_SSE",
+                "directory_enabled": True,
+                "auto_refresh": False,
+                "url": "",
+                "cloud_provider": "SNOWFLAKE",
+                "storage_integration": None,
+                "file_format": None,
+                "comment": "Default governed Snowflake internal stage for Langflow documents and semantic models.",
+                "created_by_role": self.active_role,
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            }
+        ]
+        self.external_volumes_registry: list[dict[str, Any]] = [
+            {
+                "name": "ICEBERG_EXT_VOL",
+                "type": "EXTERNAL_VOLUME",
+                "kind": "EXTERNAL_VOLUME",
+                "allow_writes": True,
+                "storage_provider": "S3",
+                "storage_base_url": "s3://snowflake-langflow-iceberg-vol/tables/",
+                "location_name": "loc_primary_s3",
+                "storage_locations": [
+                    {
+                        "name": "loc_primary_s3",
+                        "storage_provider": "S3",
+                        "storage_base_url": "s3://snowflake-langflow-iceberg-vol/tables/",
+                    }
+                ],
+                "comment": "Governed External Volume for Apache Iceberg tables.",
+                "created_by_role": self.active_role,
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            }
+        ]
+        self.stage_files_registry: dict[str, list[dict[str, Any]]] = {
+            f"{self.database}.{self.schema}.{self.stage_name}": [
+                {
+                    "name": f"{self.stage_name.lower()}/semantic_models/financial_operations.yaml",
+                    "path": "semantic_models/financial_operations.yaml",
+                    "file_name": "financial_operations.yaml",
+                    "size": 2048,
+                    "md5": "d41d8cd98f00b204e9800998ecf8427e",
+                    "last_modified": "2026-10-27T08:00:00Z",
+                    "stage_fqn": f"@{self.database}.{self.schema}.{self.stage_name}",
+                    "scoped_path": f"@{self.database}.{self.schema}.{self.stage_name}/semantic_models/financial_operations.yaml",
+                    "content_preview": "name: financial_operations\ntables:\n  - name: FIN_GL_TRANSACTIONS\n",
+                },
+                {
+                    "name": f"{self.stage_name.lower()}/docs/q4_margin_policy.pdf",
+                    "path": "docs/q4_margin_policy.pdf",
+                    "file_name": "q4_margin_policy.pdf",
+                    "size": 18432,
+                    "md5": "098f6bcd4621d373cade4e832627b4f6",
+                    "last_modified": "2026-10-27T08:05:00Z",
+                    "stage_fqn": f"@{self.database}.{self.schema}.{self.stage_name}",
+                    "scoped_path": f"@{self.database}.{self.schema}.{self.stage_name}/docs/q4_margin_policy.pdf",
+                    "content_preview": "IFRS-15 Q4 Net Margin Policy & Reconciliation Guidelines",
+                },
+            ]
+        }
         self.role_accessible_catalog: dict[str, dict[str, Any]] = {}
         self.selected_context: dict[str, Any] = {
             "database": self.database,
@@ -972,6 +1044,7 @@ class LiveSnowflakeBridge:
                 "views": [],
                 "iceberg_tables": [],
                 "stages": [self.stage_name],
+                "external_volumes": ["ICEBERG_EXT_VOL"],
                 "memories": ["SNOWFLAKE_KB_MEM"],
                 "cortex_search_services": [],
                 "semantic_views": [],
@@ -1446,11 +1519,72 @@ class LiveSnowflakeBridge:
         self._objects_cache.clear()
         self._roles_last_refreshed_ts = 0.0
 
-    @property
-    def memories_catalog(self) -> list[dict[str, Any]]:
-        """Return governed Snowflake Agent Memories available for workflow recall (`W2-R2-13`, `W2-R4-08G`)."""
+    def is_memory_visible_in_context(
+        self,
+        entry: dict[str, Any],
+        flow_id: str | None = None,
+    ) -> bool:
+        """Return True iff `entry`'s backing storage (`Snowflake Postgres` or `Database ▸ Schema`) is enabled in `[ ❄️ Context ]`."""
+        if not isinstance(entry, dict):
+            return False
+        norm_fid = self._normalize_flow_id(flow_id or CURRENT_SNOWFLAKE_FLOW_ID.get() or self.active_flow_id)
+        if norm_fid:
+            target_ctx = self.get_flow_context(norm_fid)
+            pg_list = self.get_context_postgres_instances(flow_id=norm_fid)
+        else:
+            target_ctx = self.selected_context
+            pg_list = self.get_context_postgres_instances(flow_id=None)
+
+        storage_family = str(entry.get("storage_family") or "").strip().lower()
+        vec_db = str(entry.get("vector_database") or "").strip().upper()
+        fqn = str(entry.get("table_fqn") or entry.get("fqn") or "").strip()
+        is_pg_memory = (
+            storage_family == "snowflake_postgres"
+            or "POSTGRES" in vec_db
+            or ":5432" in fqn
+        )
+        if is_pg_memory:
+            active_pg = {str(p).strip().upper() for p in pg_list if str(p).strip()}
+            if not active_pg:
+                return False
+            pg_inst = str(entry.get("postgres_instance") or "").strip().upper()
+            if not pg_inst and ":5432" in fqn:
+                pg_inst = fqn.split(":5432", 1)[0].strip().upper()
+            if not pg_inst:
+                pg_inst = str(entry.get("database") or "LANGFLOW_PG_INSTANCE").strip().upper()
+            return pg_inst in active_pg
+
+        mem_db = str(entry.get("database") or "").strip().upper()
+        mem_sch = str(entry.get("schema") or "").strip().upper()
+        if (not mem_db or not mem_sch) and "." in fqn and ":5432" not in fqn:
+            parts = [p.strip().upper() for p in fqn.split(".") if p.strip()]
+            if len(parts) >= 2:
+                mem_db = mem_db or parts[0]
+                mem_sch = mem_sch or parts[1]
+
+        raw_dbs = target_ctx.get("databases")
+        if isinstance(raw_dbs, list):
+            active_dbs = {str(d).strip().upper() for d in raw_dbs if str(d).strip()}
+            if mem_db and mem_db not in active_dbs:
+                return False
+
+        schemas_map = target_ctx.get("schemas_by_db")
+        if isinstance(schemas_map, dict) and mem_db and mem_sch:
+            for db_k, sch_list in schemas_map.items():
+                if str(db_k).strip().upper() == mem_db and isinstance(sch_list, list):
+                    active_schemas = {str(s).strip().upper() for s in sch_list if str(s).strip()}
+                    if mem_sch not in active_schemas:
+                        return False
+                    break
+        return True
+
+    def get_memories_for_flow(self, flow_id: str | None = None) -> list[dict[str, Any]]:
+        """Return Snowflake Memories filtered by the active `[ ❄️ Context ]` of `flow_id`."""
+        eff_fid = self._normalize_flow_id(flow_id or CURRENT_SNOWFLAKE_FLOW_ID.get() or self.active_flow_id)
         items: list[dict[str, Any]] = []
         for raw_m in self.memories_registry:
+            if not self.is_memory_visible_in_context(raw_m, flow_id=eff_fid):
+                continue
             m = dict(raw_m)
             m_name = str(m.get("name") or "SNOWFLAKE_MEMORY").strip()
             det_id = str(m.get("memory_id") or m.get("langflow_memory_id") or compute_deterministic_memory_uuid(m_name))
@@ -1463,33 +1597,49 @@ class LiveSnowflakeBridge:
         for mem_name in vis_mem:
             clean = str(mem_name or "").strip()
             if clean and clean.upper() not in known_names:
-                det_id = compute_deterministic_memory_uuid(clean)
-                items.append(
-                    {
-                        "id": det_id,
-                        "memory_id": det_id,
-                        "langflow_memory_id": det_id,
-                        "name": clean,
-                        "database": self.database,
-                        "schema": self.schema,
-                        "table_fqn": f"{self.database}.{self.schema}.MEM_{clean.upper()}",
-                        "agent_memory_type": "semantic_vector",
-                        "canonical_memory_type": "episodic_memory",
-                        "memory_category": "vector_table",
-                        "vector_database": "Standard Table (VECTOR)",
-                        "embedding_model": "snowflake-arctic-embed-m-v1.5",
-                        "dimension": 768,
-                        "auto_capture": True,
-                        "created_by_role": self.active_role,
-                    }
+                inRegistry = any(
+                    str(rm.get("name") or "").strip().upper() == clean.upper()
+                    for rm in self.memories_registry
                 )
-                known_names.add(clean.upper())
+                if inRegistry:
+                    continue
+                det_id = compute_deterministic_memory_uuid(clean)
+                cand = {
+                    "id": det_id,
+                    "memory_id": det_id,
+                    "langflow_memory_id": det_id,
+                    "name": clean,
+                    "database": self.database,
+                    "schema": self.schema,
+                    "table_fqn": f"{self.database}.{self.schema}.MEM_{clean.upper()}",
+                    "agent_memory_type": "semantic_vector",
+                    "canonical_memory_type": "episodic_memory",
+                    "memory_category": "vector_table",
+                    "vector_database": "Standard Table (VECTOR)",
+                    "embedding_model": "snowflake-arctic-embed-m-v1.5",
+                    "dimension": 768,
+                    "auto_capture": True,
+                    "created_by_role": self.active_role,
+                }
+                if self.is_memory_visible_in_context(cand, flow_id=eff_fid):
+                    items.append(cand)
+                    known_names.add(clean.upper())
         return items
 
-    def get_memory_catalog_options(self, *, include_none: bool = True) -> list[str]:
-        """Return dropdown options for `memory_catalog_ref` in workflow components."""
+    @property
+    def memories_catalog(self) -> list[dict[str, Any]]:
+        """Return governed Snowflake Agent Memories available for workflow recall (`W2-R2-13`, `W2-R4-08G`)."""
+        return self.get_memories_for_flow(flow_id=None)
+
+    def get_memory_catalog_options(
+        self,
+        *,
+        include_none: bool = True,
+        flow_id: str | None = None,
+    ) -> list[str]:
+        """Return dropdown options for `memory_catalog_ref` / `memory_base` filtered by `[ ❄️ Context ]` (`W2-R5-01`)."""
         opts: list[str] = ["None"] if include_none else []
-        for entry in self.memories_catalog:
+        for entry in self.get_memories_for_flow(flow_id=flow_id):
             nm = str(entry.get("name") or "").strip()
             fqn = str(entry.get("table_fqn") or "").strip()
             agent_type = str(entry.get("agent_memory_type") or entry.get("memory_category") or "memory").strip()
@@ -2362,21 +2512,21 @@ class LiveSnowflakeBridge:
                 f_vis_mem.append(name)
             self.contexts_by_flow_id[norm_fid] = f_ctx
 
-        if create_physical:
-            if is_postgres_branch and postgres_instance:
+        if is_postgres_branch and postgres_instance:
+            if create_physical or not body.get("_skip_context_auto_register"):
                 self.register_object_in_context(
                     category="postgres_instances",
                     object_name=postgres_instance,
                     flow_id=norm_fid,
                 )
-            else:
-                self.register_object_in_context(
-                    database=db,
-                    schema=sch,
-                    category="tables",
-                    object_name=fqn,
-                    flow_id=norm_fid,
-                )
+        elif create_physical:
+            self.register_object_in_context(
+                database=db,
+                schema=sch,
+                category="tables",
+                object_name=fqn,
+                flow_id=norm_fid,
+            )
 
         self._persist_memory_in_langflow_sqlite(entry, flow_id=norm_fid)
         self.record_audit_event(
@@ -3022,14 +3172,16 @@ class LiveSnowflakeBridge:
         page: int = 1,
         size: int = 50,
     ) -> dict[str, Any]:
-        """Return native Langflow `Page[MemoryBaseRead]` merging Snowflake memories across flows (`W2-R4-08G`)."""
-        _ = flow_id  # Intentionally relaxed so Snowflake memories remain visible and searchable across flows
+        """Return native Langflow `Page[MemoryBaseRead]` filtered by the active `[ ❄️ Context ]` (`W2-R4-08G`)."""
+        eff_fid = self._normalize_flow_id(flow_id or CURRENT_SNOWFLAKE_FLOW_ID.get() or self.active_flow_id)
         merged_by_name: dict[str, dict[str, Any]] = {}
         for m in self.memories_registry:
+            if not self.is_memory_visible_in_context(m, flow_id=eff_fid):
+                continue
             nm = str(m.get("name") or "").strip()
             if nm:
                 merged_by_name[nm.upper()] = self._to_langflow_memory_base_read(m)
-        for m in self.memories_catalog:
+        for m in self.get_memories_for_flow(flow_id=eff_fid):
             nm = str(m.get("name") or "").strip()
             if nm and nm.upper() not in merged_by_name:
                 merged_by_name[nm.upper()] = self._to_langflow_memory_base_read(m)
@@ -3070,6 +3222,141 @@ class LiveSnowflakeBridge:
             "page": page_int,
             "size": size_int,
             "pages": pages,
+        }
+
+    def create_native_memory(
+        self,
+        body: dict[str, Any],
+        *,
+        flow_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Handle `POST /api/v1/memories` from Langflow's native `+ Create` Memory modal (`W2-R5-02`).
+
+        Creates a governed Snowflake Memory in the active `[ ❄️ Context ]` (`<DATABASE>.<SCHEMA>` or
+        `Snowflake Postgres (:5432)`), supporting all 6 `SNOWFLAKE.CORTEX.AI_EMBED` models and
+        `No Embedding` direct SQL mode, and persists it in both `memories_registry` and SQLite `memory_base`.
+        """
+        payload = dict(body or {})
+        eff_fid = self._normalize_flow_id(
+            flow_id
+            or payload.get("flow_id")
+            or (payload.get("backend_config") or {}).get("flow_id")
+            or CURRENT_SNOWFLAKE_FLOW_ID.get()
+            or self.active_flow_id
+        )
+        if eff_fid:
+            payload["flow_id"] = eff_fid
+
+        mem_name = str(payload.get("name") or payload.get("kb_name") or "SNOWFLAKE_MEMORY").strip()
+        payload["name"] = mem_name
+        payload.setdefault("kb_name", mem_name)
+
+        backend_cfg = payload.get("backend_config") if isinstance(payload.get("backend_config"), dict) else {}
+        raw_backend = str(
+            payload.get("backend_type")
+            or payload.get("vector_database")
+            or payload.get("storage_backend")
+            or backend_cfg.get("backend_type")
+            or backend_cfg.get("vector_database")
+            or "snowflake_table"
+        ).strip()
+        raw_backend_lower = raw_backend.lower()
+
+        raw_emb_model = str(payload.get("embedding_model") or backend_cfg.get("embedding_model") or "").strip()
+        raw_emb_provider = str(
+            payload.get("embedding_provider") or backend_cfg.get("embedding_provider") or "Snowflake Cortex"
+        ).strip()
+
+        no_embedding_tokens = {"none", "no embedding", "no_embedding", "disabled", "false", "sql_only"}
+        if payload.get("enable_embedding") is False or backend_cfg.get("enable_embedding") is False:
+            enable_emb = False
+        elif raw_emb_model.lower() in no_embedding_tokens or raw_emb_provider.lower() in no_embedding_tokens:
+            enable_emb = False
+        elif "iceberg" in raw_backend_lower:
+            enable_emb = False
+        else:
+            enable_emb = True
+
+        clean_model = raw_emb_model.split(" (")[0].strip() if raw_emb_model else "snowflake-arctic-embed-m-v1.5"
+        if not enable_emb or clean_model.lower() in no_embedding_tokens:
+            clean_model = "none"
+            enable_emb = False
+
+        dim_map = {
+            "snowflake-arctic-embed-m-v1.5": 768,
+            "snowflake-arctic-embed-m": 768,
+            "e5-base-v2": 768,
+            "snowflake-arctic-embed-l-v2.0": 1024,
+            "voyage-multilingual-2": 1024,
+            "nv-embed-qa-4": 1024,
+            "snowflake-arctic-embed-l-v2.0-8k": 1024,
+            "multilingual-e5-large": 1024,
+        }
+        dim = int(payload.get("dimension") or dim_map.get(clean_model, 768))
+
+        backend_to_vector_db = {
+            "snowflake_table": "Standard Table (VECTOR)" if enable_emb else "Standard Table",
+            "snowflake standard table": "Standard Table (VECTOR)" if enable_emb else "Standard Table",
+            "standard table": "Standard Table (VECTOR)" if enable_emb else "Standard Table",
+            "chroma": "Standard Table (VECTOR)" if enable_emb else "Standard Table",
+            "snowflake_hybrid": "Hybrid Table (VECTOR)" if enable_emb else "Hybrid Table",
+            "snowflake hybrid table": "Hybrid Table (VECTOR)" if enable_emb else "Hybrid Table",
+            "hybrid table": "Hybrid Table (VECTOR)" if enable_emb else "Hybrid Table",
+            "snowflake_dynamic": "Dynamic Table (VECTOR)" if enable_emb else "Dynamic Table",
+            "snowflake dynamic table": "Dynamic Table (VECTOR)" if enable_emb else "Dynamic Table",
+            "dynamic table": "Dynamic Table (VECTOR)" if enable_emb else "Dynamic Table",
+            "snowflake_interactive": "Interactive Table (VECTOR)" if enable_emb else "Interactive Table",
+            "snowflake interactive table": "Interactive Table (VECTOR)" if enable_emb else "Interactive Table",
+            "interactive table": "Interactive Table (VECTOR)" if enable_emb else "Interactive Table",
+            "snowflake_iceberg": "Standard Table",
+            "snowflake iceberg table": "Standard Table",
+            "iceberg table": "Standard Table",
+            "snowflake_postgres": "Snowflake Postgres (pgvector)" if enable_emb else "Snowflake Postgres (Relational / JSONB)",
+            "snowflake postgres": "Snowflake Postgres (pgvector)" if enable_emb else "Snowflake Postgres (Relational / JSONB)",
+            "snowflake postgres (:5432)": "Snowflake Postgres (pgvector)" if enable_emb else "Snowflake Postgres (Relational / JSONB)",
+        }
+        mapped_vec_db = backend_to_vector_db.get(raw_backend_lower, raw_backend or "Standard Table (VECTOR)")
+        is_pg = "postgres" in raw_backend_lower or "postgres" in mapped_vec_db.lower()
+
+        payload.setdefault("storage_family", "snowflake_postgres" if is_pg else "snowflake_sql")
+        payload.setdefault("vector_database", mapped_vec_db)
+        payload["enable_embedding"] = enable_emb
+        payload["embedding_provider"] = "snowflake_cortex" if enable_emb else "none"
+        payload["embedding_model"] = clean_model if enable_emb else None
+        payload["dimension"] = dim if enable_emb else None
+        payload.setdefault(
+            "agent_memory_type",
+            backend_cfg.get("agent_memory_type")
+            or payload.get("canonical_memory_type")
+            or ("episodic_memory" if enable_emb else "buffer_window_memory"),
+        )
+        if "preprocessing" in payload and "llm_preprocessing" not in payload:
+            payload["llm_preprocessing"] = {
+                "enabled": bool(payload.get("preprocessing")),
+                "engine": "cortex_sql",
+                "model": str(payload.get("preproc_model") or "mistral-large2"),
+                "custom_instructions": str(payload.get("preproc_instructions") or ""),
+                "kill_phrase": str(payload.get("preproc_kill_phrase") or "NO_INGEST"),
+            }
+        if "threshold" in payload and "ingestion_threshold" not in payload:
+            payload["ingestion_threshold"] = int(payload.get("threshold") or 1)
+
+        res = self.create_or_register_memory(payload)
+        if not res.get("ok"):
+            return res
+
+        entry = res["memory"]
+        entry["backend_type"] = raw_backend if raw_backend.startswith("snowflake_") else (
+            "snowflake_postgres" if is_pg else "snowflake_table"
+        )
+        read_obj = self._to_langflow_memory_base_read(entry)
+        read_obj["backend_type"] = entry["backend_type"]
+        return {
+            **read_obj,
+            "ok": True,
+            "status_code": 201,
+            "memory": entry,
+            "ddl": res.get("ddl"),
         }
 
     def get_native_memory(self, memory_id: str) -> dict[str, Any]:
@@ -4380,22 +4667,773 @@ class LiveSnowflakeBridge:
         """Return True if the active role is permitted to create schema-level objects."""
         return self.can_create_schema()
 
+    def can_create_stage(self) -> bool:
+        """Return True if the active role is permitted to execute CREATE STAGE in the target schema (`W2-R5-05`)."""
+        role_u = self.active_role.strip().upper()
+        if role_u in (
+            "PUBLIC",
+            "SNOWFLAKE_LANGFLOW_VIEWER_ROLE",
+            "VIEWER_ROLE",
+            "ROLE_VIEWER",
+            "READONLY_ROLE",
+            "UNAUTHORIZED_ROLE",
+            "NO_DDL_ROLE",
+        ):
+            return False
+        return True
+
+    def can_create_external_volume(self) -> bool:
+        """Return True if the active role has `CREATE EXTERNAL VOLUME ON ACCOUNT` privilege (`W2-R5-05`)."""
+        role_u = self.active_role.strip().upper()
+        return role_u in (
+            "ACCOUNTADMIN",
+            "SYSADMIN",
+            "SNOWFLAKE_LANGFLOW_ADMIN_ROLE",
+            "SNOWFLAKE_LANGFLOW_ADMIN",
+        )
+
     def get_role_privileges(self) -> dict[str, bool]:
         """Compute granular active-role creation privileges for Hub Section 1 & sidebar components."""
         can_db = self.can_create_database()
         can_sch = self.can_create_schema()
         can_obj = self.can_create_object()
+        can_stg = self.can_create_stage()
+        can_ext_vol = self.can_create_external_volume()
         return {
             "can_create_database": can_db,
             "can_create_schema": can_sch,
             "can_create_table": can_obj,
-            "can_create_stage": can_obj,
+            "can_create_stage": can_stg,
+            "can_create_external_volume": can_ext_vol,
             "can_create_view": can_obj,
             "can_create_function": can_obj,
             "can_create_procedure": can_obj,
             "can_create_cortex_search": can_obj,
             "can_create_postgres": can_db,
             "can_create_object": can_obj,
+        }
+
+    def is_stage_visible_in_context(
+        self,
+        stage_entry: dict[str, Any],
+        flow_id: str | None = None,
+    ) -> bool:
+        """Return True iff `stage_entry`'s `<DATABASE>.<SCHEMA>` is enabled in `[ ❄️ Context ]` (`W2-R5-05`)."""
+        if not isinstance(stage_entry, dict):
+            return False
+        norm_fid = self._normalize_flow_id(flow_id or CURRENT_SNOWFLAKE_FLOW_ID.get() or self.active_flow_id)
+        target_ctx = self.get_flow_context(norm_fid) if norm_fid else self.selected_context
+
+        stg_db = str(stage_entry.get("database") or "").strip().upper()
+        stg_sch = str(stage_entry.get("schema") or "").strip().upper()
+        raw_fqn = str(stage_entry.get("stage_fqn") or stage_entry.get("fqn") or "").lstrip("@").strip()
+        if (not stg_db or not stg_sch) and "." in raw_fqn:
+            parts = [p.strip().upper() for p in raw_fqn.split(".") if p.strip()]
+            if len(parts) >= 2:
+                stg_db = stg_db or parts[0]
+                stg_sch = stg_sch or parts[1]
+
+        raw_dbs = target_ctx.get("databases")
+        if isinstance(raw_dbs, list):
+            active_dbs = {str(d).strip().upper() for d in raw_dbs if str(d).strip()}
+            if stg_db and stg_db not in active_dbs:
+                return False
+
+        schemas_map = target_ctx.get("schemas_by_db")
+        if isinstance(schemas_map, dict) and stg_db and stg_sch:
+            for db_k, sch_list in schemas_map.items():
+                if str(db_k).strip().upper() == stg_db and isinstance(sch_list, list):
+                    active_schemas = {str(s).strip().upper() for s in sch_list if str(s).strip()}
+                    if stg_sch not in active_schemas:
+                        return False
+                    break
+
+        sel_objs = target_ctx.get("selected_objects")
+        pair_key = f"{stg_db}.{stg_sch}"
+        if isinstance(sel_objs, dict) and pair_key in sel_objs and isinstance(sel_objs[pair_key], dict):
+            pair_sel = sel_objs[pair_key]
+            if "stages" in pair_sel and isinstance(pair_sel["stages"], list):
+                allowed_stages = {str(s).lstrip("@").split(".")[-1].strip().upper() for s in pair_sel["stages"] if str(s).strip()}
+                stg_nm = str(stage_entry.get("name") or raw_fqn.split(".")[-1]).lstrip("@").strip().upper()
+                if allowed_stages and stg_nm not in allowed_stages:
+                    return False
+        return True
+
+    def list_stages_for_context(
+        self,
+        *,
+        flow_id: str | None = None,
+        database: str | None = None,
+        schema: str | None = None,
+    ) -> dict[str, Any]:
+        """Return Internal & External Stages (`@<DB>.<SCHEMA>.<STAGE>`) filtered by `[ ❄️ Context ]` (`W2-R5-05`)."""
+        norm_fid = self._normalize_flow_id(flow_id or CURRENT_SNOWFLAKE_FLOW_ID.get() or self.active_flow_id)
+        target_ctx = self.get_flow_context(norm_fid) if norm_fid else self.selected_context
+
+        by_fqn: dict[str, dict[str, Any]] = {}
+        for stg in self.stages_registry:
+            if not self.is_stage_visible_in_context(stg, flow_id=norm_fid):
+                continue
+            s_db = str(stg.get("database") or self.database).strip().upper()
+            s_sch = str(stg.get("schema") or self.schema).strip().upper()
+            if database and s_db != database.strip().upper():
+                continue
+            if schema and s_sch != schema.strip().upper():
+                continue
+            s_name = str(stg.get("name") or self.stage_name).strip().upper()
+            fqn_key = f"{s_db}.{s_sch}.{s_name}"
+            entry_copy = dict(stg)
+            entry_copy["name"] = s_name
+            entry_copy["database"] = s_db
+            entry_copy["schema"] = s_sch
+            entry_copy["fqn"] = fqn_key
+            entry_copy["stage_fqn"] = f"@{fqn_key}"
+            entry_copy["at_stage"] = f"@{fqn_key}"
+            entry_copy["files_count"] = len(self.stage_files_registry.get(fqn_key, []))
+            by_fqn[fqn_key] = entry_copy
+
+        # Also harvest stages from objects_by_db_schema / selected_objects in target_ctx
+        for map_key in ("objects_by_db_schema", "selected_objects"):
+            obj_map = target_ctx.get(map_key)
+            if not isinstance(obj_map, dict):
+                continue
+            for pair_str, bucket in obj_map.items():
+                if not isinstance(bucket, dict) or "." not in str(pair_str):
+                    continue
+                p_db, p_sch = [p.strip().upper() for p in str(pair_str).split(".", 1)]
+                if database and p_db != database.strip().upper():
+                    continue
+                if schema and p_sch != schema.strip().upper():
+                    continue
+                for raw_stg in bucket.get("stages") or []:
+                    s_nm = str(raw_stg or "").lstrip("@").split(".")[-1].strip().upper()
+                    if not s_nm:
+                        continue
+                    fqn_key = f"{p_db}.{p_sch}.{s_nm}"
+                    if fqn_key in by_fqn:
+                        continue
+                    cand = {
+                        "name": s_nm,
+                        "database": p_db,
+                        "schema": p_sch,
+                        "fqn": fqn_key,
+                        "stage_fqn": f"@{fqn_key}",
+                        "at_stage": f"@{fqn_key}",
+                        "type": "INTERNAL",
+                        "stage_type": "INTERNAL",
+                        "kind": "INTERNAL_STAGE",
+                        "encryption": "SNOWFLAKE_SSE",
+                        "directory_enabled": True,
+                        "auto_refresh": False,
+                        "url": "",
+                        "cloud_provider": "SNOWFLAKE",
+                        "storage_integration": None,
+                        "file_format": None,
+                        "comment": f"Snowflake stage @{fqn_key}",
+                        "created_by_role": self.active_role,
+                        "files_count": len(self.stage_files_registry.get(fqn_key, [])),
+                    }
+                    if self.is_stage_visible_in_context(cand, flow_id=norm_fid):
+                        by_fqn[fqn_key] = cand
+
+        storage_integrations: list[str] = ["AWS_S3_INTEGRATION", "GCS_STORAGE_INTEGRATION", "AZURE_STORAGE_INTEGRATION"]
+        int_res = self.execute_sql("SHOW STORAGE INTEGRATIONS")
+        for r in int_res.get("rows") or []:
+            if isinstance(r, dict):
+                int_nm = str(r.get("name") or r.get("NAME") or "").strip()
+                if int_nm and int_nm not in storage_integrations:
+                    storage_integrations.insert(0, int_nm)
+
+        ext_vols_res = self.list_external_volumes_for_context(flow_id=norm_fid)
+        stages_list = list(by_fqn.values())
+        return {
+            "ok": True,
+            "active_role": self.active_role,
+            "flow_id": norm_fid,
+            "can_create_stage": self.can_create_stage(),
+            "can_create_external_volume": self.can_create_external_volume(),
+            "role_privileges": self.role_privileges,
+            "stages": stages_list,
+            "stage_names": [s["stage_fqn"] for s in stages_list],
+            "external_volumes": ext_vols_res.get("external_volumes", []),
+            "storage_integrations": storage_integrations,
+        }
+
+    def list_external_volumes_for_context(
+        self,
+        *,
+        flow_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Return External Volumes (`SHOW EXTERNAL VOLUMES`) available in `[ ❄️ Context ]` (`W2-R5-05`)."""
+        norm_fid = self._normalize_flow_id(flow_id or CURRENT_SNOWFLAKE_FLOW_ID.get() or self.active_flow_id)
+        by_name: dict[str, dict[str, Any]] = {}
+        for vol in self.external_volumes_registry:
+            v_nm = str(vol.get("name") or "").strip().upper()
+            if v_nm:
+                by_name[v_nm] = dict(vol)
+
+        vol_res = self.execute_sql("SHOW EXTERNAL VOLUMES")
+        for r in vol_res.get("rows") or []:
+            if isinstance(r, dict):
+                v_nm = str(r.get("name") or r.get("NAME") or "").strip().upper()
+                if v_nm and v_nm not in by_name:
+                    by_name[v_nm] = {
+                        "name": v_nm,
+                        "type": "EXTERNAL_VOLUME",
+                        "kind": "EXTERNAL_VOLUME",
+                        "allow_writes": str(r.get("allow_writes") or r.get("ALLOW_WRITES") or "true").lower() == "true",
+                        "storage_provider": str(r.get("storage_provider") or "S3"),
+                        "storage_base_url": str(r.get("storage_base_url") or ""),
+                        "comment": str(r.get("comment") or r.get("COMMENT") or ""),
+                        "created_by_role": self.active_role,
+                    }
+
+        return {
+            "ok": True,
+            "active_role": self.active_role,
+            "flow_id": norm_fid,
+            "can_create_external_volume": self.can_create_external_volume(),
+            "external_volumes": list(by_name.values()),
+        }
+
+    def create_stage_governed(
+        self,
+        body: dict[str, Any],
+        *,
+        flow_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Build & execute governed `CREATE STAGE` (Internal `SNOWFLAKE_SSE`/`SNOWFLAKE_FULL` or External `S3`/`GCS`/`AZURE`/`S3COMPAT`) and auto-register in `[ ❄️ Context ]` (`W2-R5-05`)."""
+        payload = dict(body or {})
+        eff_fid = self._normalize_flow_id(
+            flow_id or payload.get("flow_id") or CURRENT_SNOWFLAKE_FLOW_ID.get() or self.active_flow_id
+        )
+        target_ctx = self.get_flow_context(eff_fid) if eff_fid else self.selected_context
+        ctx_dbs = list(target_ctx.get("databases") or [target_ctx.get("database") or self.database])
+        default_db = str(target_ctx.get("database") or (ctx_dbs[0] if ctx_dbs else self.database) or self.database).strip().upper()
+        default_sch_list = list((target_ctx.get("schemas_by_db") or {}).get(default_db) or [target_ctx.get("schema") or self.schema])
+        default_sch = str(target_ctx.get("schema") or (default_sch_list[0] if default_sch_list else self.schema) or self.schema).strip().upper()
+
+        db = str(payload.get("database") or default_db).strip().upper()
+        sch = str(payload.get("schema") or payload.get("schema_name") or default_sch).strip().upper()
+        raw_name = str(payload.get("name") or payload.get("stage_name") or "").lstrip("@").split(".")[-1].strip()
+        safe_name = "".join(c if c.isalnum() or c == "_" else "_" for c in (raw_name or "LANGFLOW_STAGE")).upper()
+        fqn = f"{db}.{sch}.{safe_name}"
+
+        if not self.can_create_stage():
+            msg = f"Active role {self.active_role} does not have CREATE STAGE privilege on {db}.{sch}"
+            self.record_audit_event(
+                action="STAGE_CREATE",
+                outcome="DENIED",
+                error_code=ErrorCode.AUTHZ_ROLE_DENIED.value,
+                target_object=fqn,
+                flow_id=eff_fid,
+                details={"message": msg},
+            )
+            return {
+                "ok": False,
+                "status_code": 403,
+                "error_code": ErrorCode.AUTHZ_ROLE_DENIED.value,
+                "message": msg,
+                "banner": msg,
+                "active_role": self.active_role,
+            }
+
+        denied = self.check_write_privilege_or_deny("STAGE_CREATE", fqn)
+        if denied:
+            return denied
+
+        stage_type = str(payload.get("stage_type") or payload.get("type") or "INTERNAL").strip().upper()
+        if "EXTERNAL" in stage_type or payload.get("url") or payload.get("cloud_url"):
+            stage_type = "EXTERNAL"
+        else:
+            stage_type = "INTERNAL"
+
+        create_mode = str(payload.get("create_mode") or "CREATE IF NOT EXISTS").strip().upper()
+        if payload.get("or_replace") is True or "REPLACE" in create_mode:
+            create_prefix = f"CREATE OR REPLACE STAGE {fqn}"
+        elif payload.get("if_not_exists", True) or "IF NOT EXISTS" in create_mode:
+            create_prefix = f"CREATE STAGE IF NOT EXISTS {fqn}"
+        else:
+            create_prefix = f"CREATE STAGE {fqn}"
+
+        directory_enabled = bool(payload.get("directory_enabled", payload.get("enable_directory", True)))
+        auto_refresh = bool(payload.get("auto_refresh", False))
+        notification_integration = str(payload.get("notification_integration") or "").strip()
+        file_format = str(payload.get("file_format") or "").strip().upper()
+        comment = str(payload.get("comment") or "").strip()
+        safe_comment = comment.replace("'", "''")
+
+        clauses: list[str] = [create_prefix]
+        cloud_url = ""
+        cloud_provider = "SNOWFLAKE"
+        storage_integration: str | None = None
+        encryption_type = "SNOWFLAKE_SSE"
+
+        if stage_type == "INTERNAL":
+            raw_enc = str(payload.get("encryption") or payload.get("encryption_type") or "SNOWFLAKE_SSE").strip().upper()
+            encryption_type = "SNOWFLAKE_FULL" if "FULL" in raw_enc else "SNOWFLAKE_SSE"
+            clauses.append(f"ENCRYPTION = (TYPE = '{encryption_type}')")
+            if directory_enabled:
+                dir_parts = ["ENABLE = TRUE"]
+                if auto_refresh:
+                    dir_parts.append("AUTO_REFRESH = TRUE")
+                clauses.append(f"DIRECTORY = ({' '.join(dir_parts)})")
+        else:
+            cloud_provider = str(payload.get("cloud_provider") or payload.get("provider") or "S3").strip().upper()
+            raw_url = str(payload.get("url") or payload.get("cloud_url") or "").strip()
+            if not raw_url:
+                scheme_map = {
+                    "S3": "s3://",
+                    "S3GOV": "s3gov://",
+                    "S3CHINA": "s3china://",
+                    "GCS": "gcs://",
+                    "AZURE": "azure://",
+                    "S3COMPAT": "s3compat://",
+                }
+                scheme = scheme_map.get(cloud_provider, "s3://")
+                raw_url = f"{scheme}snowflake-langflow-bucket/{safe_name.lower()}/"
+            cloud_url = raw_url
+            safe_url = cloud_url.replace("'", "''")
+            clauses.append(f"URL = '{safe_url}'")
+
+            auth_mode = str(payload.get("auth_mode") or "STORAGE_INTEGRATION").strip().upper()
+            storage_integration = str(payload.get("storage_integration") or "").strip() or None
+            if auth_mode == "CREDENTIALS" or (not storage_integration and payload.get("credentials")):
+                creds = payload.get("credentials") if isinstance(payload.get("credentials"), dict) else {}
+                aws_key = str(creds.get("aws_key_id") or payload.get("aws_key_id") or "").replace("'", "''")
+                aws_secret = str(creds.get("aws_secret_key") or payload.get("aws_secret_key") or "").replace("'", "''")
+                aws_token = str(creds.get("aws_token") or payload.get("aws_token") or "").replace("'", "''")
+                aws_role = str(creds.get("aws_role") or payload.get("aws_role") or "").replace("'", "''")
+                azure_sas = str(creds.get("azure_sas_token") or payload.get("azure_sas_token") or "").replace("'", "''")
+                cred_parts: list[str] = []
+                if azure_sas or cloud_provider == "AZURE":
+                    cred_parts.append(f"AZURE_SAS_TOKEN = '{azure_sas or '<AZURE_SAS_TOKEN>'}'")
+                elif aws_role:
+                    cred_parts.append(f"AWS_ROLE = '{aws_role}'")
+                else:
+                    cred_parts.append(f"AWS_KEY_ID = '{aws_key or '<AWS_KEY_ID>'}'")
+                    cred_parts.append(f"AWS_SECRET_KEY = '{aws_secret or '<AWS_SECRET_KEY>'}'")
+                    if aws_token:
+                        cred_parts.append(f"AWS_TOKEN = '{aws_token}'")
+                clauses.append(f"CREDENTIALS = ({' '.join(cred_parts)})")
+            else:
+                storage_integration = storage_integration or "AWS_S3_INTEGRATION"
+                clauses.append(f"STORAGE_INTEGRATION = {storage_integration}")
+
+            if cloud_provider == "S3COMPAT" or payload.get("endpoint"):
+                ep = str(payload.get("endpoint") or "s3.compatible.endpoint.local").replace("'", "''")
+                clauses.append(f"ENDPOINT = '{ep}'")
+
+            raw_enc = str(payload.get("encryption") or payload.get("encryption_type") or "").strip().upper()
+            encryption_type = raw_enc or "NONE"
+            if raw_enc and raw_enc != "NONE":
+                kms_id = str(payload.get("kms_key_id") or "").replace("'", "''")
+                if kms_id:
+                    clauses.append(f"ENCRYPTION = (TYPE = '{raw_enc}' KMS_KEY_ID = '{kms_id}')")
+                else:
+                    clauses.append(f"ENCRYPTION = (TYPE = '{raw_enc}')")
+
+            if payload.get("use_privatelink_endpoint") is True:
+                clauses.append("USE_PRIVATELINK_ENDPOINT = TRUE")
+
+            if directory_enabled:
+                dir_parts = ["ENABLE = TRUE"]
+                if auto_refresh:
+                    dir_parts.append("AUTO_REFRESH = TRUE")
+                if notification_integration:
+                    dir_parts.append(f"NOTIFICATION_INTEGRATION = '{notification_integration.replace(chr(39), '')}'")
+                clauses.append(f"DIRECTORY = ({' '.join(dir_parts)})")
+
+        if file_format and file_format != "NONE":
+            if file_format in ("CSV", "JSON", "PARQUET", "AVRO", "ORC", "XML"):
+                clauses.append(f"FILE_FORMAT = (TYPE = '{file_format}')")
+            else:
+                clauses.append(f"FILE_FORMAT = (FORMAT_NAME = '{file_format.replace(chr(39), '')}')")
+
+        if safe_comment:
+            clauses.append(f"COMMENT = '{safe_comment}'")
+
+        ddl = " ".join(clauses) + ";"
+        dry_run = bool(payload.get("dry_run", False))
+        exec_res = {"ok": True, "mode": "dry_run"} if dry_run else self.execute_sql(ddl)
+
+        stage_entry = {
+            "name": safe_name,
+            "database": db,
+            "schema": sch,
+            "fqn": fqn,
+            "stage_fqn": f"@{fqn}",
+            "at_stage": f"@{fqn}",
+            "type": stage_type,
+            "stage_type": stage_type,
+            "kind": f"{stage_type}_STAGE",
+            "encryption": encryption_type,
+            "directory_enabled": directory_enabled,
+            "auto_refresh": auto_refresh,
+            "url": cloud_url,
+            "cloud_provider": cloud_provider,
+            "storage_integration": storage_integration,
+            "file_format": file_format or None,
+            "comment": comment,
+            "ddl": ddl,
+            "created_by_role": self.active_role,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
+        existing_idx = next(
+            (i for i, s in enumerate(self.stages_registry) if str(s.get("fqn") or "").upper() == fqn.upper()),
+            None,
+        )
+        if existing_idx is not None:
+            self.stages_registry[existing_idx] = stage_entry
+        else:
+            self.stages_registry.append(stage_entry)
+        self.stage_files_registry.setdefault(fqn, [])
+
+        reg_ctx = self.register_object_in_context(db, sch, "stages", safe_name, flow_id=eff_fid)
+        self.record_audit_event(
+            action="STAGE_CREATE",
+            outcome="ALLOWED",
+            target_object=f"@{fqn}",
+            flow_id=eff_fid,
+            details={"ddl": ddl, "stage": stage_entry},
+        )
+        return {
+            "ok": True,
+            "status_code": 201,
+            "stage": stage_entry,
+            "ddl": ddl,
+            "result": exec_res,
+            "registered_in_context": True,
+            "selected_context": reg_ctx,
+            "active_role": self.active_role,
+        }
+
+    def create_external_volume_governed(
+        self,
+        body: dict[str, Any],
+        *,
+        flow_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Build & execute governed `CREATE EXTERNAL VOLUME` after checking active role privilege (`W2-R5-05`)."""
+        payload = dict(body or {})
+        eff_fid = self._normalize_flow_id(
+            flow_id or payload.get("flow_id") or CURRENT_SNOWFLAKE_FLOW_ID.get() or self.active_flow_id
+        )
+        raw_name = str(payload.get("name") or payload.get("volume_name") or "ICEBERG_EXT_VOL").strip()
+        safe_name = "".join(c if c.isalnum() or c == "_" else "_" for c in raw_name).upper()
+
+        if not self.can_create_external_volume():
+            msg = f"Active role {self.active_role} does not have CREATE EXTERNAL VOLUME privilege"
+            self.record_audit_event(
+                action="EXTERNAL_VOLUME_CREATE",
+                outcome="DENIED",
+                error_code=ErrorCode.AUTHZ_ROLE_DENIED.value,
+                target_object=safe_name,
+                flow_id=eff_fid,
+                details={"message": msg, "required_privilege": "CREATE EXTERNAL VOLUME ON ACCOUNT"},
+            )
+            return {
+                "ok": False,
+                "status_code": 403,
+                "error_code": ErrorCode.AUTHZ_ROLE_DENIED.value,
+                "message": msg,
+                "banner": msg,
+                "active_role": self.active_role,
+            }
+
+        denied = self.check_write_privilege_or_deny("EXTERNAL_VOLUME_CREATE", safe_name)
+        if denied:
+            return denied
+
+        create_mode = str(payload.get("create_mode") or "CREATE IF NOT EXISTS").strip().upper()
+        if payload.get("or_replace") is True or "REPLACE" in create_mode:
+            create_prefix = f"CREATE OR REPLACE EXTERNAL VOLUME {safe_name}"
+        elif payload.get("if_not_exists", True) or "IF NOT EXISTS" in create_mode:
+            create_prefix = f"CREATE EXTERNAL VOLUME IF NOT EXISTS {safe_name}"
+        else:
+            create_prefix = f"CREATE EXTERNAL VOLUME {safe_name}"
+
+        allow_writes = bool(payload.get("allow_writes", True))
+        loc_name = str(payload.get("location_name") or payload.get("storage_location_name") or f"{safe_name.lower()}_loc").replace("'", "''")
+        provider = str(payload.get("storage_provider") or payload.get("cloud_provider") or "S3").strip().upper()
+        base_url = str(
+            payload.get("storage_base_url")
+            or payload.get("url")
+            or f"s3://snowflake-langflow-iceberg/{safe_name.lower()}/"
+        ).replace("'", "''")
+
+        loc_parts = [
+            f"NAME = '{loc_name}'",
+            f"STORAGE_PROVIDER = '{provider}'",
+            f"STORAGE_BASE_URL = '{base_url}'",
+        ]
+        if provider in ("S3", "S3GOV"):
+            role_arn = str(payload.get("storage_aws_role_arn") or "arn:aws:iam::123456789012:role/snowflake-iceberg-role").replace("'", "''")
+            loc_parts.append(f"STORAGE_AWS_ROLE_ARN = '{role_arn}'")
+            if payload.get("storage_aws_external_id"):
+                ext_id = str(payload.get("storage_aws_external_id")).replace("'", "''")
+                loc_parts.append(f"STORAGE_AWS_EXTERNAL_ID = '{ext_id}'")
+            if payload.get("storage_aws_access_point_arn"):
+                ap_arn = str(payload.get("storage_aws_access_point_arn")).replace("'", "''")
+                loc_parts.append(f"STORAGE_AWS_ACCESS_POINT_ARN = '{ap_arn}'")
+        elif provider == "AZURE":
+            tenant_id = str(payload.get("azure_tenant_id") or "00000000-0000-0000-0000-000000000000").replace("'", "''")
+            loc_parts.append(f"AZURE_TENANT_ID = '{tenant_id}'")
+        elif provider == "S3COMPAT":
+            endpoint = str(payload.get("storage_endpoint") or payload.get("endpoint") or "s3.compatible.endpoint.local").replace("'", "''")
+            loc_parts.append(f"STORAGE_ENDPOINT = '{endpoint}'")
+
+        raw_enc = str(payload.get("encryption") or payload.get("encryption_type") or "").strip().upper()
+        if raw_enc and raw_enc != "NONE":
+            kms_id = str(payload.get("kms_key_id") or "").replace("'", "''")
+            if kms_id:
+                loc_parts.append(f"ENCRYPTION = (TYPE = '{raw_enc}' KMS_KEY_ID = '{kms_id}')")
+            else:
+                loc_parts.append(f"ENCRYPTION = (TYPE = '{raw_enc}')")
+
+        if payload.get("use_privatelink_endpoint") is True:
+            loc_parts.append("USE_PRIVATELINK_ENDPOINT = TRUE")
+
+        comment = str(payload.get("comment") or "").strip()
+        comment_sql = f" COMMENT = '{comment.replace(chr(39), chr(39)*2)}'" if comment else ""
+        ddl = (
+            f"{create_prefix} STORAGE_LOCATIONS = (({' '.join(loc_parts)})) "
+            f"ALLOW_WRITES = {'TRUE' if allow_writes else 'FALSE'}{comment_sql};"
+        )
+        dry_run = bool(payload.get("dry_run", False))
+        exec_res = {"ok": True, "mode": "dry_run"} if dry_run else self.execute_sql(ddl)
+
+        vol_entry = {
+            "name": safe_name,
+            "type": "EXTERNAL_VOLUME",
+            "kind": "EXTERNAL_VOLUME",
+            "allow_writes": allow_writes,
+            "location_name": loc_name,
+            "storage_provider": provider,
+            "storage_base_url": base_url,
+            "storage_locations": [
+                {
+                    "name": loc_name,
+                    "storage_provider": provider,
+                    "storage_base_url": base_url,
+                }
+            ],
+            "comment": comment,
+            "ddl": ddl,
+            "created_by_role": self.active_role,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
+        existing_idx = next(
+            (i for i, v in enumerate(self.external_volumes_registry) if str(v.get("name") or "").upper() == safe_name),
+            None,
+        )
+        if existing_idx is not None:
+            self.external_volumes_registry[existing_idx] = vol_entry
+        else:
+            self.external_volumes_registry.append(vol_entry)
+
+        target_ctx = self.get_flow_context(eff_fid) if eff_fid else self.selected_context
+        vis_vols = target_ctx.setdefault("visible_objects", {}).setdefault("external_volumes", [])
+        if safe_name not in vis_vols:
+            vis_vols.append(safe_name)
+
+        self.record_audit_event(
+            action="EXTERNAL_VOLUME_CREATE",
+            outcome="ALLOWED",
+            target_object=safe_name,
+            flow_id=eff_fid,
+            details={"ddl": ddl, "external_volume": vol_entry},
+        )
+        return {
+            "ok": True,
+            "status_code": 201,
+            "external_volume": vol_entry,
+            "ddl": ddl,
+            "result": exec_res,
+            "registered_in_context": True,
+            "active_role": self.active_role,
+        }
+
+    def _normalize_stage_fqn_no_at(self, stage_fqn: str) -> str:
+        clean = str(stage_fqn or "").strip().lstrip("@").strip("/")
+        if not clean:
+            return f"{self.database}.{self.schema}.{self.stage_name}"
+        parts = [p.strip().upper() for p in clean.split(".") if p.strip()]
+        if len(parts) == 1:
+            return f"{self.database}.{self.schema}.{parts[0]}"
+        if len(parts) == 2:
+            return f"{self.database}.{parts[0]}.{parts[1]}"
+        return f"{parts[0]}.{parts[1]}.{parts[2]}"
+
+    def list_stage_files(
+        self,
+        stage_fqn: str,
+        *,
+        subpath: str = "",
+        pattern: str = "",
+    ) -> dict[str, Any]:
+        """Execute `LIST @<stage_fqn>` and return files with `name`, `size`, `md5`, `last_modified` (`W2-R5-05`)."""
+        clean_fqn = self._normalize_stage_fqn_no_at(stage_fqn)
+        clean_subpath = str(subpath or "").strip().strip("/")
+        target_at = f"@{clean_fqn}/{clean_subpath}" if clean_subpath else f"@{clean_fqn}"
+        pattern_clause = f" PATTERN = '{pattern.replace(chr(39), '')}'" if pattern else ""
+        list_sql = f"LIST {target_at}{pattern_clause};"
+        res = self.execute_sql(list_sql)
+
+        files_by_path: dict[str, dict[str, Any]] = {}
+        for f_rec in self.stage_files_registry.get(clean_fqn, []):
+            p_key = str(f_rec.get("path") or f_rec.get("name") or "").strip()
+            if clean_subpath and not p_key.startswith(clean_subpath):
+                continue
+            files_by_path[p_key] = dict(f_rec)
+
+        for r in res.get("rows") or []:
+            if not isinstance(r, dict):
+                continue
+            raw_nm = str(r.get("name") or r.get("NAME") or "").strip()
+            if not raw_nm:
+                continue
+            rel_path = raw_nm.split("/", 1)[1] if "/" in raw_nm else raw_nm
+            files_by_path[rel_path] = {
+                "name": raw_nm,
+                "path": rel_path,
+                "file_name": rel_path.split("/")[-1],
+                "size": int(r.get("size") or r.get("SIZE") or 0),
+                "md5": str(r.get("md5") or r.get("MD5") or ""),
+                "last_modified": str(r.get("last_modified") or r.get("LAST_MODIFIED") or ""),
+                "stage_fqn": f"@{clean_fqn}",
+                "scoped_path": f"@{clean_fqn}/{rel_path}",
+            }
+
+        files_list = list(files_by_path.values())
+        return {
+            "ok": True,
+            "stage_fqn": f"@{clean_fqn}",
+            "sql": list_sql,
+            "files": files_list,
+            "total": len(files_list),
+            "active_role": self.active_role,
+        }
+
+    def upload_stage_file(
+        self,
+        *,
+        stage_fqn: str,
+        file_name: str,
+        content_bytes: bytes | None = None,
+        content_text: str | None = None,
+        content_base64: str | None = None,
+        subpath: str = "",
+        auto_compress: bool = False,
+        overwrite: bool = True,
+        refresh_directory: bool = True,
+    ) -> dict[str, Any]:
+        """Upload a file directly to a Snowflake Stage (`PUT` + `ALTER STAGE ... REFRESH`) (`W2-R5-05`)."""
+        clean_fqn = self._normalize_stage_fqn_no_at(stage_fqn)
+        denied = self.check_write_privilege_or_deny("STAGE_UPLOAD_FILE", f"@{clean_fqn}")
+        if denied:
+            return denied
+
+        clean_file_name = Path(str(file_name or "uploaded_file.txt").strip()).name
+        clean_subpath = str(subpath or "").strip().strip("/")
+        rel_path = f"{clean_subpath}/{clean_file_name}" if clean_subpath else clean_file_name
+
+        if content_bytes is not None:
+            raw_bytes = content_bytes
+        elif content_base64:
+            try:
+                b64_str = content_base64.split(",", 1)[-1] if "," in content_base64 else content_base64
+                raw_bytes = base64.b64decode(b64_str)
+            except Exception:  # noqa: BLE001
+                raw_bytes = str(content_base64).encode("utf-8")
+        else:
+            raw_bytes = str(content_text or "").encode("utf-8")
+
+        tmp_dir = Path("/tmp/snowflake_stage_uploads")
+        tmp_dir.mkdir(parents=True, exist_ok=True)
+        local_file_path = tmp_dir / clean_file_name
+        local_file_path.write_bytes(raw_bytes)
+
+        target_stage_dir = f"@{clean_fqn}/{clean_subpath}" if clean_subpath else f"@{clean_fqn}"
+        put_sql = (
+            f"PUT 'file://{local_file_path}' {target_stage_dir} "
+            f"AUTO_COMPRESS = {'TRUE' if auto_compress else 'FALSE'} "
+            f"OVERWRITE = {'TRUE' if overwrite else 'FALSE'};"
+        )
+        put_res = self.execute_sql(put_sql)
+        refresh_sql = f"ALTER STAGE {clean_fqn} REFRESH;"
+        if refresh_directory:
+            self.execute_sql(refresh_sql)
+
+        md5_hex = hashlib.md5(raw_bytes).hexdigest()  # noqa: S324
+        now_iso = datetime.now(timezone.utc).isoformat()
+        stg_short = clean_fqn.split(".")[-1].lower()
+        file_entry = {
+            "name": f"{stg_short}/{rel_path}",
+            "path": rel_path,
+            "file_name": clean_file_name,
+            "size": len(raw_bytes),
+            "md5": md5_hex,
+            "last_modified": now_iso,
+            "stage_fqn": f"@{clean_fqn}",
+            "scoped_path": f"@{clean_fqn}/{rel_path}",
+            "content_preview": raw_bytes[:4096].decode("utf-8", errors="replace"),
+        }
+        cur_files = self.stage_files_registry.setdefault(clean_fqn, [])
+        cur_files = [f for f in cur_files if str(f.get("path") or "") != rel_path]
+        cur_files.insert(0, file_entry)
+        self.stage_files_registry[clean_fqn] = cur_files
+
+        return {
+            "ok": True,
+            "status_code": 201,
+            "stage_fqn": f"@{clean_fqn}",
+            "scoped_path": f"@{clean_fqn}/{rel_path}",
+            "file": file_entry,
+            "put_sql": put_sql,
+            "refresh_sql": refresh_sql if refresh_directory else None,
+            "result": put_res,
+            "active_role": self.active_role,
+        }
+
+    def delete_stage_file(self, stage_fqn: str, file_path: str) -> dict[str, Any]:
+        """Remove a file from a Snowflake Stage (`REMOVE @<stage>/<file_path>`) (`W2-R5-05`)."""
+        clean_fqn = self._normalize_stage_fqn_no_at(stage_fqn)
+        denied = self.check_write_privilege_or_deny("STAGE_REMOVE_FILE", f"@{clean_fqn}")
+        if denied:
+            return denied
+        clean_rel = str(file_path or "").strip().lstrip("/")
+        stg_short = clean_fqn.split(".")[-1].lower()
+        if clean_rel.lower().startswith(f"{stg_short}/"):
+            clean_rel = clean_rel.split("/", 1)[1]
+        remove_sql = f"REMOVE @{clean_fqn}/{clean_rel};"
+        res = self.execute_sql(remove_sql)
+        cur_files = self.stage_files_registry.get(clean_fqn, [])
+        self.stage_files_registry[clean_fqn] = [
+            f
+            for f in cur_files
+            if str(f.get("path") or "") != clean_rel and str(f.get("file_name") or "") != clean_rel
+        ]
+        return {
+            "ok": True,
+            "stage_fqn": f"@{clean_fqn}",
+            "removed_path": f"@{clean_fqn}/{clean_rel}",
+            "sql": remove_sql,
+            "result": res,
+            "active_role": self.active_role,
+        }
+
+    def refresh_stage_directory(self, stage_fqn: str) -> dict[str, Any]:
+        """Refresh a Snowflake Stage Directory Table (`ALTER STAGE <stage_fqn> REFRESH`) (`W2-R5-05`)."""
+        clean_fqn = self._normalize_stage_fqn_no_at(stage_fqn)
+        refresh_sql = f"ALTER STAGE {clean_fqn} REFRESH;"
+        res = self.execute_sql(refresh_sql)
+        return {
+            "ok": True,
+            "stage_fqn": f"@{clean_fqn}",
+            "sql": refresh_sql,
+            "result": res,
+            "active_role": self.active_role,
         }
 
     @property
@@ -4668,6 +5706,13 @@ class LiveSnowflakeBridge:
             clean_pg = [str(p).strip() for p in raw_pg if str(p).strip()]
             base_ctx["postgres_instances"] = clean_pg
             base_ctx["selected_postgres_instances"] = list(clean_pg)
+            base_ctx.setdefault("visible_objects", {})["postgres_instances"] = list(clean_pg)
+            for _map_k in ("selected_objects", "objects_by_db_schema"):
+                _m_obj = base_ctx.get(_map_k)
+                if isinstance(_m_obj, dict):
+                    for _pv in _m_obj.values():
+                        if isinstance(_pv, dict):
+                            _pv.pop("postgres_instances", None)
         elif legacy_pg_instances:
             base_ctx["postgres_instances"] = list(legacy_pg_instances)
             base_ctx["selected_postgres_instances"] = list(legacy_pg_instances)
@@ -4691,7 +5736,9 @@ class LiveSnowflakeBridge:
                         cur_vis[k] = []
                     else:
                         cur_vis.setdefault(k, [])
-        if base_ctx.get("postgres_instances"):
+        if has_pg_key and isinstance(raw_pg, list):
+            base_ctx.setdefault("visible_objects", {})["postgres_instances"] = list(base_ctx["postgres_instances"])
+        elif base_ctx.get("postgres_instances"):
             base_ctx.setdefault("visible_objects", {})["postgres_instances"] = list(base_ctx["postgres_instances"])
 
         base_ctx["active_role"] = self.active_role
@@ -5131,7 +6178,7 @@ class LiveSnowflakeBridge:
                     if item not in merged_cortex_agents:
                         merged_cortex_agents.append(item)
 
-        memories = [m.get("name", "") for m in self.memories_registry if m.get("name")] or ["SNOWFLAKE_KB_MEM"]
+        memories = [m.get("name", "") for m in self.memories_catalog if m.get("name")]
         for pair_val in objects_by_db_schema.values():
             if isinstance(pair_val, dict):
                 pair_val.setdefault("memories", list(memories))
@@ -6260,6 +7307,20 @@ def register_snowflake_fastapi_routes(app: Any) -> None:
         )
         return JSONResponse(status_code=200, content=payload)
 
+    @memories_v1_router.post("/api/v1/memories", status_code=201)
+    async def post_v1_memories_native(request: Request) -> JSONResponse:
+        req_fid = request.query_params.get("flow_id") or request.headers.get("X-Snowflake-Flow-Id")
+        try:
+            body = await request.json()
+            payload_in = body if isinstance(body, dict) else {}
+        except Exception:  # noqa: BLE001
+            payload_in = {}
+        res = await asyncio.to_thread(
+            lambda: LIVE_BRIDGE.create_native_memory(payload_in, flow_id=req_fid)
+        )
+        status_code = int(res.get("status_code") or (201 if res.get("ok") else 422))
+        return JSONResponse(status_code=status_code, content=res)
+
     @memories_v1_router.get("/api/v1/memories/{memory_id}/sessions")
     async def get_v1_memory_sessions_native(memory_id: str, request: Request) -> JSONResponse:
         req_page = int(request.query_params.get("page") or 1)
@@ -6415,6 +7476,18 @@ def register_snowflake_fastapi_routes(app: Any) -> None:
                     )
                 )
                 return JSONResponse(status_code=200, content=mem_list_payload)
+
+            if clean_path == "/api/v1/memories" and method == "POST":
+                try:
+                    create_body = await request.json()
+                    create_in = create_body if isinstance(create_body, dict) else {}
+                except Exception:  # noqa: BLE001
+                    create_in = {}
+                create_res = await asyncio.to_thread(
+                    lambda: LIVE_BRIDGE.create_native_memory(create_in, flow_id=norm_fid)
+                )
+                create_status = int(create_res.get("status_code") or (201 if create_res.get("ok") else 422))
+                return JSONResponse(status_code=create_status, content=create_res)
 
             m_mem_sub = re.match(r"^/api/v1/memories/([^/]+)(?:/(sessions|messages))?$", clean_path)
             if m_mem_sub:
@@ -6992,14 +8065,21 @@ def register_snowflake_fastapi_routes(app: Any) -> None:
         return JSONResponse(status_code=200, content=res)
 
     @sf_router.get("/memories")
-    async def get_memories() -> JSONResponse:
+    async def get_memories(request: Request, flow_id: str | None = None) -> JSONResponse:
+        req_fid = flow_id or request.query_params.get("flow_id") or request.headers.get("X-Snowflake-Flow-Id")
+        filtered_catalog = LIVE_BRIDGE.get_memories_for_flow(flow_id=req_fid)
+        filtered_registry = [
+            m
+            for m in LIVE_BRIDGE.memories_registry
+            if LIVE_BRIDGE.is_memory_visible_in_context(m, flow_id=req_fid)
+        ]
         return JSONResponse(
             status_code=200,
             content={
                 "ok": True,
                 "active_role": LIVE_BRIDGE.active_role,
-                "memories": LIVE_BRIDGE.memories_registry,
-                "memories_catalog": LIVE_BRIDGE.memories_catalog,
+                "memories": filtered_registry,
+                "memories_catalog": filtered_catalog,
                 "agent_memory_types": list(AGENT_MEMORY_TYPES),
                 "coming_soon_memory_types": list(COMING_SOON_MEMORY_TYPES),
                 "dropdown_memory_types": list(DROPDOWN_MEMORY_TYPES),
@@ -7167,6 +8247,207 @@ def register_snowflake_fastapi_routes(app: Any) -> None:
         status_code = int(res.get("status_code") or (200 if res.get("ok") else 404))
         return JSONResponse(status_code=status_code, content=res)
 
+    @sf_router.get("/stages")
+    async def get_stages_route(
+        request: Request,
+        flow_id: str | None = None,
+        database: str | None = None,
+        schema: str | None = None,
+    ) -> JSONResponse:
+        req_fid = flow_id or request.query_params.get("flow_id") or request.headers.get("X-Snowflake-Flow-Id")
+        res = await asyncio.to_thread(
+            lambda: LIVE_BRIDGE.list_stages_for_context(flow_id=req_fid, database=database, schema=schema)
+        )
+        return JSONResponse(status_code=200, content=res)
+
+    @sf_router.post("/stages/create", status_code=201)
+    @sf_router.post("/stages", status_code=201)
+    async def post_create_stage_route(request: Request) -> JSONResponse:
+        req_fid = request.query_params.get("flow_id") or request.headers.get("X-Snowflake-Flow-Id")
+        try:
+            body = await request.json()
+            payload = body if isinstance(body, dict) else {}
+        except Exception:  # noqa: BLE001
+            payload = {}
+        res = await asyncio.to_thread(
+            lambda: LIVE_BRIDGE.create_stage_governed(payload, flow_id=req_fid or payload.get("flow_id"))
+        )
+        status_code = int(res.get("status_code") or (201 if res.get("ok") else 403))
+        return JSONResponse(status_code=status_code, content=res)
+
+    @sf_router.get("/external-volumes")
+    async def get_external_volumes_route(request: Request, flow_id: str | None = None) -> JSONResponse:
+        req_fid = flow_id or request.query_params.get("flow_id") or request.headers.get("X-Snowflake-Flow-Id")
+        res = await asyncio.to_thread(
+            lambda: LIVE_BRIDGE.list_external_volumes_for_context(flow_id=req_fid)
+        )
+        return JSONResponse(status_code=200, content=res)
+
+    @sf_router.post("/external-volumes/create", status_code=201)
+    @sf_router.post("/external-volumes", status_code=201)
+    async def post_create_external_volume_route(request: Request) -> JSONResponse:
+        req_fid = request.query_params.get("flow_id") or request.headers.get("X-Snowflake-Flow-Id")
+        try:
+            body = await request.json()
+            payload = body if isinstance(body, dict) else {}
+        except Exception:  # noqa: BLE001
+            payload = {}
+        res = await asyncio.to_thread(
+            lambda: LIVE_BRIDGE.create_external_volume_governed(payload, flow_id=req_fid or payload.get("flow_id"))
+        )
+        status_code = int(res.get("status_code") or (201 if res.get("ok") else 403))
+        return JSONResponse(status_code=status_code, content=res)
+
+    @sf_router.get("/stages/files")
+    async def get_stage_files_query_route(
+        request: Request,
+        stage_fqn: str | None = None,
+        stage: str | None = None,
+        subpath: str = "",
+        pattern: str = "",
+    ) -> JSONResponse:
+        target_stage = (
+            stage_fqn
+            or stage
+            or request.query_params.get("stage_fqn")
+            or request.query_params.get("stage")
+            or f"@{LIVE_BRIDGE.database}.{LIVE_BRIDGE.schema}.{LIVE_BRIDGE.stage_name}"
+        )
+        res = await asyncio.to_thread(
+            lambda: LIVE_BRIDGE.list_stage_files(target_stage, subpath=subpath, pattern=pattern)
+        )
+        return JSONResponse(status_code=200, content=res)
+
+    @sf_router.post("/stages/upload", status_code=201)
+    async def post_stage_upload_route(request: Request) -> JSONResponse:
+        content_type = str(request.headers.get("content-type") or "").lower()
+        stage_fqn = (
+            request.query_params.get("stage_fqn")
+            or request.query_params.get("stage")
+            or f"@{LIVE_BRIDGE.database}.{LIVE_BRIDGE.schema}.{LIVE_BRIDGE.stage_name}"
+        )
+        file_name = request.query_params.get("file_name") or "uploaded_file.txt"
+        subpath = request.query_params.get("subpath") or ""
+        raw_bytes: bytes | None = None
+        content_text: str | None = None
+        content_b64: str | None = None
+        refresh_dir = True
+
+        if "multipart/form-data" in content_type:
+            form = await request.form()
+            if form.get("stage_fqn") or form.get("stage"):
+                stage_fqn = str(form.get("stage_fqn") or form.get("stage"))
+            if form.get("subpath"):
+                subpath = str(form.get("subpath"))
+            upload_obj = form.get("file")
+            if upload_obj is not None and hasattr(upload_obj, "read"):
+                raw_bytes = await upload_obj.read()
+                file_name = str(getattr(upload_obj, "filename", None) or form.get("file_name") or file_name)
+            elif form.get("content"):
+                content_text = str(form.get("content"))
+                file_name = str(form.get("file_name") or file_name)
+        else:
+            try:
+                body = await request.json()
+                payload = body if isinstance(body, dict) else {}
+            except Exception:  # noqa: BLE001
+                payload = {}
+            stage_fqn = str(payload.get("stage_fqn") or payload.get("stage") or stage_fqn)
+            file_name = str(payload.get("file_name") or payload.get("filename") or payload.get("name") or file_name)
+            subpath = str(payload.get("subpath") or subpath)
+            content_text = payload.get("content") or payload.get("content_text") or payload.get("text")
+            content_b64 = payload.get("content_base64") or payload.get("base64")
+            refresh_dir = bool(payload.get("refresh_directory", True))
+
+        res = await asyncio.to_thread(
+            lambda: LIVE_BRIDGE.upload_stage_file(
+                stage_fqn=stage_fqn,
+                file_name=file_name,
+                content_bytes=raw_bytes,
+                content_text=str(content_text) if content_text is not None else None,
+                content_base64=str(content_b64) if content_b64 is not None else None,
+                subpath=subpath,
+                refresh_directory=refresh_dir,
+            )
+        )
+        status_code = int(res.get("status_code") or (201 if res.get("ok") else 403))
+        return JSONResponse(status_code=status_code, content=res)
+
+    @sf_router.delete("/stages/files")
+    async def delete_stage_file_query_route(request: Request) -> JSONResponse:
+        stage_fqn = request.query_params.get("stage_fqn") or request.query_params.get("stage") or ""
+        file_path = (
+            request.query_params.get("file_path")
+            or request.query_params.get("path")
+            or request.query_params.get("file_name")
+            or ""
+        )
+        try:
+            body = await request.json()
+            if isinstance(body, dict):
+                stage_fqn = str(body.get("stage_fqn") or body.get("stage") or stage_fqn)
+                file_path = str(body.get("file_path") or body.get("path") or body.get("file_name") or file_path)
+        except Exception:  # noqa: BLE001
+            pass
+        res = await asyncio.to_thread(
+            lambda: LIVE_BRIDGE.delete_stage_file(stage_fqn, file_path)
+        )
+        status_code = int(res.get("status_code") or (200 if res.get("ok") else 403))
+        return JSONResponse(status_code=status_code, content=res)
+
+    @sf_router.post("/stages/refresh")
+    async def post_stage_refresh_route(request: Request) -> JSONResponse:
+        stage_fqn = request.query_params.get("stage_fqn") or request.query_params.get("stage") or ""
+        try:
+            body = await request.json()
+            if isinstance(body, dict):
+                stage_fqn = str(body.get("stage_fqn") or body.get("stage") or stage_fqn)
+        except Exception:  # noqa: BLE001
+            pass
+        res = await asyncio.to_thread(
+            lambda: LIVE_BRIDGE.refresh_stage_directory(stage_fqn)
+        )
+        return JSONResponse(status_code=200, content=res)
+
+    @sf_router.get("/stages/{stage_fqn:path}/files")
+    async def get_stage_files_path_route(
+        stage_fqn: str,
+        request: Request,
+        subpath: str = "",
+        pattern: str = "",
+    ) -> JSONResponse:
+        res = await asyncio.to_thread(
+            lambda: LIVE_BRIDGE.list_stage_files(stage_fqn, subpath=subpath, pattern=pattern)
+        )
+        return JSONResponse(status_code=200, content=res)
+
+    @sf_router.delete("/stages/{stage_fqn:path}/files")
+    async def delete_stage_files_path_route(stage_fqn: str, request: Request) -> JSONResponse:
+        file_path = (
+            request.query_params.get("file_path")
+            or request.query_params.get("path")
+            or request.query_params.get("file_name")
+            or ""
+        )
+        try:
+            body = await request.json()
+            if isinstance(body, dict):
+                file_path = str(body.get("file_path") or body.get("path") or body.get("file_name") or file_path)
+        except Exception:  # noqa: BLE001
+            pass
+        res = await asyncio.to_thread(
+            lambda: LIVE_BRIDGE.delete_stage_file(stage_fqn, file_path)
+        )
+        status_code = int(res.get("status_code") or (200 if res.get("ok") else 403))
+        return JSONResponse(status_code=status_code, content=res)
+
+    @sf_router.post("/stages/{stage_fqn:path}/refresh")
+    async def post_stage_refresh_path_route(stage_fqn: str) -> JSONResponse:
+        res = await asyncio.to_thread(
+            lambda: LIVE_BRIDGE.refresh_stage_directory(stage_fqn)
+        )
+        return JSONResponse(status_code=200, content=res)
+
     @sf_router.post("/mcp/streamable")
     async def post_mcp_streamable(request: Request) -> JSONResponse:
         """Native MCP Streamable HTTP JSON-RPC endpoint for Cortex Code CLI & Cortex Code Desktop."""
@@ -7301,6 +8582,450 @@ def register_snowflake_fastapi_routes(app: Any) -> None:
             content={"jsonrpc": "2.0", "id": msg_id, "error": {"code": -32601, "message": f"Unsupported method {method}"}},
         )
 
+    register_snowflake_vector_store_backends()
     app.include_router(sf_router)
     app.include_router(traces_v2_router)
     app.include_router(memories_v1_router)
+
+
+try:
+    from lfx.base.knowledge_bases.backends.base import (  # type: ignore[import-not-found]
+        BaseVectorStoreBackend as _UpstreamBaseVectorStoreBackend,
+    )
+except Exception:  # noqa: BLE001
+    class _UpstreamBaseVectorStoreBackend:  # type: ignore[no-redef]
+        """Standalone fallback for `BaseVectorStoreBackend` when running outside the Langflow container."""
+
+        backend_type: str = "snowflake_table"
+
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            pass
+
+
+SNOWFLAKE_VECTOR_STORE_BACKENDS: dict[str, dict[str, Any]] = {
+    "snowflake_table": {
+        "key": "snowflake_table",
+        "label": "Snowflake Standard Table",
+        "table_type": "STANDARD",
+        "storage_family": "snowflake_sql",
+        "supports_vector": True,
+    },
+    "snowflake_hybrid": {
+        "key": "snowflake_hybrid",
+        "label": "Snowflake Hybrid Table",
+        "table_type": "HYBRID",
+        "storage_family": "snowflake_sql",
+        "supports_vector": True,
+    },
+    "snowflake_dynamic": {
+        "key": "snowflake_dynamic",
+        "label": "Snowflake Dynamic Table",
+        "table_type": "DYNAMIC",
+        "storage_family": "snowflake_sql",
+        "supports_vector": True,
+    },
+    "snowflake_interactive": {
+        "key": "snowflake_interactive",
+        "label": "Snowflake Interactive Table",
+        "table_type": "INTERACTIVE",
+        "storage_family": "snowflake_sql",
+        "supports_vector": True,
+    },
+    "snowflake_iceberg": {
+        "key": "snowflake_iceberg",
+        "label": "Snowflake Iceberg Table",
+        "table_type": "ICEBERG",
+        "storage_family": "snowflake_sql",
+        "supports_vector": False,
+    },
+    "snowflake_postgres": {
+        "key": "snowflake_postgres",
+        "label": "Snowflake Postgres (:5432)",
+        "table_type": "POSTGRES",
+        "storage_family": "snowflake_postgres",
+        "supports_vector": True,
+    },
+}
+
+OFFICIAL_SNOWFLAKE_CORTEX_AI_EMBED_MODELS: dict[str, int] = {
+    "snowflake-arctic-embed-m-v1.5": 768,
+    "snowflake-arctic-embed-m": 768,
+    "e5-base-v2": 768,
+    "snowflake-arctic-embed-l-v2.0": 1024,
+    "voyage-multilingual-2": 1024,
+    "nv-embed-qa-4": 1024,
+}
+
+
+class SnowflakeVectorStoreBackend(_UpstreamBaseVectorStoreBackend):
+    """Snowflake-native `BaseVectorStoreBackend` implementation (`W2-R5-02`).
+
+    Supports all 6 Snowflake storage backends (`snowflake_table`, `snowflake_hybrid`,
+    `snowflake_dynamic`, `snowflake_interactive`, `snowflake_iceberg`, `snowflake_postgres`)
+    and the 6 official `SNOWFLAKE.CORTEX.AI_EMBED` models (`768d` & `1024d`) as well as
+    `No Embedding` direct SQL mode. Computes `VECTOR_COSINE_SIMILARITY` strictly in the
+    `SELECT` projection (never in `WHERE`), enabling relational predicate pruning first.
+    """
+
+    backend_type: str = "snowflake_table"
+    SUPPORTED_BACKENDS = SNOWFLAKE_VECTOR_STORE_BACKENDS
+
+    def __init__(
+        self,
+        kb_path: Any = None,
+        *,
+        backend_type: str = "snowflake_table",
+        database: str | None = None,
+        schema: str | None = None,
+        table_name: str | None = None,
+        table_fqn: str | None = None,
+        embedding_model: str | None = "snowflake-arctic-embed-m-v1.5",
+        embedding_provider: str | None = "Snowflake Cortex",
+        enable_embedding: bool | None = None,
+        dimension: int | None = None,
+        session_id: str | None = None,
+        user_id: str | None = None,
+        postgres_instance: str | None = None,
+        bridge: Any = None,
+        **kwargs: Any,
+    ) -> None:
+        try:
+            super().__init__(kb_path, **kwargs)
+        except Exception:  # noqa: BLE001
+            pass
+        self.bridge = bridge or LIVE_BRIDGE
+        self.kb_path = kb_path
+        norm_bt = str(backend_type or getattr(self.__class__, "backend_type", "snowflake_table")).strip().lower()
+        alias_map = {
+            "standard": "snowflake_table",
+            "standard table": "snowflake_table",
+            "snowflake standard table": "snowflake_table",
+            "hybrid": "snowflake_hybrid",
+            "hybrid table": "snowflake_hybrid",
+            "snowflake hybrid table": "snowflake_hybrid",
+            "dynamic": "snowflake_dynamic",
+            "dynamic table": "snowflake_dynamic",
+            "snowflake dynamic table": "snowflake_dynamic",
+            "interactive": "snowflake_interactive",
+            "interactive table": "snowflake_interactive",
+            "snowflake interactive table": "snowflake_interactive",
+            "iceberg": "snowflake_iceberg",
+            "iceberg table": "snowflake_iceberg",
+            "snowflake iceberg table": "snowflake_iceberg",
+            "postgres": "snowflake_postgres",
+            "snowflake postgres": "snowflake_postgres",
+            "snowflake postgres (:5432)": "snowflake_postgres",
+        }
+        self.backend_type = alias_map.get(norm_bt, norm_bt if norm_bt in SNOWFLAKE_VECTOR_STORE_BACKENDS else "snowflake_table")
+        spec = SNOWFLAKE_VECTOR_STORE_BACKENDS[self.backend_type]
+        self.storage_family = spec["storage_family"]
+        self.table_type = spec["table_type"]
+
+        self.database = str(database or getattr(self.bridge, "database", "SNOWFLAKE_LANGFLOW")).strip().upper()
+        self.schema = str(schema or getattr(self.bridge, "schema", "CORE")).strip().upper()
+        raw_tbl = str(table_name or (Path(str(kb_path)).name if kb_path else "MEM_VECTOR_STORE")).strip()
+        safe_tbl = "".join(c if c.isalnum() or c == "_" else "_" for c in raw_tbl).upper() or "MEM_VECTOR_STORE"
+        self.table_name = safe_tbl
+        self.postgres_instance = str(postgres_instance or "LANGFLOW_PG_INSTANCE").strip()
+
+        if table_fqn:
+            self.table_fqn = str(table_fqn).strip()
+        elif self.backend_type == "snowflake_postgres":
+            self.table_fqn = f"{self.postgres_instance}:5432/postgres.public.{safe_tbl.lower()}"
+        else:
+            self.table_fqn = f"{self.database}.{self.schema}.{safe_tbl}"
+
+        raw_model = str(embedding_model or "").split(" (")[0].strip()
+        raw_prov = str(embedding_provider or "Snowflake Cortex").strip()
+        no_emb_set = {"none", "no embedding", "no_embedding", "disabled", "false", "sql_only"}
+        if enable_embedding is False or raw_model.lower() in no_emb_set or raw_prov.lower() in no_emb_set:
+            self.enable_embedding = False
+        elif not spec["supports_vector"]:
+            self.enable_embedding = False
+        else:
+            self.enable_embedding = True if enable_embedding is None else bool(enable_embedding)
+
+        self.embedding_model = (
+            raw_model if (self.enable_embedding and raw_model) else ("snowflake-arctic-embed-m-v1.5" if self.enable_embedding else "none")
+        )
+        self.embedding_provider = raw_prov if self.enable_embedding else "none"
+        self.dimension = int(dimension or OFFICIAL_SNOWFLAKE_CORTEX_AI_EMBED_MODELS.get(self.embedding_model, 768))
+        self.session_id = str(session_id or "default")
+        self.user_id = str(user_id or "default")
+        self._records: list[dict[str, Any]] = []
+
+    def build_ddl(self) -> str:
+        """Build governed Snowflake DDL for the configured backend and embedding mode."""
+        vec_col = f", EMBEDDING VECTOR(FLOAT, {self.dimension})" if self.enable_embedding else ""
+        if self.backend_type == "snowflake_hybrid":
+            return (
+                f"CREATE HYBRID TABLE IF NOT EXISTS {self.table_fqn} ("
+                f"CHUNK_ID VARCHAR(128) PRIMARY KEY, SESSION_ID VARCHAR(128), USER_ID VARCHAR(128), "
+                f"TEXT_CHUNK VARCHAR, METADATA VARIANT{vec_col}, "
+                f"CREATED_AT TIMESTAMP_TZ DEFAULT CURRENT_TIMESTAMP(), "
+                f"INDEX IDX_SESSION (SESSION_ID));"
+            )
+        if self.backend_type == "snowflake_dynamic":
+            wh = getattr(self.bridge, "warehouse", "COMPUTE_WH")
+            return (
+                f"CREATE DYNAMIC TABLE IF NOT EXISTS {self.table_fqn} "
+                f"TARGET_LAG = '1 minute' WAREHOUSE = {wh} AS "
+                f"SELECT CHUNK_ID, SESSION_ID, USER_ID, TEXT_CHUNK, METADATA"
+                f"{', EMBEDDING' if self.enable_embedding else ''}, CREATED_AT "
+                f"FROM {self.database}.{self.schema}.{self.table_name}_SRC;"
+            )
+        if self.backend_type == "snowflake_interactive":
+            wh = getattr(self.bridge, "warehouse", "COMPUTE_WH")
+            return (
+                f"CREATE INTERACTIVE TABLE IF NOT EXISTS {self.table_fqn} "
+                f"CLUSTER BY (SESSION_ID) TARGET_LAG = '1 minute' WAREHOUSE = {wh} AS "
+                f"SELECT CHUNK_ID, SESSION_ID, USER_ID, TEXT_CHUNK, METADATA"
+                f"{', EMBEDDING' if self.enable_embedding else ''}, CREATED_AT "
+                f"FROM {self.database}.{self.schema}.{self.table_name}_SRC;"
+            )
+        if self.backend_type == "snowflake_iceberg":
+            return (
+                f"CREATE ICEBERG TABLE IF NOT EXISTS {self.table_fqn} ("
+                f"CHUNK_ID STRING, SESSION_ID STRING, USER_ID STRING, "
+                f"TEXT_CHUNK STRING, CREATED_AT TIMESTAMP_TZ) "
+                f"EXTERNAL_VOLUME = 'ICEBERG_EXT_VOL' CATALOG = 'SNOWFLAKE' "
+                f"BASE_LOCATION = '{self.table_name.lower()}';"
+            )
+        if self.backend_type == "snowflake_postgres":
+            pg_vec = f", embedding vector({self.dimension})" if self.enable_embedding else ""
+            return (
+                f"-- Instance: {self.postgres_instance} (:5432)\n"
+                f"CREATE TABLE IF NOT EXISTS public.{self.table_name.lower()} ("
+                f"chunk_id TEXT PRIMARY KEY, session_id TEXT, user_id TEXT, "
+                f"text_chunk TEXT, metadata JSONB{pg_vec}, created_at TIMESTAMPTZ DEFAULT NOW());"
+            )
+        return (
+            f"CREATE TABLE IF NOT EXISTS {self.table_fqn} ("
+            f"CHUNK_ID VARCHAR(128), SESSION_ID VARCHAR(128), USER_ID VARCHAR(128), "
+            f"TEXT_CHUNK VARCHAR, METADATA VARIANT{vec_col}, "
+            f"CREATED_AT TIMESTAMP_TZ DEFAULT CURRENT_TIMESTAMP());"
+        )
+
+    def build_insert_sql(
+        self,
+        text: str,
+        *,
+        session_id: str | None = None,
+        user_id: str | None = None,
+        metadata: dict[str, Any] | None = None,
+        chunk_id: str | None = None,
+    ) -> str:
+        cid = str(chunk_id or f"chk-{uuid.uuid4().hex[:10]}").replace("'", "''")
+        sess = str(session_id or self.session_id or "default").replace("'", "''")
+        usr = str(user_id or self.user_id or "default").replace("'", "''")
+        safe_txt = str(text or "").replace("'", "''")
+        meta_json = json.dumps(metadata or {}).replace("'", "''")
+        if self.enable_embedding:
+            return (
+                f"INSERT INTO {self.table_fqn} "
+                f"(CHUNK_ID, SESSION_ID, USER_ID, TEXT_CHUNK, METADATA, EMBEDDING, CREATED_AT) "
+                f"SELECT '{cid}', '{sess}', '{usr}', '{safe_txt}', PARSE_JSON('{meta_json}'), "
+                f"SNOWFLAKE.CORTEX.AI_EMBED('{self.embedding_model}', '{safe_txt}'), CURRENT_TIMESTAMP();"
+            )
+        return (
+            f"INSERT INTO {self.table_fqn} "
+            f"(CHUNK_ID, SESSION_ID, USER_ID, TEXT_CHUNK, METADATA, CREATED_AT) "
+            f"SELECT '{cid}', '{sess}', '{usr}', '{safe_txt}', PARSE_JSON('{meta_json}'), CURRENT_TIMESTAMP();"
+        )
+
+    def build_search_sql(
+        self,
+        query: str = "",
+        *,
+        top_k: int = 5,
+        session_id: str | None = None,
+        user_id: str | None = None,
+        where_clause: str | None = None,
+    ) -> str:
+        """Build governed recall SQL with `VECTOR_COSINE_SIMILARITY` strictly in `SELECT` (never in `WHERE`)."""
+        bounded_k = max(1, min(int(top_k or 5), 200))
+        safe_q = str(query or "").replace("'", "''")
+        predicates: list[str] = []
+        if session_id:
+            predicates.append(f"SESSION_ID = '{str(session_id).replace(chr(39), chr(39)*2)}'")
+        if user_id:
+            predicates.append(f"USER_ID = '{str(user_id).replace(chr(39), chr(39)*2)}'")
+        if where_clause:
+            clean_where = str(where_clause).strip()
+            if clean_where.upper().startswith("WHERE "):
+                clean_where = clean_where[6:].strip()
+            if clean_where and "VECTOR_COSINE_SIMILARITY" not in clean_where.upper():
+                predicates.append(f"({clean_where})")
+
+        if not self.enable_embedding and safe_q:
+            predicates.append(f"TEXT_CHUNK ILIKE '%{safe_q}%'")
+
+        where_sql = f" WHERE {' AND '.join(predicates)}" if predicates else ""
+        if self.enable_embedding:
+            return (
+                f"SELECT CHUNK_ID, SESSION_ID, USER_ID, TEXT_CHUNK, METADATA, "
+                f"VECTOR_COSINE_SIMILARITY(EMBEDDING, SNOWFLAKE.CORTEX.AI_EMBED('{self.embedding_model}', '{safe_q}')) AS SCORE "
+                f"FROM {self.table_fqn}{where_sql} ORDER BY SCORE DESC LIMIT {bounded_k};"
+            )
+        return (
+            f"SELECT CHUNK_ID, SESSION_ID, USER_ID, TEXT_CHUNK, METADATA, 1.0 AS SCORE "
+            f"FROM {self.table_fqn}{where_sql} ORDER BY CREATED_AT DESC LIMIT {bounded_k};"
+        )
+
+    def add_texts(
+        self,
+        texts: list[str],
+        metadatas: list[dict[str, Any]] | None = None,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        sql_statements: list[str] = []
+        sess = str(kwargs.get("session_id") or self.session_id)
+        usr = str(kwargs.get("user_id") or self.user_id)
+        for idx, txt in enumerate(texts or []):
+            meta = (metadatas[idx] if metadatas and idx < len(metadatas) else {}) or {}
+            cid = str(meta.get("chunk_id") or f"chk-{len(self._records) + 1}")
+            stmt = self.build_insert_sql(txt, session_id=sess, user_id=usr, metadata=meta, chunk_id=cid)
+            sql_statements.append(stmt)
+            self.bridge.execute_sql(stmt)
+            self._records.append(
+                {
+                    "chunk_id": cid,
+                    "session_id": sess,
+                    "user_id": usr,
+                    "text_chunk": str(txt),
+                    "metadata": meta,
+                    "score": 1.0,
+                }
+            )
+        return {
+            "ok": True,
+            "ingested_count": len(sql_statements),
+            "table_fqn": self.table_fqn,
+            "backend_type": self.backend_type,
+            "enable_embedding": self.enable_embedding,
+            "embedding_model": self.embedding_model if self.enable_embedding else None,
+            "sql_statements": sql_statements,
+        }
+
+    def add_documents(self, documents: list[Any], **kwargs: Any) -> dict[str, Any]:
+        texts: list[str] = []
+        metas: list[dict[str, Any]] = []
+        for doc in documents or []:
+            if isinstance(doc, str):
+                texts.append(doc)
+                metas.append({})
+            elif isinstance(doc, dict):
+                texts.append(str(doc.get("page_content") or doc.get("text") or doc.get("content") or ""))
+                metas.append(dict(doc.get("metadata") or {}))
+            else:
+                texts.append(str(getattr(doc, "page_content", None) or getattr(doc, "text", None) or str(doc)))
+                metas.append(dict(getattr(doc, "metadata", None) or {}))
+        return self.add_texts(texts, metadatas=metas, **kwargs)
+
+    def ingest(self, documents: list[Any], **kwargs: Any) -> dict[str, Any]:
+        return self.add_documents(documents, **kwargs)
+
+    def search(self, query: str = "", top_k: int = 5, **kwargs: Any) -> dict[str, Any]:
+        sql = self.build_search_sql(
+            query,
+            top_k=top_k,
+            session_id=kwargs.get("session_id"),
+            user_id=kwargs.get("user_id"),
+            where_clause=kwargs.get("where_clause"),
+        )
+        res = self.bridge.execute_sql(sql)
+        rows = list(res.get("rows") or []) if res.get("mode") != "offline" else []
+        if not rows and self._records:
+            q_lower = str(query or "").lower()
+            q_tokens = [tok for tok in re.split(r"\W+", q_lower) if len(tok) >= 2]
+            sess_filter = kwargs.get("session_id")
+            for rec in self._records:
+                if sess_filter and str(rec.get("session_id") or "") != str(sess_filter):
+                    continue
+                txt_lower = str(rec.get("text_chunk") or "").lower()
+                if (
+                    not q_lower
+                    or q_lower in txt_lower
+                    or (q_tokens and any(tok in txt_lower for tok in q_tokens))
+                    or self.enable_embedding
+                ):
+                    rows.append(dict(rec))
+            rows = rows[: max(1, int(top_k or 5))]
+        return {
+            "ok": True,
+            "query": query,
+            "sql": sql,
+            "rows": rows,
+            "table_fqn": self.table_fqn,
+            "backend_type": self.backend_type,
+            "enable_embedding": self.enable_embedding,
+            "embedding_model": self.embedding_model if self.enable_embedding else None,
+        }
+
+    def similarity_search(self, query: str = "", k: int = 5, **kwargs: Any) -> list[dict[str, Any]]:
+        return self.search(query, top_k=k, **kwargs).get("rows", [])
+
+    def retrieve(self, query: str = "", top_k: int = 5, **kwargs: Any) -> list[dict[str, Any]]:
+        return self.similarity_search(query, k=top_k, **kwargs)
+
+
+def register_snowflake_vector_store_backends() -> dict[str, Any]:
+    """Register all 6 Snowflake backends (`snowflake_table`, `snowflake_hybrid`, `snowflake_dynamic`, `snowflake_interactive`, `snowflake_iceberg`, `snowflake_postgres`) into Langflow's KB & Memory backend registries (`W2-R5-02`)."""
+    registered_in_lfx = False
+    registered_in_langflow = False
+    backend_classes: dict[str, type[SnowflakeVectorStoreBackend]] = {}
+    for b_key, b_spec in SNOWFLAKE_VECTOR_STORE_BACKENDS.items():
+        cls_name = f"SnowflakeVectorStoreBackend_{b_spec['table_type']}"
+        sub_cls = type(
+            cls_name,
+            (SnowflakeVectorStoreBackend,),
+            {"backend_type": b_key, "display_name": b_spec["label"]},
+        )
+        backend_classes[b_key] = sub_cls
+
+    try:
+        import lfx.base.knowledge_bases.backends.registry as lfx_kb_registry  # type: ignore[import-not-found]
+
+        for attr_name in ("_BACKEND_REGISTRY", "BACKEND_REGISTRY", "_REGISTRY"):
+            reg_dict = getattr(lfx_kb_registry, attr_name, None)
+            if isinstance(reg_dict, dict):
+                for b_key, sub_cls in backend_classes.items():
+                    reg_dict[b_key] = sub_cls
+                registered_in_lfx = True
+        reg_fn = getattr(lfx_kb_registry, "register_backend", None)
+        if callable(reg_fn):
+            for b_key, sub_cls in backend_classes.items():
+                try:
+                    reg_fn(b_key, sub_cls)
+                    registered_in_lfx = True
+                except Exception:  # noqa: BLE001
+                    pass
+    except Exception:  # noqa: BLE001
+        pass
+
+    try:
+        import langflow.schema.knowledge_base as lf_kb_schema  # type: ignore[import-not-found]
+
+        allowed = getattr(lf_kb_schema, "_CREATION_ALLOWED_BACKENDS", None)
+        if isinstance(allowed, set):
+            allowed.update(SNOWFLAKE_VECTOR_STORE_BACKENDS.keys())
+            registered_in_langflow = True
+        elif isinstance(allowed, (list, tuple, frozenset)):
+            setattr(
+                lf_kb_schema,
+                "_CREATION_ALLOWED_BACKENDS",
+                set(allowed) | set(SNOWFLAKE_VECTOR_STORE_BACKENDS.keys()),
+            )
+            registered_in_langflow = True
+    except Exception:  # noqa: BLE001
+        pass
+
+    return {
+        "ok": True,
+        "registered_backends": list(SNOWFLAKE_VECTOR_STORE_BACKENDS.keys()),
+        "backend_labels": {k: v["label"] for k, v in SNOWFLAKE_VECTOR_STORE_BACKENDS.items()},
+        "backend_class": "SnowflakeVectorStoreBackend",
+        "registered_in_lfx": registered_in_lfx,
+        "registered_in_langflow": registered_in_langflow,
+    }
+

@@ -316,6 +316,14 @@ def build_snowflake_full_memory_enterprise_agent_flow() -> dict[str, Any]:
                     "category": "models_and_agents",
                     "icon": "Snowflake",
                     "template": {
+                        "memory": {
+                            "name": "memory",
+                            "display_name": "External Memory",
+                            "input_types": ["Memory", "BaseChatMessageHistory"],
+                            "is_list": True,
+                            "list": True,
+                            "value": None,
+                        },
                         "memory_base": {"name": "memory_base", "value": "MEM_2_CHAT_WINDOW"},
                         "storage_family": {"name": "storage_family", "value": "snowflake_postgres"},
                         "postgres_instance": {"name": "postgres_instance", "value": "LANGFLOW_PG_INSTANCE"},
@@ -905,6 +913,7 @@ def bootstrap_full_memory_showcase_flow(
 
         bridge = _bridge
 
+    prev_active_flow_id = getattr(bridge, "active_flow_id", None)
     upd_ctx_fn = getattr(bridge, "update_selected_context", None)
     for alias_fid in (SHOWCASE_FLOW_ID, SHOWCASE_FLOW_UUID, SHOWCASE_FLOW_UUID_HEX):
         if callable(upd_ctx_fn):
@@ -914,6 +923,8 @@ def bootstrap_full_memory_showcase_flow(
             set_ctx_fn(alias_fid, dict(SHOWCASE_FLOW_CONTEXT))
         elif hasattr(bridge, "flow_contexts") and isinstance(bridge.flow_contexts, dict):
             bridge.flow_contexts[alias_fid] = dict(SHOWCASE_FLOW_CONTEXT)
+    if hasattr(bridge, "active_flow_id"):
+        bridge.active_flow_id = prev_active_flow_id
 
     flow_payload = build_snowflake_full_memory_enterprise_agent_flow()
     flow_persisted_sqlite = _persist_showcase_flow_in_sqlite(flow_payload)
@@ -1028,70 +1039,76 @@ def run_full_memory_showcase_simulation(
         ),
     }
 
-    # Instantiate native canvas components for #1..#5 and verify dynamic adaptation
-    mem1_comp = SnowflakeMemoryBaseNativeComponent(
-        memory_base="MEM_1_GRAPH_CHECKPOINTER",
-        thread_id="fin-reconcile-thread-001",
-        checkpoint_ns="fin_reconciliation_hitl",
-        ttl_hours=72,
-    )
-    mem1_cfg = mem1_comp.update_build_config(
-        mem1_comp.to_build_config(), "MEM_1_GRAPH_CHECKPOINTER", "memory_base"
-    )
-    mem1_state = mem1_comp.get_checkpoint_state().data
+    from .fastapi_live_bridge import CURRENT_SNOWFLAKE_FLOW_ID
 
-    mem2_comp = SnowflakeMessageHistoryNativeComponent(
-        memory_base="MEM_2_CHAT_WINDOW",
-        storage_family="snowflake_postgres",
-        postgres_instance="LANGFLOW_PG_INSTANCE",
-        pg_table="public.chat_message_history",
-        session_id="fin-reconcile-session-001",
-        window_k=8,
-    )
-    mem2_cfg = mem2_comp.update_build_config(
-        mem2_comp.to_build_config(), "MEM_2_CHAT_WINDOW", "memory_base"
-    )
-    mem2_history = json.loads(mem2_comp.retrieve_chat_history().text)
+    _sim_tok = CURRENT_SNOWFLAKE_FLOW_ID.set(SHOWCASE_FLOW_ID)
+    try:
+        # Instantiate native canvas components for #1..#5 and verify dynamic adaptation
+        mem1_comp = SnowflakeMemoryBaseNativeComponent(
+            memory_base="MEM_1_GRAPH_CHECKPOINTER",
+            thread_id="fin-reconcile-thread-001",
+            checkpoint_ns="fin_reconciliation_hitl",
+            ttl_hours=72,
+        )
+        mem1_cfg = mem1_comp.update_build_config(
+            mem1_comp.to_build_config(), "MEM_1_GRAPH_CHECKPOINTER", "memory_base"
+        )
+        mem1_state = mem1_comp.get_checkpoint_state().data
 
-    mem3_comp = SnowflakeMemoryBaseNativeComponent(
-        memory_base="MEM_3_SESSION_SUMMARY",
-        session_id="fin-reconcile-session-001",
-        summarizer_model="openai-gpt-6-luna",
-        max_summary_tokens=512,
-    )
-    mem3_cfg = mem3_comp.update_build_config(
-        mem3_comp.to_build_config(), "MEM_3_SESSION_SUMMARY", "memory_base"
-    )
-    mem3_summary_msg = mem3_comp.get_running_summary().text
+        mem2_comp = SnowflakeMessageHistoryNativeComponent(
+            memory_base="MEM_2_CHAT_WINDOW",
+            storage_family="snowflake_postgres",
+            postgres_instance="LANGFLOW_PG_INSTANCE",
+            pg_table="public.chat_message_history",
+            session_id="fin-reconcile-session-001",
+            window_k=8,
+        )
+        mem2_cfg = mem2_comp.update_build_config(
+            mem2_comp.to_build_config(), "MEM_2_CHAT_WINDOW", "memory_base"
+        )
+        mem2_history = json.loads(mem2_comp.retrieve_chat_history().text)
 
-    mem4_comp = SnowflakeMemoryBaseNativeComponent(
-        memory_base="MEM_4_USER_ENTITY_PROFILE",
-        user_id="fin_analyst_01",
-        entity_namespace="financial_reporting_prefs",
-        filter_by_session=False,
-        tool_mode=False,
-    )
-    mem4_cfg = mem4_comp.update_build_config(
-        mem4_comp.to_build_config(), "MEM_4_USER_ENTITY_PROFILE", "memory_base"
-    )
-    mem4_profile = mem4_comp.get_profile_context().data
+        mem3_comp = SnowflakeMemoryBaseNativeComponent(
+            memory_base="MEM_3_SESSION_SUMMARY",
+            session_id="fin-reconcile-session-001",
+            summarizer_model="openai-gpt-6-luna",
+            max_summary_tokens=512,
+        )
+        mem3_cfg = mem3_comp.update_build_config(
+            mem3_comp.to_build_config(), "MEM_3_SESSION_SUMMARY", "memory_base"
+        )
+        mem3_summary_msg = mem3_comp.get_running_summary().text
 
-    mem5_comp = SnowflakeMemoryBaseNativeComponent(
-        memory_base="MEM_5_EPISODIC_FEWSHOT",
-        topic="q4_margin_reconciliation",
-        outcome_score_threshold=0.9,
-        few_shot_k=3,
-        filter_by_session=False,
-        tool_mode=True,
-        search_query="Riconcilia lo scostamento di margine Q4 come abbiamo fatto per le chiusure passate",
-    )
-    mem5_cfg = mem5_comp.update_build_config(
-        mem5_comp.to_build_config(), "MEM_5_EPISODIC_FEWSHOT", "memory_base"
-    )
-    mem5_tool = mem5_comp.to_toolkit()
-    mem5_tool_invocation = mem5_tool.invoke(
-        {"query": "Riconcilia lo scostamento di margine Q4 come abbiamo fatto per le chiusure passate"}
-    )
+        mem4_comp = SnowflakeMemoryBaseNativeComponent(
+            memory_base="MEM_4_USER_ENTITY_PROFILE",
+            user_id="fin_analyst_01",
+            entity_namespace="financial_reporting_prefs",
+            filter_by_session=False,
+            tool_mode=False,
+        )
+        mem4_cfg = mem4_comp.update_build_config(
+            mem4_comp.to_build_config(), "MEM_4_USER_ENTITY_PROFILE", "memory_base"
+        )
+        mem4_profile = mem4_comp.get_profile_context().data
+
+        mem5_comp = SnowflakeMemoryBaseNativeComponent(
+            memory_base="MEM_5_EPISODIC_FEWSHOT",
+            topic="q4_margin_reconciliation",
+            outcome_score_threshold=0.9,
+            few_shot_k=3,
+            filter_by_session=False,
+            tool_mode=True,
+            search_query="Riconcilia lo scostamento di margine Q4 come abbiamo fatto per le chiusure passate",
+        )
+        mem5_cfg = mem5_comp.update_build_config(
+            mem5_comp.to_build_config(), "MEM_5_EPISODIC_FEWSHOT", "memory_base"
+        )
+        mem5_tool = mem5_comp.to_toolkit()
+        mem5_tool_invocation = mem5_tool.invoke(
+            {"query": "Riconcilia lo scostamento di margine Q4 come abbiamo fatto per le chiusure passate"}
+        )
+    finally:
+        CURRENT_SNOWFLAKE_FLOW_ID.reset(_sim_tok)
 
     composed_system_message = (
         f"{PROCEDURAL_SYSTEM_MESSAGE_TEMPLATE}\n\n"

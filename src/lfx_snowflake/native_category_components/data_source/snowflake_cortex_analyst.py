@@ -73,8 +73,11 @@ def _analyst_sources(
     return views
 
 
-def _memory_catalog_options() -> list[str]:
-    return LIVE_BRIDGE.get_memory_catalog_options(include_none=True)
+def _memory_catalog_options(flow_id: str | None = None) -> list[str]:
+    try:
+        return LIVE_BRIDGE.get_memory_catalog_options(include_none=True, flow_id=flow_id)
+    except TypeError:
+        return LIVE_BRIDGE.get_memory_catalog_options(include_none=True)
 
 
 class SnowflakeCortexAnalystComponent(Component):
@@ -186,7 +189,7 @@ class SnowflakeCortexAnalystComponent(Component):
             "value": src_opts[0] if src_opts else "",
         }
         if "memory_catalog_ref" in build_config:
-            build_config["memory_catalog_ref"]["options"] = _memory_catalog_options()
+            build_config["memory_catalog_ref"]["options"] = _memory_catalog_options(flow_id=flow_id)
         return build_config
 
     def _invoke(self) -> dict[str, Any]:
@@ -203,6 +206,7 @@ class SnowflakeCortexAnalystComponent(Component):
             execute_sql=bool(getattr(self, "execute_generated_sql", True)),
             max_rows=int(getattr(self, "max_rows", 50) or 50),
         )
+        res.setdefault("rest_endpoint", "/api/v2/cortex/analyst/message")
         res["discovery_sql"] = (
             f"SHOW SEMANTIC VIEWS IN SCHEMA {db}.{sch}"
             if mode == "Semantic View"

@@ -33,23 +33,43 @@ from lfx_snowflake.native_category_components.files_and_knowledge.snowflake_memo
 _SHARED_HISTORY_BACKENDS: dict[str, InMemoryMessageHistoryBackend] = {}
 
 
-def _buffer_window_memory_options() -> list[str]:
+def _buffer_window_memory_options(flow_id: str | None = None) -> list[str]:
     opts: list[str] = []
-    for entry in getattr(LIVE_BRIDGE, "memories_catalog", []):
+    catalog_entries = (
+        LIVE_BRIDGE.get_memories_for_flow(flow_id=flow_id)
+        if hasattr(LIVE_BRIDGE, "get_memories_for_flow")
+        else list(getattr(LIVE_BRIDGE, "memories_catalog", []))
+    )
+    for entry in catalog_entries:
         c_type = resolve_canonical_memory_type(
             str(entry.get("canonical_memory_type") or entry.get("agent_memory_type") or "")
         )
         nm = str(entry.get("name") or "").strip()
         if c_type == "buffer_window_memory" and nm and nm not in opts:
             opts.append(nm)
-    for entry in getattr(LIVE_BRIDGE, "memories_catalog", []):
+    for entry in catalog_entries:
         nm = str(entry.get("name") or "").strip()
         if nm and nm not in opts:
             opts.append(nm)
+    reg_by_name = {
+        str(m.get("name") or "").strip().upper(): m
+        for m in getattr(LIVE_BRIDGE, "memories_registry", [])
+        if isinstance(m, dict) and m.get("name")
+    }
     for fallback in ("MEM_2_CHAT_WINDOW", "CHAT_WINDOW_HISTORY", "CHAT_MESSAGE_HISTORY"):
-        if fallback not in opts:
+        if fallback in opts:
+            continue
+        reg_entry = reg_by_name.get(fallback.upper())
+        if reg_entry is not None:
+            if LIVE_BRIDGE.is_memory_visible_in_context(reg_entry, flow_id=flow_id):
+                opts.append(fallback)
+        elif not opts:
             opts.append(fallback)
-    return opts
+    return opts or ["MEM_2_CHAT_WINDOW"]
+
+
+def _memory_options(flow_id: str | None = None) -> list[str]:
+    return _buffer_window_memory_options(flow_id=flow_id)
 
 
 class SnowflakeMessageHistoryNativeComponent(Component):
@@ -76,10 +96,11 @@ class SnowflakeMessageHistoryNativeComponent(Component):
             name="memory",
             display_name="External Memory",
             input_types=["Memory", "BaseChatMessageHistory"],
+            is_list=True,
             value=None,
             info=(
-                "Connect a Snowflake Memory Base component (or compatible external Memory) "
-                "to route Retrieve/Store operations through its governed Snowflake backend."
+                "Connect one or more Snowflake Memory Base components (or compatible external Memories) "
+                "to route Retrieve/Store operations through their governed Snowflake backends."
             ),
         ),
         MessageInput(
@@ -220,6 +241,9 @@ class SnowflakeMessageHistoryNativeComponent(Component):
                         "value": getattr(inp, "value", None),
                         "show": getattr(inp, "show", True),
                     }
+                if getattr(inp, "is_list", False):
+                    cfg[inp_name]["is_list"] = True
+                    cfg[inp_name]["list"] = True
         return cfg
 
     def update_build_config(
@@ -228,8 +252,17 @@ class SnowflakeMessageHistoryNativeComponent(Component):
         field_value: Any = None,
         field_name: str | None = None,
     ) -> dict[str, Any]:
+        flow_id = (
+            getattr(self, "flow_id", None)
+            or (build_config.get("_flow_id") or {}).get("value")
+            if isinstance(build_config.get("_flow_id"), dict)
+            else getattr(self, "flow_id", None)
+        )
+        if "memory" in build_config and isinstance(build_config["memory"], dict):
+            build_config["memory"]["is_list"] = True
+            build_config["memory"]["list"] = True
         if "memory_base" in build_config and isinstance(build_config["memory_base"], dict):
-            build_config["memory_base"]["options"] = _buffer_window_memory_options()
+            build_config["memory_base"]["options"] = _buffer_window_memory_options(flow_id=flow_id)
             if field_name == "memory_base" and isinstance(field_value, str) and field_value.strip():
                 build_config["memory_base"]["value"] = field_value
 
@@ -370,8 +403,8 @@ class SnowflakeMessageHistoryNativeComponent(Component):
                 ]
         return frontend_node
 
-    def _resolve_external_memory(self) -> SnowflakeChatMessageHistoryAdapter | Any | None:
-        ext = getattr(self, "memory", None)
+    @staticmethod
+    def _normalize_single_external_memory(ext: Any) -> SnowflakeChatMessageHistoryAdapter | Any | None:
         if ext is None or ext == "":
             return None
         if isinstance(ext, SnowflakeMemoryBaseNativeComponent):
@@ -380,9 +413,43 @@ class SnowflakeMessageHistoryNativeComponent(Component):
             return ext
         if hasattr(ext, "build_memory") and callable(ext.build_memory):
             return ext.build_memory()
-        if hasattr(ext, "add_message") or hasattr(ext, "get_messages") or hasattr(ext, "messages"):
+        if (
+            hasattr(ext, "add_message")
+            or hasattr(ext, "get_messages")
+            or hasattr(ext, "messages")
+            or hasattr(ext, "get_message_dicts")
+        ):
             return ext
+        if isinstance(ext, dict):
+            mem_nm = ext.get("memory_name") or ext.get("memory_base") or ext.get("name")
+            if mem_nm:
+                return SnowflakeMemoryBaseNativeComponent(memory_base=str(mem_nm)).build_memory()
+        if isinstance(ext, str) and ext.strip():
+            return SnowflakeMemoryBaseNativeComponent(memory_base=ext.strip()).build_memory()
         return None
+
+    def _resolve_external_memories(self) -> list[Any]:
+        """Resolve one or multiple connected `External Memory` adapters/components (`W2-R5-03` `is_list=True`)."""
+        raw = getattr(self, "memory", None)
+        if raw is None or raw == "":
+            return []
+        candidates: list[Any] = list(raw) if isinstance(raw, (list, tuple, set)) else [raw]
+        resolved: list[Any] = []
+        seen_keys: set[str] = set()
+        for item in candidates:
+            norm = self._normalize_single_external_memory(item)
+            if norm is None:
+                continue
+            key = str(getattr(norm, "memory_name", None) or id(norm))
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+            resolved.append(norm)
+        return resolved
+
+    def _resolve_external_memory(self) -> SnowflakeChatMessageHistoryAdapter | Any | None:
+        memories = self._resolve_external_memories()
+        return memories[0] if memories else None
 
     def _build_domain_component(self, *, storage_family_override: str | None = None) -> SnowflakeMessageHistoryComponent:
         family = str(
@@ -444,7 +511,12 @@ class SnowflakeMessageHistoryNativeComponent(Component):
 
     def _run_history(self, *, mode_override: str | None = None) -> dict[str, Any]:
         explicit = getattr(self, "_explicit_kwargs", set())
-        ext_mem = self._resolve_external_memory()
+        ext_memories = self._resolve_external_memories()
+        ext_mem = ext_memories[0] if ext_memories else None
+        external_memory_names = [
+            str(getattr(m, "memory_name", None) or getattr(m, "name", f"mem_{idx + 1}"))
+            for idx, m in enumerate(ext_memories)
+        ]
 
         mem_ref = str(getattr(self, "memory_base", "MEM_2_CHAT_WINDOW") or "MEM_2_CHAT_WINDOW").split(" (")[0].strip()
         storage_family = str(getattr(self, "storage_family", "snowflake_postgres") or "snowflake_postgres")
@@ -485,7 +557,7 @@ class SnowflakeMessageHistoryNativeComponent(Component):
         mode = str(mode_override or getattr(self, "mode", "Retrieve") or "Retrieve").strip()
         comp = self._build_domain_component(storage_family_override=storage_family)
 
-        ext_messages: list[dict[str, Any]] = []
+        stored_in_memories: list[str] = []
         if mode == "Store" and msg_str:
             existing_rows = comp.retrieve_messages(
                 user_id=user_id,
@@ -503,16 +575,22 @@ class SnowflakeMessageHistoryNativeComponent(Component):
                 sender_name=sender_name,
                 visible_text=msg_str,
             )
-            if ext_mem is not None and hasattr(ext_mem, "add_message"):
-                ext_mem.add_message(
-                    msg_str,
-                    session_id=sess_id,
-                    sender=sender,
-                    sender_name=sender_name,
-                    user_id=user_id,
-                    project_id=project_id,
-                    message_id=eff_msg_id,
-                )
+            for m_adapter in ext_memories:
+                if hasattr(m_adapter, "add_message"):
+                    m_adapter.add_message(
+                        msg_str,
+                        session_id=sess_id,
+                        sender=sender,
+                        sender_name=sender_name,
+                        user_id=user_id,
+                        project_id=project_id,
+                        message_id=eff_msg_id,
+                    )
+                    m_nm = str(getattr(m_adapter, "memory_name", None) or getattr(m_adapter, "name", "")).strip()
+                    if m_nm and m_nm not in stored_in_memories:
+                        stored_in_memories.append(m_nm)
+            if not stored_in_memories or ("memory_base" in explicit and mem_ref not in stored_in_memories):
+                stored_in_memories.append(mem_ref)
         else:
             stored = comp.retrieve_messages(
                 user_id=user_id,
@@ -521,26 +599,74 @@ class SnowflakeMessageHistoryNativeComponent(Component):
                 limit=win_k,
             )
 
-        if ext_mem is not None:
-            if hasattr(ext_mem, "get_message_dicts"):
-                ext_messages = ext_mem.get_message_dicts(
-                    session_id=sess_id,
-                    limit=win_k,
-                    user_id=user_id,
-                    project_id=project_id,
+        ext_messages: list[dict[str, Any]] = []
+        if ext_memories:
+            raw_merged: list[tuple[int, dict[str, Any]]] = []
+            seq_idx = 0
+            for m_adapter in ext_memories:
+                m_nm = str(getattr(m_adapter, "memory_name", None) or mem_ref)
+                m_rows: list[dict[str, Any]] = []
+                if hasattr(m_adapter, "get_message_dicts"):
+                    m_rows = list(
+                        m_adapter.get_message_dicts(
+                            session_id=sess_id,
+                            limit=win_k,
+                            user_id=user_id,
+                            project_id=project_id,
+                        )
+                        or []
+                    )
+                elif hasattr(m_adapter, "get_messages"):
+                    raw_list = m_adapter.get_messages(session_id=sess_id, limit=win_k)
+                    m_rows = [
+                        dict(m.data)
+                        if hasattr(m, "data") and isinstance(m.data, dict)
+                        else {"text": getattr(m, "text", str(m))}
+                        for m in raw_list
+                    ]
+                elif hasattr(m_adapter, "messages"):
+                    raw_list = list(getattr(m_adapter, "messages") or [])
+                    m_rows = [
+                        dict(m.data)
+                        if hasattr(m, "data") and isinstance(m.data, dict)
+                        else {"text": getattr(m, "text", str(m))}
+                        for m in raw_list[-win_k:]
+                    ]
+                for row in m_rows:
+                    r_copy = dict(row)
+                    r_copy.setdefault("memory_base", m_nm)
+                    raw_merged.append((seq_idx, r_copy))
+                    seq_idx += 1
+
+            raw_merged.sort(
+                key=lambda pair: (
+                    str(pair[1].get("created_at") or pair[1].get("timestamp") or ""),
+                    pair[0],
                 )
-            elif hasattr(ext_mem, "get_messages"):
-                raw_list = ext_mem.get_messages(session_id=sess_id, limit=win_k)
-                ext_messages = [
-                    dict(m.data) if hasattr(m, "data") and isinstance(m.data, dict) else {"text": getattr(m, "text", str(m))}
-                    for m in raw_list
-                ]
-            elif hasattr(ext_mem, "messages"):
-                raw_list = list(getattr(ext_mem, "messages") or [])
-                ext_messages = [
-                    dict(m.data) if hasattr(m, "data") and isinstance(m.data, dict) else {"text": getattr(m, "text", str(m))}
-                    for m in raw_list[-win_k:]
-                ]
+            )
+            deduped_by_key: dict[tuple[str, str, str], dict[str, Any]] = {}
+            deduped_by_pair: dict[tuple[str, str], dict[str, Any]] = {}
+            for _ord, row in raw_merged:
+                rid = str(row.get("message_id") or row.get("id") or "").strip()
+                r_sender = str(row.get("sender") or row.get("role") or "User").strip()
+                r_text = str(row.get("text") or row.get("message_text") or row.get("content") or "").strip()
+                src_mem = str(row.get("memory_base") or mem_ref)
+                triple_key = (rid, r_sender, r_text)
+                pair_key = (r_sender, r_text)
+                existing_rec = deduped_by_key.get(triple_key) or (
+                    deduped_by_pair.get(pair_key) if r_text else None
+                )
+                if existing_rec is not None:
+                    sources = list(existing_rec.get("memory_sources") or [existing_rec.get("memory_base")])
+                    if src_mem and src_mem not in sources:
+                        sources.append(src_mem)
+                    existing_rec["memory_sources"] = sources
+                    continue
+                row["memory_sources"] = [src_mem]
+                deduped_by_key[triple_key] = row
+                if r_text:
+                    deduped_by_pair[pair_key] = row
+                ext_messages.append(row)
 
         recalled = LIVE_BRIDGE.recall_memory(
             mem_ref,
@@ -565,8 +691,11 @@ class SnowflakeMessageHistoryNativeComponent(Component):
             "window_k": win_k,
             "filter_by_session": True,
             "enable_embedding": False,
-            "external_memory_connected": ext_mem is not None,
-            "external_memory_name": getattr(ext_mem, "memory_name", None) if ext_mem is not None else None,
+            "external_memory_connected": len(ext_memories) > 0,
+            "external_memory_count": len(ext_memories),
+            "external_memory_name": external_memory_names[0] if external_memory_names else None,
+            "external_memory_names": external_memory_names,
+            "stored_in_memories": stored_in_memories,
             "stored_text": msg_str if mode == "Store" else "",
             "messages": resolved_messages,
             "recall_sql": recalled.get("recall_sql"),

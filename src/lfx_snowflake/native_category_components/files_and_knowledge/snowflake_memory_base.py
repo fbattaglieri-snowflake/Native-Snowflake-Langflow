@@ -18,8 +18,8 @@ from lfx_snowflake.components.knowledge_and_memories import (
 from lfx_snowflake.fastapi_live_bridge import LIVE_BRIDGE, resolve_canonical_memory_type
 
 
-def _memory_base_options() -> list[str]:
-    opts = list(LIVE_BRIDGE.get_memory_catalog_options(include_none=False))
+def _memory_base_options(flow_id: str | None = None) -> list[str]:
+    opts = list(LIVE_BRIDGE.get_memory_catalog_options(include_none=False, flow_id=flow_id))
     defaults = [
         "MEM_1_GRAPH_CHECKPOINTER",
         "MEM_2_CHAT_WINDOW",
@@ -27,10 +27,25 @@ def _memory_base_options() -> list[str]:
         "MEM_4_USER_ENTITY_PROFILE",
         "MEM_5_EPISODIC_FEWSHOT",
     ]
+    reg_by_name = {
+        str(m.get("name") or "").strip().upper(): m
+        for m in getattr(LIVE_BRIDGE, "memories_registry", [])
+        if isinstance(m, dict) and m.get("name")
+    }
     for d in defaults:
-        if d not in opts:
+        if d in opts:
+            continue
+        reg_entry = reg_by_name.get(d.upper())
+        if reg_entry is not None:
+            if LIVE_BRIDGE.is_memory_visible_in_context(reg_entry, flow_id=flow_id):
+                opts.append(d)
+        elif not reg_by_name:
             opts.append(d)
     return opts or ["SNOWFLAKE_KB_MEM"]
+
+
+def _memory_options(flow_id: str | None = None) -> list[str]:
+    return _memory_base_options(flow_id=flow_id)
 
 
 def _register_chat_message_history_adapter():
@@ -471,6 +486,19 @@ class SnowflakeMemoryBaseNativeComponent(Component):
         Output(display_name="Toolset", name="component_as_tool", method="to_toolkit", types=["Tool"]),
     ]
 
+    def __init__(self, **kwargs: Any) -> None:
+        if "memory_name" in kwargs and "memory_base" not in kwargs:
+            kwargs["memory_base"] = kwargs["memory_name"]
+        super().__init__(**kwargs)
+
+    @property
+    def memory_name(self) -> str:
+        return str(getattr(self, "memory_base", "SNOWFLAKE_KB_MEM") or "SNOWFLAKE_KB_MEM").split(" (")[0].strip()
+
+    @memory_name.setter
+    def memory_name(self, value: str) -> None:
+        self.memory_base = str(value or "SNOWFLAKE_KB_MEM").strip()
+
     def build_memory(self) -> SnowflakeChatMessageHistoryAdapter:
         """Return an External Memory adapter (`Memory` / `BaseChatMessageHistory`) for 2-node or 1-node canvas wiring (`W2-R4-09`)."""
         adapter = getattr(self, "_memory_adapter", None)
@@ -546,6 +574,12 @@ class SnowflakeMemoryBaseNativeComponent(Component):
         field_value: Any = None,
         field_name: str | None = None,
     ) -> dict[str, Any]:
+        flow_id = (
+            getattr(self, "flow_id", None)
+            or (build_config.get("_flow_id") or {}).get("value")
+            if isinstance(build_config.get("_flow_id"), dict)
+            else getattr(self, "flow_id", None)
+        )
         selected = (
             str(field_value)
             if field_name in ("memory_base", "memory_name", "memory_catalog_ref") and isinstance(field_value, str)
@@ -553,10 +587,12 @@ class SnowflakeMemoryBaseNativeComponent(Component):
         )
         helper = self._build_helper(selected)
         updated = helper.update_build_config(build_config, field_value, field_name)
-        if "memory_base" in updated and isinstance(updated["memory_base"], dict):
-            updated["memory_base"]["options"] = _memory_base_options()
-            if field_name == "memory_base" and isinstance(field_value, str) and field_value.strip():
-                updated["memory_base"]["value"] = field_value
+        opts = _memory_base_options(flow_id=flow_id)
+        for mem_key in ("memory_base", "memory_name"):
+            if mem_key in updated and isinstance(updated[mem_key], dict):
+                updated[mem_key]["options"] = opts
+                if field_name == mem_key and isinstance(field_value, str) and field_value.strip():
+                    updated[mem_key]["value"] = field_value
         return updated
 
     def _execute_recall(self) -> dict[str, Any]:
