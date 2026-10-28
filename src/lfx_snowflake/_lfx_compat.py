@@ -222,6 +222,7 @@ def ensure_lfx_shim_installed() -> None:
 
     if "lfx" in sys.modules or importlib.util.find_spec("lfx") is not None:
         try:
+            import lfx.custom as _real_custom  # noqa: F401
             import lfx.field_typing as _real_ft
             import lfx.io as _real_io
 

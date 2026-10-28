@@ -62,9 +62,33 @@ PROTOCOL_TO_SNOWFLAKE_PROVIDER: dict[str, str] = {
     "ollama": PROVIDER_PRIVATE_OLLAMA,
 }
 
-# Offline fallback catalog used ONLY when no live proxy endpoint or mock transport is reachable
+# Offline fallback catalog matching the 11 promoted Snowflake Proxy models + Private Ollama
 FALLBACK_OFFLINE_CATALOG: dict[str, dict[str, dict[str, Any]]] = {
     "chat": {
+        "glm-5.3": {
+            "release_status": "qualified",
+            "expires_at": "2099-12-31T23:59:59Z",
+            "capabilities": ["chat", "streaming", "tool_calling"],
+            "reasoning": False,
+        },
+        "grok-4.6": {
+            "release_status": "qualified",
+            "expires_at": "2099-12-31T23:59:59Z",
+            "capabilities": ["chat", "streaming", "tool_calling"],
+            "reasoning": False,
+        },
+        "grok-4.7": {
+            "release_status": "qualified",
+            "expires_at": "2099-12-31T23:59:59Z",
+            "capabilities": ["chat", "streaming", "tool_calling"],
+            "reasoning": False,
+        },
+        "kimi-k3": {
+            "release_status": "qualified",
+            "expires_at": "2099-12-31T23:59:59Z",
+            "capabilities": ["chat", "streaming", "tool_calling"],
+            "reasoning": False,
+        },
         "openai-gpt-6-luna": {
             "release_status": "qualified",
             "expires_at": "2099-12-31T23:59:59Z",
@@ -77,12 +101,6 @@ FALLBACK_OFFLINE_CATALOG: dict[str, dict[str, dict[str, Any]]] = {
             "capabilities": ["chat", "streaming", "tool_calling", "reasoning"],
             "reasoning": {"supported": True, "required": True},
         },
-        "grok-4.7": {
-            "release_status": "qualified",
-            "expires_at": "2099-12-31T23:59:59Z",
-            "capabilities": ["chat", "streaming", "tool_calling"],
-            "reasoning": False,
-        },
     },
     "responses": {
         "openai-gpt-6-astra": {
@@ -92,7 +110,7 @@ FALLBACK_OFFLINE_CATALOG: dict[str, dict[str, dict[str, Any]]] = {
             "response_stream": "ordered-items",
             "reasoning": {"supported": True, "required": True},
         },
-        "openai-gpt-6-luna": {
+        "openai-gpt-6.1-sol": {
             "release_status": "qualified",
             "expires_at": "2099-12-31T23:59:59Z",
             "capabilities": ["responses", "streaming", "tool_calling", "reasoning"],
@@ -101,13 +119,19 @@ FALLBACK_OFFLINE_CATALOG: dict[str, dict[str, dict[str, Any]]] = {
         },
     },
     "messages": {
-        "claude-sonnet-5-5": {
+        "claude-haiku-5-5": {
             "release_status": "qualified",
             "expires_at": "2099-12-31T23:59:59Z",
             "capabilities": ["messages", "streaming", "tool_calling", "extended_thinking"],
             "reasoning": True,
         },
         "claude-opus-5-5": {
+            "release_status": "qualified",
+            "expires_at": "2099-12-31T23:59:59Z",
+            "capabilities": ["messages", "streaming", "tool_calling", "extended_thinking"],
+            "reasoning": True,
+        },
+        "claude-sonnet-5-5": {
             "release_status": "qualified",
             "expires_at": "2099-12-31T23:59:59Z",
             "capabilities": ["messages", "streaming", "tool_calling", "extended_thinking"],
@@ -121,6 +145,34 @@ FALLBACK_OFFLINE_CATALOG: dict[str, dict[str, dict[str, Any]]] = {
         },
     },
 }
+
+MODEL_NAME_TO_SNOWFLAKE_PROVIDER: dict[str, str] = {
+    "glm-5.3": PROVIDER_PROXY_CHAT,
+    "grok-4.6": PROVIDER_PROXY_CHAT,
+    "grok-4.7": PROVIDER_PROXY_CHAT,
+    "kimi-k3": PROVIDER_PROXY_CHAT,
+    "openai-gpt-6-luna": PROVIDER_PROXY_CHAT,
+    "openai-gpt-6-sol": PROVIDER_PROXY_CHAT,
+    "openai-gpt-6-astra": PROVIDER_PROXY_RESPONSES,
+    "openai-gpt-6.1-sol": PROVIDER_PROXY_RESPONSES,
+    "claude-haiku-5-5": PROVIDER_PROXY_MESSAGES,
+    "claude-opus-5-5": PROVIDER_PROXY_MESSAGES,
+    "claude-sonnet-5-5": PROVIDER_PROXY_MESSAGES,
+    "llama3.1:8b": PROVIDER_PRIVATE_OLLAMA,
+}
+
+
+def resolve_snowflake_provider_for_model(model_name: str, provider: str | None = None) -> str:
+    """Resolve canonical Snowflake provider name for a model or alias."""
+    prov = str(provider or "").strip()
+    if prov in SNOWFLAKE_PROVIDER_TO_PROTOCOL:
+        return PROTOCOL_TO_SNOWFLAKE_PROVIDER[SNOWFLAKE_PROVIDER_TO_PROTOCOL[prov]]
+    m_name = str(model_name or "").strip()
+    if m_name in MODEL_NAME_TO_SNOWFLAKE_PROVIDER and (
+        not prov or prov in ("Unknown", "Custom", "OpenAI", "Anthropic", "Ollama")
+    ):
+        return MODEL_NAME_TO_SNOWFLAKE_PROVIDER[m_name]
+    return prov
 
 
 def sanitize_tool_identifier(raw: str) -> str:
@@ -350,7 +402,18 @@ def _build_option_entry(
         "provider": provider_name,
         "category": provider_name,
         "icon": "Snowflake",
+        "model_type": "llm",
         "default": True,
+        "tool_calling": tool_calling,
+        "reasoning": supports_reasoning,
+        "reasoning_required": reasoning_required,
+        "deprecated": False,
+        "not_supported": False,
+        "protocol": protocol,
+        "context_length": int(meta.get("context_length", 128000)),
+        "model_class": "ProtectedAnthropic" if protocol == "messages" else "ChatOpenAI",
+        "model_name_param": "model",
+        "api_key_param": "api_key",
         "metadata": option_meta,
     }
 
@@ -371,13 +434,10 @@ def get_snowflake_live_language_model_catalog(
         except Exception:  # noqa: BLE001
             if strict_live:
                 raise
-            base_url = standard_langflow._get_base(protocol)
-            if "<PROXY_SERVICE>" in base_url or "<OLLAMA_SERVICE>" in base_url or not hasattr(
-                standard_langflow.provider_httpx_clients(base_url).get("http_client"), "get"
-            ):
-                live_map = dict(FALLBACK_OFFLINE_CATALOG.get(protocol, {}))
-            else:
-                live_map = {}
+            live_map = dict(FALLBACK_OFFLINE_CATALOG.get(protocol, {}))
+
+        if not live_map and not strict_live:
+            live_map = dict(FALLBACK_OFFLINE_CATALOG.get(protocol, {}))
 
         for model_id, model_meta in live_map.items():
             entry = _build_option_entry(protocol, model_id, model_meta)
@@ -385,6 +445,54 @@ def get_snowflake_live_language_model_catalog(
                 continue
             options.append(entry)
     return options
+
+
+def get_proxy_chat_catalog_rows() -> list[dict[str, Any]]:
+    """Return static/fallback + live catalog rows for `Snowflake Proxy - Chat (/chat/v1)`."""
+    return get_snowflake_live_language_model_catalog(protocols=("chat",))
+
+
+def get_proxy_responses_catalog_rows() -> list[dict[str, Any]]:
+    """Return static/fallback + live catalog rows for `Snowflake Proxy - Responses (/responses/v1)`."""
+    return get_snowflake_live_language_model_catalog(protocols=("responses",))
+
+
+def get_proxy_messages_catalog_rows() -> list[dict[str, Any]]:
+    """Return static/fallback + live catalog rows for `Snowflake Proxy - Messages (/messages)`."""
+    return get_snowflake_live_language_model_catalog(protocols=("messages",))
+
+
+def get_private_ollama_catalog_rows() -> list[dict[str, Any]]:
+    """Return static/fallback + live catalog rows for `Snowflake Private - Ollama`."""
+    return get_snowflake_live_language_model_catalog(protocols=("ollama",))
+
+
+def discover_proxy_chat_models(user_id: Any = None, model_type: str = "llm") -> list[dict[str, Any]]:
+    del user_id
+    if model_type is not None and model_type != "llm":
+        return []
+    return get_snowflake_live_language_model_catalog(protocols=("chat",))
+
+
+def discover_proxy_responses_models(user_id: Any = None, model_type: str = "llm") -> list[dict[str, Any]]:
+    del user_id
+    if model_type is not None and model_type != "llm":
+        return []
+    return get_snowflake_live_language_model_catalog(protocols=("responses",))
+
+
+def discover_proxy_messages_models(user_id: Any = None, model_type: str = "llm") -> list[dict[str, Any]]:
+    del user_id
+    if model_type is not None and model_type != "llm":
+        return []
+    return get_snowflake_live_language_model_catalog(protocols=("messages",))
+
+
+def discover_private_ollama_models(user_id: Any = None, model_type: str = "llm") -> list[dict[str, Any]]:
+    del user_id
+    if model_type is not None and model_type != "llm":
+        return []
+    return get_snowflake_live_language_model_catalog(protocols=("ollama",))
 
 
 def get_snowflake_reasoning_inputs() -> list[Any]:
@@ -470,16 +578,43 @@ def _extract_selected_model_entry(
     candidate = field_value if (field_name == model_field_name and field_value) else None
     if candidate is None:
         candidate = build_config.get(model_field_name, {}).get("value")
+    fallback_prov = build_config.get("provider", {}).get("value")
     if isinstance(candidate, list) and candidate:
         first = candidate[0]
         if isinstance(first, dict):
-            return dict(first)
+            entry = dict(first)
+            m_name = str(entry.get("name") or entry.get("model_name") or "").strip()
+            resolved_prov = resolve_snowflake_provider_for_model(
+                m_name,
+                str(entry.get("provider") or fallback_prov or "").strip(),
+            )
+            if resolved_prov:
+                entry["provider"] = resolved_prov
+                entry["category"] = resolved_prov
+                if resolved_prov in SNOWFLAKE_PROVIDER_TO_PROTOCOL:
+                    entry["icon"] = "Snowflake"
+            return entry
         if isinstance(first, str) and first.strip():
-            return {"name": first.strip(), "provider": build_config.get("provider", {}).get("value") or PROVIDER_PROXY_CHAT}
+            m_name = first.strip()
+            resolved_prov = resolve_snowflake_provider_for_model(m_name, fallback_prov) or PROVIDER_PROXY_CHAT
+            return {"name": m_name, "model_name": m_name, "provider": resolved_prov, "icon": "Snowflake"}
     if isinstance(candidate, dict):
-        return dict(candidate)
+        entry = dict(candidate)
+        m_name = str(entry.get("name") or entry.get("model_name") or "").strip()
+        resolved_prov = resolve_snowflake_provider_for_model(
+            m_name,
+            str(entry.get("provider") or fallback_prov or "").strip(),
+        )
+        if resolved_prov:
+            entry["provider"] = resolved_prov
+            entry["category"] = resolved_prov
+            if resolved_prov in SNOWFLAKE_PROVIDER_TO_PROTOCOL:
+                entry["icon"] = "Snowflake"
+        return entry
     if isinstance(candidate, str) and candidate.strip():
-        return {"name": candidate.strip(), "provider": build_config.get("provider", {}).get("value") or PROVIDER_PROXY_CHAT}
+        m_name = candidate.strip()
+        resolved_prov = resolve_snowflake_provider_for_model(m_name, fallback_prov) or PROVIDER_PROXY_CHAT
+        return {"name": m_name, "model_name": m_name, "provider": resolved_prov, "icon": "Snowflake"}
     return None
 
 
@@ -691,6 +826,39 @@ def build_snowflake_language_model(
     )
 
 
+def _insert_reasoning_inputs_after_model(inputs_list: list[Any]) -> None:
+    """Insert `reasoning_effort`, `extended_thinking`, `thinking_budget_tokens` immediately after `model` (index 1) and set default options/value."""
+    reasoning_names = {"reasoning_effort", "extended_thinking", "thinking_budget_tokens"}
+    filtered = [inp for inp in inputs_list if getattr(inp, "name", "") not in reasoning_names]
+    model_idx = next(
+        (idx for idx, inp in enumerate(filtered) if getattr(inp, "name", "") == "model"),
+        0,
+    )
+    sf_opts = get_snowflake_live_language_model_catalog(force_refresh=False)
+    default_luna = next(
+        (opt for opt in sf_opts if opt.get("name") == "openai-gpt-6-luna"),
+        sf_opts[0] if sf_opts else None,
+    )
+    for inp in filtered:
+        inp_name = getattr(inp, "name", "")
+        if inp_name == "model":
+            try:
+                inp.options = list(sf_opts)
+                if not getattr(inp, "value", None) and default_luna is not None:
+                    inp.value = [dict(default_luna)]
+            except Exception:  # noqa: BLE001
+                pass
+        elif inp_name == "api_key":
+            try:
+                inp.show = False
+                inp.required = False
+            except Exception:  # noqa: BLE001
+                pass
+    reasoning_inputs = get_snowflake_reasoning_inputs()
+    new_inputs = filtered[: model_idx + 1] + reasoning_inputs + filtered[model_idx + 1 :]
+    inputs_list[:] = new_inputs
+
+
 def register_snowflake_language_model_providers() -> dict[str, Any]:
     """Register the 4 Snowflake Language Model providers into Langflow's `unified_models`, `LanguageModelComponent`, and `AgentComponent` (`MA-W2-R6-02` & `MA-W2-R6-03`)."""
     status: dict[str, Any] = {
@@ -699,6 +867,24 @@ def register_snowflake_language_model_providers() -> dict[str, Any]:
         "unified_models_patched": False,
         "language_model_component_patched": False,
         "agent_component_patched": False,
+    }
+
+    try:
+        import lfx.custom as _lfx_custom  # noqa: F401
+    except Exception:  # noqa: BLE001
+        pass
+
+    proto_to_catalog_loader: dict[str, str] = {
+        "chat": "lfx_snowflake.providers.language_models:get_proxy_chat_catalog_rows",
+        "responses": "lfx_snowflake.providers.language_models:get_proxy_responses_catalog_rows",
+        "messages": "lfx_snowflake.providers.language_models:get_proxy_messages_catalog_rows",
+        "ollama": "lfx_snowflake.providers.language_models:get_private_ollama_catalog_rows",
+    }
+    proto_to_live_discovery: dict[str, str] = {
+        "chat": "lfx_snowflake.providers.language_models:discover_proxy_chat_models",
+        "responses": "lfx_snowflake.providers.language_models:discover_proxy_responses_models",
+        "messages": "lfx_snowflake.providers.language_models:discover_proxy_messages_models",
+        "ollama": "lfx_snowflake.providers.language_models:discover_private_ollama_models",
     }
 
     # 1. Register ProviderDescriptors in lfx.base.models.provider_registry if available
@@ -712,7 +898,18 @@ def register_snowflake_language_model_providers() -> dict[str, Any]:
                 (PROVIDER_PROXY_MESSAGES, "messages"),
                 (PROVIDER_PRIVATE_OLLAMA, "ollama"),
             ):
+                if hasattr(_pr, "is_registered") and hasattr(_pr, "unregister_provider"):
+                    try:
+                        if _pr.is_registered(prov_name):
+                            _pr.unregister_provider(prov_name)
+                    except Exception:  # noqa: BLE001
+                        pass
                 model_cls_name = "ProtectedAnthropic" if proto == "messages" else "ChatOpenAI"
+                model_cls_ref = (
+                    ("lfx_snowflake.standard_langflow", "ProtectedAnthropic", None)
+                    if proto == "messages"
+                    else None
+                )
                 descriptor = _pr.ProviderDescriptor(
                     name=prov_name,
                     metadata={
@@ -724,7 +921,11 @@ def register_snowflake_language_model_providers() -> dict[str, Any]:
                             "api_key_param": "api_key",
                         },
                     },
+                    model_class=model_cls_ref,
                     api_key_required=False,
+                    live=True,
+                    live_discovery=proto_to_live_discovery[proto],
+                    catalog_loader=proto_to_catalog_loader[proto],
                 )
                 try:
                     _pr.register_provider(descriptor)
@@ -734,9 +935,120 @@ def register_snowflake_language_model_providers() -> dict[str, Any]:
     except Exception:  # noqa: BLE001
         pass
 
-    # 2. Patch unified_models: get_language_model_options, handle_model_input_update, get_llm
+    try:
+        from lfx.base.models.unified_models import class_registry as _cr
+
+        _cr._MODEL_CLASS_IMPORTS["ProtectedAnthropic"] = (
+            "lfx_snowflake.standard_langflow",
+            "ProtectedAnthropic",
+            None,
+        )
+    except Exception:  # noqa: BLE001
+        pass
+
+    # 2. Patch unified_models: get_unified_models_detailed, get_language_model_options, handle_model_input_update, get_llm
     try:
         from lfx.base.models import unified_models as _um
+
+        orig_get_detailed = getattr(_um, "get_unified_models_detailed", None)
+        if callable(orig_get_detailed) and not getattr(orig_get_detailed, "__sflf_lm_wrapped__", False):
+
+            def _wrapped_get_unified_models_detailed(
+                providers: list[str] | None = None,
+                model_name: str | None = None,
+                model_type: str | None = None,
+                *,
+                include_unsupported: bool | None = None,
+                include_deprecated: bool | None = None,
+                only_defaults: bool = False,
+                **metadata_filters: Any,
+            ) -> list[dict[str, Any]]:
+                res = list(
+                    orig_get_detailed(
+                        providers=providers,
+                        model_name=model_name,
+                        model_type=model_type,
+                        include_unsupported=include_unsupported,
+                        include_deprecated=include_deprecated,
+                        only_defaults=False,
+                        **metadata_filters,
+                    )
+                )
+                present_providers: set[str] = set()
+                for prov_dict in res:
+                    p_name = str(prov_dict.get("provider") or "")
+                    present_providers.add(p_name)
+                    if p_name in SNOWFLAKE_PROVIDER_TO_PROTOCOL or p_name == "Snowflake Cortex":
+                        prov_dict["icon"] = "Snowflake"
+                        for m in prov_dict.get("models", []):
+                            m_meta = m.setdefault("metadata", {})
+                            m_meta["default"] = True
+                            m_meta.setdefault("icon", "Snowflake")
+                    elif only_defaults:
+                        kept = [
+                            m
+                            for m in prov_dict.get("models", [])
+                            if (m.get("metadata") or {}).get("default", False)
+                        ]
+                        prov_dict["models"] = kept
+                        prov_dict["num_models"] = len(kept)
+
+                if model_type in (None, "llm"):
+                    for sf_prov, proto in (
+                        (PROVIDER_PROXY_CHAT, "chat"),
+                        (PROVIDER_PROXY_RESPONSES, "responses"),
+                        (PROVIDER_PROXY_MESSAGES, "messages"),
+                        (PROVIDER_PRIVATE_OLLAMA, "ollama"),
+                    ):
+                        if sf_prov in present_providers:
+                            continue
+                        if providers and sf_prov not in providers:
+                            continue
+                        rows = get_snowflake_live_language_model_catalog(protocols=(proto,))
+                        models_out: list[dict[str, Any]] = []
+                        for row in rows:
+                            r_name = str(row.get("name") or "")
+                            if model_name and r_name != model_name:
+                                continue
+                            r_meta = dict(row.get("metadata") or {})
+                            r_meta["default"] = True
+                            r_meta["icon"] = "Snowflake"
+                            r_meta["model_type"] = "llm"
+                            if any(r_meta.get(k) != v for k, v in metadata_filters.items()):
+                                continue
+                            models_out.append({"model_name": r_name, "metadata": r_meta})
+                        if models_out or (model_name is None and not metadata_filters):
+                            res.append(
+                                {
+                                    "provider": sf_prov,
+                                    "display_name": sf_prov,
+                                    "icon": "Snowflake",
+                                    "variables": [],
+                                    "mapping": {
+                                        "model_class": "ProtectedAnthropic" if proto == "messages" else "ChatOpenAI",
+                                        "model_param": "model",
+                                        "api_key_param": "api_key",
+                                    },
+                                    "models": models_out,
+                                    "num_models": len(models_out),
+                                }
+                            )
+                return res
+
+            setattr(_wrapped_get_unified_models_detailed, "__sflf_lm_wrapped__", True)
+            setattr(_um, "get_unified_models_detailed", _wrapped_get_unified_models_detailed)
+            try:
+                from lfx.base.models.unified_models import model_catalog as _mc
+
+                setattr(_mc, "get_unified_models_detailed", _wrapped_get_unified_models_detailed)
+            except Exception:  # noqa: BLE001
+                pass
+            try:
+                from langflow.api.v1 import models as _api_models
+
+                setattr(_api_models, "get_unified_models_detailed", _wrapped_get_unified_models_detailed)
+            except Exception:  # noqa: BLE001
+                pass
 
         orig_get_opts = getattr(_um, "get_language_model_options", None)
         if callable(orig_get_opts) and not getattr(orig_get_opts, "__sflf_lm_wrapped__", False):
@@ -829,14 +1141,22 @@ def register_snowflake_language_model_providers() -> dict[str, Any]:
                 thinking_budget_tokens: int = 2048,
             ) -> Any:
                 selected_dict: dict[str, Any] | None = None
-                if isinstance(model, list) and model and isinstance(model[0], dict):
-                    selected_dict = model[0]
+                if isinstance(model, list) and model:
+                    if isinstance(model[0], dict):
+                        selected_dict = dict(model[0])
+                    elif isinstance(model[0], str) and model[0].strip():
+                        selected_dict = {"name": model[0].strip()}
                 elif isinstance(model, dict):
-                    selected_dict = model
+                    selected_dict = dict(model)
+                elif isinstance(model, str) and model.strip():
+                    selected_dict = {"name": model.strip()}
 
                 if selected_dict is not None:
-                    prov = str(selected_dict.get("provider") or "").strip()
                     m_name = str(selected_dict.get("name") or selected_dict.get("model_name") or "").strip()
+                    prov = resolve_snowflake_provider_for_model(
+                        m_name,
+                        str(selected_dict.get("provider") or "").strip(),
+                    )
                     meta = dict(selected_dict.get("metadata") or {})
                     if prov in SNOWFLAKE_PROVIDER_TO_PROTOCOL and m_name:
                         ov = dict(overrides or {})
@@ -894,16 +1214,13 @@ def register_snowflake_language_model_providers() -> dict[str, Any]:
     except Exception:  # noqa: BLE001
         pass
 
-    # 3. Patch LanguageModelComponent in-memory if importable
+    # 3. Patch LanguageModelComponent in-memory if importable (insert reasoning inputs right after model at index 1)
     try:
         from lfx.components.models_and_agents import language_model as _lm_mod
 
         lm_cls = getattr(_lm_mod, "LanguageModelComponent", None)
         if lm_cls is not None:
-            existing_names = {getattr(inp, "name", "") for inp in getattr(lm_cls, "inputs", [])}
-            for sf_inp in get_snowflake_reasoning_inputs():
-                if sf_inp.name not in existing_names:
-                    lm_cls.inputs.append(sf_inp)
+            _insert_reasoning_inputs_after_model(lm_cls.inputs)
 
             if hasattr(_um, "get_language_model_options"):
                 setattr(_lm_mod, "get_language_model_options", _um.get_language_model_options)
@@ -942,16 +1259,13 @@ def register_snowflake_language_model_providers() -> dict[str, Any]:
     except Exception:  # noqa: BLE001
         pass
 
-    # 4. Patch AgentComponent in-memory if importable (including multi-tool `tools` is_list=True)
+    # 4. Patch AgentComponent in-memory if importable (insert reasoning inputs right after model at index 1 + multi-tool is_list=True)
     try:
         from lfx.components.models_and_agents import agent as _ag_mod
 
         ag_cls = getattr(_ag_mod, "AgentComponent", None)
         if ag_cls is not None:
-            existing_names = {getattr(inp, "name", "") for inp in getattr(ag_cls, "inputs", [])}
-            for sf_inp in get_snowflake_reasoning_inputs():
-                if sf_inp.name not in existing_names:
-                    ag_cls.inputs.append(sf_inp)
+            _insert_reasoning_inputs_after_model(ag_cls.inputs)
 
             for inp in getattr(ag_cls, "inputs", []):
                 if getattr(inp, "name", "") == "tools":

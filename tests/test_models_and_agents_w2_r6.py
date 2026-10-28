@@ -41,6 +41,8 @@ from lfx_snowflake.native_category_components.models_and_agents.snowflake_cortex
     THREAD_CONTINUITY_MODES,
 )
 from lfx_snowflake.providers.language_models import (
+    FALLBACK_OFFLINE_CATALOG,
+    MODEL_NAME_TO_SNOWFLAKE_PROVIDER,
     PROVIDER_PRIVATE_OLLAMA,
     PROVIDER_PROXY_CHAT,
     PROVIDER_PROXY_MESSAGES,
@@ -50,8 +52,18 @@ from lfx_snowflake.providers.language_models import (
     CortexAnalystToolSchema,
     CortexSearchToolSchema,
     StructuredTool,
+    _insert_reasoning_inputs_after_model,
+    discover_private_ollama_models,
+    discover_proxy_chat_models,
+    discover_proxy_messages_models,
+    discover_proxy_responses_models,
+    get_private_ollama_catalog_rows,
+    get_proxy_chat_catalog_rows,
+    get_proxy_messages_catalog_rows,
+    get_proxy_responses_catalog_rows,
     get_snowflake_live_language_model_catalog,
     register_snowflake_language_model_providers,
+    resolve_snowflake_provider_for_model,
     sanitize_tool_identifier,
     update_snowflake_language_model_build_config,
 )
@@ -872,3 +884,122 @@ def test_ma_w2_r6_05_fastapi_a2a_v030_server_bridge_and_threads_routes(
     assert lm_resp.status_code == 200
     assert lm_resp.json()["ok"] is True
     assert lm_resp.json()["providers"] == list(SNOWFLAKE_LANGUAGE_MODEL_PROVIDERS)
+
+
+# ---------------------------------------------------------------------------
+# MA-W2-R6-06 (v0.5.2-20261027): 11 Proxy Models across 3 Categories + Ollama,
+# Catalog Loaders / Live Discovery, Reasoning Inputs Right After Model, and
+# Legacy Bare Model Name Resolution (e.g. glm-5.3)
+# ---------------------------------------------------------------------------
+
+
+def test_ma_w2_r6_06_eleven_proxy_models_catalog_loaders_and_reasoning_input_order(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify all 11 Proxy models (6 Chat + 2 Responses + 3 Messages) + 1 Ollama model, catalog_loader/live_discovery, reasoning input placement after model, and bare glm-5.3 resolution."""
+    standard_langflow.clear_catalog_cache()
+    monkeypatch.setattr(standard_langflow, "discovery_transport", None)
+
+    expected_chat = [
+        "glm-5.3",
+        "grok-4.6",
+        "grok-4.7",
+        "kimi-k3",
+        "openai-gpt-6-luna",
+        "openai-gpt-6-sol",
+    ]
+    expected_responses = [
+        "openai-gpt-6-astra",
+        "openai-gpt-6.1-sol",
+    ]
+    expected_messages = [
+        "claude-haiku-5-5",
+        "claude-opus-5-5",
+        "claude-sonnet-5-5",
+    ]
+    expected_ollama = ["llama3.1:8b"]
+
+    assert list(FALLBACK_OFFLINE_CATALOG["chat"]) == expected_chat
+    assert list(FALLBACK_OFFLINE_CATALOG["responses"]) == expected_responses
+    assert list(FALLBACK_OFFLINE_CATALOG["messages"]) == expected_messages
+    assert list(FALLBACK_OFFLINE_CATALOG["ollama"]) == expected_ollama
+
+    chat_rows = get_proxy_chat_catalog_rows()
+    resp_rows = get_proxy_responses_catalog_rows()
+    msg_rows = get_proxy_messages_catalog_rows()
+    ollama_rows = get_private_ollama_catalog_rows()
+
+    assert [r["name"] for r in chat_rows] == expected_chat
+    assert [r["name"] for r in resp_rows] == expected_responses
+    assert [r["name"] for r in msg_rows] == expected_messages
+    assert [r["name"] for r in ollama_rows] == expected_ollama
+
+    # Every model in all 4 Snowflake providers must have default=True so 6th model is never truncated at 5
+    for row in [*chat_rows, *resp_rows, *msg_rows, *ollama_rows]:
+        assert row["default"] is True
+        assert row["metadata"]["default"] is True
+        assert row["model_type"] == "llm"
+        assert row["metadata"]["model_type"] == "llm"
+        assert row["icon"] == "Snowflake"
+
+    assert [r["name"] for r in discover_proxy_chat_models(model_type="llm")] == expected_chat
+    assert discover_proxy_chat_models(model_type="embeddings") == []
+    assert [r["name"] for r in discover_proxy_responses_models(model_type="llm")] == expected_responses
+    assert discover_proxy_responses_models(model_type="embeddings") == []
+    assert [r["name"] for r in discover_proxy_messages_models(model_type="llm")] == expected_messages
+    assert discover_proxy_messages_models(model_type="embeddings") == []
+    assert [r["name"] for r in discover_private_ollama_models(model_type="llm")] == expected_ollama
+    assert discover_private_ollama_models(model_type="embeddings") == []
+
+    # Verify bare/legacy model resolution (e.g. glm-5.3 on Agent without provider)
+    assert resolve_snowflake_provider_for_model("glm-5.3") == PROVIDER_PROXY_CHAT
+    assert resolve_snowflake_provider_for_model("glm-5.3", "OpenAI") == PROVIDER_PROXY_CHAT
+    assert resolve_snowflake_provider_for_model("openai-gpt-6-astra") == PROVIDER_PROXY_RESPONSES
+    assert resolve_snowflake_provider_for_model("claude-sonnet-5-5") == PROVIDER_PROXY_MESSAGES
+    assert resolve_snowflake_provider_for_model("llama3.1:8b") == PROVIDER_PRIVATE_OLLAMA
+    assert len(MODEL_NAME_TO_SNOWFLAKE_PROVIDER) == 12
+
+    bare_cfg: dict[str, Any] = {
+        "model": {
+            "options": [],
+            "value": [{"name": "glm-5.3"}],
+        },
+        "api_key": {"show": True, "required": True, "value": "secret"},
+    }
+    update_snowflake_language_model_build_config(bare_cfg, field_name="model", force_refresh=False)
+    assert bare_cfg["model"]["value"][0]["name"] == "glm-5.3"
+    assert bare_cfg["model"]["value"][0]["provider"] == PROVIDER_PROXY_CHAT
+    assert bare_cfg["api_key"]["show"] is False
+    assert bare_cfg["reasoning_effort"]["show"] is False
+
+    # Verify _insert_reasoning_inputs_after_model places reasoning_effort, extended_thinking, thinking_budget_tokens right after model
+    from lfx.io import DropdownInput
+
+    sample_inputs: list[Any] = [
+        DropdownInput(name="model", display_name="Language Model", options=[], value=""),
+        types.SimpleNamespace(name="api_key", display_name="API Key", show=True, required=True),
+        DropdownInput(name="temperature", display_name="Temperature", options=[], value="0.1"),
+    ]
+    _insert_reasoning_inputs_after_model(sample_inputs)
+    assert [inp.name for inp in sample_inputs[:4]] == [
+        "model",
+        "reasoning_effort",
+        "extended_thinking",
+        "thinking_budget_tokens",
+    ]
+    assert len(sample_inputs[0].options) == 12
+    assert sample_inputs[0].value[0]["name"] == "openai-gpt-6-luna"
+    assert sample_inputs[0].value[0]["provider"] == PROVIDER_PROXY_CHAT
+    assert sample_inputs[1].name == "reasoning_effort"
+    assert sample_inputs[4].name == "api_key"
+    assert sample_inputs[4].show is False
+
+    # Verify install_live_hooks_in_container.py contains the W2-R6-06 patches
+    hook_script = (REPO_ROOT / "scripts" / "install_live_hooks_in_container.py").read_text(encoding="utf-8")
+    assert "_sfMMap" in hook_script
+    assert "_normSfModel" in hook_script
+    assert '"Snowflake Proxy - Chat (/chat/v1)": 6' in hook_script
+    assert '"Snowflake Proxy - Responses (/responses/v1)": 2' in hook_script
+    assert '"Snowflake Proxy - Messages (/messages)": 3' in hook_script
+    assert '"Snowflake Private - Ollama": 1' in hook_script
+

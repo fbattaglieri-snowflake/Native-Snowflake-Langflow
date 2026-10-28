@@ -544,6 +544,11 @@ def register_snowflake_cortex_embedding_provider() -> dict[str, Any]:
         "model_catalog_patched": False,
     }
 
+    try:
+        import lfx.custom as _lfx_custom  # noqa: F401
+    except Exception:  # noqa: BLE001
+        pass
+
     # 1. Call provider_registry.register_provider FIRST (before manual fallback dict mutations)
     try:
         from lfx.base.models import provider_registry as _pr

@@ -109,18 +109,39 @@ def _svg_data_uri(fill: str) -> str:
 
 
 def _patch_upstream_models_and_agents_files() -> None:
-    """Patch upstream `language_model.py`, `agent.py`, and `a2a_agent.py` in `lfx/components/models_and_agents` (`MA-W2-R6-02..05`)."""
+    """Patch upstream `language_model.py`, `agent.py`, `a2a_agent.py`, and `unified_models/__init__.py` (`MA-W2-R6-02..05`)."""
     import importlib
     import sys
+
+    um_init = SITE_PACKAGES / "lfx" / "base" / "models" / "unified_models" / "__init__.py"
+    if um_init.exists():
+        um_txt = um_init.read_text(encoding="utf-8")
+        if "register_snowflake_language_model_providers" not in um_txt:
+            um_txt += (
+                "\n# Snowflake Langflow provider registration\n"
+                "try:\n"
+                "    from lfx_snowflake.providers.embeddings import register_snowflake_cortex_embedding_provider as _reg_sf_emb\n"
+                "    _reg_sf_emb()\n"
+                "except Exception:\n"
+                "    pass\n"
+                "try:\n"
+                "    from lfx_snowflake.providers.language_models import register_snowflake_language_model_providers as _reg_sf_lm\n"
+                "    _reg_sf_lm()\n"
+                "except Exception:\n"
+                "    pass\n"
+            )
+            um_init.write_text(um_txt, encoding="utf-8")
+            print("[install_live_hooks] Patched lfx/base/models/unified_models/__init__.py with auto-registration")
 
     ma_dir = LFX_COMPONENTS_DIR / "models_and_agents"
     if not ma_dir.exists():
         return
 
-    # 1. Patch language_model.py on disk so LanguageModelComponent exposes Snowflake providers & reasoning inputs
+    # 1. Patch language_model.py on disk so LanguageModelComponent exposes Snowflake providers & reasoning inputs right after model
     lm_file = ma_dir / "language_model.py"
     if lm_file.exists():
         lm_txt = lm_file.read_text(encoding="utf-8")
+        lm_orig = lm_txt
         if "register_snowflake_language_model_providers" not in lm_txt:
             lm_txt = lm_txt.replace(
                 "from lfx.base.models.unified_models import (\n"
@@ -141,11 +162,6 @@ def _patch_upstream_models_and_agents_files() -> None:
                 1,
             )
             lm_txt = lm_txt.replace(
-                '            range_spec=RangeSpec(min=0, max=128000, step=1, step_type="int"),\n        ),\n    ]',
-                '            range_spec=RangeSpec(min=0, max=128000, step=1, step_type="int"),\n        ),\n        *get_snowflake_reasoning_inputs(),\n    ]',
-                1,
-            )
-            lm_txt = lm_txt.replace(
                 '            ollama_base_url=getattr(self, "ollama_base_url", None),\n        )',
                 '            ollama_base_url=getattr(self, "ollama_base_url", None),\n'
                 '            reasoning_effort=getattr(self, "reasoning_effort", None),\n'
@@ -154,13 +170,39 @@ def _patch_upstream_models_and_agents_files() -> None:
                 "        )",
                 1,
             )
+        # Ensure *get_snowflake_reasoning_inputs() is placed right after ModelInput(name="model", ...) and not at the bottom
+        lm_txt = lm_txt.replace(
+            '            range_spec=RangeSpec(min=0, max=128000, step=1, step_type="int"),\n        ),\n        *get_snowflake_reasoning_inputs(),\n    ]',
+            '            range_spec=RangeSpec(min=0, max=128000, step=1, step_type="int"),\n        ),\n    ]',
+        )
+        if "*get_snowflake_reasoning_inputs()" not in lm_txt:
+            lm_txt = lm_txt.replace(
+                '        ModelInput(\n'
+                '            name="model",\n'
+                '            display_name="Language Model",\n'
+                '            info="Select your model provider",\n'
+                '            real_time_refresh=True,\n'
+                '            required=True,\n'
+                '        ),',
+                '        ModelInput(\n'
+                '            name="model",\n'
+                '            display_name="Language Model",\n'
+                '            info="Select your model provider",\n'
+                '            real_time_refresh=True,\n'
+                '            required=True,\n'
+                '        ),\n'
+                '        *get_snowflake_reasoning_inputs(),',
+                1,
+            )
+        if lm_txt != lm_orig:
             lm_file.write_text(lm_txt, encoding="utf-8")
             print("[install_live_hooks] Patched lfx/components/models_and_agents/language_model.py")
 
-    # 2. Patch agent.py on disk so AgentComponent exposes Snowflake providers, reasoning inputs, and multi-tool is_list=True
+    # 2. Patch agent.py on disk so AgentComponent exposes Snowflake providers, reasoning inputs right after model, and multi-tool is_list=True
     ag_file = ma_dir / "agent.py"
     if ag_file.exists():
         ag_txt = ag_file.read_text(encoding="utf-8")
+        ag_orig = ag_txt
         if "register_snowflake_language_model_providers" not in ag_txt:
             ag_txt = ag_txt.replace(
                 "from lfx.base.models.unified_models import (\n"
@@ -181,24 +223,6 @@ def _patch_upstream_models_and_agents_files() -> None:
                 1,
             )
             ag_txt = ag_txt.replace(
-                '            info=(\n'
-                '                "If true, adds a zero-config arithmetic calculator tool to the agent "\n'
-                '                "(safe: only +, -, *, /, ** operators via AST)."\n'
-                "            ),\n"
-                "            value=True,\n"
-                "        ),\n"
-                "    ]",
-                '            info=(\n'
-                '                "If true, adds a zero-config arithmetic calculator tool to the agent "\n'
-                '                "(safe: only +, -, *, /, ** operators via AST)."\n'
-                "            ),\n"
-                "            value=True,\n"
-                "        ),\n"
-                "        *get_snowflake_reasoning_inputs(),\n"
-                "    ]",
-                1,
-            )
-            ag_txt = ag_txt.replace(
                 '            overrides=getattr(self, "_model_overrides", None),\n        )',
                 '            overrides=getattr(self, "_model_overrides", None),\n'
                 '            reasoning_effort=getattr(self, "reasoning_effort", None),\n'
@@ -207,6 +231,31 @@ def _patch_upstream_models_and_agents_files() -> None:
                 "        )",
                 1,
             )
+        # Ensure *get_snowflake_reasoning_inputs() is placed right after ModelInput(name="model", ...) and not at the bottom
+        ag_txt = ag_txt.replace(
+            '            info=(\n'
+            '                "If true, adds a zero-config arithmetic calculator tool to the agent "\n'
+            '                "(safe: only +, -, *, /, ** operators via AST)."\n'
+            "            ),\n"
+            "            value=True,\n"
+            "        ),\n"
+            "        *get_snowflake_reasoning_inputs(),\n"
+            "    ]",
+            '            info=(\n'
+            '                "If true, adds a zero-config arithmetic calculator tool to the agent "\n'
+            '                "(safe: only +, -, *, /, ** operators via AST)."\n'
+            "            ),\n"
+            "            value=True,\n"
+            "        ),\n"
+            "    ]",
+        )
+        if "*get_snowflake_reasoning_inputs()" not in ag_txt:
+            ag_txt = ag_txt.replace(
+                '            filters={"tool_calling": True},\n        ),',
+                '            filters={"tool_calling": True},\n        ),\n        *get_snowflake_reasoning_inputs(),',
+                1,
+            )
+        if ag_txt != ag_orig:
             ag_file.write_text(ag_txt, encoding="utf-8")
             print("[install_live_hooks] Patched lfx/components/models_and_agents/agent.py")
 
@@ -695,8 +744,73 @@ def install_all() -> None:
         if ma_res and ma_res[1]:
             entries_map.setdefault("models_and_agents", {}).update(ma_res[1])
 
-    # Map SnowflakeMessageHistoryNativeComponent under canonical key "MessageHistory" and pop duplicate keys (MA-W2-R6-04)
+    # Populate Snowflake LLM & Embedding options, default selection, and field_order in component_index.json
     ma_entries = entries_map.setdefault("models_and_agents", {})
+    try:
+        from lfx_snowflake.providers.language_models import (
+            get_snowflake_live_language_model_catalog,
+            update_snowflake_language_model_build_config,
+        )
+
+        sf_lm_opts = get_snowflake_live_language_model_catalog(force_refresh=False)
+        default_luna = next(
+            (opt for opt in sf_lm_opts if opt.get("name") == "openai-gpt-6-luna"),
+            sf_lm_opts[0] if sf_lm_opts else None,
+        )
+        for lm_key in ("LanguageModelComponent", "Agent"):
+            if lm_key in ma_entries and isinstance(ma_entries[lm_key], dict):
+                comp_dict = ma_entries[lm_key]
+                tmpl = comp_dict.setdefault("template", {})
+                if "model" in tmpl and isinstance(tmpl["model"], dict):
+                    tmpl["model"]["options"] = list(sf_lm_opts)
+                    tmpl["model"]["_connection_mode"] = False
+                    if default_luna is not None:
+                        tmpl["model"]["value"] = [dict(default_luna)]
+                update_snowflake_language_model_build_config(tmpl, field_name="model", force_refresh=False)
+                f_order = [
+                    f
+                    for f in list(comp_dict.get("field_order") or [])
+                    if f not in ("reasoning_effort", "extended_thinking", "thinking_budget_tokens")
+                ]
+                m_idx = f_order.index("model") if "model" in f_order else 0
+                comp_dict["field_order"] = (
+                    f_order[: m_idx + 1]
+                    + ["reasoning_effort", "extended_thinking", "thinking_budget_tokens"]
+                    + f_order[m_idx + 1 :]
+                )
+    except Exception as exc:
+        print(f"[install_live_hooks] Warning populating LanguageModelComponent/Agent template options: {exc}")
+
+    try:
+        from lfx_snowflake.providers.embeddings import get_snowflake_cortex_embedding_catalog
+
+        sf_emb_cat = get_snowflake_cortex_embedding_catalog()
+        sf_emb_opts = [
+            {
+                "name": item["model_name"],
+                "model_name": item["model_name"],
+                "provider": "Snowflake Cortex",
+                "category": "Snowflake Cortex",
+                "icon": "Snowflake",
+                "default": True,
+                "metadata": dict(item["metadata"]),
+            }
+            for item in sf_emb_cat
+        ]
+        if "EmbeddingModel" in ma_entries and isinstance(ma_entries["EmbeddingModel"], dict):
+            emb_tmpl = ma_entries["EmbeddingModel"].setdefault("template", {})
+            if "model" in emb_tmpl and isinstance(emb_tmpl["model"], dict):
+                emb_tmpl["model"]["options"] = list(sf_emb_opts)
+                emb_tmpl["model"]["_connection_mode"] = False
+                if sf_emb_opts and not emb_tmpl["model"].get("value"):
+                    emb_tmpl["model"]["value"] = [dict(sf_emb_opts[0])]
+            if "api_key" in emb_tmpl and isinstance(emb_tmpl["api_key"], dict):
+                emb_tmpl["api_key"]["show"] = False
+                emb_tmpl["api_key"]["required"] = False
+    except Exception as exc:
+        print(f"[install_live_hooks] Warning populating EmbeddingModel template options: {exc}")
+
+    # Map SnowflakeMessageHistoryNativeComponent under canonical key "MessageHistory" and pop duplicate keys (MA-W2-R6-04)
     if "SnowflakeMessageHistory" in ma_entries:
         mh_entry = dict(ma_entries.pop("SnowflakeMessageHistory"))
         mh_entry["display_name"] = "Message History"
@@ -1341,8 +1455,58 @@ def install_all() -> None:
             )
             txt = txt.replace(
                 "function iIe(e,t,n,o){",
-                'function iIe(e,t,n,o){if(t==="Snowflake Cortex")return!0;',
+                'function iIe(e,t,n,o){if(t==="Snowflake Cortex"||typeof t==="string"&&(t.startsWith("Snowflake Proxy")||t==="Snowflake Private - Ollama"))return!0;',
             )
+        # W2-R6-06 (v0.5.2-20261027): Fix Model providers modal ('false' suffix, 0-model embeddings filter, Snowflake icon, 4 Snowflake LLM providers & legacy glm-5.3 resolution)
+        txt = txt.replace(
+            'function iIe(e,t,n,o){if(t==="Snowflake Cortex")return!0;',
+            'function iIe(e,t,n,o){if(t==="Snowflake Cortex"||typeof t==="string"&&(t.startsWith("Snowflake Proxy")||t==="Snowflake Private - Ollama"))return!0;',
+        )
+        txt = txt.replace(
+            '`${e.provider||T("modelProviders.unknownProvider")} ${E&&` ${T("modelProviders.configuration")}`}`',
+            '`${e.provider||T("modelProviders.unknownProvider")}${E?` ${T("modelProviders.configuration")}`:""}`',
+        )
+        if 'e.startsWith("Snowflake")?"Snowflake"' not in txt:
+            txt = txt.replace(
+                'm_i=e=>({OpenAI:"OpenAI",',
+                'm_i=e=>typeof e==="string"&&e.startsWith("Snowflake")?"Snowflake":({OpenAI:"OpenAI",',
+            )
+        s_i_orig = (
+            'return u.filter(E=>x(E.provider)).map(E=>{const z=E?.models?.filter(T=>e==="all"?!0:T?.metadata?.model_type===e)||[];'
+            'return{provider:E.provider,icon:E.icon,is_enabled:E.is_enabled,is_configured:E.is_configured,model_count:z.length,models:z,api_docs_url:E.api_docs_url,live_discovery:E.live_discovery}})'
+        )
+        s_i_new = (
+            'return u.filter(E=>x(E.provider)).map(E=>{const z=E?.models?.filter(T=>e==="all"?!0:T?.metadata?.model_type===e)||[];'
+            'return{provider:E.provider,icon:E.icon,is_enabled:E.is_enabled,is_configured:E.is_configured,model_count:z.length,models:z,api_docs_url:E.api_docs_url,live_discovery:E.live_discovery}})'
+            '.filter(E=>!(e&&e!=="all"&&typeof E.provider==="string"&&E.provider.startsWith("Snowflake")&&E.model_count===0))'
+        )
+        if '.filter(E=>!(e&&e!=="all"&&typeof E.provider==="string"&&E.provider.startsWith("Snowflake")&&E.model_count===0))' not in txt:
+            txt = txt.replace(s_i_orig, s_i_new)
+        txt = txt.replace(
+            'loo={"IBM watsonx.ai":"IBM WatsonX"}',
+            'loo={"IBM watsonx.ai":"IBM WatsonX","Proxy - Chat":"Snowflake Proxy - Chat (/chat/v1)","Snowflake Proxy - Chat":"Snowflake Proxy - Chat (/chat/v1)","Proxy - Responses":"Snowflake Proxy - Responses (/responses/v1)","Snowflake Proxy - Responses":"Snowflake Proxy - Responses (/responses/v1)","Proxy - Messages":"Snowflake Proxy - Messages (/messages)","Snowflake Proxy - Messages":"Snowflake Proxy - Messages (/messages)","Private - Ollama":"Snowflake Private - Ollama"}',
+        )
+        txt = txt.replace(
+            'if(t){const z=t[x]??t[E];if(z&&z[O.name]!==!0)continue}',
+            'if(t){const z=t[x]??t[E],_isSf=typeof x==="string"&&x.startsWith("Snowflake ");if(z&&(_isSf?z[O.name]===!1:z[O.name]!==!0))continue}',
+        )
+        txt = txt.replace(
+            'if(t&&n)for(const O of n){const x=O.provider,E=ej(x);if(p.has(E))continue;const z=t[x]??t[E];if(z)for(const T of O.models??[]){const k=T.model_name;if(z[k]!==!0)continue;',
+            'if(t&&n)for(const O of n){const x=O.provider,E=ej(x),_isSf=typeof x==="string"&&x.startsWith("Snowflake ");if(p.has(E))continue;const z=t[x]??t[E];if(z||_isSf)for(const T of O.models??[]){const k=T.model_name;if(_isSf?z?.[k]===!1:z?.[k]!==!0)continue;',
+        )
+        gqn_orig = (
+            'function gQn(e){if(!e||typeof e.name!="string"||!uoo(e.name))return e;let t;try{t=JSON.parse(e.name)}catch{return e}'
+            'const n=Array.isArray(t)?t[0]:t;if(!n||typeof n!="object"||typeof n.name!="string")return e;const o=n;'
+            'return{...e,name:o.name,provider:o.provider??e.provider,icon:o.icon??e.icon,metadata:o.metadata??e.metadata}}'
+        )
+        gqn_new = (
+            'const _sfMMap={"glm-5.3":"Snowflake Proxy - Chat (/chat/v1)","grok-4.6":"Snowflake Proxy - Chat (/chat/v1)","grok-4.7":"Snowflake Proxy - Chat (/chat/v1)","kimi-k3":"Snowflake Proxy - Chat (/chat/v1)","openai-gpt-6-luna":"Snowflake Proxy - Chat (/chat/v1)","openai-gpt-6-sol":"Snowflake Proxy - Chat (/chat/v1)","openai-gpt-6-astra":"Snowflake Proxy - Responses (/responses/v1)","openai-gpt-6.1-sol":"Snowflake Proxy - Responses (/responses/v1)","claude-haiku-5-5":"Snowflake Proxy - Messages (/messages)","claude-opus-5-5":"Snowflake Proxy - Messages (/messages)","claude-sonnet-5-5":"Snowflake Proxy - Messages (/messages)","llama3.1:8b":"Snowflake Private - Ollama"};'
+            'function _normSfModel(r){if(!r||typeof r.name!="string")return r;const p=ej(r.provider||""),sp=_sfMMap[r.name];if(sp&&(!p||!p.startsWith("Snowflake "))){return{...r,provider:sp,icon:"Snowflake"}}if(p&&p!==r.provider){return{...r,provider:p,icon:p.startsWith("Snowflake ")?"Snowflake":r.icon}}return r}'
+            'function gQn(e){if(typeof e=="string"&&e.trim())e={name:e.trim()};if(!e||typeof e.name!="string")return e;if(!uoo(e.name))return _normSfModel(e);let t;try{t=JSON.parse(e.name)}catch{return _normSfModel(e)}'
+            'const n=Array.isArray(t)?t[0]:t;if(!n||typeof n!="object"||typeof n.name!="string")return _normSfModel(e);const o=n;'
+            'return _normSfModel({...e,name:o.name,provider:o.provider??e.provider,icon:o.icon??e.icon,metadata:o.metadata??e.metadata})}'
+        )
+        txt = txt.replace(gqn_orig, gqn_new)
         if js_asset.name.startswith("index-") and "__sflfPatched" not in txt:
             txt = dom_guard_banner + txt
         if js_asset.name.startswith("index-") and "memories-plus-snowflake-btn" in txt:
@@ -1393,10 +1557,10 @@ def install_all() -> None:
             count=1,
             flags=re.IGNORECASE,
         )
-    # Bump cache-bust query param from ?v=sflf043 / ?v=sflf045 to ?v=sflf046
+    # Bump cache-bust query param from ?v=sflf046 to ?v=sflf047
     html_text = re.sub(
         r'src="(\./assets/index-[^"?]+\.js)(?:\?[^"]*)?"',
-        r'src="\1?v=sflf046"',
+        r'src="\1?v=sflf047"',
         html_text,
     )
     inject_block = (
@@ -1439,8 +1603,8 @@ def install_all() -> None:
         '        color: #ffffff !important;\n'
         "      }\n"
         "    </style>\n"
-        '    <script defer src="./preserved_provisioning_and_memories_concept.js?v=sflf046"></script>\n'
-        '    <script defer src="./snowflake-ui-integration.js?v=sflf046&r=2"></script>\n'
+        '    <script defer src="./preserved_provisioning_and_memories_concept.js?v=sflf047"></script>\n'
+        '    <script defer src="./snowflake-ui-integration.js?v=sflf047&r=2"></script>\n'
         "  </head>"
     )
     if "snowflake-ui-integration.js" not in html_text:
@@ -1452,11 +1616,12 @@ def install_all() -> None:
             html_text,
         )
     index_html.write_text(html_text, encoding="utf-8")
-    print("[install_live_hooks] Updated index.html with Snowflake SVG favicon, title, and snowflake-ui-integration.js?v=sflf046")
+    print("[install_live_hooks] Updated index.html with Snowflake SVG favicon, title, and snowflake-ui-integration.js?v=sflf047")
 
-    # 7. Verify component_index.json integrity and FastAPI routes
+    # 7. Verify component_index.json integrity, unified_models catalog, and FastAPI routes
     from langflow.main import create_app
     from langflow.plugin_routes import _get_route_keys
+    from lfx.base.models import unified_models as _um_check
     from lfx.interface.components import _read_component_index
 
     verified_idx = _read_component_index()
@@ -1512,6 +1677,49 @@ def install_all() -> None:
         assert ma_removed not in idx_cats["models_and_agents"], (
             f"Removed duplicate {ma_removed} still in models_and_agents"
         )
+
+    for lm_comp_key in ("LanguageModelComponent", "Agent"):
+        lm_comp_entry = idx_cats["models_and_agents"][lm_comp_key]
+        assert lm_comp_entry["field_order"][:4] == [
+            "model",
+            "reasoning_effort",
+            "extended_thinking",
+            "thinking_budget_tokens",
+        ], f"Unexpected field_order on {lm_comp_key}: {lm_comp_entry['field_order'][:6]}"
+        lm_model_tmpl = lm_comp_entry["template"]["model"]
+        assert len(lm_model_tmpl.get("options") or []) >= 12, (
+            f"Expected >= 12 Snowflake LLM options in {lm_comp_key}.template.model.options, got {len(lm_model_tmpl.get('options') or [])}"
+        )
+        assert lm_model_tmpl["value"][0]["name"] == "openai-gpt-6-luna", (
+            f"Expected default model openai-gpt-6-luna on {lm_comp_key}, got {lm_model_tmpl.get('value')}"
+        )
+
+    llm_detailed = {
+        p["provider"]: p
+        for p in _um_check.get_unified_models_detailed(model_type="llm")
+    }
+    expected_sf_llm_counts = {
+        "Snowflake Proxy - Chat (/chat/v1)": 6,
+        "Snowflake Proxy - Responses (/responses/v1)": 2,
+        "Snowflake Proxy - Messages (/messages)": 3,
+        "Snowflake Private - Ollama": 1,
+    }
+    for exp_prov, exp_min_count in expected_sf_llm_counts.items():
+        assert exp_prov in llm_detailed, f"Missing {exp_prov} in get_unified_models_detailed(model_type='llm')!"
+        prov_models = llm_detailed[exp_prov]["models"]
+        assert len(prov_models) >= exp_min_count, (
+            f"Expected >= {exp_min_count} models for {exp_prov}, got {len(prov_models)}"
+        )
+        assert all(m["metadata"].get("default") is True for m in prov_models), (
+            f"Expected all models in {exp_prov} to have default=True, got {[m['metadata'].get('default') for m in prov_models]}"
+        )
+    emb_detailed = {
+        p["provider"]: p
+        for p in _um_check.get_unified_models_detailed(model_type="embeddings")
+    }
+    assert "Snowflake Cortex" in emb_detailed, "Missing Snowflake Cortex in get_unified_models_detailed(model_type='embeddings')!"
+    assert len(emb_detailed["Snowflake Cortex"]["models"]) == 6
+    assert all(m["metadata"].get("default") is True for m in emb_detailed["Snowflake Cortex"]["models"])
 
     for llm_comp in (
         "SnowflakeObjectProvisioner",
