@@ -74,6 +74,7 @@ TECHNICAL_MEMORY_TABLE_NAMES: frozenset[str] = frozenset(
         "MEM_3_SESSION_SUMMARY",
         "MEM_4_USER_ENTITY_PROFILE",
         "MEM_5_EPISODIC_FEWSHOT",
+        "LANGFLOW_TRIGGER_REGISTRY",
     }
 )
 
@@ -89,6 +90,15 @@ TECHNICAL_MEMORY_TABLE_PREFIXES: tuple[str, ...] = (
     "MEM_3_",
     "MEM_4_",
     "MEM_5_",
+    "_LF_STREAM_BATCH_",
+    "_LF_STAGE_BATCH_",
+    "LF_STRM_",
+    "LF_STG_STRM_",
+    "LF_SCHED_",
+    "LF_TRG_",
+    "LF_STG_TRG_",
+    "LF_ALRT_",
+    "LANGFLOW_TRIGGER_",
 )
 
 

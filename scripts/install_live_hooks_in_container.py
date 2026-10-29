@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import os
 import re
@@ -678,6 +679,9 @@ def install_all() -> None:
             continue
         target_cat_dir = LFX_COMPONENTS_DIR / cat_dir.name
         target_cat_dir.mkdir(parents=True, exist_ok=True)
+        (target_cat_dir / "__init__.py").touch(exist_ok=True)
+        if cat_dir.name == "triggers" and (cat_dir / "__init__.py").exists():
+            shutil.copyfile(cat_dir / "__init__.py", target_cat_dir / "__init__.py")
         for py_file in sorted(cat_dir.glob("*.py")):
             if py_file.name == "__init__.py":
                 continue
@@ -737,6 +741,12 @@ def install_all() -> None:
         assert top_level == cat_name
         entries_map.setdefault(cat_name, {}).update(comp_templates)
         print(f"[install_live_hooks] Merged {list(comp_templates.keys())} into native category '{cat_name}'")
+
+    # TRG-W2-R8-01: Expose native Webhook in 'triggers' category while keeping 'input_output' 100% invariant
+    if "input_output" in entries_map and "Webhook" in entries_map["input_output"]:
+        entries_map.setdefault("triggers", {})["Webhook"] = copy.deepcopy(
+            entries_map["input_output"]["Webhook"]
+        )
 
     # Re-template patched upstream Models & Agents modules so component_index.json has the updated code & inputs
     for ma_mod in ("language_model", "agent", "a2a_agent", "embedding_model", "prompt"):
@@ -1401,6 +1411,32 @@ def install_all() -> None:
             '"settings.dbProviders.description":"Configure vector-store providers for Knowledge Bases."',
             '"settings.dbProviders.description":"Snowflake Vector Stores (Standard Table VECTOR, Hybrid Table VECTOR, Cortex Search, Snowflake Postgres pgvector) are pre-configured in Files & Knowledge. Configure any additional DB providers below."',
         )
+        # TRG-W2-R8-01: Sidebar Category 'Triggers' ('triggers', icon='Zap') positioned after 'Input & Output' and before 'Data Sources'
+        if '{display_name:"sidebar.category.triggers",name:"triggers",icon:"Zap"}' not in txt:
+            txt = txt.replace(
+                '{display_name:"sidebar.category.inputOutput",name:"input_output",icon:"Cable"},{display_name:"sidebar.category.dataSources",name:"data_source",icon:"Database"}',
+                '{display_name:"sidebar.category.inputOutput",name:"input_output",icon:"Cable"},{display_name:"sidebar.category.triggers",name:"triggers",icon:"Zap"},{display_name:"sidebar.category.dataSources",name:"data_source",icon:"Database"}',
+            )
+        if '"sidebar.category.triggers":"Triggers"' not in txt:
+            txt = txt.replace(
+                '"sidebar.category.inputOutput":"Input & Output",',
+                '"sidebar.category.inputOutput":"Input & Output","sidebar.category.triggers":"Triggers",',
+            )
+        if 'kei={saved_components:"Save",input_output:"Cable",triggers:"Zap",' not in txt:
+            txt = txt.replace(
+                'kei={saved_components:"Save",input_output:"Cable",',
+                'kei={saved_components:"Save",input_output:"Cable",triggers:"Zap",',
+            )
+        if 'F5n={input_output:"Cable",triggers:"Zap",' not in txt:
+            txt = txt.replace(
+                'F5n={input_output:"Cable",',
+                'F5n={input_output:"Cable",triggers:"Zap",',
+            )
+        if 'Ex={triggers:"#29B5E8",inputs:"#10B981",' not in txt:
+            txt = txt.replace(
+                'Ex={inputs:"#10B981",',
+                'Ex={triggers:"#29B5E8",inputs:"#10B981",',
+            )
         # W2-R5-05: Inject Stages & Volumes Bucket icon in left vertical rail between Memories and Traces
         bucket_svg_inline = (
             'v.jsxs("svg",{xmlns:"http://www.w3.org/2000/svg",width:20,height:20,viewBox:"0 0 24 24",fill:"none",'
@@ -1627,6 +1663,18 @@ def install_all() -> None:
     verified_idx = _read_component_index()
     assert verified_idx is not None, "component_index.json failed SHA256 or structure verification!"
     idx_cats = dict(verified_idx["entries"])
+
+    for io_comp in ("ChatInput", "ChatOutput", "TextInput", "TextOutput", "Webhook"):
+        assert io_comp in idx_cats["input_output"], f"Missing invariant {io_comp} in input_output"
+    assert "triggers" in idx_cats, "Missing triggers category in component_index.json"
+    for trg_comp in (
+        "SnowflakeScheduleTrigger",
+        "SnowflakeTableChangeTrigger",
+        "SnowflakeStageFileTrigger",
+        "SnowflakeAlertTrigger",
+        "Webhook",
+    ):
+        assert trg_comp in idx_cats["triggers"], f"Missing {trg_comp} in triggers"
 
     for ds_comp in (
         "SnowflakeTables",

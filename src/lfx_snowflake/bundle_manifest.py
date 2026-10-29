@@ -554,6 +554,43 @@ SNOWFLAKE_BUNDLE_COMPONENTS: tuple[BundleComponentSpec, ...] = (
         description="Snowflake ToolGuard wrapping connected Tools with CURRENT_ROLE() RBAC, Cortex Guard, AI_REDACT PII masking, and Proxy/Ollama LLM policy evaluation.",
         required_privileges=("USAGE ON SERVICE",),
     ),
+    # Triggers (4)
+    BundleComponentSpec(
+        component_id="snowflake_schedule_trigger",
+        display_name="Schedule Trigger",
+        category="Triggers",
+        release_phase="W2-R8",
+        icon="Snowflake",
+        description="Role-governed Snowflake Schedule Trigger (CREATE OR ALTER TASK USING CRON / Interval + SPCS Service Function RUN_LANGFLOW_FLOW) with Active/Paused toggle.",
+        required_privileges=("USAGE ON DATABASE", "USAGE ON SCHEMA", "CREATE TASK ON SCHEMA", "EXECUTE TASK ON ACCOUNT"),
+    ),
+    BundleComponentSpec(
+        component_id="snowflake_table_change_trigger",
+        display_name="Table Change Trigger",
+        category="Triggers",
+        release_phase="W2-R8",
+        icon="Snowflake",
+        description="Role-governed Snowflake Table Change Trigger (STREAM ON TABLE/DYNAMIC TABLE/VIEW + pure Triggered Task WHEN SYSTEM$STREAM_HAS_DATA with atomic temp batch consumption).",
+        required_privileges=("USAGE ON DATABASE", "USAGE ON SCHEMA", "SELECT ON TABLE/VIEW", "CREATE STREAM ON SCHEMA", "CREATE TASK ON SCHEMA", "EXECUTE TASK ON ACCOUNT"),
+    ),
+    BundleComponentSpec(
+        component_id="snowflake_stage_file_trigger",
+        display_name="Stage File Trigger",
+        category="Triggers",
+        release_phase="W2-R8",
+        icon="Snowflake",
+        description="Role-governed Snowflake Stage File Trigger (Directory Table STREAM ON STAGE + pure Triggered Task WHEN SYSTEM$STREAM_HAS_DATA with BUILD_SCOPED_FILE_URL and file_pattern).",
+        required_privileges=("USAGE ON DATABASE", "USAGE ON SCHEMA", "READ ON STAGE", "CREATE STREAM ON SCHEMA", "CREATE TASK ON SCHEMA", "EXECUTE TASK ON ACCOUNT"),
+    ),
+    BundleComponentSpec(
+        component_id="snowflake_alert_trigger",
+        display_name="Condition Alert Trigger",
+        category="Triggers",
+        release_phase="W2-R8",
+        icon="Snowflake",
+        description="Role-governed Snowflake Condition Alert Trigger (CREATE OR ALTER ALERT IF EXISTS (<condition_sql>) THEN RESULT_SCAN(SNOWFLAKE.ALERT.GET_CONDITION_QUERY_UUID())).",
+        required_privileges=("USAGE ON DATABASE", "USAGE ON SCHEMA", "CREATE ALERT ON SCHEMA", "EXECUTE ALERT ON ACCOUNT"),
+    ),
 )
 
 

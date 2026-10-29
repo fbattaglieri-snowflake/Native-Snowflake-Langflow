@@ -1085,6 +1085,13 @@
       const list = vis.functions || [];
       return { options: list, fallbackValue: list[0] || "" };
     }
+    if (key.includes("source_object")) {
+      const combined = []
+        .concat(vis.tables || [])
+        .concat(vis.views || [])
+        .concat(vis.iceberg_tables || []);
+      return { options: combined, fallbackValue: combined[0] || "" };
+    }
     if (key.includes("table_name") || key.includes("table")) {
       const list = vis.tables || [];
       return { options: list, fallbackValue: list[0] || "" };
@@ -6717,6 +6724,125 @@
     if (modal) modal.style.display = "none";
     await fetchSnowflakeContext(flowId);
     await fetchSnowflakeStagesAndVolumes(flowId);
+  }
+
+  // =========================================================================
+  // TRG-W2-R8-01: Native `Triggers` (`triggers`, icon="Zap") Sidebar Category & Activity Badges
+  // =========================================================================
+  const SNOWFLAKE_TRIGGERS_SIDEBAR_CATEGORY = {
+    name: "triggers",
+    display_name: "Triggers",
+    i18n_key: "sidebar.category.triggers",
+    icon: "Zap",
+    color: "#29B5E8",
+    positioned_after: "input_output",
+    positioned_before: "data_source",
+    disclosure_testid: "disclosure-triggers",
+  };
+
+  const SNOWFLAKE_TRIGGER_COMPONENTS = [
+    {
+      key: "SnowflakeScheduleTrigger",
+      component_id: "snowflake_schedule_trigger",
+      display_name: "Schedule Trigger",
+      category: "triggers",
+      icon: "Snowflake",
+      event_type: "SCHEDULED_RUN",
+      snowflake_objects: ["TASK", "SERVICE FUNCTION"],
+    },
+    {
+      key: "SnowflakeTableChangeTrigger",
+      component_id: "snowflake_table_change_trigger",
+      display_name: "Table Change Trigger",
+      category: "triggers",
+      icon: "Snowflake",
+      event_type: "STREAM_TRIGGER_RUN",
+      snowflake_objects: ["STREAM", "TASK", "SERVICE FUNCTION"],
+    },
+    {
+      key: "SnowflakeStageFileTrigger",
+      component_id: "snowflake_stage_file_trigger",
+      display_name: "Stage File Trigger",
+      category: "triggers",
+      icon: "Snowflake",
+      event_type: "STAGE_FILE_TRIGGER_RUN",
+      snowflake_objects: ["STAGE DIRECTORY", "STREAM ON STAGE", "TASK", "SERVICE FUNCTION"],
+    },
+    {
+      key: "SnowflakeAlertTrigger",
+      component_id: "snowflake_alert_trigger",
+      display_name: "Condition Alert Trigger",
+      category: "triggers",
+      icon: "Snowflake",
+      event_type: "ALERT_TRIGGER_RUN",
+      snowflake_objects: ["ALERT", "SERVICE FUNCTION"],
+    },
+    {
+      key: "Webhook",
+      component_id: "webhook",
+      display_name: "Webhook",
+      category: "triggers",
+      icon: "Webhook",
+      event_type: "WEBHOOK_RUN",
+      snowflake_objects: ["HTTP WEBHOOK"],
+    },
+  ];
+
+  const SNOWFLAKE_TRIGGER_ACTIVITY_BADGES = {
+    SCHEDULED_RUN: {
+      event_type: "SCHEDULED_RUN",
+      label: "SCHEDULED_RUN",
+      short_label: "Schedule Trigger",
+      color: "#0284c7",
+      bg: "rgba(41,181,232,0.14)",
+      border: "#29B5E8",
+    },
+    STREAM_TRIGGER_RUN: {
+      event_type: "STREAM_TRIGGER_RUN",
+      label: "STREAM_TRIGGER_RUN",
+      short_label: "Table Change Trigger",
+      color: "#059669",
+      bg: "rgba(16,185,129,0.14)",
+      border: "#10b981",
+    },
+    STAGE_FILE_TRIGGER_RUN: {
+      event_type: "STAGE_FILE_TRIGGER_RUN",
+      label: "STAGE_FILE_TRIGGER_RUN",
+      short_label: "Stage File Trigger",
+      color: "#7c3aed",
+      bg: "rgba(124,58,237,0.14)",
+      border: "#8b5cf6",
+    },
+    ALERT_TRIGGER_RUN: {
+      event_type: "ALERT_TRIGGER_RUN",
+      label: "ALERT_TRIGGER_RUN",
+      short_label: "Condition Alert Trigger",
+      color: "#d97706",
+      bg: "rgba(245,158,11,0.14)",
+      border: "#f59e0b",
+    },
+    WEBHOOK_RUN: {
+      event_type: "WEBHOOK_RUN",
+      label: "WEBHOOK_RUN",
+      short_label: "Webhook Trigger",
+      color: "#475569",
+      bg: "rgba(100,116,139,0.14)",
+      border: "#64748b",
+    },
+  };
+
+  function renderTriggerActivityBadge(eventType) {
+    const key = String(eventType || "").trim().toUpperCase();
+    const spec = SNOWFLAKE_TRIGGER_ACTIVITY_BADGES[key];
+    if (!spec) return "";
+    return `<span class="sflf-trigger-activity-badge" data-trigger-event-type="${spec.event_type}" style="display:inline-flex;align-items:center;gap:4px;background:${spec.bg};color:${spec.color};border:1px solid ${spec.border};border-radius:999px;padding:1px 8px;font-size:10px;font-weight:700;font-family:'JetBrains Mono',monospace;">${spec.label}</span>`;
+  }
+
+  if (typeof window !== "undefined") {
+    window.SNOWFLAKE_TRIGGERS_SIDEBAR_CATEGORY = SNOWFLAKE_TRIGGERS_SIDEBAR_CATEGORY;
+    window.SNOWFLAKE_TRIGGER_COMPONENTS = SNOWFLAKE_TRIGGER_COMPONENTS;
+    window.SNOWFLAKE_TRIGGER_ACTIVITY_BADGES = SNOWFLAKE_TRIGGER_ACTIVITY_BADGES;
+    window.renderTriggerActivityBadge = renderTriggerActivityBadge;
   }
 
   function bootSnowflakeUI() {

@@ -115,6 +115,7 @@ from .governance.models import (
     SnowflakeErrorCode as ErrorCode,
 )
 from .observability.redaction import redact_payload_for_sink as redact_for_sink
+from .providers.registry import SnowflakeProviderError
 
 SPCS_TOKEN_PATH = Path("/snowflake/session/token")
 
@@ -8298,6 +8299,154 @@ class LiveSnowflakeBridge:
             self.execute_sql(stmt, role="ACCOUNTADMIN")
         return event_id
 
+    def record_trigger_execution_telemetry(
+        self,
+        *,
+        flow_id: str,
+        run_id: str,
+        trace_id: str,
+        trigger_type: str,
+        status: str = "SUCCEEDED",
+        duration_ms: float = 10.0,
+        trigger_payload: dict[str, Any] | None = None,
+        result_payload: dict[str, Any] | None = None,
+        active_role: str | None = None,
+        error_message: str | None = None,
+    ) -> dict[str, Any]:
+        """Record 3-tier trigger telemetry (`LANGFLOW_FLOW_ACTIVITY`, `LANGFLOW_FLOW_RUNS`, `LANGFLOW_FLOW_SPANS`, `LANGFLOW_AUDIT_LOG`)."""
+        norm_fid = self._normalize_flow_id(flow_id) or str(flow_id or "default-flow")
+        eff_role = str(active_role or self.active_role or "SNOWFLAKE_LANGFLOW_ADMIN_ROLE").strip()
+        ev_type = str(trigger_type or "SCHEDULED_RUN").strip().upper()
+        now_iso = datetime.now(timezone.utc).isoformat()
+        flw_ctx = copy.deepcopy(self.contexts_by_flow_id.get(norm_fid, self.selected_context))
+        in_pay = redact_for_sink(trigger_payload or {})
+        out_pay = redact_for_sink(result_payload or {"status": status, "run_id": run_id})
+        span_id = f"spn-{run_id[:20]}"
+        node_spans = [
+            {
+                "span_id": span_id,
+                "vertex_id": ev_type,
+                "component_name": ev_type,
+                "timestamp": now_iso,
+                "latency_ms": float(duration_ms or 0.0),
+                "status": status,
+            }
+        ]
+        act_record = {
+            "id": run_id,
+            "activity_id": run_id,
+            "trace_id": trace_id,
+            "name": f"{ev_type} ({norm_fid})",
+            "event_type": ev_type,
+            "flow_id": norm_fid,
+            "flow_name": norm_fid,
+            "project_id": "default",
+            "project_name": "Default Project",
+            "session_id": norm_fid,
+            "timestamp": now_iso,
+            "run_timestamp": now_iso,
+            "status": status,
+            "latency_ms": float(duration_ms or 0.0),
+            "total_latency_ms": float(duration_ms or 0.0),
+            "input": json.dumps(in_pay, default=str)[:1000],
+            "output": json.dumps(out_pay, default=str)[:1000],
+            "input_text": json.dumps(in_pay, default=str)[:1000],
+            "output_text": json.dumps(out_pay, default=str)[:1000],
+            "error_message": error_message,
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0,
+            "user_identity": self.authenticated_user,
+            "active_role": eff_role,
+            "context_epoch": self.context_epoch,
+            "flow_context_json": flw_ctx,
+            "input_payload": in_pay,
+            "output_payload": out_pay,
+            "node_spans_json": node_spans,
+            "spans": node_spans,
+            "snowflake_query_ids": [],
+            "deleted_in_ui_at": None,
+        }
+        self._recent_activity_events.insert(0, act_record)
+        if len(self._recent_activity_events) > 200:
+            self._recent_activity_events = self._recent_activity_events[:200]
+
+        act_sql = self._build_activity_merge_sql(act_record)
+        in_sql = self._safe_sql_json_str(in_pay, max_chars=4000, default_empty="{}")
+        out_sql = self._safe_sql_json_str(out_pay, max_chars=4000, default_empty="{}")
+        safe_fid = norm_fid.replace("'", "''")
+        safe_role = eff_role.replace("'", "''")
+        safe_status = str(status or "SUCCEEDED").replace("'", "''")
+        safe_ev = ev_type.replace("'", "''")
+
+        merge_run = (
+            f"MERGE INTO {self.runs_table} t "
+            f"USING (SELECT '{run_id}' AS run_id) s ON t.run_id = s.run_id "
+            f"WHEN NOT MATCHED THEN INSERT "
+            f"(event_id, run_id, trace_id, project_id, flow_id, authenticated_user, effective_role, "
+            f"execution_mode, start_ts, end_ts, latency_ms, status, input_payload, output_payload) VALUES "
+            f"('evr-{run_id[:16]}', '{run_id}', '{trace_id}', 'default', '{safe_fid}', "
+            f"'{self.authenticated_user}', '{safe_role}', '{safe_ev}', "
+            f"CURRENT_TIMESTAMP(), CURRENT_TIMESTAMP(), {float(duration_ms or 0.0)}, '{safe_status}', "
+            f"PARSE_JSON('{in_sql}'), PARSE_JSON('{out_sql}'))"
+        )
+        merge_span = (
+            f"MERGE INTO {self.spans_table} t "
+            f"USING (SELECT '{span_id}' AS span_id) s ON t.span_id = s.span_id "
+            f"WHEN NOT MATCHED THEN INSERT "
+            f"(event_id, span_id, run_id, trace_id, project_id, flow_id, component_id, component_name, "
+            f"authenticated_user, effective_role, execution_mode, start_ts, end_ts, latency_ms, status, "
+            f"redacted_inputs, redacted_outputs) VALUES "
+            f"('evs-{run_id[:16]}', '{span_id}', '{run_id}', '{trace_id}', 'default', '{safe_fid}', "
+            f"'{safe_ev}', '{safe_ev}', '{self.authenticated_user}', '{safe_role}', '{safe_ev}', "
+            f"CURRENT_TIMESTAMP(), CURRENT_TIMESTAMP(), {float(duration_ms or 0.0)}, '{safe_status}', "
+            f"PARSE_JSON('{in_sql}'), PARSE_JSON('{out_sql}'))"
+        )
+
+        if self._has_spcs_token() and not self._is_execute_sql_mocked():
+            _AUDIT_EXECUTOR.submit(self.execute_sql, act_sql, role="ACCOUNTADMIN", timeout=15)
+            _AUDIT_EXECUTOR.submit(self.execute_sql, merge_run, role="ACCOUNTADMIN", timeout=15)
+            _AUDIT_EXECUTOR.submit(self.execute_sql, merge_span, role="ACCOUNTADMIN", timeout=15)
+        else:
+            self.execute_sql(act_sql, role="ACCOUNTADMIN")
+            self.execute_sql(merge_run, role="ACCOUNTADMIN")
+            self.execute_sql(merge_span, role="ACCOUNTADMIN")
+
+        self.record_audit_event(
+            action=f"TRIGGER_{ev_type}",
+            outcome=status,
+            error_code="TRIGGER_EXECUTION_FAILED" if status == "FAILED" else None,
+            target_object=norm_fid,
+            flow_id=norm_fid,
+            run_id=run_id,
+            details={"trigger_type": ev_type, "duration_ms": duration_ms, "trigger_payload": in_pay},
+        )
+        return act_record
+
+    def invoke_service_trigger_batch(self, batch_body: dict[str, Any]) -> dict[str, Any]:
+        """Execute SPCS Service Function `/api/v1/snowflake/service-trigger` batch protocol."""
+        from lfx_snowflake.triggers_manager import TRIGGERS_MANAGER  # noqa: PLC0415
+
+        return TRIGGERS_MANAGER.execute_service_trigger_batch(batch_body, bridge=self)
+
+    def sync_flow_triggers(self, flow_id: str, flow_payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        """Provision/update Snowflake Tasks, Streams, and Alerts for a flow and drop removed trigger objects."""
+        from lfx_snowflake.triggers_manager import TRIGGERS_MANAGER  # noqa: PLC0415
+
+        return TRIGGERS_MANAGER.sync_flow_payload_triggers(flow_id, flow_payload, bridge=self)
+
+    def cleanup_flow_triggers(self, flow_id: str) -> dict[str, Any]:
+        """Suspend and drop all Snowflake Tasks, Streams, and Alerts registered for `flow_id`."""
+        from lfx_snowflake.triggers_manager import TRIGGERS_MANAGER  # noqa: PLC0415
+
+        return TRIGGERS_MANAGER.cleanup_flow_triggers(flow_id, bridge=self)
+
+    def list_flow_triggers(self, flow_id: str | None = None) -> list[dict[str, Any]]:
+        """List registered Snowflake triggers (optionally filtered by `flow_id`)."""
+        from lfx_snowflake.triggers_manager import TRIGGERS_MANAGER  # noqa: PLC0415
+
+        return TRIGGERS_MANAGER.list_triggers(flow_id=flow_id)
+
     def switch_role(self, target_role: str, flow_id: str | None = None) -> dict[str, Any]:
         clean = (target_role or "").strip().upper()
         if not clean or clean not in [r.upper() for r in self.available_roles]:
@@ -9048,7 +9197,7 @@ def register_snowflake_fastapi_routes(app: Any) -> None:
             matched_fid = header_fid
             if not matched_fid:
                 m_flow = re.search(
-                    r"/api/v1/(?:flows|build|run|monitor/builds|monitor/messages|custom_component|webhook)/([0-9a-fA-F-]{8,64})",
+                    r"/api/v1/(?:flows|build|run|monitor/builds|monitor/messages|custom_component|webhook)/(?!upload\b)([A-Za-z0-9_-]{3,128})",
                     path,
                 )
                 if m_flow:
@@ -9166,6 +9315,17 @@ def register_snowflake_fastapi_routes(app: Any) -> None:
                         del_res = await asyncio.to_thread(LIVE_BRIDGE.delete_memory, target_mem_id)
                         return JSONResponse(status_code=int(del_res.get("status_code") or 200), content=del_res)
 
+            flow_body_for_triggers: dict[str, Any] | None = None
+            if method in ("PUT", "PATCH") and "/api/v1/flows/" in path and matched_fid:
+                try:
+                    raw_body_bytes = await request.body()
+                    if raw_body_bytes:
+                        parsed_body = json.loads(raw_body_bytes.decode("utf-8"))
+                        if isinstance(parsed_body, dict):
+                            flow_body_for_triggers = parsed_body
+                except Exception:  # noqa: BLE001
+                    flow_body_for_triggers = None
+
             token = CURRENT_SNOWFLAKE_FLOW_ID.set(norm_fid)
             try:
                 response = await call_next(request)
@@ -9173,6 +9333,10 @@ def register_snowflake_fastapi_routes(app: Any) -> None:
                 CURRENT_SNOWFLAKE_FLOW_ID.reset(token)
 
             if method == "DELETE" and "/api/v1/flows/" in path and matched_fid:
+                await asyncio.to_thread(
+                    LIVE_BRIDGE.cleanup_flow_triggers,
+                    str(norm_fid or matched_fid),
+                )
                 _AUDIT_EXECUTOR.submit(
                     LIVE_BRIDGE.record_audit_event,
                     action="FLOW_DELETED_IN_UI",
@@ -9181,9 +9345,35 @@ def register_snowflake_fastapi_routes(app: Any) -> None:
                     flow_id=norm_fid,
                     details={"path": path, "method": method, "durable_snowflake_audit_preserved": True},
                 )
+            elif method in ("PUT", "PATCH") and "/api/v1/flows/" in path and matched_fid and flow_body_for_triggers is not None:
+                if getattr(response, "status_code", 200) < 400:
+                    try:
+                        await asyncio.to_thread(
+                            LIVE_BRIDGE.sync_flow_triggers,
+                            str(norm_fid or matched_fid),
+                            flow_body_for_triggers,
+                        )
+                    except Exception:  # noqa: BLE001
+                        pass
             elif method == "POST" and path.rstrip("/") in ("/api/v1/flows", "/api/v1/flows/upload"):
                 _AUDIT_EXECUTOR.submit(LIVE_BRIDGE._load_flow_contexts_sqlite)
             elif any(seg in path for seg in ("/api/v1/build/", "/api/v1/run/", "/api/v1/webhook/")):
+                if "/api/v1/webhook/" in path:
+                    wh_fid = str(norm_fid or matched_fid or "webhook-flow")
+                    wh_run_id = f"wh_run_{uuid.uuid4().hex[:16]}"
+                    wh_status = "SUCCEEDED" if getattr(response, "status_code", 200) < 400 else "FAILED"
+                    await asyncio.to_thread(
+                        lambda: LIVE_BRIDGE.record_trigger_execution_telemetry(
+                            flow_id=wh_fid,
+                            run_id=wh_run_id,
+                            trace_id=f"wh_trc_{uuid.uuid4().hex[:16]}",
+                            trigger_type="WEBHOOK_RUN",
+                            status=wh_status,
+                            duration_ms=10.0,
+                            trigger_payload={"path": path, "method": method, "trigger_type": "WEBHOOK_RUN"},
+                            result_payload={"status": wh_status, "run_id": wh_run_id},
+                        )
+                    )
                 _AUDIT_EXECUTOR.submit(
                     LIVE_BRIDGE.sync_langflow_traces_to_snowflake,
                     25,
@@ -10420,6 +10610,84 @@ def register_snowflake_fastapi_routes(app: Any) -> None:
             status_code=200,
             content={"jsonrpc": "2.0", "id": msg_id, "error": {"code": -32601, "message": f"Unsupported method {method}"}},
         )
+
+    @sf_router.post("/service-trigger")
+    async def post_snowflake_service_trigger(request: Request) -> JSONResponse:
+        """SPCS Service Function batch endpoint (`SNOWFLAKE_LANGFLOW.CORE.RUN_LANGFLOW_FLOW`)."""
+        sf_header_user = request.headers.get("Sf-Context-Current-User")
+        if sf_header_user:
+            LIVE_BRIDGE.authenticated_user = sf_header_user
+        try:
+            body = await request.json()
+        except Exception as exc:  # noqa: BLE001
+            return JSONResponse(
+                status_code=400,
+                content={"ok": False, "error": f"Invalid JSON body: {exc}"},
+            )
+        try:
+            res = await asyncio.to_thread(LIVE_BRIDGE.invoke_service_trigger_batch, body if isinstance(body, dict) else {})
+            return JSONResponse(status_code=200, content=res)
+        except SnowflakeProviderError as exc:
+            return JSONResponse(
+                status_code=int(getattr(exc, "status_code", 403) or 403),
+                content=exc.to_dict(),
+            )
+        except ValueError as exc:
+            return JSONResponse(
+                status_code=422,
+                content={"ok": False, "error": str(exc)},
+            )
+
+    @sf_router.get("/triggers")
+    async def get_snowflake_triggers(request: Request, flow_id: str | None = None) -> JSONResponse:
+        req_fid = flow_id or request.query_params.get("flow_id") or request.headers.get("X-Snowflake-Flow-Id")
+        items = await asyncio.to_thread(LIVE_BRIDGE.list_flow_triggers, req_fid)
+        return JSONResponse(
+            status_code=200,
+            content={
+                "ok": True,
+                "flow_id": req_fid,
+                "active_role": LIVE_BRIDGE.active_role,
+                "triggers": items,
+                "count": len(items),
+            },
+        )
+
+    @sf_router.post("/triggers/sync")
+    async def post_sync_snowflake_triggers(request: Request) -> JSONResponse:
+        try:
+            body = await request.json()
+            payload = body if isinstance(body, dict) else {}
+        except Exception:  # noqa: BLE001
+            payload = {}
+        req_fid = str(
+            payload.get("flow_id")
+            or request.query_params.get("flow_id")
+            or request.headers.get("X-Snowflake-Flow-Id")
+            or "default-flow"
+        )
+        flow_payload = payload.get("flow_payload") if isinstance(payload.get("flow_payload"), dict) else payload
+        try:
+            res = await asyncio.to_thread(LIVE_BRIDGE.sync_flow_triggers, req_fid, flow_payload)
+            return JSONResponse(status_code=200, content=res)
+        except SnowflakeProviderError as exc:
+            return JSONResponse(
+                status_code=int(getattr(exc, "status_code", 403) or 403),
+                content={"ok": False, **exc.to_dict()},
+            )
+        except ValueError as exc:
+            return JSONResponse(
+                status_code=422,
+                content={"ok": False, "error": str(exc)},
+            )
+
+    @sf_router.delete("/triggers/{flow_id}")
+    async def delete_snowflake_triggers_for_flow(flow_id: str) -> JSONResponse:
+        try:
+            res = await asyncio.to_thread(LIVE_BRIDGE.cleanup_flow_triggers, flow_id)
+            return JSONResponse(status_code=200, content=res)
+        except ValueError as exc:
+            return JSONResponse(status_code=422, content={"ok": False, "error": str(exc)})
 
     register_snowflake_vector_store_backends()
     app.include_router(sf_router)

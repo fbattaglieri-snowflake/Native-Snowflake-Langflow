@@ -40,7 +40,7 @@
 
 ---
 
-## 3. Wave 2 UI, Hub & Sidebar Enhancement Matrix (`UI-W2-01`, `HUB-W2-01..05`, `DS-W2-01`, `PROV-W2-01`, `MA-W2-01`, `LLM-W2-01..06`, `FK-W2-01..04`)
+## 3. Wave 2 UI, Hub & Sidebar Enhancement Matrix (`UI-W2-01`, `HUB-W2-01..05`, `DS-W2-01`, `PROV-W2-01`, `MA-W2-01`, `LLM-W2-01..06`, `FK-W2-01..04`, `TRG-W2-R8-01..07`)
 
 | Wave 2 ID | Area | Implementation & Verification Contract |
 |---|---|---|
@@ -54,3 +54,4 @@
 | **MA-W2-01** | `Models & Agents` Cascading Cortex Agent | `SnowflakeCortexAgentA2AComponent` cascades `Mode -> Database -> Schema -> Cortex Agent` (`SHOW CORTEX AGENTS IN SCHEMA`). |
 | **LLM-W2-01..06** | `LLM Operations` Expansion | Adds `Snowflake Stored Procedure` (graphical child procedure ports), `Snowflake Function (UDF / UDTF)`, dedicated `Snowflake AI Complete` vs task-specific `Snowflake AI Function` (`return_as_json`), `Snowflake SQL Statement`, `Cortex Search` (`SEARCH_PREVIEW`), `Cortex Analyst`, `Snowflake`, and `Snowflake Decision` (`snowflake-decision`). |
 | **FK-W2-01..04** | `Files & Knowledge` & 4-Node `Cortex Search` Pipeline | Context-cascading `Knowledge & Vector Memory` and `Stage File System` (Internal/External stage creation), 4-node `Cortex Search` pipeline (`1: Parse Document` via `AI_PARSE_DOCUMENT`, `2: Split Text` via `SPLIT_TEXT_RECURSIVE_CHARACTER`, `3: Search Service` via `CREATE OR REPLACE CORTEX SEARCH SERVICE`, `4: Stream + Task` with `_DOC_STREAM_BATCH`), and `Cortex Analyst (Create in Snowsight)` disabled guidance node. |
+| **TRG-W2-R8-01..07** | `Triggers` (`triggers`, `icon="Zap"`) Sidebar Category, 5 Separate Trigger Components (`1 class = 1 file`) & SPCS Service Function (`RUN_LANGFLOW_FLOW`) | Positioned immediately after `Input & Output` (invariant) and before `Data Sources`. Provides `Schedule Trigger` (`SnowflakeScheduleTrigger`, `CREATE OR ALTER TASK USING CRON`/interval), `Table Change Trigger` (`SnowflakeTableChangeTrigger`, `STREAM ON TABLE/DYNAMIC TABLE/VIEW` + pure Triggered Task `WHEN SYSTEM$STREAM_HAS_DATA` + atomic `_LF_STREAM_BATCH_<FLOW_SHORT_ID>`), `Stage File Trigger` (`SnowflakeStageFileTrigger`, `DIRECTORY = (ENABLE = TRUE)` + `STREAM ON STAGE` + `BUILD_SCOPED_FILE_URL`), `Condition Alert Trigger` (`SnowflakeAlertTrigger`, `CREATE OR ALTER ALERT IF EXISTS (<condition_sql>) THEN RESULT_SCAN(SNOWFLAKE.ALERT.GET_CONDITION_QUERY_UUID())`), and `Webhook`. Executed via `<DATABASE>.<SCHEMA>.RUN_LANGFLOW_FLOW` (`POST /api/v1/snowflake/service-trigger`) under `CURRENT_ROLE()` with 3-tier observability (`SCHEDULED_RUN`, `STREAM_TRIGGER_RUN`, `STAGE_FILE_TRIGGER_RUN`, `ALERT_TRIGGER_RUN`, `WEBHOOK_RUN`) and automatic lifecycle cleanup on node/flow deletion. |
