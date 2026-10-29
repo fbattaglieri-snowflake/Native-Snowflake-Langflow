@@ -13,11 +13,11 @@ from lfx_snowflake.triggers_manager import (
     COMPUTE_MODE_OPTIONS,
     SCHEDULE_TYPE_OPTIONS,
     STATUS_MODE_OPTIONS,
-    TRIGGERS_MANAGER,
     build_schedule_trigger_ddl,
     get_trigger_databases,
     get_trigger_schemas,
     get_trigger_warehouses,
+    get_triggers_manager,
     resolve_trigger_flow_id,
 )
 
@@ -217,6 +217,14 @@ class SnowflakeScheduleTrigger(Component):
         if "warehouse" in build_config:
             build_config["warehouse"]["options"] = get_trigger_warehouses(flow_id=flow_id)
             build_config["warehouse"]["show"] = cmode == "Warehouse"
+        get_triggers_manager().sync_trigger_from_build_config(
+            component_type=self.name,
+            component=self,
+            build_config=build_config,
+            field_name=field_name,
+            field_value=field_value,
+            bridge=LIVE_BRIDGE,
+        )
         return build_config
 
     def _provision_and_get_spec(self) -> dict[str, Any]:
@@ -247,7 +255,7 @@ class SnowflakeScheduleTrigger(Component):
             timeout_ms=int(getattr(self, "timeout_ms", 3600000) or 3600000),
         )
         node_id = str(getattr(self, "_id", None) or getattr(self, "id", None) or "SnowflakeScheduleTrigger")
-        prov = TRIGGERS_MANAGER.provision_trigger(
+        prov = get_triggers_manager().provision_trigger(
             ddl_spec=ddl_spec,
             node_id=node_id,
             bridge=LIVE_BRIDGE,

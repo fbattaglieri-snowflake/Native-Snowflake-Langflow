@@ -931,3 +931,184 @@ def test_trg_w2_r8_verifier_schedule_modes_and_delete_triggers_endpoint(
     assert len(r_del.json()["statements"]) >= 2
     assert "DROP TASK IF EXISTS SNOWFLAKE_LANGFLOW.CORE.LF_SCHED_VERIFIERFLOW;" in "\n".join(executed_sql)
 
+
+# =============================================================================
+# TRG-W2-R8-07: Real-Time Status Toggle, Target Replacement & `[ ❄️ Context ]` Adaptation
+# =============================================================================
+
+
+def test_trg_w2_r8_07_realtime_status_toggle_and_target_replacement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Verify instant `Status` (`Active` <-> `Paused`), schedule `ALTER_IN_PLACE`, and target object replacement (`DROP` old Task/Stream)."""
+    _, client, executed_sql = _make_bridge_and_client(tmp_path, monkeypatch)
+    flow_id = "rt-sync-flow-007"
+
+    # 1. Provision Schedule Trigger via `update_build_config` with `status_mode = "Active"`
+    sched = SnowflakeScheduleTrigger()
+    sched._flow_id = flow_id
+    sched._id = "sched-node-rt"
+    sched_cfg = {
+        "status_mode": {"value": "Active"},
+        "schedule_type": {"value": "Custom (Cron)"},
+        "cron_expression": {"show": True, "value": "0 9 * * 1-5"},
+        "timezone": {"value": "Europe/Rome"},
+        "database": {"options": [], "value": "SNOWFLAKE_LANGFLOW"},
+        "schema": {"options": [], "value": "CORE"},
+        "compute_mode": {"value": "Serverless (Managed)"},
+        "warehouse": {"show": False, "options": [], "value": "COMPUTE_WH"},
+    }
+    executed_sql.clear()
+    sched.update_build_config(sched_cfg, "Active", "status_mode")
+    assert sched_cfg["_last_trigger_sync"]["transition_mode"] == "CREATE"
+    assert "RESUMED" in sched_cfg["status_mode"]["info"]
+    assert any("CREATE OR ALTER TASK SNOWFLAKE_LANGFLOW.CORE.LF_SCHED_RTSYNCFLOW00" in s for s in executed_sql)
+    assert any("ALTER TASK SNOWFLAKE_LANGFLOW.CORE.LF_SCHED_RTSYNCFLOW00 RESUME;" in s for s in executed_sql)
+
+    # 2. Clicking `Paused` on `status_mode` executes ONLY `ALTER TASK ... SUSPEND;` (`STATUS_TOGGLE_ONLY`), preserving TASK_HISTORY
+    executed_sql.clear()
+    sched.update_build_config(sched_cfg, "Paused", "status_mode")
+    assert sched_cfg["_last_trigger_sync"]["transition_mode"] == "STATUS_TOGGLE_ONLY"
+    assert "SUSPENDED" in sched_cfg["status_mode"]["info"]
+    assert "ALTER TASK SNOWFLAKE_LANGFLOW.CORE.LF_SCHED_RTSYNCFLOW00 SUSPEND;" in executed_sql
+    assert not any("CREATE OR ALTER TASK" in s for s in executed_sql)
+
+    # 3. Direct REST endpoint `POST /api/v1/snowflake/triggers/status` toggles back to `Active` (`RESUME`)
+    executed_sql.clear()
+    r_status = client.post(
+        "/api/v1/snowflake/triggers/status",
+        json={"flow_id": flow_id, "node_id": "sched-node-rt", "status_mode": "Active"},
+    )
+    assert r_status.status_code == 200
+    assert r_status.json()["status_mode"] == "Active"
+    assert r_status.json()["statement"] == "ALTER TASK SNOWFLAKE_LANGFLOW.CORE.LF_SCHED_RTSYNCFLOW00 RESUME;"
+    assert "ALTER TASK SNOWFLAKE_LANGFLOW.CORE.LF_SCHED_RTSYNCFLOW00 RESUME;" in executed_sql
+
+    # 4. Modifying `cron_expression` on the existing Schedule Trigger runs `SUSPEND -> ALTER TASK ... SET SCHEDULE -> CREATE OR ALTER -> RESUME`
+    executed_sql.clear()
+    sched_cfg["status_mode"]["value"] = "Active"
+    sched.update_build_config(sched_cfg, "0 18 * * 1-5", "cron_expression")
+    assert sched_cfg["_last_trigger_sync"]["transition_mode"] == "ALTER_IN_PLACE"
+    joined_alter = "\n".join(executed_sql)
+    assert "ALTER TASK IF EXISTS SNOWFLAKE_LANGFLOW.CORE.LF_SCHED_RTSYNCFLOW00 SUSPEND;" in joined_alter
+    assert "ALTER TASK IF EXISTS SNOWFLAKE_LANGFLOW.CORE.LF_SCHED_RTSYNCFLOW00 SET SCHEDULE = 'USING CRON 0 18 * * 1-5 Europe/Rome';" in joined_alter
+    assert "ALTER TASK SNOWFLAKE_LANGFLOW.CORE.LF_SCHED_RTSYNCFLOW00 RESUME;" in joined_alter
+
+    # 5. Changing `source_object` on an existing `SnowflakeTableChangeTrigger` immediately drops the old Task & Stream and creates the new ones
+    tbl = SnowflakeTableChangeTrigger()
+    tbl._flow_id = flow_id
+    tbl._id = "tbl-node-rt"
+    tbl_cfg = {
+        "status_mode": {"value": "Active"},
+        "database": {"options": [], "value": "SNOWFLAKE_LANGFLOW"},
+        "schema": {"options": [], "value": "CORE"},
+        "source_object": {"options": [], "value": "CUSTOMER_ORDERS"},
+        "trigger_on": {"value": "New Rows Only (Insert)"},
+        "compute_mode": {"value": "Serverless (Managed)"},
+        "warehouse": {"show": False, "options": [], "value": "COMPUTE_WH"},
+    }
+    tbl.update_build_config(tbl_cfg, "Active", "status_mode")
+    assert tbl_cfg["_last_trigger_sync"]["transition_mode"] == "CREATE"
+
+    executed_sql.clear()
+    tbl.update_build_config(tbl_cfg, "INVOICE_EVENTS", "source_object")
+    assert tbl_cfg["_last_trigger_sync"]["transition_mode"] == "REPLACE_TARGET_OBJECT"
+    rep_sql = "\n".join(executed_sql)
+    assert "ALTER TASK IF EXISTS SNOWFLAKE_LANGFLOW.CORE.LF_TRG_RTSYNCFLOW00_CUSTOMER_ORDERS SUSPEND;" in rep_sql
+    assert "DROP TASK IF EXISTS SNOWFLAKE_LANGFLOW.CORE.LF_TRG_RTSYNCFLOW00_CUSTOMER_ORDERS;" in rep_sql
+    assert "DROP STREAM IF EXISTS SNOWFLAKE_LANGFLOW.CORE.LF_STRM_RTSYNCFLOW00_CUSTOMER_ORDERS;" in rep_sql
+    assert "CREATE STREAM IF NOT EXISTS SNOWFLAKE_LANGFLOW.CORE.LF_STRM_RTSYNCFLOW00_INVOICE_EVENTS" in rep_sql
+    assert "CREATE OR ALTER TASK SNOWFLAKE_LANGFLOW.CORE.LF_TRG_RTSYNCFLOW00_INVOICE_EVENTS" in rep_sql
+
+
+def test_trg_w2_r8_07_context_change_and_role_switch_auto_pause(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Verify reactive `[ ❄️ Context ]` update and role switch automatically suspend out-of-scope or unauthorized active triggers."""
+    bridge, client, executed_sql = _make_bridge_and_client(tmp_path, monkeypatch)
+    flow_id = "ctx-adapt-flow-008"
+
+    bridge.update_selected_context(
+        {
+            "database": "SNOWFLAKE_LANGFLOW",
+            "schema": "CORE",
+            "databases": ["SNOWFLAKE_LANGFLOW"],
+            "schemas_by_db": {"SNOWFLAKE_LANGFLOW": ["CORE"]},
+            "objects_by_db_schema": {
+                "SNOWFLAKE_LANGFLOW.CORE": {
+                    "tables": ["CUSTOMER_ORDERS", "INVOICE_EVENTS"],
+                    "stages": ["SNOWFLAKE_LANGFLOW_STAGE"],
+                }
+            },
+        },
+        flow_id=flow_id,
+    )
+
+    # Provision a Table Change Trigger on `CUSTOMER_ORDERS` and a Schedule Trigger on `SNOWFLAKE_LANGFLOW.CORE`
+    tbl = SnowflakeTableChangeTrigger()
+    tbl._flow_id = flow_id
+    tbl._id = "tbl-ctx-1"
+    tbl_cfg = {
+        "status_mode": {"value": "Active"},
+        "database": {"options": [], "value": "SNOWFLAKE_LANGFLOW"},
+        "schema": {"options": [], "value": "CORE"},
+        "source_object": {"options": [], "value": "CUSTOMER_ORDERS"},
+        "trigger_on": {"value": "New Rows Only (Insert)"},
+        "compute_mode": {"value": "Serverless (Managed)"},
+        "warehouse": {"show": False, "options": [], "value": "COMPUTE_WH"},
+    }
+    tbl.update_build_config(tbl_cfg, "Active", "status_mode")
+
+    sched = SnowflakeScheduleTrigger()
+    sched._flow_id = flow_id
+    sched._id = "sched-ctx-1"
+    sched_cfg = {
+        "status_mode": {"value": "Active"},
+        "schedule_type": {"value": "Minutes"},
+        "interval_value": {"value": 15},
+        "database": {"options": [], "value": "SNOWFLAKE_LANGFLOW"},
+        "schema": {"options": [], "value": "CORE"},
+        "compute_mode": {"value": "Serverless (Managed)"},
+        "warehouse": {"show": False, "options": [], "value": "COMPUTE_WH"},
+    }
+    sched.update_build_config(sched_cfg, "Active", "status_mode")
+
+    # 1. Removing `CUSTOMER_ORDERS` from `[ ❄️ Context ]` must auto-pause `tbl-ctx-1` (`ALTER TASK ... SUSPEND;`) while keeping `sched-ctx-1` Active
+    executed_sql.clear()
+    ctx_res = bridge.update_selected_context(
+        {
+            "database": "SNOWFLAKE_LANGFLOW",
+            "schema": "CORE",
+            "databases": ["SNOWFLAKE_LANGFLOW"],
+            "schemas_by_db": {"SNOWFLAKE_LANGFLOW": ["CORE"]},
+            "objects_by_db_schema": {
+                "SNOWFLAKE_LANGFLOW.CORE": {
+                    "tables": ["INVOICE_EVENTS"],
+                    "stages": ["SNOWFLAKE_LANGFLOW_STAGE"],
+                }
+            },
+        },
+        flow_id=flow_id,
+    )
+    auto_paused = ctx_res["reconciled_triggers"]["auto_paused"]
+    assert len(auto_paused) == 1
+    assert auto_paused[0]["trigger_id"] == f"{flow_id}::tbl-ctx-1"
+    assert "ALTER TASK IF EXISTS SNOWFLAKE_LANGFLOW.CORE.LF_TRG_CTXADAPTFLOW_CUSTOMER_ORDERS SUSPEND;" in executed_sql
+
+    triggers_after_ctx = {t["node_id"]: t["status_mode"] for t in bridge.list_flow_triggers(flow_id=flow_id)}
+    assert triggers_after_ctx["tbl-ctx-1"] == "Paused"
+    assert triggers_after_ctx["sched-ctx-1"] == "Active"
+
+    # 2. Switching to read-only `SNOWFLAKE_LANGFLOW_VIEWER_ROLE` must auto-pause the remaining active trigger `sched-ctx-1`
+    executed_sql.clear()
+    role_res = bridge.switch_role("SNOWFLAKE_LANGFLOW_VIEWER_ROLE", flow_id=flow_id)
+    assert role_res["ok"] is True
+    role_paused = role_res["reconciled_triggers"]["auto_paused"]
+    assert len(role_paused) == 1
+    assert role_paused[0]["trigger_id"] == f"{flow_id}::sched-ctx-1"
+    assert "ALTER TASK IF EXISTS SNOWFLAKE_LANGFLOW.CORE.LF_SCHED_CTXADAPTFLOW SUSPEND;" in executed_sql
+
+    triggers_after_role = {t["node_id"]: t["status_mode"] for t in bridge.list_flow_triggers(flow_id=flow_id)}
+    assert triggers_after_role["sched-ctx-1"] == "Paused"
+
+

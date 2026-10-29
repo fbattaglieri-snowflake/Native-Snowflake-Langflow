@@ -993,6 +993,7 @@ class SnowflakeTriggersManager:
         self._triggers_by_id: dict[str, RegisteredTriggerRecord] = {}
         self._idempotency_ledger: dict[str, dict[str, Any]] = {}
         self._init_sqlite_tables()
+        self._load_sqlite_registry()
 
     def _get_sqlite_conn(self) -> sqlite3.Connection | None:
         candidates = [self._sqlite_path, "/tmp/snowflake_langflow_triggers.db"]
@@ -1037,6 +1038,29 @@ class SnowflakeTriggersManager:
                 )
                 conn.execute(
                     """
+                    CREATE VIEW IF NOT EXISTS snowflake_flow_triggers AS
+                    SELECT
+                        trigger_id,
+                        flow_id,
+                        flow_short_id,
+                        node_id,
+                        trigger_component,
+                        trigger_type,
+                        status_mode AS status,
+                        database_name,
+                        schema_name,
+                        primary_object_fqn AS task_or_alert_fqn,
+                        secondary_object_fqn AS stream_fqn,
+                        source_object_fqn,
+                        active_role,
+                        config_json,
+                        ddl_text,
+                        updated_at
+                    FROM snowflake_trigger_registry
+                    """
+                )
+                conn.execute(
+                    """
                     CREATE TABLE IF NOT EXISTS snowflake_trigger_idempotency (
                         idempotency_key TEXT PRIMARY KEY,
                         flow_id TEXT NOT NULL,
@@ -1048,6 +1072,54 @@ class SnowflakeTriggersManager:
                     )
                     """
                 )
+        except Exception:  # noqa: BLE001
+            pass
+        finally:
+            conn.close()
+
+    def _load_sqlite_registry(self) -> None:
+        """Load persisted trigger records from SQLite into memory on startup."""
+        conn = self._get_sqlite_conn()
+        if conn is None:
+            return
+        try:
+            cur = conn.execute(
+                """
+                SELECT
+                    trigger_id, flow_id, flow_short_id, node_id,
+                    trigger_component, trigger_type, status_mode,
+                    database_name, schema_name, primary_object_fqn,
+                    secondary_object_fqn, source_object_fqn, active_role,
+                    config_json, ddl_text, updated_at
+                FROM snowflake_trigger_registry
+                """
+            )
+            rows = cur.fetchall()
+            with self._lock:
+                for row in rows:
+                    try:
+                        cfg = json.loads(row[13]) if row[13] else {}
+                    except Exception:  # noqa: BLE001
+                        cfg = {}
+                    rec = RegisteredTriggerRecord(
+                        trigger_id=str(row[0]),
+                        flow_id=str(row[1]),
+                        flow_short_id=str(row[2]),
+                        node_id=str(row[3]),
+                        trigger_component=str(row[4]),
+                        trigger_type=str(row[5]),
+                        status_mode=str(row[6]),
+                        database=str(row[7]),
+                        schema=str(row[8]),
+                        primary_object_fqn=str(row[9]),
+                        secondary_object_fqn=str(row[10]) if row[10] else None,
+                        source_object_fqn=str(row[11]) if row[11] else None,
+                        active_role=str(row[12]),
+                        config=cfg if isinstance(cfg, dict) else {},
+                        ddl=str(row[14] or ""),
+                        updated_at=str(row[15] or datetime.now(timezone.utc).isoformat()),
+                    )
+                    self._triggers_by_id[rec.trigger_id] = rec
         except Exception:  # noqa: BLE001
             pass
         finally:
@@ -1140,7 +1212,13 @@ class SnowflakeTriggersManager:
         bridge: Any = None,
         config: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """Validate RBAC, execute trigger DDL statements, audit, and register the trigger."""
+        """Validate RBAC, execute differential trigger DDL statements, audit, and register the trigger.
+
+        Handles:
+        1. Target change (`<OLD_OBJ>` -> `<NEW_OBJ>`): immediately `SUSPEND` + `DROP` old Task/Stream/Alert before creating new ones.
+        2. Pure Status toggle (`Active` <-> `Paused` on identical definition): executes `ALTER TASK/ALERT <fqn> RESUME/SUSPEND;` preserving history.
+        3. In-place parameter update on existing Task/Alert: prepends `ALTER TASK/ALERT IF EXISTS <fqn> SUSPEND;` (and `ALTER TASK <fqn> SET SCHEDULE = ...` when schedule changed) before applying changes and `RESUME`/`SUSPEND`.
+        """
         active_role = (
             getattr(bridge, "active_role", None) if bridge is not None else None
         ) or "SNOWFLAKE_LANGFLOW_ADMIN_ROLE"
@@ -1164,9 +1242,52 @@ class SnowflakeTriggersManager:
             bridge=bridge,
         )
 
+        safe_fid = validate_flow_id(ddl_spec["flow_id"])
+        safe_nid = str(node_id or comp or "trigger_node").strip()
+        trigger_id = f"{safe_fid}::{safe_nid}"
+        with self._lock:
+            prev_rec = self._triggers_by_id.get(trigger_id)
+
+        superseded_cleanup_stmts: list[str] = []
+        statements_to_run: list[str] = list(ddl_spec.get("statements", []))
+        transition_mode = "CREATE"
+
+        if prev_rec is not None:
+            target_changed = (
+                prev_rec.primary_object_fqn != ddl_spec["primary_object_fqn"]
+                or (prev_rec.secondary_object_fqn or None) != (ddl_spec.get("secondary_object_fqn") or None)
+            )
+            if target_changed:
+                transition_mode = "REPLACE_TARGET_OBJECT"
+                superseded_cleanup_stmts = self.build_cleanup_ddl_for_record(prev_rec)
+                statements_to_run = superseded_cleanup_stmts + statements_to_run
+            else:
+                prev_body = "\n\n".join((prev_rec.ddl or "").strip().split("\n\n")[:-1]).strip()
+                new_body = "\n\n".join(ddl_spec.get("statements", [])[:-1]).strip()
+                if prev_body and prev_body == new_body:
+                    transition_mode = "STATUS_TOGGLE_ONLY"
+                    statements_to_run = [ddl_spec["alter_state_sql"]]
+                else:
+                    transition_mode = "ALTER_IN_PLACE"
+                    obj_kw = "ALERT" if kind == "ALERT" else "TASK"
+                    suspend_first = f"ALTER {obj_kw} IF EXISTS {ddl_spec['primary_object_fqn']} SUSPEND;"
+                    in_place_stmts: list[str] = [suspend_first]
+                    if comp == "SnowflakeScheduleTrigger" and ddl_spec.get("schedule_clause"):
+                        in_place_stmts.append(
+                            f"ALTER TASK IF EXISTS {ddl_spec['primary_object_fqn']} SET SCHEDULE = '{ddl_spec['schedule_clause']}';"
+                        )
+                    elif comp == "SnowflakeAlertTrigger":
+                        if ddl_spec.get(" condition_sql") or ddl_spec.get("condition_sql"):
+                            cond_q = ddl_spec["condition_sql"]
+                            in_place_stmts.append(
+                                f"ALTER ALERT IF EXISTS {ddl_spec['primary_object_fqn']} MODIFY CONDITION EXISTS ({cond_q});"
+                            )
+                    in_place_stmts.extend(ddl_spec.get("statements", []))
+                    statements_to_run = in_place_stmts
+
         executed_results: list[dict[str, Any]] = []
         if bridge is not None and hasattr(bridge, "execute_sql"):
-            for stmt in ddl_spec.get("statements", []):
+            for stmt in statements_to_run:
                 res = bridge.execute_sql(stmt)
                 executed_results.append(res)
 
@@ -1180,6 +1301,19 @@ class SnowflakeTriggersManager:
         )
 
         if bridge is not None and hasattr(bridge, "record_audit_event"):
+            if superseded_cleanup_stmts and prev_rec is not None:
+                bridge.record_audit_event(
+                    action="DROP_SUPERSEDED_TRIGGER_OBJECT",
+                    outcome="SUCCEEDED",
+                    target_object=prev_rec.primary_object_fqn,
+                    flow_id=rec.flow_id,
+                    details={
+                        "old_primary_object": prev_rec.primary_object_fqn,
+                        "old_secondary_object": prev_rec.secondary_object_fqn,
+                        "new_primary_object": rec.primary_object_fqn,
+                        "new_secondary_object": rec.secondary_object_fqn,
+                    },
+                )
             is_active = ddl_spec.get("status_mode") == "Active"
             if kind == "ALERT":
                 op_create = "CREATE_TRIGGER_ALERT"
@@ -1188,35 +1322,468 @@ class SnowflakeTriggersManager:
                 op_create = "CREATE_TRIGGER_TASK"
                 op_state = "RESUME_TRIGGER_TASK" if is_active else "SUSPEND_TRIGGER_TASK"
 
-            if ddl_spec.get("secondary_object_fqn"):
+            if transition_mode != "STATUS_TOGGLE_ONLY":
+                if ddl_spec.get("secondary_object_fqn"):
+                    bridge.record_audit_event(
+                        action="CREATE_TRIGGER_STREAM",
+                        outcome="SUCCEEDED",
+                        target_object=ddl_spec["secondary_object_fqn"],
+                        flow_id=rec.flow_id,
+                        details={"trigger_component": comp, "source_object": ddl_spec.get("source_object_fqn")},
+                    )
                 bridge.record_audit_event(
-                    action="CREATE_TRIGGER_STREAM",
+                    action=op_create,
                     outcome="SUCCEEDED",
-                    target_object=ddl_spec["secondary_object_fqn"],
+                    target_object=ddl_spec["primary_object_fqn"],
                     flow_id=rec.flow_id,
-                    details={"trigger_component": comp, "source_object": ddl_spec.get("source_object_fqn")},
+                    details={
+                        "trigger_component": comp,
+                        "status_mode": rec.status_mode,
+                        "transition_mode": transition_mode,
+                    },
                 )
-            bridge.record_audit_event(
-                action=op_create,
-                outcome="SUCCEEDED",
-                target_object=ddl_spec["primary_object_fqn"],
-                flow_id=rec.flow_id,
-                details={"trigger_component": comp, "status_mode": rec.status_mode},
-            )
             bridge.record_audit_event(
                 action=op_state,
                 outcome="SUCCEEDED",
                 target_object=ddl_spec["primary_object_fqn"],
                 flow_id=rec.flow_id,
-                details={"trigger_component": comp, "status_mode": rec.status_mode},
+                details={
+                    "trigger_component": comp,
+                    "status_mode": rec.status_mode,
+                    "transition_mode": transition_mode,
+                },
+            )
+
+        return {
+            "ok": True,
+            "transition_mode": transition_mode,
+            "trigger": rec.to_dict(),
+            "ddl": "\n\n".join(statements_to_run),
+            "statements": statements_to_run,
+            "execution_results": executed_results,
+        }
+
+    def set_trigger_status(
+        self,
+        *,
+        flow_id: str,
+        node_id: str,
+        status_mode: str,
+        bridge: Any = None,
+    ) -> dict[str, Any]:
+        """Immediately toggle a registered trigger between `Active` (`RESUME`) and `Paused` (`SUSPEND`) on Snowflake."""
+        safe_fid = validate_flow_id(flow_id)
+        safe_nid = str(node_id or "trigger_node").strip()
+        trigger_id = f"{safe_fid}::{safe_nid}"
+        with self._lock:
+            rec = self._triggers_by_id.get(trigger_id)
+        if rec is None:
+            raise ValueError(f"Trigger {trigger_id!r} is not registered yet.")
+
+        active_role = (
+            getattr(bridge, "active_role", None) if bridge is not None else None
+        ) or rec.active_role
+        comp = rec.trigger_component
+        kind = (
+            "SCHEDULE"
+            if comp == "SnowflakeScheduleTrigger"
+            else "TABLE_CHANGE"
+            if comp == "SnowflakeTableChangeTrigger"
+            else "STAGE_FILE"
+            if comp == "SnowflakeStageFileTrigger"
+            else "ALERT"
+        )
+        is_active = (status_mode or "Active").strip().lower() != "paused"
+        target_status = "Active" if is_active else "Paused"
+
+        if is_active:
+            verify_trigger_rbac_privileges(
+                active_role=active_role,
+                database=rec.database,
+                schema=rec.schema,
+                trigger_kind=kind,
+                compute_mode=rec.config.get("compute_mode", "Serverless (Managed)"),
+                warehouse=rec.config.get("warehouse"),
+                bridge=bridge,
+            )
+
+        obj_kw = "ALERT" if comp == "SnowflakeAlertTrigger" else "TASK"
+        action_kw = "RESUME" if is_active else "SUSPEND"
+        stmt = f"ALTER {obj_kw} {rec.primary_object_fqn} {action_kw};"
+        exec_res: list[dict[str, Any]] = []
+        if bridge is not None and hasattr(bridge, "execute_sql"):
+            exec_res.append(bridge.execute_sql(stmt))
+
+        updated_ddl = re.sub(
+            rf"ALTER\s+{obj_kw}\s+{re.escape(rec.primary_object_fqn)}\s+(RESUME|SUSPEND);",
+            stmt,
+            rec.ddl or "",
+        )
+        if stmt not in updated_ddl:
+            updated_ddl = f"{rec.ddl}\n\n{stmt}".strip()
+
+        with self._lock:
+            rec.status_mode = target_status
+            rec.active_role = active_role
+            rec.ddl = updated_ddl
+            rec.updated_at = datetime.now(timezone.utc).isoformat()
+            self._triggers_by_id[trigger_id] = rec
+            conn = self._get_sqlite_conn()
+            if conn is not None:
+                try:
+                    with conn:
+                        conn.execute(
+                            """
+                            UPDATE snowflake_trigger_registry
+                               SET status_mode = ?, active_role = ?, ddl_text = ?, updated_at = ?
+                             WHERE trigger_id = ?
+                            """,
+                            (rec.status_mode, rec.active_role, rec.ddl, rec.updated_at, trigger_id),
+                        )
+                except Exception:  # noqa: BLE001
+                    pass
+                finally:
+                    conn.close()
+
+        if bridge is not None and hasattr(bridge, "record_audit_event"):
+            op_state = (
+                ("RESUME_TRIGGER_ALERT" if is_active else "SUSPEND_TRIGGER_ALERT")
+                if obj_kw == "ALERT"
+                else ("RESUME_TRIGGER_TASK" if is_active else "SUSPEND_TRIGGER_TASK")
+            )
+            bridge.record_audit_event(
+                action=op_state,
+                outcome="SUCCEEDED",
+                target_object=rec.primary_object_fqn,
+                flow_id=rec.flow_id,
+                details={"trigger_component": comp, "status_mode": target_status, "transition_mode": "STATUS_TOGGLE_ONLY"},
             )
 
         return {
             "ok": True,
             "trigger": rec.to_dict(),
-            "ddl": ddl_spec["ddl"],
-            "statements": ddl_spec["statements"],
-            "execution_results": executed_results,
+            "status_mode": target_status,
+            "statement": stmt,
+            "execution_results": exec_res,
+        }
+
+    def sync_trigger_from_build_config(
+        self,
+        *,
+        component_type: str,
+        component: Any,
+        build_config: dict[str, Any],
+        field_name: str | None = None,
+        field_value: Any = None,
+        bridge: Any = None,
+    ) -> dict[str, Any]:
+        """Synchronize Snowflake Task/Stream/Alert immediately when `Status` or trigger inputs change on the node card."""
+        if bridge is None:
+            from lfx_snowflake.fastapi_live_bridge import LIVE_BRIDGE as bridge  # noqa: PLC0415
+
+        if field_name and field_name in build_config and isinstance(build_config[field_name], dict) and field_value is not None:
+            build_config[field_name]["value"] = field_value
+
+        flow_id = resolve_trigger_flow_id(component, build_config, bridge=bridge)
+        node_id = str(
+            (build_config.get("_node_id", {}).get("value") if isinstance(build_config.get("_node_id"), dict) else build_config.get("_node_id"))
+            or getattr(component, "_id", None)
+            or getattr(component, "id", None)
+            or component_type
+        ).strip()
+        trigger_id = f"{validate_flow_id(flow_id)}::{node_id}"
+        with self._lock:
+            existing_rec = self._triggers_by_id.get(trigger_id)
+
+        # Sync immediately when the user toggles Status (`Active` <-> `Paused`), changes target object/schedule, or when already registered
+        sync_trigger_fields = {
+            "status_mode",
+            "schedule_type",
+            "cron_expression",
+            "timezone",
+            "interval_value",
+            "days_of_week",
+            "day_of_month",
+            "at_hour",
+            "at_minute",
+            "database",
+            "schema",
+            "source_object",
+            "stage_name",
+            "trigger_on",
+            "file_pattern",
+            "alert_mode",
+            "check_frequency",
+            "condition_sql",
+            "compute_mode",
+            "warehouse",
+        }
+        if field_name not in sync_trigger_fields and existing_rec is None:
+            return build_config
+
+        # If only `status_mode` changed on an already-registered trigger, do a fast status toggle first
+        vals: dict[str, Any] = {}
+        for k, v in (build_config or {}).items():
+            if isinstance(v, dict) and "value" in v:
+                vals[k] = v.get("value")
+            else:
+                vals[k] = v
+        if component is not None:
+            for attr in (
+                "status_mode",
+                "schedule_type",
+                "cron_expression",
+                "timezone",
+                "interval_value",
+                "days_of_week",
+                "day_of_month",
+                "at_hour",
+                "at_minute",
+                "trigger_message",
+                "database",
+                "schema",
+                "source_object",
+                "stage_name",
+                "trigger_on",
+                "file_pattern",
+                "max_batch_rows",
+                "show_initial_rows",
+                "max_files_per_run",
+                "alert_mode",
+                "check_frequency",
+                "condition_sql",
+                "max_alert_rows",
+                "compute_mode",
+                "warehouse",
+                "allow_overlapping_executions",
+                "retry_attempts",
+                "suspend_after_failures",
+                "timeout_ms",
+            ):
+                if vals.get(attr) is None and getattr(component, attr, None) is not None:
+                    vals[attr] = getattr(component, attr)
+        if field_name and field_value is not None:
+            vals[field_name] = field_value
+
+        db = str(vals.get("database") or getattr(bridge, "database", "SNOWFLAKE_LANGFLOW") or "SNOWFLAKE_LANGFLOW")
+        sch = str(vals.get("schema") or getattr(bridge, "schema", "CORE") or "CORE")
+        status_mode = str(vals.get("status_mode") or "Active")
+
+        try:
+            if component_type == "SnowflakeScheduleTrigger":
+                ddl_spec = build_schedule_trigger_ddl(
+                    flow_id=flow_id,
+                    database=db,
+                    schema=sch,
+                    status_mode=status_mode,
+                    schedule_type=str(vals.get("schedule_type") or "Custom (Cron)"),
+                    cron_expression=str(vals.get("cron_expression") or "0 9 * * 1-5"),
+                    timezone_name=str(vals.get("timezone") or "Europe/Rome"),
+                    interval_value=int(vals.get("interval_value") or 15),
+                    days_of_week=str(vals.get("days_of_week") or "MON,TUE,WED,THU,FRI"),
+                    day_of_month=str(vals.get("day_of_month") or "1"),
+                    at_hour=int(vals.get("at_hour") if vals.get("at_hour") is not None else 9),
+                    at_minute=int(vals.get("at_minute") if vals.get("at_minute") is not None else 0),
+                    trigger_message=str(vals.get("trigger_message") or "Run scheduled workflow"),
+                    compute_mode=str(vals.get("compute_mode") or "Serverless (Managed)"),
+                    warehouse=vals.get("warehouse"),
+                    allow_overlapping_executions=bool(vals.get("allow_overlapping_executions", False)),
+                    retry_attempts=int(vals.get("retry_attempts") if vals.get("retry_attempts") is not None else 3),
+                    suspend_after_failures=int(vals.get("suspend_after_failures") if vals.get("suspend_after_failures") is not None else 5),
+                    timeout_ms=int(vals.get("timeout_ms") if vals.get("timeout_ms") is not None else 3600000),
+                )
+            elif component_type == "SnowflakeTableChangeTrigger":
+                src_obj = str(vals.get("source_object") or "CUSTOMER_ORDERS")
+                obj_kind = str(vals.get("object_kind") or detect_source_object_kind(db, sch, src_obj, flow_id=flow_id, bridge=bridge))
+                ddl_spec = build_table_change_trigger_ddl(
+                    flow_id=flow_id,
+                    database=db,
+                    schema=sch,
+                    source_object=src_obj,
+                    object_kind=obj_kind,
+                    status_mode=status_mode,
+                    trigger_on=str(vals.get("trigger_on") or "New Rows Only (Insert)"),
+                    max_batch_rows=int(vals.get("max_batch_rows") or 100),
+                    show_initial_rows=bool(vals.get("show_initial_rows", False)),
+                    compute_mode=str(vals.get("compute_mode") or "Serverless (Managed)"),
+                    warehouse=vals.get("warehouse"),
+                    retry_attempts=int(vals.get("retry_attempts") if vals.get("retry_attempts") is not None else 3),
+                    suspend_after_failures=int(vals.get("suspend_after_failures") if vals.get("suspend_after_failures") is not None else 5),
+                    timeout_ms=int(vals.get("timeout_ms") if vals.get("timeout_ms") is not None else 3600000),
+                )
+            elif component_type == "SnowflakeStageFileTrigger":
+                ddl_spec = build_stage_file_trigger_ddl(
+                    flow_id=flow_id,
+                    database=db,
+                    schema=sch,
+                    stage_name=str(vals.get("stage_name") or "SNOWFLAKE_LANGFLOW_STAGE"),
+                    status_mode=status_mode,
+                    trigger_on=str(vals.get("trigger_on") or "New Files Only (Upload)"),
+                    file_pattern=vals.get("file_pattern"),
+                    max_files_per_run=int(vals.get("max_files_per_run") or 50),
+                    compute_mode=str(vals.get("compute_mode") or "Serverless (Managed)"),
+                    warehouse=vals.get("warehouse"),
+                    retry_attempts=int(vals.get("retry_attempts") if vals.get("retry_attempts") is not None else 3),
+                    suspend_after_failures=int(vals.get("suspend_after_failures") if vals.get("suspend_after_failures") is not None else 5),
+                    timeout_ms=int(vals.get("timeout_ms") if vals.get("timeout_ms") is not None else 3600000),
+                )
+            else:
+                ddl_spec = build_alert_trigger_ddl(
+                    flow_id=flow_id,
+                    database=db,
+                    schema=sch,
+                    status_mode=status_mode,
+                    alert_mode=str(vals.get("alert_mode") or "Periodic Condition Check"),
+                    check_frequency=str(vals.get("check_frequency") or "Every 5 Minutes"),
+                    cron_expression=str(vals.get("cron_expression") or "*/5 * * * *"),
+                    timezone_name=str(vals.get("timezone") or "Europe/Rome"),
+                    condition_sql=str(
+                        vals.get("condition_sql")
+                        or "SELECT ORDER_ID, TOTAL_AMOUNT, STATUS FROM SNOWFLAKE_LANGFLOW.CORE.CUSTOMER_ORDERS WHERE STATUS = 'FAILED' AND TOTAL_AMOUNT > 10000"
+                    ),
+                    max_alert_rows=int(vals.get("max_alert_rows") or 100),
+                    compute_mode=str(vals.get("compute_mode") or "Serverless (Managed)"),
+                    warehouse=vals.get("warehouse"),
+                    suspend_after_failures=int(vals.get("suspend_after_failures") if vals.get("suspend_after_failures") is not None else 5),
+                )
+
+            prov_res = self.provision_trigger(
+                ddl_spec=ddl_spec,
+                node_id=node_id,
+                bridge=bridge,
+                config=vals,
+            )
+            if "status_mode" in build_config and isinstance(build_config["status_mode"], dict):
+                sf_state = "RESUMED" if ddl_spec["status_mode"] == "Active" else "SUSPENDED"
+                build_config["status_mode"]["value"] = ddl_spec["status_mode"]
+                build_config["status_mode"]["info"] = (
+                    f"Snowflake object {ddl_spec['primary_object_fqn']} is {ddl_spec['status_mode']} ({sf_state})."
+                )
+                build_config["_last_trigger_sync"] = prov_res
+        except SnowflakeProviderError as exc:
+            if "status_mode" in build_config and isinstance(build_config["status_mode"], dict):
+                build_config["status_mode"]["value"] = "Paused"
+                build_config["status_mode"]["info"] = str(exc)
+            if field_name == "status_mode" and str(field_value).strip().lower() == "active":
+                raise
+        except ValueError as exc:
+            if "status_mode" in build_config and isinstance(build_config["status_mode"], dict):
+                build_config["status_mode"]["info"] = f"Validation error: {exc}"
+        return build_config
+
+    def reconcile_triggers_with_flow_context(
+        self,
+        flow_id: str | None = None,
+        *,
+        bridge: Any = None,
+    ) -> dict[str, Any]:
+        """Reconcile registered triggers when `[ ❄️ Context ]` or `active_role` changes.
+
+        Any `Active` trigger whose Database, Schema, Table/View, or Stage was removed from
+        the flow's `[ ❄️ Context ]` (or when the active role lacks privileges) is immediately
+        suspended on Snowflake (`ALTER TASK/ALERT IF EXISTS <fqn> SUSPEND;`), switched to
+        `Paused`, and audited with `AUTO_PAUSE_TRIGGER_ON_CONTEXT_CHANGE`.
+        """
+        if bridge is None:
+            from lfx_snowflake.fastapi_live_bridge import LIVE_BRIDGE as bridge  # noqa: PLC0415
+
+        with self._lock:
+            candidates = [
+                r
+                for r in self._triggers_by_id.values()
+                if (flow_id is None or r.flow_id == validate_flow_id(flow_id))
+            ]
+
+        auto_paused: list[dict[str, Any]] = []
+        statements: list[str] = []
+        active_role = str(getattr(bridge, "active_role", "SNOWFLAKE_LANGFLOW_ADMIN_ROLE") or "SNOWFLAKE_LANGFLOW_ADMIN_ROLE").upper()
+        role_is_readonly = active_role == "PUBLIC" or "VIEWER" in active_role or "READONLY" in active_role
+
+        for rec in candidates:
+            if rec.status_mode != "Active":
+                continue
+
+            allowed_dbs = [str(d).strip().upper() for d in bridge.get_context_databases(flow_id=rec.flow_id)]
+            allowed_schemas = [
+                str(s).strip().upper()
+                for s in bridge.get_context_schemas(rec.database, flow_id=rec.flow_id)
+            ]
+            reason: str | None = None
+
+            if role_is_readonly:
+                reason = f"Active role '{active_role}' is read-only"
+            elif allowed_dbs and rec.database.upper() not in allowed_dbs:
+                reason = f"Database '{rec.database}' removed from [ ❄️ Context ]"
+            elif allowed_schemas and rec.schema.upper() not in allowed_schemas:
+                reason = f"Schema '{rec.database}.{rec.schema}' removed from [ ❄️ Context ]"
+            else:
+                ctx = bridge.get_flow_context(rec.flow_id) if hasattr(bridge, "get_flow_context") else {}
+                obj_map = (
+                    (ctx or {}).get("objects_by_db_schema")
+                    or (ctx or {}).get("selected_objects")
+                    or {}
+                )
+                db_sch_key = f"{rec.database.upper()}.{rec.schema.upper()}"
+                bucket = obj_map.get(db_sch_key) if isinstance(obj_map, dict) else None
+                if isinstance(bucket, dict):
+                    if rec.trigger_component == "SnowflakeTableChangeTrigger" and rec.source_object_fqn:
+                        short_obj = rec.source_object_fqn.split(".")[-1].upper()
+                        explicit_tbls = [
+                            str(x).strip().split(".")[-1].upper()
+                            for cat in ("tables", "views", "iceberg_tables")
+                            for x in (bucket.get(cat) or [])
+                        ]
+                        if any(bucket.get(cat) is not None for cat in ("tables", "views", "iceberg_tables")) and short_obj not in explicit_tbls:
+                            reason = f"Table/View '{rec.source_object_fqn}' removed from [ ❄️ Context ]"
+                    elif rec.trigger_component == "SnowflakeStageFileTrigger" and rec.source_object_fqn:
+                        short_stg = rec.source_object_fqn.lstrip("@").split(".")[-1].upper()
+                        if bucket.get("stages") is not None:
+                            explicit_stgs = [
+                                str(x).lstrip("@").strip().split(".")[-1].upper()
+                                for x in (bucket.get("stages") or [])
+                            ]
+                            if short_stg not in explicit_stgs:
+                                reason = f"Stage '{rec.source_object_fqn}' removed from [ ❄️ Context ]"
+
+            if reason:
+                obj_kw = "ALERT" if rec.trigger_component == "SnowflakeAlertTrigger" else "TASK"
+                stmt = f"ALTER {obj_kw} IF EXISTS {rec.primary_object_fqn} SUSPEND;"
+                statements.append(stmt)
+                if hasattr(bridge, "execute_sql"):
+                    bridge.execute_sql(stmt)
+
+                with self._lock:
+                    rec.status_mode = "Paused"
+                    rec.updated_at = datetime.now(timezone.utc).isoformat()
+                    self._triggers_by_id[rec.trigger_id] = rec
+                    conn = self._get_sqlite_conn()
+                    if conn is not None:
+                        try:
+                            with conn:
+                                conn.execute(
+                                    "UPDATE snowflake_trigger_registry SET status_mode = 'Paused', updated_at = ? WHERE trigger_id = ?",
+                                    (rec.updated_at, rec.trigger_id),
+                                )
+                        except Exception:  # noqa: BLE001
+                            pass
+                        finally:
+                            conn.close()
+
+                if hasattr(bridge, "record_audit_event"):
+                    bridge.record_audit_event(
+                        action="AUTO_PAUSE_TRIGGER_ON_CONTEXT_CHANGE",
+                        outcome="SUCCEEDED",
+                        target_object=rec.primary_object_fqn,
+                        flow_id=rec.flow_id,
+                        details={"reason": reason, "trigger_id": rec.trigger_id, "new_status_mode": "Paused"},
+                    )
+                auto_paused.append({"trigger_id": rec.trigger_id, "primary_object_fqn": rec.primary_object_fqn, "reason": reason})
+
+        return {
+            "ok": True,
+            "flow_id": flow_id,
+            "auto_paused": auto_paused,
+            "statements": statements,
         }
 
     def build_cleanup_ddl_for_record(self, rec: RegisteredTriggerRecord) -> list[str]:
@@ -1796,3 +2363,9 @@ def get_trigger_stage_objects(
 
 
 TRIGGERS_MANAGER = SnowflakeTriggersManager()
+
+
+def get_triggers_manager() -> SnowflakeTriggersManager:
+    """Return the active `TRIGGERS_MANAGER` singleton (respecting runtime/test replacements)."""
+    return TRIGGERS_MANAGER
+

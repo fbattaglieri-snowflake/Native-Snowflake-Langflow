@@ -5876,6 +5876,7 @@ class LiveSnowflakeBridge:
             )
 
         role_intersection = self.compute_role_effective_context(effective_flow_id, self.active_role)
+        reconciled_triggers = self.reconcile_triggers_with_flow_context(effective_flow_id)
         return {
             "ok": True,
             "status": "ok",
@@ -5889,6 +5890,7 @@ class LiveSnowflakeBridge:
             "effective_context": role_intersection["effective_context"],
             "inaccessible_objects": role_intersection["inaccessible_objects"],
             "updated_node_templates": updated_node_templates,
+            "reconciled_triggers": reconciled_triggers,
             "role_privileges": self.role_privileges,
         }
 
@@ -8447,6 +8449,26 @@ class LiveSnowflakeBridge:
 
         return TRIGGERS_MANAGER.list_triggers(flow_id=flow_id)
 
+    def set_trigger_status(self, flow_id: str, node_id: str, status_mode: str) -> dict[str, Any]:
+        """Toggle a registered Snowflake trigger between `Active` (`RESUME`) and `Paused` (`SUSPEND`)."""
+        from lfx_snowflake.triggers_manager import TRIGGERS_MANAGER  # noqa: PLC0415
+
+        return TRIGGERS_MANAGER.set_trigger_status(
+            flow_id=flow_id,
+            node_id=node_id,
+            status_mode=status_mode,
+            bridge=self,
+        )
+
+    def reconcile_triggers_with_flow_context(self, flow_id: str | None = None) -> dict[str, Any]:
+        """Auto-suspend active triggers whose Database/Schema/Table/Stage was removed from `[ ❄️ Context ]` or role."""
+        from lfx_snowflake.triggers_manager import TRIGGERS_MANAGER  # noqa: PLC0415
+
+        try:
+            return TRIGGERS_MANAGER.reconcile_triggers_with_flow_context(flow_id=flow_id, bridge=self)
+        except Exception:  # noqa: BLE001
+            return {"ok": True, "flow_id": flow_id, "auto_paused": [], "statements": []}
+
     def switch_role(self, target_role: str, flow_id: str | None = None) -> dict[str, Any]:
         clean = (target_role or "").strip().upper()
         if not clean or clean not in [r.upper() for r in self.available_roles]:
@@ -8500,6 +8522,7 @@ class LiveSnowflakeBridge:
         eff_fid = self._normalize_flow_id(flow_id or CURRENT_SNOWFLAKE_FLOW_ID.get() or self.active_flow_id)
         intersection = self.compute_role_effective_context(eff_fid, self.active_role)
         updated_node_templates = self.sync_flow_node_templates_sqlite(eff_fid) if eff_fid else {}
+        reconciled_triggers = self.reconcile_triggers_with_flow_context(eff_fid)
 
         self.record_audit_event(
             action="ROLE_SWITCH",
@@ -8529,6 +8552,7 @@ class LiveSnowflakeBridge:
             "retained_objects_count": intersection["retained_objects_count"],
             "hidden_by_role_count": intersection["hidden_by_role_count"],
             "updated_node_templates": updated_node_templates,
+            "reconciled_triggers": reconciled_triggers,
             "cache_invalidated": True,
         }
 
@@ -9316,6 +9340,7 @@ def register_snowflake_fastapi_routes(app: Any) -> None:
                         return JSONResponse(status_code=int(del_res.get("status_code") or 200), content=del_res)
 
             flow_body_for_triggers: dict[str, Any] | None = None
+            batch_deleted_flow_ids: list[str] = []
             if method in ("PUT", "PATCH") and "/api/v1/flows/" in path and matched_fid:
                 try:
                     raw_body_bytes = await request.body()
@@ -9325,6 +9350,15 @@ def register_snowflake_fastapi_routes(app: Any) -> None:
                             flow_body_for_triggers = parsed_body
                 except Exception:  # noqa: BLE001
                     flow_body_for_triggers = None
+            elif method == "DELETE" and path.rstrip("/") == "/api/v1/flows":
+                try:
+                    raw_del_bytes = await request.body()
+                    if raw_del_bytes:
+                        parsed_del = json.loads(raw_del_bytes.decode("utf-8"))
+                        if isinstance(parsed_del, list):
+                            batch_deleted_flow_ids = [str(x).strip() for x in parsed_del if str(x).strip()]
+                except Exception:  # noqa: BLE001
+                    batch_deleted_flow_ids = []
 
             token = CURRENT_SNOWFLAKE_FLOW_ID.set(norm_fid)
             try:
@@ -9345,6 +9379,9 @@ def register_snowflake_fastapi_routes(app: Any) -> None:
                     flow_id=norm_fid,
                     details={"path": path, "method": method, "durable_snowflake_audit_preserved": True},
                 )
+            elif method == "DELETE" and batch_deleted_flow_ids:
+                for b_fid in batch_deleted_flow_ids:
+                    await asyncio.to_thread(LIVE_BRIDGE.cleanup_flow_triggers, b_fid)
             elif method in ("PUT", "PATCH") and "/api/v1/flows/" in path and matched_fid and flow_body_for_triggers is not None:
                 if getattr(response, "status_code", 200) < 400:
                     try:
@@ -10680,6 +10717,32 @@ def register_snowflake_fastapi_routes(app: Any) -> None:
                 status_code=422,
                 content={"ok": False, "error": str(exc)},
             )
+
+    @sf_router.post("/triggers/status")
+    async def post_snowflake_trigger_status(request: Request) -> JSONResponse:
+        try:
+            body = await request.json()
+            payload = body if isinstance(body, dict) else {}
+        except Exception:  # noqa: BLE001
+            payload = {}
+        req_fid = str(
+            payload.get("flow_id")
+            or request.query_params.get("flow_id")
+            or request.headers.get("X-Snowflake-Flow-Id")
+            or "default-flow"
+        )
+        node_id = str(payload.get("node_id") or "trigger_node")
+        status_mode = str(payload.get("status_mode") or payload.get("status") or "Active")
+        try:
+            res = await asyncio.to_thread(LIVE_BRIDGE.set_trigger_status, req_fid, node_id, status_mode)
+            return JSONResponse(status_code=200, content=res)
+        except SnowflakeProviderError as exc:
+            return JSONResponse(
+                status_code=int(getattr(exc, "status_code", 403) or 403),
+                content={"ok": False, **exc.to_dict()},
+            )
+        except ValueError as exc:
+            return JSONResponse(status_code=422, content={"ok": False, "error": str(exc)})
 
     @sf_router.delete("/triggers/{flow_id}")
     async def delete_snowflake_triggers_for_flow(flow_id: str) -> JSONResponse:

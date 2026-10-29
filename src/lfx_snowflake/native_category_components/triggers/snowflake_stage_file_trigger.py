@@ -12,12 +12,12 @@ from lfx_snowflake.triggers_manager import (
     COMPUTE_MODE_OPTIONS,
     STAGE_TRIGGER_ON_OPTIONS,
     STATUS_MODE_OPTIONS,
-    TRIGGERS_MANAGER,
     build_stage_file_trigger_ddl,
     get_trigger_databases,
     get_trigger_schemas,
     get_trigger_stage_objects,
     get_trigger_warehouses,
+    get_triggers_manager,
     resolve_trigger_flow_id,
 )
 
@@ -162,11 +162,14 @@ class SnowflakeStageFileTrigger(Component):
         )
         if "stage_name" in build_config:
             stg_opts = get_trigger_stage_objects(db_val, sch_val, flow_id=flow_id)
-            build_config["stage_name"]["options"] = stg_opts
+            cur_stg = build_config["stage_name"].get("value")
             if field_name == "stage_name" and isinstance(field_value, str):
                 build_config["stage_name"]["value"] = field_value
-            elif stg_opts and build_config["stage_name"].get("value") not in stg_opts:
+                if field_value and field_value not in stg_opts:
+                    stg_opts = [field_value, *stg_opts]
+            elif (field_name in ("database", "schema") or not cur_stg) and stg_opts and cur_stg not in stg_opts:
                 build_config["stage_name"]["value"] = stg_opts[0]
+            build_config["stage_name"]["options"] = stg_opts
 
         cmode = (
             field_value
@@ -176,6 +179,14 @@ class SnowflakeStageFileTrigger(Component):
         if "warehouse" in build_config:
             build_config["warehouse"]["options"] = get_trigger_warehouses(flow_id=flow_id)
             build_config["warehouse"]["show"] = cmode == "Warehouse"
+        get_triggers_manager().sync_trigger_from_build_config(
+            component_type=self.name,
+            component=self,
+            build_config=build_config,
+            field_name=field_name,
+            field_value=field_value,
+            bridge=LIVE_BRIDGE,
+        )
         return build_config
 
     def _provision_and_get_spec(self) -> dict[str, Any]:
@@ -203,7 +214,7 @@ class SnowflakeStageFileTrigger(Component):
             timeout_ms=int(getattr(self, "timeout_ms", 3600000) or 3600000),
         )
         node_id = str(getattr(self, "_id", None) or getattr(self, "id", None) or "SnowflakeStageFileTrigger")
-        prov = TRIGGERS_MANAGER.provision_trigger(
+        prov = get_triggers_manager().provision_trigger(
             ddl_spec=ddl_spec,
             node_id=node_id,
             bridge=LIVE_BRIDGE,
