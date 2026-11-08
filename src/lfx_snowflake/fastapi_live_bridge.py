@@ -10467,11 +10467,11 @@ def register_snowflake_fastapi_routes(app: Any) -> None:
     ) -> JSONResponse:
         req_fid = flow_id or request.query_params.get("flow_id") or request.headers.get("X-Snowflake-Flow-Id")
         req_rt = request.query_params.get("resource_type") or resource_type or "procedure"
-        req_id = (
-            request.query_params.get("identifier")
-            or request.query_params.get("custom_tool_identifier")
-            or identifier
+        id_list = (
+            request.query_params.getlist("identifier")
+            or request.query_params.getlist("custom_tool_identifier")
         )
+        req_id = ", ".join(id_list) if id_list else identifier
         req_dbs = request.query_params.get("database_schema") or database_schema
         if request.method.upper() == "POST":
             try:
