@@ -516,14 +516,30 @@ class SnowflakeProviderRegistry:
             if model_id in defaults_by_id:
                 parsed.append(defaults_by_id[model_id])
             else:
-                caps = tuple(item.get("capabilities", ("text", "tools", "streaming")))
+                meta = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+                raw_caps = item.get("capabilities") or meta.get("capabilities") or ("text", "tools", "streaming")
+                caps = tuple(raw_caps)
+                constraints = meta.get("constraints") if isinstance(meta.get("constraints"), dict) else {}
+                supports_re = True
+                requires_re_none = False
+                if protocol == "chat" and constraints:
+                    if "reasoning_effort" not in constraints:
+                        supports_re = False
+                    else:
+                        re_cfg = constraints.get("reasoning_effort") or {}
+                        re_vals = re_cfg.get("values") if isinstance(re_cfg, dict) else None
+                        if re_vals == ["none"]:
+                            requires_re_none = True
                 parsed.append(
                     ModelProfile(
                         id=model_id,
                         protocol=protocol,
                         provider_id=f"snowflake_proxy_{protocol}" if protocol != "ollama" else "snowflake_ollama",
                         capabilities=caps,
-                        response_stream_mode="ordered-items" if protocol == "responses" else None,
+                        requires_reasoning_none=requires_re_none,
+                        supports_reasoning_effort=supports_re,
+                        response_stream_mode=meta.get("response_stream") or ("ordered-items" if protocol == "responses" else None),
+                        metadata=dict(meta),
                     )
                 )
         return parsed

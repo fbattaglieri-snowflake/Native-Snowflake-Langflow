@@ -285,6 +285,15 @@ def model_supports_reasoning(
     if identifier in CHAT_REASONING_UNSUPPORTED_MODELS:
         return (False, False)
     meta = metadata if isinstance(metadata, dict) else (get_cached_model_metadata('chat', identifier) or {})
+    constraints = meta.get('constraints')
+    if isinstance(constraints, dict) and constraints:
+        if 'reasoning_effort' not in constraints:
+            return (False, False)
+        re_constraint = constraints.get('reasoning_effort') or {}
+        re_values = re_constraint.get('values') if isinstance(re_constraint, dict) else None
+        if re_values == ['none']:
+            return (True, True)
+        return (True, False)
     caps = meta.get('capabilities') or []
     meta_reasoning = meta.get('reasoning')
     if (

@@ -949,6 +949,23 @@
       };
       document.body.appendChild(btn);
     }
+    if (!isMemoriesView || modalOpen) {
+      closeSnowflakeMemoryTypeDropdown();
+      const helperBar = document.getElementById("sflf-native-create-memory-helper");
+      if (helperBar && !modalOpen && helperBar.style.display !== "none") {
+        helperBar.style.display = "none";
+      }
+      if (!isMemoriesView) {
+        const cardsGrid = document.getElementById("sflf-memories-cards-grid");
+        if (cardsGrid && cardsGrid.style.display !== "none") {
+          cardsGrid.style.display = "none";
+        }
+        const detailView = document.getElementById("sflf-memory-detail-view");
+        if (detailView && detailView.style.display !== "none") {
+          detailView.style.display = "none";
+        }
+      }
+    }
     if (nativeReactBtn) {
       if (btn.style.display !== "none") btn.style.display = "none";
       if (btn.style.pointerEvents !== "none") btn.style.pointerEvents = "none";
@@ -979,6 +996,7 @@
       if (btn.style.display !== "inline-flex") btn.style.display = "inline-flex";
       ensureSnowflakeMemoriesSearchableCards();
     } else {
+      closeSnowflakeMemoryTypeDropdown();
       if (btn.style.display !== "none") btn.style.display = "none";
       if (btn.style.pointerEvents !== "none") btn.style.pointerEvents = "none";
       const cardsGrid = document.getElementById("sflf-memories-cards-grid");
@@ -1073,9 +1091,13 @@
       const list = vis.views || [];
       return { options: list, fallbackValue: list[0] || "" };
     }
-    if (key.includes("stage_name") || key.includes("stage")) {
+    if ((key.includes("stage_name") || key.includes("stage_selector") || key.includes("stage")) && !key.includes("stage_file")) {
       const list = vis.stages || [];
       return { options: list, fallbackValue: list[0] || "" };
+    }
+    if (key.includes("custom_tool_identifier")) {
+      const combined = [].concat(vis.procedures || []).concat(vis.functions || []);
+      return { options: combined, fallbackValue: combined[0] || "" };
     }
     if (key.includes("procedure")) {
       const list = vis.procedures || [];
@@ -1476,8 +1498,12 @@
       pillEl.style.display = "none";
     }
     if (currentFlowId !== _lastObservedFlowId) {
+      const hadPrevObserved = _lastObservedFlowId !== null;
       _lastObservedFlowId = currentFlowId;
       sfState.flow_id = currentFlowId;
+      if (hadPrevObserved && typeof dismissTransientSnowflakeOverlays === "function") {
+        dismissTransientSnowflakeOverlays("route-change");
+      }
       updateTopbarWidgets();
       if (currentFlowId) {
         fetchSnowflakeContext(currentFlowId);
@@ -3334,13 +3360,63 @@
       dd.style.display = "none";
     }
   }
+  window.closeSnowflakeMemoryTypeDropdown = closeSnowflakeMemoryTypeDropdown;
+
+  // W2-R9-05 (UI-FIX-01): Centralized auto-dismissal of transient Snowflake overlays on rail tab switch,
+  // leaving Memories, outside click, Escape, and route changes.
+  function dismissTransientSnowflakeOverlays(reason) {
+    closeSnowflakeMemoryTypeDropdown();
+    const r = String(reason || "unspecified").toLowerCase();
+    const helperBar = document.getElementById("sflf-native-create-memory-helper");
+    if (helperBar && (r !== "outside-click" || !isAnyModalDialogOpen())) {
+      helperBar.style.display = "none";
+    }
+    if (
+      r === "rail-tab-switch" ||
+      r === "route-change" ||
+      r === "leave-memories" ||
+      r === "popstate" ||
+      r === "hashchange" ||
+      r === "escape"
+    ) {
+      const memModal = document.getElementById("sflf-create-memory-modal");
+      if (memModal && memModal.style.display !== "none") {
+        memModal.style.display = "none";
+      }
+      const stgModal = document.getElementById("sflf-create-stage-modal");
+      if (stgModal && stgModal.style.display !== "none") {
+        stgModal.style.display = "none";
+      }
+    }
+    if (!isStrictMemoriesView() || r === "leave-memories") {
+      const plusBtn = document.getElementById("sflf-memories-plus-snowflake-btn");
+      if (plusBtn && plusBtn.style.display !== "none") {
+        plusBtn.style.display = "none";
+        plusBtn.style.pointerEvents = "none";
+      }
+      const cardsGrid = document.getElementById("sflf-memories-cards-grid");
+      if (cardsGrid && cardsGrid.style.display !== "none") {
+        cardsGrid.style.display = "none";
+      }
+      const detailView = document.getElementById("sflf-memory-detail-view");
+      if (detailView && detailView.style.display !== "none") {
+        detailView.style.display = "none";
+      }
+    }
+  }
+  window.dismissTransientSnowflakeOverlays = dismissTransientSnowflakeOverlays;
 
   function openSnowflakeMemoryTypeDropdown(flowIdFromReact, anchorEventOrEl) {
     if (flowIdFromReact && typeof flowIdFromReact === "string") {
       _activeMemoryFlowId = flowIdFromReact;
     }
     if (!document.body) return;
-    let dd = document.getElementById("sflf-memory-type-dropdown");
+    const existing = document.getElementById("sflf-memory-type-dropdown");
+    if (existing && existing.style.display !== "none") {
+      closeSnowflakeMemoryTypeDropdown();
+      return;
+    }
+    let dd = existing;
     if (!dd) {
       dd = document.createElement("div");
       dd.id = "sflf-memory-type-dropdown";
@@ -5458,7 +5534,7 @@
   }
   window.ensureLeftRailStagesVolumesTab = ensureLeftRailStagesVolumesTab;
 
-  // Close Stages view when any other sidebar-nav button (components, mcp, bundles, versions, agent, memories, traces) is clicked
+  // Close Stages view and transient Snowflake overlays when any sidebar-nav button (components, mcp, bundles, versions, agent, memories, stages, traces) is clicked
   document.addEventListener(
     "click",
     function (ev) {
@@ -5467,6 +5543,7 @@
         ev.target.closest &&
         ev.target.closest('[data-testid^="sidebar-nav-"], [data-sidebar-nav-item]');
       if (!navBtn) return;
+      dismissTransientSnowflakeOverlays("rail-tab-switch");
       const item =
         navBtn.getAttribute("data-sidebar-nav-item") ||
         (navBtn.getAttribute("data-testid") || "").replace("sidebar-nav-", "");
@@ -5485,6 +5562,46 @@
     },
     true
   );
+
+  // W2-R9-05 (UI-FIX-01): Auto-close #sflf-memory-type-dropdown on outside click, Escape, and route navigation
+  document.addEventListener(
+    "mousedown",
+    function (ev) {
+      const dd = document.getElementById("sflf-memory-type-dropdown");
+      if (!dd || dd.style.display === "none") return;
+      const target = ev.target;
+      if (target && target.closest) {
+        if (
+          target.closest("#sflf-memory-type-dropdown") ||
+          target.closest("#sflf-memories-plus-snowflake-btn") ||
+          target.closest('[data-testid="memories-plus-snowflake-btn"]')
+        ) {
+          return;
+        }
+      }
+      dismissTransientSnowflakeOverlays("outside-click");
+    },
+    true
+  );
+
+  document.addEventListener(
+    "keydown",
+    function (ev) {
+      if (ev && ev.key === "Escape") {
+        dismissTransientSnowflakeOverlays("escape");
+      }
+    },
+    true
+  );
+
+  if (typeof window !== "undefined" && typeof window.addEventListener === "function") {
+    window.addEventListener("popstate", function () {
+      dismissTransientSnowflakeOverlays("popstate");
+    });
+    window.addEventListener("hashchange", function () {
+      dismissTransientSnowflakeOverlays("hashchange");
+    });
+  }
 
   function toggleSnowflakeStagesVolumesView() {
     if (_stagesVolumesViewOpen) {
@@ -5575,6 +5692,7 @@
   }
 
   function openSnowflakeStagesVolumesView(fetchFresh) {
+    dismissTransientSnowflakeOverlays("rail-tab-switch");
     const viewEl = ensureStagesVolumesDomMounted();
     _stagesVolumesViewOpen = true;
     viewEl.style.display = "flex";

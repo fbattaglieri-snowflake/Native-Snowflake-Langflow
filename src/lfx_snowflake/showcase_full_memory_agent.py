@@ -902,16 +902,44 @@ def _persist_showcase_execution_and_activity(
     }
 
 
+def _should_seed_showcase_flow() -> bool:
+    """Return True only when `SNOWFLAKE_SEED_SHOWCASE_FLOW` is explicitly enabled (`W2-R9-06`)."""
+    import os
+
+    return os.getenv("SNOWFLAKE_SEED_SHOWCASE_FLOW", "").strip().lower() in ("1", "true", "yes")
+
+
 def bootstrap_full_memory_showcase_flow(
     bridge: Any = None,
     *,
     dry_run: bool = True,
+    explicit_user_request: bool = True,
 ) -> dict[str, Any]:
     """Provision the 5 showcase memories in `LIVE_BRIDGE` and return the complete flow & context payload."""
     if bridge is None:
         from .fastapi_live_bridge import LIVE_BRIDGE as _bridge
 
         bridge = _bridge
+
+    flow_payload = build_snowflake_full_memory_enterprise_agent_flow()
+    if not explicit_user_request and not _should_seed_showcase_flow():
+        return {
+            "ok": True,
+            "skipped_unsolicited_seed": True,
+            "explicit_user_request": False,
+            "flow_id": SHOWCASE_FLOW_ID,
+            "flow_name": SHOWCASE_FLOW_NAME,
+            "active_role": getattr(bridge, "active_role", "SNOWFLAKE_LANGFLOW_ADMIN"),
+            "snowflake_context": SHOWCASE_FLOW_CONTEXT,
+            "flow_persisted_sqlite": False,
+            "memories_registered_count": 0,
+            "memories": [],
+            "data_sources_business_tables_only": ["FIN_GL_TRANSACTIONS", "FIN_Q3_Q4_MARGIN_LEDGER"],
+            "technical_memory_tables_excluded_from_data_sources": True,
+            "flow": flow_payload,
+        }
+
+    setattr(bridge, "_showcase_explicitly_bootstrapped", True)
 
     prev_active_flow_id = getattr(bridge, "active_flow_id", None)
     upd_ctx_fn = getattr(bridge, "update_selected_context", None)
@@ -926,7 +954,6 @@ def bootstrap_full_memory_showcase_flow(
     if hasattr(bridge, "active_flow_id"):
         bridge.active_flow_id = prev_active_flow_id
 
-    flow_payload = build_snowflake_full_memory_enterprise_agent_flow()
     flow_persisted_sqlite = _persist_showcase_flow_in_sqlite(flow_payload)
 
     created_memories: list[dict[str, Any]] = []
@@ -935,6 +962,7 @@ def bootstrap_full_memory_showcase_flow(
             **spec,
             "create_new_physical_store": not dry_run,
             "dry_run": dry_run,
+            "_skip_context_auto_register": True,
         }
         res = bridge.create_or_register_memory(req_body)
         created_memories.append(res)
@@ -956,6 +984,8 @@ def bootstrap_full_memory_showcase_flow(
 
     return {
         "ok": True,
+        "explicit_user_request": True,
+        "skipped_unsolicited_seed": False,
         "flow_id": SHOWCASE_FLOW_ID,
         "flow_name": SHOWCASE_FLOW_NAME,
         "active_role": getattr(bridge, "active_role", "SNOWFLAKE_LANGFLOW_ADMIN"),
@@ -976,6 +1006,7 @@ def run_full_memory_showcase_simulation(
     *,
     dry_run: bool = True,
     enable_episodic_embedding: bool = True,
+    explicit_user_request: bool = True,
 ) -> dict[str, Any]:
     """Execute a multi-turn simulation of `Snowflake_Full_Memory_Enterprise_Agent` (`W2-R4-07`).
 
@@ -993,7 +1024,17 @@ def run_full_memory_showcase_simulation(
 
         bridge = _bridge
 
-    boot = bootstrap_full_memory_showcase_flow(bridge, dry_run=dry_run)
+    boot = bootstrap_full_memory_showcase_flow(
+        bridge,
+        dry_run=dry_run,
+        explicit_user_request=explicit_user_request,
+    )
+    if boot.get("skipped_unsolicited_seed"):
+        return {
+            **boot,
+            "turns": [],
+            "activity_persistence": {"sqlite_tx_persisted": False, "snowflake_activity_synced": False},
+        }
 
     # Optionally toggle #5 episodic memory between Embedding ON (AI_EMBED 1024d) and Embedding OFF (SQL / AI_FILTER)
     for entry in getattr(bridge, "memories_registry", []):
@@ -1207,10 +1248,16 @@ def bootstrap_and_run_full_memory_showcase(
     *,
     dry_run: bool = True,
     execute_simulation: bool = True,
+    explicit_user_request: bool = True,
 ) -> dict[str, Any]:
-    """Combined bootstrap + multi-turn simulation entrypoint for `LIVE_BRIDGE.bootstrap_full_memory_showcase_flow` (`W2-R4-07`)."""
+    """Combined bootstrap + multi-turn simulation entrypoint for `LIVE_BRIDGE.bootstrap_full_memory_showcase_flow` (`W2-R4-07`, `W2-R9-06`)."""
     if execute_simulation:
-        sim = run_full_memory_showcase_simulation(bridge, dry_run=dry_run, enable_episodic_embedding=True)
+        sim = run_full_memory_showcase_simulation(
+            bridge,
+            dry_run=dry_run,
+            enable_episodic_embedding=True,
+            explicit_user_request=explicit_user_request,
+        )
         boot = sim.get("bootstrap") or {}
         return {
             **boot,
@@ -1229,7 +1276,11 @@ def bootstrap_and_run_full_memory_showcase(
                 "MEM_3_SESSION_SUMMARY + MEM_4_USER_ENTITY_PROFILE)"
             ),
         }
-    boot = bootstrap_full_memory_showcase_flow(bridge, dry_run=dry_run)
+    boot = bootstrap_full_memory_showcase_flow(
+        bridge,
+        dry_run=dry_run,
+        explicit_user_request=explicit_user_request,
+    )
     return {
         **boot,
         "memories_created": [

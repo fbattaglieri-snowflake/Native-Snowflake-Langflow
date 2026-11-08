@@ -9,10 +9,8 @@ from lfx.io import DropdownInput, IntInput, MultilineInput, Output
 from lfx.schema import Data, DataFrame
 from lfx.schema.message import Message
 
+from lfx_snowflake.context_helpers import _resolve_flow_id
 from lfx_snowflake.fastapi_live_bridge import LIVE_BRIDGE
-from lfx_snowflake.native_category_components.llm_operations.snowflake_object_provisioner import (
-    _resolve_flow_id,
-)
 
 
 def _node_databases(flow_id: str | None = None) -> list[str]:

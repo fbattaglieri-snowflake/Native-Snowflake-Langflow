@@ -1422,3 +1422,53 @@ class SnowflakeAPIRouter:
             target_object=flow_id,
         )
         return SnowflakeAPIResponse(status_code=200, body={"a2a_service": record})
+
+    # ------------------------------------------------------------------
+    # 7. Custom Tools Discovery & Signature Inspection (W2-R9-01)
+    # ------------------------------------------------------------------
+    def list_custom_tools(
+        self,
+        resource_type: str = "procedure",
+        database_schema: str = "Database All",
+        flow_id: str | None = None,
+    ) -> SnowflakeAPIResponse:
+        """GET /api/v1/snowflake/custom-tools"""
+        from .fastapi_live_bridge import LIVE_BRIDGE
+
+        items = LIVE_BRIDGE.list_custom_tool_identifiers(
+            resource_type=resource_type,
+            database_schema=database_schema,
+            flow_id=flow_id,
+        )
+        return SnowflakeAPIResponse(
+            status_code=200,
+            body={
+                "ok": True,
+                "resource_type": resource_type,
+                "database_schema": database_schema,
+                "identifiers": items,
+                "count": len(items),
+                "active_role": self.active_role,
+                "context_epoch": self.context_epoch,
+            },
+        )
+
+    def describe_custom_tool(
+        self,
+        resource_type: str = "procedure",
+        identifier: str = "",
+        database_schema: str | None = None,
+        flow_id: str | None = None,
+    ) -> SnowflakeAPIResponse:
+        """GET /api/v1/snowflake/custom-tools/describe"""
+        from .fastapi_live_bridge import LIVE_BRIDGE
+
+        res = LIVE_BRIDGE.describe_custom_tool_signature(
+            resource_type=resource_type,
+            identifier=identifier,
+            database_schema=database_schema,
+            flow_id=flow_id,
+        )
+        status = int(res.get("status_code") or (200 if res.get("ok", True) else 422))
+        return SnowflakeAPIResponse(status_code=status, body=res)
+

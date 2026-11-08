@@ -39,8 +39,9 @@ To minimize merge conflicts across upstream upgrades, 95%+ of Snowflake-specific
 - `src/lfx_snowflake/governance/` — `SnowflakeAuthzService`, `SnowflakeObjectProvisioner`, role-bound session pool, 4-code error taxonomy, and `EXPLAIN_PRIVILEGES` pre-checks.
 - `src/lfx_snowflake/observability/` — `SnowflakeTraceReplicator` (`<DATABASE>.<SCHEMA>.LANGFLOW_FLOW_RUNS`, `<DATABASE>.<SCHEMA>.LANGFLOW_FLOW_SPANS`), `SnowflakeAuditOutbox` (`<DATABASE>.<SCHEMA>.LANGFLOW_AUDIT_LOG`), deterministic pre-sink secret/PII redactor.
 - `src/lfx_snowflake/providers/` — Native adapters for `Snowflake Proxy - Chat`, `Snowflake Proxy - Responses`, `Snowflake Proxy - Messages`, `Ollama (Snowflake Hosted)`, and Snowflake `Embedding Model`.
-- `src/lfx_snowflake/components/` — `Data Sources` + `Cortex Analyst`, `LLM Operations` + `AI Complete` / `AI Function` / `Stored Procedure` / `UDF-UDTF` / `SQL Statement` / `Cortex Search` / `Snowflake Decision`, `Files & Knowledge` + `Create Memory` + 4-stage `Cortex Search` indexing pipeline (`AI_PARSE_DOCUMENT`, `SPLIT_TEXT_RECURSIVE_CHARACTER`, `CREATE CORTEX SEARCH SERVICE`, `Stream + Task`), `Message History`, `Python Interpreter` (Snowflake PyPI), `ToolGuard / Policies` (ALTK), and `A2A Agent` / `Cortex Agent`.
-- `src/lfx_snowflake/native_category_components/` & `scripts/install_live_hooks_in_container.py` — Native Langflow sidebar component classes and build-time `component_index.json` / `index.html` / `snowflake-ui-integration.js` installer (`UI-W2-01`, `HUB-W2-01..05`, `W2-R3-01..07`, `DS-W2-01`, `PROV-W2-01`, `MA-W2-01`, `LLM-W2-01..06`, `FK-W2-01..04`, including Snowsight hierarchical tree selector, 5 LangChain/Langflow Memory Types with optional embeddings, and SPCS SQLite WAL / `UV_CACHE_DIR` runtime hardening).
+- `src/lfx_snowflake/context_helpers.py` — Shared per-flow context resolution (`_resolve_flow_id`), DDL verification (`_ddl_succeeded`), and `[ ❄️ Context ]` object registration helpers (`_register_created_object`, `_can_create_database`, `_can_create_schema`).
+- `src/lfx_snowflake/components/` — `Data Sources` + `Cortex Analyst`, `LLM Operations` + `Custom Tool` (`procedure`/`function`/`table_function`) / `Decision` (`snowflake-decision-fast` & `snowflake-decision`) / `AI Redact` (13 PII categories, 4,096-token limit + auto-chunking) / `AI Complete` / `AI Function` (14 `AI_*` functions + Internal & External Stage multimodal `TO_FILE` / `DIRECTORY`) / `SQL Statement`, `Files & Knowledge` + `Create Memory` + 4-stage `Cortex Search` indexing pipeline (`AI_PARSE_DOCUMENT`, `SPLIT_TEXT_RECURSIVE_CHARACTER`, `CREATE CORTEX SEARCH SERVICE`, `Stream + Task`), `Message History`, `Python Interpreter` (Snowflake PyPI), `ToolGuard / Policies` (ALTK), and `A2A Agent` / `Cortex Agent`.
+- `src/lfx_snowflake/native_category_components/` & `scripts/install_live_hooks_in_container.py` — Native Langflow sidebar component classes (`1 class = 1 file`) and build-time `component_index.json` / `index.html` / `snowflake-ui-integration.js` installer (`UI-W2-01`, `HUB-W2-01..05`, `W2-R3-01..07`, `DS-W2-01`, `PROV-W2-01`, `MA-W2-01`, `LLM-W2-01..06`, `FK-W2-01..04`, `TRG-W2-R8-01..07`, `W2-R9-01..06`, including Snowsight hierarchical tree selector, 5 LangChain/Langflow Memory Types with optional embeddings, transient overlay auto-dismiss `dismissTransientSnowflakeOverlays`, clean startup flow persistence, and SPCS SQLite WAL / `UV_CACHE_DIR` runtime hardening).
 
 ### Tracked Core Patch Registry (`frontend_patches/`)
 
@@ -74,3 +75,19 @@ Unchanged upstream categories (`Input & Output`, `Prompt Template`, `Processing`
    ```
 4. **Database & Code Rollback Plan:**
    Before promoting a synchronized release to `<COMPUTE_POOL>`, execute `python3 scripts/backup_restore_lifecycle.py` to create a verified quiesced backup (or Snowflake Postgres point-in-time fork of `<POSTGRES_INSTANCE>`) so both container image and ORM database can be rolled back atomically if post-upgrade checks fail.
+
+---
+
+## 4. Bundle Isolation Architecture Schema
+
+```mermaid
+flowchart TB
+    Upstream["langflow-ai/langflow (Read-Only Remote 'upstream', v1.12.5)"]
+    Staging["sync/upstream-<version> Staging Branch"]
+    Gate["Verification Gates: pytest + verify_public_repo_sanitization.py"]
+    Main["snowflake/main Protected Branch"]
+    Bundle["src/lfx_snowflake/ + frontend_patches/ + scripts/install_live_hooks_in_container.py"]
+
+    Upstream --> Staging --> Gate --> Main
+    Bundle --> Gate
+```

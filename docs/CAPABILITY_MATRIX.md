@@ -28,7 +28,7 @@
 | **REQ-06** | 3 Native Proxy Standard Protocols + `Ollama` | `lfx_snowflake/providers/registry.py` | `/chat/v1`, `/responses/v1` (`ordered-items`, `store=False`, `include=["reasoning.encrypted_content"]`), `/messages` (inference `/messages/v1/messages`, `thinking.signature`, `redacted_thinking`), `<OLLAMA_BASE_URL>`, `call_0..call_N` deduplication, 0 silent retries. |
 | **REQ-07** | Snowflake `Embedding Model` | `lfx_snowflake/providers/registry.py` | Separate catalog (`/api/v2/cortex/inference:embed` / `AI_EMBED` + verified Ollama embedders) with `(model_id, dimension, space_fingerprint)` guard. |
 | **REQ-08** | `Message History` on Snowflake Postgres & Standard Tables | `lfx_snowflake/components/utilities_a2a.py` | Store/Retrieve (`Messages`/`Table`), separating visible UI messages, signed protocol replay state, and Cortex Agent thread references. |
-| **REQ-09** | `LLM Operations` + Native `AI Function` (`[G-A2]`) | `lfx_snowflake/components/llm_operations.py` | `Batch Run`, `Guardrails`, `Smart Router`, `Smart Transform`, `Structured Output` (`LLM Selector` unchanged) + `AI Function` (`AI_REDACT`, `AI_CLASSIFY`, `AI_COMPLETE`, `AI_EXTRACT`, `AI_SENTIMENT`, `AI_SUMMARIZE_AGG`, `AI_AGG`, `AI_TRANSLATE`, `AI_FILTER`) with `EXPLAIN_PRIVILEGES`, `AI_COUNT_TOKENS`, row vs aggregate semantics, and `AI_REDACT` `detect` span masking. |
+| **REQ-09** | `LLM Operations` + `Custom Tool`, `Decision`, `AI Redact` & `AI Function` (`[G-A2]`, `W2-R9-01..04`) | `lfx_snowflake/components/llm_operations.py`, `lfx_snowflake/components/ai_function.py`, `native_category_components/llm_operations/` | `Batch Run`, `Guardrails`, `Smart Router`, `Smart Transform`, `Structured Output` (`LLM Selector` unchanged) + `[ ❄️ ] Custom Tool` (`procedure`/`function`/`table_function`), `[ ❄️ ] Decision` (`snowflake-decision-fast` / `snowflake-decision`), `[ ❄️ ] AI Redact` (13 official PII categories, 4,096-token limit + auto-chunking), `[ ❄️ ] AI Complete`, and `[ ❄️ ] AI Function` (14 `AI_*` functions with Internal Stage `@<DATABASE>.<SCHEMA>.<STAGE_NAME>` & External Bucket multimodal `TO_FILE` / `DIRECTORY`). |
 | **REQ-10** | `Files & Knowledge` & `Memories / Create Memory` (`[G-A3]`, `[G-A4]`) | `lfx_snowflake/components/files_knowledge.py` | `File System` (stage creation), `Read File`, `Write File` (safe atomic `Append`, internal vs external stages), `Knowledge` & `Create Memory` (optional `LLM Preprocessing`, separated `CREATE` vs use permissions, cross-session isolation) across 4 vector backends. |
 | **REQ-11** | Unchanged Core Categories | `lfx_snowflake/bundle_manifest.py`, `frontend_patches/` | `Input & Output`, `Prompt Template`, `Processing`, `Flow Control` (with `[Beta]` badges on `Listen`, `Notify`, `Run Flow`), `LLM Selector`, `Calculator`, `Current Date` 100% unchanged. |
 | **REQ-12** | `Utilities`: `Python Interpreter` with Snowflake PyPI | `lfx_snowflake/components/utilities_a2a.py` | Uses `snowflake.snowpark.pypi_shared_repository` (`SNOWFLAKE.PYPI_REPOSITORY_USER`) with zero fallback to public PyPI. |
@@ -40,7 +40,7 @@
 
 ---
 
-## 3. Wave 2 UI, Hub & Sidebar Enhancement Matrix (`UI-W2-01`, `HUB-W2-01..05`, `DS-W2-01`, `PROV-W2-01`, `MA-W2-01`, `LLM-W2-01..06`, `FK-W2-01..04`, `TRG-W2-R8-01..07`)
+## 3. Wave 2 UI, Hub & Sidebar Enhancement Matrix (`UI-W2-01`, `HUB-W2-01..05`, `DS-W2-01`, `PROV-W2-01`, `MA-W2-01`, `LLM-W2-01..06`, `FK-W2-01..04`, `TRG-W2-R8-01..07`, `W2-R9-01..07`)
 
 | Wave 2 ID | Area | Implementation & Verification Contract |
 |---|---|---|
@@ -50,8 +50,34 @@
 | **HUB-W2-03** & **HUB-W2-04** | Section 1 — Hierarchical Provisioning & Routine Exclusion | Enforces `1. Database -> 2. Schema -> 3. Object` with active-role grey-out warnings (`role_privileges`). Strictly rejects `FUNCTION`/`PROCEDURE`/`MEMORY` creation from Object Provisioner (`HTTP 422 UNSUPPORTED_CAPABILITY`). |
 | **HUB-W2-05** & **W2-R3-05..06** | Section 2 & Memories (`+ Snowflake`) — 5 LangChain/Langflow Memory Types & Optional Embeddings | Scopes `+ Snowflake` toolbar button strictly to `Memories` (`z-index: 10`, hidden behind modals), opens light-themed `Create a Snowflake Memory` modal (`data-testid="create-snowflake-memory-modal"`), and supports all 5 LangChain/Langflow Memory Types (`graph_state_checkpointer`, `buffer_window_memory`, `summary_memory`, `user_profile_entity_memory`, `episodic_memory` + legacy aliases) with non-embedding SQL lookup by default and optional `Snowflake Cortex (AI_EMBED)` or external embedding providers (`openai`, `cohere`, `huggingface_ollama`, `custom_endpoint`). |
 | **W2-R3-07** | SPCS Runtime Stability (SQLite WAL & Writable `UV_CACHE_DIR`) | Configures `PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA busy_timeout=30000; PRAGMA temp_store=MEMORY;` on `/persist/langflow.db` and SQLAlchemy connections, and sets writable `UV_CACHE_DIR=/tmp/uv-cache`. |
-| **DS-W2-01** & **PROV-W2-01** | `Data Sources` Hierarchy & `Object Provisioner` Relocation | `SnowflakeDataSourceComponent` ordered `Engine -> Database -> Schema -> Object Type -> Table / View Name`. `Snowflake Object Provisioner` removed from `Data Sources` and replicated into `LLM Operations` (`SnowflakeObjectProvisioner`) and `Files & Knowledge` (`SnowflakeObjectProvisionerFK`). |
+| **DS-W2-01** & **PROV-W2-01** (`W2-R9-03`) | `Data Sources` Hierarchy & `Object Provisioner` Governance Separation | `SnowflakeDataSourceComponent` ordered `Engine -> Database -> Schema -> Object Type -> Table / View Name`. `Object Provisioner` removed from workflow node categories (`Data Sources`, `LLM Operations`, `Files & Knowledge`) and retained exclusively in the Topbar Snowflake Hub (Section 1) and governance service (`src/lfx_snowflake/governance/provisioner.py`), with shared helpers in `src/lfx_snowflake/context_helpers.py`. |
 | **MA-W2-01** | `Models & Agents` Cascading Cortex Agent | `SnowflakeCortexAgentA2AComponent` cascades `Mode -> Database -> Schema -> Cortex Agent` (`SHOW CORTEX AGENTS IN SCHEMA`). |
-| **LLM-W2-01..06** | `LLM Operations` Expansion | Adds `Snowflake Stored Procedure` (graphical child procedure ports), `Snowflake Function (UDF / UDTF)`, dedicated `Snowflake AI Complete` vs task-specific `Snowflake AI Function` (`return_as_json`), `Snowflake SQL Statement`, `Cortex Search` (`SEARCH_PREVIEW`), `Cortex Analyst`, `Snowflake`, and `Snowflake Decision` (`snowflake-decision`). |
+| **LLM-W2-01..06** & **W2-R9-01..04** | `LLM Operations` Refactoring (`Custom Tool`, `Decision`, `AI Redact`, `AI Complete`, `AI Function`, `SQL Statement`, `Operations`) | Replaces `Stored Procedure` and `Function (UDF / UDTF)` with Snowsight-aligned `Custom Tool` (`snowflake_custom_tool.py`); redesigns `Decision` (`snowflake_decision.py`) on `snowflake-decision-fast` (default) and `snowflake-decision` (`choice`, `score` `0..n-1`, `noul`); separates `AI Redact` (`snowflake_ai_redact.py`, 13 PII categories, 4,096-token limit + auto-chunking) from `AI Function` (`snowflake_ai_function.py`, 14 `AI_*` functions) and `AI Complete` (`snowflake_ai_complete.py`), with full Internal & External Stage (`@<DATABASE>.<SCHEMA>.<STAGE_NAME>`) multimodal `TO_FILE(...)` and `DIRECTORY(@...)` support. |
 | **FK-W2-01..04** | `Files & Knowledge` & 4-Node `Cortex Search` Pipeline | Context-cascading `Knowledge & Vector Memory` and `Stage File System` (Internal/External stage creation), 4-node `Cortex Search` pipeline (`1: Parse Document` via `AI_PARSE_DOCUMENT`, `2: Split Text` via `SPLIT_TEXT_RECURSIVE_CHARACTER`, `3: Search Service` via `CREATE OR REPLACE CORTEX SEARCH SERVICE`, `4: Stream + Task` with `_DOC_STREAM_BATCH`), and `Cortex Analyst (Create in Snowsight)` disabled guidance node. |
 | **TRG-W2-R8-01..07** | `Triggers` (`triggers`, `icon="Zap"`) Sidebar Category, 5 Separate Trigger Components (`1 class = 1 file`) & SPCS Service Function (`RUN_LANGFLOW_FLOW`) | Positioned immediately after `Input & Output` (invariant) and before `Data Sources`. Provides `Schedule Trigger` (`SnowflakeScheduleTrigger`, `CREATE OR ALTER TASK USING CRON`/interval), `Table Change Trigger` (`SnowflakeTableChangeTrigger`, `STREAM ON TABLE/DYNAMIC TABLE/VIEW` + pure Triggered Task `WHEN SYSTEM$STREAM_HAS_DATA` + atomic `_LF_STREAM_BATCH_<FLOW_SHORT_ID>`), `Stage File Trigger` (`SnowflakeStageFileTrigger`, `DIRECTORY = (ENABLE = TRUE)` + `STREAM ON STAGE` + `BUILD_SCOPED_FILE_URL`), `Condition Alert Trigger` (`SnowflakeAlertTrigger`, `CREATE OR ALTER ALERT IF EXISTS (<condition_sql>) THEN RESULT_SCAN(SNOWFLAKE.ALERT.GET_CONDITION_QUERY_UUID())`), and `Webhook`. Executed via `<DATABASE>.<SCHEMA>.RUN_LANGFLOW_FLOW` (`POST /api/v1/snowflake/service-trigger`) under `CURRENT_ROLE()` with 3-tier observability (`SCHEDULED_RUN`, `STREAM_TRIGGER_RUN`, `STAGE_FILE_TRIGGER_RUN`, `ALERT_TRIGGER_RUN`, `WEBHOOK_RUN`) and automatic lifecycle cleanup on node/flow deletion. |
+| **W2-R9-05** & **W2-R9-06** | Transient Overlay Auto-Dismiss (`dismissTransientSnowflakeOverlays`) & Clean Startup Persistence | Automatically closes `#sflf-memory-type-dropdown` and transient overlays on left-rail tab switch, leaving `Memories`, outside click, `Escape`, or route change (`W2-R9-05`). Disables unsolicited auto-seeding of `Snowflake_Full_Memory_Enterprise_Agent` unless `SNOWFLAKE_SEED_SHOWCASE_FLOW=true` and purges unsolicited `New Flow (Backup)` rows while preserving 100% of user flows in `/persist/langflow.db` (`W2-R9-06`). |
+
+---
+
+## 4. Wave 2 Round 9 (`W2-R9-01..07`) Architecture Schema
+
+```mermaid
+flowchart LR
+    subgraph Sidebar["LLM Operations Sidebar (7 [ ❄️ ] Nodes)"]
+        CT["[ ❄️ ] Custom Tool\n(procedure | function | table_function)"]
+        DEC["[ ❄️ ] Decision\n(snowflake-decision-fast | snowflake-decision)"]
+        RED["[ ❄️ ] AI Redact\n(13 PII Categories | 4,096-Token Limit)"]
+        AIC["[ ❄️ ] AI Complete\n(Text | JSON Schema | Multimodal TO_FILE)"]
+        AIF["[ ❄️ ] AI Function\n(14 AI_* Functions | DIRECTORY(@stage))"]
+        SQL["[ ❄️ ] SQL Statement"]
+        OPS["[ ❄️ ] Operations"]
+    end
+
+    subgraph Hub["Topbar Snowflake Hub & Governance"]
+        PROV["SnowflakeObjectProvisioner\n(Section 1 Infrastructure Wizard Only)"]
+        CTX["[ ❄️ Context ] Per-Flow Cone\n(<DATABASE>.<SCHEMA> + Stages + Routines)"]
+    end
+
+    CTX --> CT & DEC & RED & AIC & AIF & SQL & OPS
+    PROV -. "Registers Created Objects" .-> CTX
+```

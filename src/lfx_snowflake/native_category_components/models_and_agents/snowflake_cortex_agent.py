@@ -10,10 +10,8 @@ from lfx.io import BoolInput, DropdownInput, MessageTextInput, Output, StrInput
 from lfx.schema import Data
 from lfx.schema.message import Message
 
+from lfx_snowflake.context_helpers import _resolve_flow_id
 from lfx_snowflake.fastapi_live_bridge import LIVE_BRIDGE
-from lfx_snowflake.native_category_components.llm_operations.snowflake_object_provisioner import (
-    _resolve_flow_id,
-)
 from lfx_snowflake.providers.language_models import (
     CortexAgentToolSchema,
     build_structured_tool,

@@ -782,59 +782,994 @@ class SnowflakeCortexSearchQueryEngine:
         return sql, payload
 
 
-class SnowflakeDecisionEngine:
+SUPPORTED_CUSTOM_TOOL_RESOURCE_TYPES: tuple[str, ...] = (
+    "procedure",
+    "function",
+    "table_function",
+)
+
+CUSTOM_TOOL_SORT_OPTIONS: tuple[str, ...] = (
+    "Latest added",
+    "Alphabetical",
+    "Required first",
+)
+
+SUPPORTED_CUSTOM_TOOL_PARAM_TYPES: tuple[str, ...] = (
+    "string",
+    "number",
+    "integer",
+    "boolean",
+    "array",
+)
+
+CUSTOM_TOOL_WAREHOUSE_MODES: tuple[str, ...] = (
+    "User's default",
+    "Custom",
+)
+
+SUPPORTED_DECISION_MODELS: tuple[str, ...] = (
+    "snowflake-decision-fast",
+    "snowflake-decision",
+)
+
+SUPPORTED_DECISION_QUESTION_TYPES: tuple[str, ...] = (
+    "choice",
+    "score",
+    "noul",
+)
+
+DECISION_EVALUATION_MODES: tuple[str, ...] = (
+    "Single State (Text / JSON Input)",
+    "Table-Level Processing (Database.Schema.Table)",
+)
+
+
+class SnowflakeCustomToolEngine:
     """
-    Domain engine for `SnowflakeDecisionComponent` (`LLM-W2-06` / `snowflake-decision`) supporting:
-    1. `AI_COMPLETE (Structured Decision JSON)` enforcing `{decision, confidence, reasoning, selected_branch, policy_action}`
-    2. `Cortex SystemOne API (Jev-compatible)`
+    Domain engine for `SnowflakeCustomToolComponent` (`W2-R9-01` / `LLM-OP-01`),
+    mirroring 1:1 Snowsight 'Add custom tool' for Snowflake Cortex Agents and Langflow Agents.
     """
 
-    DECISION_JSON_SCHEMA: dict[str, Any] = {
-        "type": "object",
-        "properties": {
-            "decision": {"type": "string"},
-            "confidence": {"type": "number"},
-            "reasoning": {"type": "string"},
-            "selected_branch": {"type": "string"},
-            "policy_action": {"type": "string"},
+    RESOURCE_TYPES: tuple[str, ...] = SUPPORTED_CUSTOM_TOOL_RESOURCE_TYPES
+    SORT_OPTIONS: tuple[str, ...] = CUSTOM_TOOL_SORT_OPTIONS
+    SUPPORTED_PARAM_TYPES: tuple[str, ...] = SUPPORTED_CUSTOM_TOOL_PARAM_TYPES
+    WAREHOUSE_MODES: tuple[str, ...] = CUSTOM_TOOL_WAREHOUSE_MODES
+    TOOL_NAME_PATTERN: str = r"^[A-Za-z0-9_-]{1,64}$"
+
+    @classmethod
+    def map_sql_type_to_json_schema_type(cls, sql_type: str) -> str:
+        raw = (sql_type or "VARCHAR").strip().upper()
+        base = raw.split("(")[0].strip()
+        if base == "OBJECT" or raw.startswith("OBJECT"):
+            raise SnowflakeProviderError(
+                ERROR_UNSUPPORTED_CAPABILITY,
+                "Snowflake Cortex does not support stored procedures and custom tools with a parameter of type object.",
+                active_role="CURRENT_ROLE",
+                operation="custom_tool_parameter_validation",
+            )
+        if base in ("ARRAY",) or raw.startswith("ARRAY"):
+            return "array"
+        if base in ("BOOLEAN", "BOOL"):
+            return "boolean"
+        if base in ("INT", "INTEGER", "BIGINT", "SMALLINT", "TINYINT", "BYTEINT"):
+            return "integer"
+        if base in ("NUMBER", "NUMERIC", "DECIMAL", "DEC"):
+            if "(" in raw and ")" in raw:
+                inner = raw[raw.find("(") + 1 : raw.rfind(")")]
+                parts = [p.strip() for p in inner.split(",") if p.strip()]
+                if len(parts) >= 2:
+                    try:
+                        scale = int(parts[1])
+                    except ValueError:
+                        scale = 0
+                    return "number" if scale > 0 else "integer"
+            return "integer"
+        if base in ("FLOAT", "FLOAT4", "FLOAT8", "DOUBLE", "DOUBLE PRECISION", "REAL"):
+            return "number"
+        return "string"
+
+    @classmethod
+    def validate_param_type(cls, param_type: str) -> str:
+        norm = (param_type or "string").strip().lower()
+        if norm == "object":
+            raise SnowflakeProviderError(
+                ERROR_UNSUPPORTED_CAPABILITY,
+                "Snowflake Cortex does not support stored procedures and custom tools with a parameter of type object.",
+                active_role="CURRENT_ROLE",
+                operation="custom_tool_parameter_validation",
+            )
+        if norm not in cls.SUPPORTED_PARAM_TYPES:
+            return cls.map_sql_type_to_json_schema_type(param_type)
+        return norm
+
+    @classmethod
+    def derive_tool_name(cls, identifier: str) -> str:
+        import re
+
+        head = (identifier or "").strip().split("(")[0].strip()
+        short_name = head.split(".")[-1].strip().strip('"') if head else "custom_tool"
+        snake = re.sub(r"[^A-Za-z0-9_-]+", "_", short_name).strip("_").lower()
+        if not snake:
+            snake = "custom_tool"
+        return snake[:64]
+
+    @classmethod
+    def validate_tool_name(cls, tool_name: str, fallback_identifier: str = "") -> str:
+        import re
+
+        candidate = (tool_name or "").strip()
+        if not candidate and fallback_identifier:
+            candidate = cls.derive_tool_name(fallback_identifier)
+        if not candidate or len(candidate) > 64 or not re.match(cls.TOOL_NAME_PATTERN, candidate):
+            raise ValueError(
+                f"Invalid custom tool name '{tool_name}': must be 1..64 characters matching {cls.TOOL_NAME_PATTERN}."
+            )
+        return candidate
+
+    @staticmethod
+    def validate_query_timeout(query_timeout: int | float | str | None) -> int:
+        if query_timeout is None or query_timeout == "":
+            return 60
+        val = int(query_timeout)
+        if val < 1 or val > 600:
+            raise ValueError(f"query_timeout must be between 1 and 600 seconds (got {val}).")
+        return val
+
+    @staticmethod
+    def extract_bare_identifier(identifier: str, default_db_schema: str = "SNOWFLAKE_LANGFLOW.CORE") -> str:
+        head = (identifier or "").strip().split("(")[0].strip()
+        if not head:
+            return f"{default_db_schema}.SEND_EMAIL_ALL"
+        parts = [p.strip() for p in head.split(".") if p.strip()]
+        if len(parts) >= 3:
+            return f"{parts[0]}.{parts[1]}.{parts[2]}"
+        if default_db_schema and default_db_schema != "Database All" and "." in default_db_schema:
+            return f"{default_db_schema.strip()}.{parts[-1]}"
+        return f"SNOWFLAKE_LANGFLOW.CORE.{parts[-1]}"
+
+    @classmethod
+    def _split_top_level_commas(cls, text: str) -> list[str]:
+        parts: list[str] = []
+        depth = 0
+        buf: list[str] = []
+        for ch in text:
+            if ch == "(":
+                depth += 1
+                buf.append(ch)
+            elif ch == ")":
+                depth = max(0, depth - 1)
+                buf.append(ch)
+            elif ch == "," and depth == 0:
+                token = "".join(buf).strip()
+                if token:
+                    parts.append(token)
+                buf = []
+            else:
+                buf.append(ch)
+        tail = "".join(buf).strip()
+        if tail:
+            parts.append(tail)
+        return parts
+
+    @classmethod
+    def parse_signature_parameters(
+        cls,
+        identifier_or_signature: str,
+        describe_rows: list[dict[str, Any]] | None = None,
+    ) -> list[dict[str, Any]]:
+        sig_str = (identifier_or_signature or "").strip()
+        if describe_rows:
+            for row in describe_rows:
+                if not isinstance(row, dict):
+                    continue
+                prop = str(row.get("property") or row.get("PROPERTY") or "").strip().lower()
+                if prop == "signature":
+                    val = str(row.get("value") or row.get("VALUE") or "").strip()
+                    if val:
+                        sig_str = val
+                        break
+
+        obj_head = (identifier_or_signature or "").split("(")[0].strip().split(".")[-1].upper()
+        if "(" in sig_str and ")" in sig_str:
+            inner = sig_str[sig_str.find("(") + 1 : sig_str.rfind(")")].strip()
+        else:
+            inner = ""
+
+        if not inner:
+            return []
+
+        raw_tokens = cls._split_top_level_commas(inner)
+        default_email_names = ["body", "recipient_email", "subject"]
+        params: list[dict[str, Any]] = []
+        for idx, token in enumerate(raw_tokens):
+            clean = token.strip()
+            has_default = " DEFAULT " in clean.upper()
+            if has_default:
+                upper_idx = clean.upper().find(" DEFAULT ")
+                clean = clean[:upper_idx].strip()
+            pieces = clean.split(None, 1)
+            if len(pieces) == 2 and not pieces[0].upper().startswith(
+                ("VARCHAR", "NUMBER", "NUMERIC", "DECIMAL", "FLOAT", "DOUBLE", "INT", "BOOLEAN", "ARRAY", "OBJECT", "TEXT", "STRING", "VARIANT", "TIMESTAMP", "DATE", "TIME")
+            ):
+                p_name = pieces[0].strip().strip('"').lower()
+                sql_t = pieces[1].strip().upper()
+            else:
+                sql_t = clean.upper()
+                if obj_head == "SEND_EMAIL_ALL" and len(raw_tokens) == 3 and idx < 3:
+                    p_name = default_email_names[idx]
+                else:
+                    p_name = f"arg_{idx + 1}"
+
+            json_t = cls.map_sql_type_to_json_schema_type(sql_t)
+            params.append(
+                {
+                    "name": p_name,
+                    "sql_type": sql_t,
+                    "type": json_t,
+                    "description": "",
+                    "required": not has_default,
+                }
+            )
+        return params
+
+    @classmethod
+    def sort_parameters(
+        cls,
+        parameters: list[dict[str, Any]],
+        sort_by: str = "Latest added",
+    ) -> list[dict[str, Any]]:
+        normalized: list[dict[str, Any]] = []
+        for item in parameters or []:
+            if not isinstance(item, dict):
+                continue
+            p_name = str(item.get("name") or item.get("parameter") or "").strip()
+            if not p_name:
+                continue
+            raw_type = str(item.get("type") or item.get("sql_type") or "string").strip()
+            sql_t = str(item.get("sql_type") or raw_type.upper()).strip()
+            if sql_t.upper().startswith("OBJECT"):
+                cls.map_sql_type_to_json_schema_type(sql_t)
+            json_t = cls.validate_param_type(raw_type)
+            normalized.append(
+                {
+                    "name": p_name,
+                    "sql_type": sql_t,
+                    "type": json_t,
+                    "description": str(item.get("description") or ""),
+                    "required": bool(item.get("required", True)),
+                }
+            )
+        mode = (sort_by or "Latest added").strip()
+        if mode == "Alphabetical":
+            return sorted(normalized, key=lambda x: x["name"].lower())
+        if mode == "Required first":
+            return [
+                x
+                for _, x in sorted(
+                    enumerate(normalized),
+                    key=lambda pair: (not bool(pair[1].get("required", True)), pair[0]),
+                )
+            ]
+        return normalized
+
+    @classmethod
+    def add_parameter(
+        cls,
+        parameters: list[dict[str, Any]],
+        *,
+        name: str,
+        param_type: str = "string",
+        description: str = "",
+        required: bool = True,
+        sql_type: str | None = None,
+    ) -> list[dict[str, Any]]:
+        json_t = cls.validate_param_type(param_type)
+        out = list(parameters or [])
+        out.append(
+            {
+                "name": (name or f"param_{len(out) + 1}").strip(),
+                "sql_type": (sql_type or json_t.upper()).strip(),
+                "type": json_t,
+                "description": description or "",
+                "required": bool(required),
+            }
+        )
+        return out
+
+    @classmethod
+    def delete_parameter(
+        cls,
+        parameters: list[dict[str, Any]],
+        name_or_index: str | int,
+    ) -> list[dict[str, Any]]:
+        items = list(parameters or [])
+        if isinstance(name_or_index, int):
+            return [p for i, p in enumerate(items) if i != name_or_index]
+        target = str(name_or_index).strip().lower()
+        return [p for p in items if str(p.get("name", "")).strip().lower() != target]
+
+    @classmethod
+    def build_cortex_agent_tool_payload(
+        cls,
+        *,
+        resource_type: str = "procedure",
+        custom_tool_identifier: str = "SNOWFLAKE_LANGFLOW.CORE.SEND_EMAIL_ALL(VARCHAR, VARCHAR, VARCHAR)",
+        tool_name: str = "",
+        tool_description: str = "",
+        warehouse_mode: str = "User's default",
+        custom_warehouse: str = "",
+        query_timeout: int = 60,
+        parameters: list[dict[str, Any]] | None = None,
+        parameters_sort_by: str = "Latest added",
+        default_db_schema: str = "SNOWFLAKE_LANGFLOW.CORE",
+    ) -> dict[str, Any]:
+        res_type = (resource_type or "procedure").strip().lower()
+        if res_type not in cls.RESOURCE_TYPES:
+            raise ValueError(f"Unsupported custom tool resource_type '{resource_type}'. Must be one of {cls.RESOURCE_TYPES}.")
+        valid_name = cls.validate_tool_name(tool_name, fallback_identifier=custom_tool_identifier)
+        valid_timeout = cls.validate_query_timeout(query_timeout)
+        bare_fqn = cls.extract_bare_identifier(custom_tool_identifier, default_db_schema=default_db_schema)
+
+        raw_params = parameters if parameters is not None else cls.parse_signature_parameters(custom_tool_identifier)
+        sorted_params = cls.sort_parameters(raw_params, sort_by=parameters_sort_by)
+
+        properties: dict[str, dict[str, Any]] = {}
+        required_names: list[str] = []
+        for p in sorted_params:
+            p_name = p["name"]
+            properties[p_name] = {
+                "type": p["type"],
+                "description": p.get("description", ""),
+            }
+            if p.get("required", True):
+                required_names.append(p_name)
+
+        exec_env: dict[str, Any] = {
+            "type": "warehouse",
+            "query_timeout": valid_timeout,
+        }
+        if (warehouse_mode or "User's default").strip() == "Custom" and (custom_warehouse or "").strip():
+            exec_env["warehouse"] = custom_warehouse.strip()
+
+        return {
+            "tool_spec": {
+                "type": "generic",
+                "name": valid_name,
+                "description": (tool_description or f"Execute Snowflake {res_type} {bare_fqn}").strip(),
+                "input_schema": {
+                    "type": "object",
+                    "properties": properties,
+                    "required": required_names,
+                },
+            },
+            "tool_resources": {
+                valid_name: {
+                    "type": res_type,
+                    "identifier": bare_fqn,
+                    "execution_environment": exec_env,
+                }
+            },
+            "parameters": sorted_params,
+            "identifier_with_signature": custom_tool_identifier,
+            "warehouse_mode": (warehouse_mode or "User's default").strip(),
+        }
+
+    @classmethod
+    def _format_sql_literal(cls, value: Any, param_type: str = "string") -> str:
+        if value is None:
+            return "NULL"
+        ptype = (param_type or "string").lower()
+        if ptype == "boolean" or isinstance(value, bool):
+            if isinstance(value, str):
+                return "TRUE" if value.strip().lower() in ("true", "1", "yes") else "FALSE"
+            return "TRUE" if bool(value) else "FALSE"
+        if ptype in ("integer", "number") and isinstance(value, (int, float)) and not isinstance(value, bool):
+            return str(value)
+        if ptype == "array" or isinstance(value, (list, tuple)):
+            arr_json = json.dumps(list(value) if isinstance(value, (list, tuple)) else value).replace("'", "''")
+            return f"PARSE_JSON('{arr_json}')"
+        escaped = str(value).replace("'", "''")
+        return f"'{escaped}'"
+
+    @classmethod
+    def build_invocation_sql(
+        cls,
+        *,
+        resource_type: str = "procedure",
+        custom_tool_identifier: str = "SNOWFLAKE_LANGFLOW.CORE.SEND_EMAIL_ALL(VARCHAR, VARCHAR, VARCHAR)",
+        arguments: dict[str, Any] | list[Any] | str | None = None,
+        parameters: list[dict[str, Any]] | None = None,
+        default_db_schema: str = "SNOWFLAKE_LANGFLOW.CORE",
+    ) -> str:
+        res_type = (resource_type or "procedure").strip().lower()
+        if res_type not in cls.RESOURCE_TYPES:
+            raise ValueError(f"Unsupported custom tool resource_type '{resource_type}'.")
+        bare_fqn = cls.extract_bare_identifier(custom_tool_identifier, default_db_schema=default_db_schema)
+        params_meta = parameters if parameters is not None else cls.parse_signature_parameters(custom_tool_identifier)
+
+        if isinstance(arguments, str):
+            str_arg = arguments.strip()
+            if str_arg.startswith("{") and str_arg.endswith("}"):
+                try:
+                    arguments = json.loads(str_arg)
+                except json.JSONDecodeError:
+                    pass
+            elif str_arg.startswith("[") and str_arg.endswith("]"):
+                try:
+                    arguments = json.loads(str_arg)
+                except json.JSONDecodeError:
+                    pass
+
+        formatted_args: list[str] = []
+        if isinstance(arguments, dict):
+            if params_meta:
+                for p in params_meta:
+                    pname = p["name"]
+                    if pname in arguments:
+                        formatted_args.append(cls._format_sql_literal(arguments[pname], p.get("type", "string")))
+                    elif p.get("required", True):
+                        formatted_args.append(cls._format_sql_literal("", p.get("type", "string")))
+            else:
+                for k, v in arguments.items():
+                    formatted_args.append(cls._format_sql_literal(v, "string"))
+        elif isinstance(arguments, (list, tuple)):
+            for idx, v in enumerate(arguments):
+                ptype = params_meta[idx].get("type", "string") if idx < len(params_meta) else "string"
+                formatted_args.append(cls._format_sql_literal(v, ptype))
+        elif isinstance(arguments, str) and arguments.strip():
+            formatted_args = [arguments.strip()]
+
+        joined_args = ", ".join(formatted_args)
+        if res_type == "procedure":
+            return f"CALL {bare_fqn}({joined_args});"
+        if res_type == "table_function":
+            return f"SELECT * FROM TABLE({bare_fqn}({joined_args}));"
+        return f"SELECT {bare_fqn}({joined_args}) AS RESULT;"
+
+
+class SnowflakeDecisionEngine:
+    """
+    Domain engine for `SnowflakeDecisionComponent` (`W2-R9-02` / `LLM-OP-02`) built strictly on
+    official Snowflake Decision models (`snowflake-decision-fast` and `snowflake-decision`) via `AI_COMPLETE`:
+    https://docs.snowflake.com/en/LIMITEDACCESS/snowflake-cortex/ai-complete-snowflake-decision
+    """
+
+    SUPPORTED_MODELS: tuple[str, ...] = SUPPORTED_DECISION_MODELS
+    QUESTION_TYPES: tuple[str, ...] = SUPPORTED_DECISION_QUESTION_TYPES
+    EVALUATION_MODES: tuple[str, ...] = DECISION_EVALUATION_MODES
+    QUESTION_ID_REGEX: str = r"^[A-Za-z0-9_-]{1,64}$"
+    MAX_QUESTIONS_PER_REQUEST: int = 32
+    MAX_TOTAL_OPTIONS_PER_REQUEST: int = 256
+    MAX_SCORE_LEVELS: int = 10
+    MIN_SCORE_LEVELS: int = 2
+    MAX_NOUL_THRESHOLD: float = 0.92
+    MAX_BYTES_DECISION: int = 262_144  # 256 KiB
+    MAX_TOKENS_DECISION_FAST: int = 32_000
+    FORBIDDEN_PARAMETERS: tuple[str, ...] = (
+        "streaming",
+        "stream",
+        "guardrails",
+        "temperature",
+        "top_p",
+        "model_parameters",
+        "response_format",
+    )
+
+    MODEL_SPECS: dict[str, dict[str, Any]] = {
+        "snowflake-decision-fast": {
+            "min_choice_options": 2,
+            "max_choice_options": 16,
+            "max_tokens": 32_000,
+            "max_questions": 32,
+            "max_total_options": 256,
+            "description": "Low-latency, high-throughput decision model (2..16 choice options, 32k token limit).",
         },
-        "required": ["decision", "confidence", "reasoning", "selected_branch", "policy_action"],
-        "additionalProperties": False,
+        "snowflake-decision": {
+            "min_choice_options": 2,
+            "max_choice_options": 32,
+            "max_bytes": 262_144,
+            "max_tokens_est": 50_000,
+            "max_questions": 32,
+            "max_total_options": 256,
+            "description": "High-accuracy decision model (2..32 choice options, 256 KiB JSON prompt limit).",
+        },
     }
+
+    OFFICIAL_ERROR_SOLUTIONS: dict[str, str] = {
+        "CORTEX_ENABLED_CROSS_REGION": (
+            "Model snowflake-decision requires cross-region inference enabled: "
+            "ALTER ACCOUNT SET CORTEX_ENABLED_CROSS_REGION = 'ANY_REGION';"
+        ),
+        "INVALID_JSON": "Prompt must be a valid JSON string produced by TO_JSON({'state': ..., 'questions': ...}).",
+        "TOO_MANY_QUESTIONS": "A single decision request supports 1..32 questions and at most 256 total options.",
+        "INVALID_OPTION_COUNT": (
+            "Choice questions require 2..16 options for snowflake-decision-fast or 2..32 for snowflake-decision; "
+            "score questions require 2..10 levels."
+        ),
+        "INVALID_NOUL_CRITERIA": "Optional noul criteria must be an object containing both 'true' and 'false' keys.",
+        "UNSUPPORTED_PARAMETER": (
+            "Snowflake Decision rejects streaming and guardrails and ignores temperature and top_p."
+        ),
+    }
+
+    @staticmethod
+    def compute_confidence(probabilities: dict[str, float] | list[float]) -> float:
+        vals = list(probabilities.values()) if isinstance(probabilities, dict) else list(probabilities)
+        n = len(vals)
+        if n <= 1:
+            return 1.0 if n == 1 else 0.0
+        p_max = float(max(vals))
+        return (n * p_max - 1.0) / float(n - 1)
+
+    @staticmethod
+    def compute_weighted_score(probabilities: dict[str, float] | list[float]) -> float:
+        if isinstance(probabilities, dict):
+            total = 0.0
+            for k, p in probabilities.items():
+                total += float(int(k)) * float(p)
+            return total
+        return sum(float(i) * float(p) for i, p in enumerate(probabilities))
+
+    @classmethod
+    def map_decision_error(cls, error_message: str) -> dict[str, str]:
+        msg = (error_message or "").strip()
+        upper = msg.upper()
+        if "CORTEX_ENABLED_CROSS_REGION" in upper or "ANY_REGION" in upper:
+            return {
+                "code": "CORTEX_ENABLED_CROSS_REGION",
+                "message": msg,
+                "remediation": cls.OFFICIAL_ERROR_SOLUTIONS["CORTEX_ENABLED_CROSS_REGION"],
+            }
+        if "STREAM" in upper or "GUARDRAIL" in upper:
+            return {
+                "code": "UNSUPPORTED_PARAMETER",
+                "message": msg,
+                "remediation": cls.OFFICIAL_ERROR_SOLUTIONS["UNSUPPORTED_PARAMETER"],
+            }
+        if "NOUL" in upper and ("TRUE" in upper or "FALSE" in upper):
+            return {
+                "code": "INVALID_NOUL_CRITERIA",
+                "message": msg,
+                "remediation": cls.OFFICIAL_ERROR_SOLUTIONS["INVALID_NOUL_CRITERIA"],
+            }
+        if "OPTION" in upper or "LEVEL" in upper:
+            return {
+                "code": "INVALID_OPTION_COUNT",
+                "message": msg,
+                "remediation": cls.OFFICIAL_ERROR_SOLUTIONS["INVALID_OPTION_COUNT"],
+            }
+        if "QUESTION" in upper and ("32" in upper or "256" in upper or "LIMIT" in upper):
+            return {
+                "code": "TOO_MANY_QUESTIONS",
+                "message": msg,
+                "remediation": cls.OFFICIAL_ERROR_SOLUTIONS["TOO_MANY_QUESTIONS"],
+            }
+        return {
+            "code": "INVALID_JSON",
+            "message": msg,
+            "remediation": cls.OFFICIAL_ERROR_SOLUTIONS["INVALID_JSON"],
+        }
+
+    @classmethod
+    def normalize_and_validate_questions(
+        cls,
+        *,
+        model: str,
+        questions: dict[str, Any],
+        include_none_of_these: bool = False,
+        noul_threshold: float = 0.70,
+        state: Any = "",
+    ) -> tuple[dict[str, dict[str, Any]], list[str]]:
+        import re
+
+        norm_model = (model or "snowflake-decision-fast").strip()
+        if norm_model not in cls.SUPPORTED_MODELS:
+            raise SnowflakeProviderError(
+                ERROR_UNSUPPORTED_CAPABILITY,
+                f"Unsupported Snowflake Decision model '{model}'. Supported models: {cls.SUPPORTED_MODELS}.",
+                active_role="CURRENT_ROLE",
+                operation="snowflake_decision_validation",
+            )
+        if noul_threshold <= 0.0 or noul_threshold > cls.MAX_NOUL_THRESHOLD:
+            raise ValueError(
+                f"noul_threshold must be between 0.01 and {cls.MAX_NOUL_THRESHOLD} "
+                f"(noul probabilities stay within ~0.08–0.92; got {noul_threshold})."
+            )
+        if not isinstance(questions, dict) or not questions:
+            raise ValueError("Decision request requires 1..32 questions in 'questions'.")
+        if len(questions) > cls.MAX_QUESTIONS_PER_REQUEST:
+            raise ValueError(
+                f"Decision request exceeds maximum of {cls.MAX_QUESTIONS_PER_REQUEST} questions (got {len(questions)})."
+            )
+
+        max_choice = cls.MODEL_SPECS[norm_model]["max_choice_options"]
+        min_choice = cls.MODEL_SPECS[norm_model]["min_choice_options"]
+        normalized: dict[str, dict[str, Any]] = {}
+        warnings: list[str] = []
+        total_options = 0
+
+        for qid, qraw in questions.items():
+            if not isinstance(qid, str) or not re.match(cls.QUESTION_ID_REGEX, qid):
+                raise ValueError(
+                    f"Invalid question ID '{qid}': must be 1..64 characters matching {cls.QUESTION_ID_REGEX}."
+                )
+            if qid.lower().startswith(("is_definitely_", "definitely_", "must_always_", "never_")):
+                warnings.append(
+                    f"Question ID '{qid}' uses leading/polarizing phrasing; neutral identifiers are recommended."
+                )
+            if not isinstance(qraw, dict):
+                raise ValueError(f"Question '{qid}' must be a JSON object.")
+
+            qtype = str(qraw.get("type") or "choice").strip().lower()
+            if qtype not in cls.QUESTION_TYPES:
+                raise ValueError(
+                    f"Question '{qid}' has unsupported type '{qtype}'. Must be one of {cls.QUESTION_TYPES}."
+                )
+            instructions = str(qraw.get("instructions") or "").strip()
+            if not instructions:
+                raise ValueError(f"Question '{qid}' requires non-empty 'instructions'.")
+
+            if qtype == "choice":
+                raw_crit = qraw.get("criteria")
+                if not isinstance(raw_crit, dict):
+                    raise ValueError(f"Choice question '{qid}' requires a 'criteria' object mapping option keys to descriptions.")
+                crit = {str(k): str(v) for k, v in raw_crit.items()}
+                add_none = bool(qraw.get("include_none_of_these", include_none_of_these))
+                if add_none and "none_of_these" not in crit and "not_stated" not in crit:
+                    crit["none_of_these"] = "None of the listed options apply or not stated in the input."
+                opt_count = len(crit)
+                if opt_count < min_choice or opt_count > max_choice:
+                    raise ValueError(
+                        f"Choice question '{qid}' has {opt_count} options; model '{norm_model}' requires "
+                        f"{min_choice}..{max_choice} options."
+                    )
+                total_options += opt_count
+                normalized[qid] = {
+                    "type": "choice",
+                    "instructions": instructions,
+                    "criteria": crit,
+                }
+            elif qtype == "score":
+                raw_crit = qraw.get("criteria")
+                if not isinstance(raw_crit, list) or not all(isinstance(x, str) and x.strip() for x in raw_crit):
+                    raise ValueError(
+                        f"Score question '{qid}' requires 'criteria' as an ordered list of 2..10 level descriptions."
+                    )
+                lvl_count = len(raw_crit)
+                if lvl_count < cls.MIN_SCORE_LEVELS or lvl_count > cls.MAX_SCORE_LEVELS:
+                    raise ValueError(
+                        f"Score question '{qid}' has {lvl_count} levels; must have {cls.MIN_SCORE_LEVELS}..{cls.MAX_SCORE_LEVELS} levels."
+                    )
+                total_options += lvl_count
+                normalized[qid] = {
+                    "type": "score",
+                    "instructions": instructions,
+                    "criteria": [x.strip() for x in raw_crit],
+                }
+            elif qtype == "noul":
+                raw_crit = qraw.get("criteria")
+                q_entry: dict[str, Any] = {
+                    "type": "noul",
+                    "instructions": instructions,
+                }
+                if raw_crit is not None and raw_crit != {}:
+                    if not isinstance(raw_crit, dict) or "true" not in raw_crit or "false" not in raw_crit:
+                        raise ValueError(
+                            f"Noul question '{qid}' optional 'criteria' must be an object containing both 'true' and 'false' keys."
+                        )
+                    q_entry["criteria"] = {
+                        "true": str(raw_crit["true"]),
+                        "false": str(raw_crit["false"]),
+                    }
+                total_options += 2
+                normalized[qid] = q_entry
+
+        if total_options > cls.MAX_TOTAL_OPTIONS_PER_REQUEST:
+            raise ValueError(
+                f"Total options across all questions is {total_options}, exceeding the maximum of {cls.MAX_TOTAL_OPTIONS_PER_REQUEST}."
+            )
+
+        payload_bytes = len(json.dumps({"state": state, "questions": normalized}).encode("utf-8"))
+        if norm_model == "snowflake-decision" and payload_bytes > cls.MAX_BYTES_DECISION:
+            raise ValueError(
+                f"Decision payload size ({payload_bytes} bytes) exceeds 256 KiB ({cls.MAX_BYTES_DECISION} bytes) limit."
+            )
+        if norm_model == "snowflake-decision-fast":
+            est_tokens = payload_bytes // 4
+            if est_tokens > cls.MAX_TOKENS_DECISION_FAST:
+                raise ValueError(
+                    f"Decision payload (~{est_tokens} tokens) exceeds {cls.MAX_TOKENS_DECISION_FAST} token limit for snowflake-decision-fast."
+                )
+
+        return normalized, warnings
+
+    @classmethod
+    def _to_snowflake_map_literal(cls, obj: Any) -> str:
+        if isinstance(obj, dict):
+            pairs = []
+            for k, v in obj.items():
+                ek = str(k).replace("'", "''")
+                pairs.append(f"'{ek}': {cls._to_snowflake_map_literal(v)}")
+            return "{" + ", ".join(pairs) + "}"
+        if isinstance(obj, list):
+            return "[" + ", ".join(cls._to_snowflake_map_literal(x) for x in obj) + "]"
+        if isinstance(obj, bool):
+            return "TRUE" if obj else "FALSE"
+        if isinstance(obj, (int, float)):
+            return str(obj)
+        escaped = str(obj if obj is not None else "").replace("'", "''")
+        return f"'{escaped}'"
+
+    @classmethod
+    def build_decision_sql(
+        cls,
+        *,
+        model: str = "snowflake-decision-fast",
+        state: Any = "",
+        questions: dict[str, Any] | None = None,
+        include_none_of_these: bool = False,
+        return_error_details: bool = True,
+        noul_threshold: float = 0.70,
+        extra_parameters: dict[str, Any] | None = None,
+    ) -> str:
+        if extra_parameters:
+            for forbidden in cls.FORBIDDEN_PARAMETERS:
+                if forbidden in extra_parameters:
+                    raise SnowflakeProviderError(
+                        ERROR_UNSUPPORTED_CAPABILITY,
+                        f"Parameter '{forbidden}' is not supported by Snowflake Decision models.",
+                        active_role="CURRENT_ROLE",
+                        operation="snowflake_decision_sql",
+                    )
+        norm_questions, _ = cls.normalize_and_validate_questions(
+            model=model,
+            questions=questions or {},
+            include_none_of_these=include_none_of_these,
+            noul_threshold=noul_threshold,
+            state=state,
+        )
+        state_lit = cls._to_snowflake_map_literal(state)
+        questions_lit = cls._to_snowflake_map_literal(norm_questions)
+        err_flag = "TRUE" if return_error_details else "FALSE"
+        return (
+            "SELECT AI_COMPLETE(\n"
+            f"  model => '{model.strip()}',\n"
+            "  prompt => TO_JSON({\n"
+            f"    'state': {state_lit},\n"
+            f"    'questions': {questions_lit}\n"
+            "  }),\n"
+            f"  return_error_details => {err_flag}\n"
+            ") AS decision;"
+        )
+
+    @classmethod
+    def build_table_decision_sql(
+        cls,
+        *,
+        model: str = "snowflake-decision-fast",
+        database: str = "SNOWFLAKE_LANGFLOW",
+        schema: str = "CORE",
+        table_name: str = "SUPPORT_TICKETS",
+        state_column: str = "ticket_text",
+        questions: dict[str, Any] | None = None,
+        include_none_of_these: bool = False,
+        return_error_details: bool = True,
+        noul_threshold: float = 0.70,
+        max_rows: int = 100,
+    ) -> str:
+        norm_questions, _ = cls.normalize_and_validate_questions(
+            model=model,
+            questions=questions or {},
+            include_none_of_these=include_none_of_these,
+            noul_threshold=noul_threshold,
+            state="",
+        )
+        questions_lit = cls._to_snowflake_map_literal(norm_questions)
+        err_flag = "TRUE" if return_error_details else "FALSE"
+        table_fqn = (
+            table_name.strip()
+            if "." in table_name
+            else f"{(database or 'SNOWFLAKE_LANGFLOW').strip()}.{(schema or 'CORE').strip()}.{table_name.strip()}"
+        )
+        col = (state_column or "ticket_text").strip()
+        lim = max(1, int(max_rows or 100))
+        return (
+            "SELECT\n"
+            "  *,\n"
+            "  AI_COMPLETE(\n"
+            f"    model => '{model.strip()}',\n"
+            "    prompt => TO_JSON({\n"
+            f"      'state': {col},\n"
+            f"      'questions': {questions_lit}\n"
+            "    }),\n"
+            f"    return_error_details => {err_flag}\n"
+            "  ) AS decision\n"
+            f"FROM {table_fqn}\n"
+            f"LIMIT {lim};"
+        )
+
+    @classmethod
+    def evaluate_questions_offline(
+        cls,
+        *,
+        state: Any,
+        questions: dict[str, dict[str, Any]],
+    ) -> dict[str, dict[str, Any]]:
+        state_str = json.dumps(state).lower() if not isinstance(state, str) else state.lower()
+        answers: dict[str, dict[str, Any]] = {}
+        for qid, qspec in questions.items():
+            qtype = qspec["type"]
+            if qtype == "choice":
+                crit: dict[str, str] = qspec["criteria"]
+                keys = list(crit.keys())
+                n = len(keys)
+                chosen = keys[0]
+                for k, desc in crit.items():
+                    if k.lower() in state_str or any(
+                        tok in state_str for tok in desc.lower().split() if len(tok) >= 5
+                    ):
+                        chosen = k
+                        break
+                p_max = 0.88
+                rem = (1.0 - p_max) / float(max(1, n - 1))
+                probs = {k: (p_max if k == chosen else rem) for k in keys}
+                conf = cls.compute_confidence(probs)
+                answers[qid] = {
+                    "type": "choice",
+                    "choice": chosen,
+                    "confidence": conf,
+                    "probabilities": probs,
+                }
+            elif qtype == "score":
+                levels: list[str] = qspec["criteria"]
+                n = len(levels)
+                top_idx = n - 1 if any(w in state_str for w in ("angry", "urgent", "critical", "broken", "furious", "high")) else 0
+                p_max = 0.85
+                rem = (1.0 - p_max) / float(max(1, n - 1))
+                probs = {str(i): (p_max if i == top_idx else rem) for i in range(n)}
+                legend = {str(i): levels[i] for i in range(n)}
+                score_val = cls.compute_weighted_score(probs)
+                conf = cls.compute_confidence(probs)
+                answers[qid] = {
+                    "type": "score",
+                    "score": score_val,
+                    "legend": legend,
+                    "confidence": conf,
+                    "probabilities": probs,
+                }
+            elif qtype == "noul":
+                positive_signals = ("urgent", "immediately", "asap", "critical", "approve", "true", "yes", "emergency")
+                prob = 0.84 if any(sig in state_str for sig in positive_signals) else 0.18
+                answers[qid] = {
+                    "type": "noul",
+                    "noul": prob,
+                }
+        return answers
 
     @classmethod
     def evaluate_decision(
         cls,
         *,
-        engine_mode: str = "AI_COMPLETE (Structured Decision JSON)",
-        model: str = "claude-4-sonnet",
-        input_context: str = "",
-        decision_policy: str = "",
-        branches_csv: str = "approve,review,reject",
+        model: str = "snowflake-decision-fast",
+        state: Any = None,
+        questions: dict[str, Any] | None = None,
+        evaluation_mode: str = "Single State (Text / JSON Input)",
+        include_none_of_these: bool = False,
+        confidence_threshold: float = 0.70,
+        noul_threshold: float = 0.70,
+        return_error_details: bool = True,
+        database: str = "SNOWFLAKE_LANGFLOW",
+        schema: str = "CORE",
+        table_name: str = "SUPPORT_TICKETS",
+        state_column: str = "ticket_text",
+        max_rows: int = 100,
         active_role: str = "ACCOUNTADMIN",
+        # Legacy compatibility parameters
+        engine_mode: str | None = None,
+        input_context: str | None = None,
+        decision_policy: str | None = None,
+        branches_csv: str | None = None,
     ) -> dict[str, Any]:
-        branches = [b.strip() for b in (branches_csv or "approve,review,reject").split(",") if b.strip()] or ["approve"]
-        selected_branch = branches[0]
-        lower_ctx = f"{input_context} {decision_policy}".lower()
-        for b in branches:
-            if b.lower() in lower_ctx:
-                selected_branch = b
-                break
-        schema_str = json.dumps(cls.DECISION_JSON_SCHEMA).replace("'", "''")
-        safe_prompt = f"Policy: {decision_policy} | Input: {input_context} | Branches: {branches}".replace("'", "''")
-        sql_stmt = (
-            f"SELECT AI_COMPLETE(model => '{model}', prompt => '{safe_prompt}', "
-            f"response_format => OBJECT_CONSTRUCT('type', 'json', 'schema', PARSE_JSON('{schema_str}'))) AS DECISION_RESULT"
+        if engine_mode and "SystemOne" in engine_mode:
+            raise SnowflakeProviderError(
+                ERROR_UNSUPPORTED_CAPABILITY,
+                "Cortex SystemOne API (Jev-compatible) has been removed. Use official 'snowflake-decision-fast' or 'snowflake-decision'.",
+                active_role=active_role,
+                operation="snowflake_decision_evaluate",
+            )
+        eff_model = (model or "snowflake-decision-fast").strip()
+        if eff_model not in cls.SUPPORTED_MODELS:
+            if branches_csv is not None or input_context is not None:
+                eff_model = "snowflake-decision-fast"
+            else:
+                raise SnowflakeProviderError(
+                    ERROR_UNSUPPORTED_CAPABILITY,
+                    f"Unsupported Snowflake Decision model '{eff_model}'. Must be one of {cls.SUPPORTED_MODELS}.",
+                    active_role=active_role,
+                    operation="snowflake_decision_evaluate",
+                )
+
+        eff_state = state if state is not None else (input_context or "")
+        if not questions:
+            branches = [b.strip() for b in (branches_csv or "billing,technical_support").split(",") if b.strip()]
+            if len(branches) < 2:
+                branches = [branches[0] if branches else "approve", "review"]
+            questions = {
+                "primary_decision": {
+                    "type": "choice",
+                    "instructions": (decision_policy or "Select the best matching option for the input state.").strip(),
+                    "criteria": {b: f"Select '{b}' when matching the input state." for b in branches},
+                }
+            }
+
+        norm_questions, warnings = cls.normalize_and_validate_questions(
+            model=eff_model,
+            questions=questions,
+            include_none_of_these=include_none_of_these,
+            noul_threshold=noul_threshold,
+            state=eff_state,
         )
-        decision_obj = {
-            "decision": selected_branch.upper(),
-            "confidence": 0.95,
-            "reasoning": f"Evaluated input under active role {active_role} using {engine_mode}.",
-            "selected_branch": selected_branch,
-            "policy_action": "ALLOW" if selected_branch.lower() != "reject" else "BLOCK",
-            "engine_mode": engine_mode,
-            "model": model,
+
+        if evaluation_mode == "Table-Level Processing (Database.Schema.Table)":
+            sql_stmt = cls.build_table_decision_sql(
+                model=eff_model,
+                database=database,
+                schema=schema,
+                table_name=table_name,
+                state_column=state_column,
+                questions=norm_questions,
+                include_none_of_these=False,
+                return_error_details=return_error_details,
+                noul_threshold=noul_threshold,
+                max_rows=max_rows,
+            )
+        else:
+            sql_stmt = cls.build_decision_sql(
+                model=eff_model,
+                state=eff_state,
+                questions=norm_questions,
+                include_none_of_these=False,
+                return_error_details=return_error_details,
+                noul_threshold=noul_threshold,
+            )
+
+        answers = cls.evaluate_questions_offline(state=eff_state, questions=norm_questions)
+        confidences: list[float] = []
+        noul_scores: list[float] = []
+        selected_branch = ""
+        for qid, ans in answers.items():
+            if ans["type"] in ("choice", "score"):
+                confidences.append(float(ans["confidence"]))
+                if ans["type"] == "choice" and not selected_branch:
+                    selected_branch = str(ans["choice"])
+            elif ans["type"] == "noul":
+                noul_scores.append(float(ans["noul"]))
+
+        min_conf = min(confidences) if confidences else 1.0
+        min_noul = min(noul_scores) if noul_scores else 1.0
+        is_high_confidence = (
+            (not confidences or min_conf >= float(confidence_threshold))
+            and (not noul_scores or min_noul >= float(noul_threshold))
+        )
+        primary_confidence = confidences[0] if confidences else (noul_scores[0] if noul_scores else 1.0)
+        route = "high_confidence" if is_high_confidence else "low_confidence"
+
+        return {
+            "answers": answers,
+            "model": eff_model,
+            "evaluation_mode": evaluation_mode,
+            "confidence": primary_confidence,
+            "confidence_threshold": float(confidence_threshold),
+            "noul_threshold": float(noul_threshold),
+            "high_confidence": is_high_confidence,
+            "route": route,
+            "selected_branch": selected_branch or route,
+            "decision": (selected_branch or route).upper(),
+            "policy_action": "AUTOMATED_ACTION" if is_high_confidence else "HUMAN_REVIEW",
+            "return_error_details": bool(return_error_details),
+            "warnings": warnings,
+            "active_role": active_role,
             "sql_preview": sql_stmt,
         }
-        return decision_obj
+
 

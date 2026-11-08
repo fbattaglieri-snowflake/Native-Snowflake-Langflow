@@ -708,6 +708,11 @@ def heal_sqlite_invalid_uuid_rows(conn: Any) -> int:
                     continue
 
         showcase_uuid = "50700000000040008000000000000507" if use_hex else "50700000-0000-4000-8000-000000000507"
+        seed_showcase = os.getenv("SNOWFLAKE_SEED_SHOWCASE_FLOW", "").strip().lower() in ("1", "true", "yes")
+        explicitly_bootstrapped = bool(
+            globals().get("LIVE_BRIDGE") is not None
+            and getattr(globals().get("LIVE_BRIDGE"), "_showcase_explicitly_bootstrapped", False)
+        )
         valid_user_id: str | None = None
         if "user" in tables:
             for ur in cur.execute("SELECT id FROM user ORDER BY is_superuser DESC").fetchall():
@@ -724,6 +729,39 @@ def heal_sqlite_invalid_uuid_rows(conn: Any) -> int:
                     break
 
         if "flow" in tables:
+            # W2-R9-06 (NP-01): Purge unsolicited New Flow (Backup)* and auto-seeded showcase flow
+            # unless SNOWFLAKE_SEED_SHOWCASE_FLOW=true or explicitly requested, while preserving 100% of user flows.
+            cur.execute(
+                "DELETE FROM flow WHERE name = 'New Flow (Backup)' OR name LIKE 'New Flow (Backup)%' OR name LIKE '% (Backup)'"
+            )
+            if cur.rowcount and cur.rowcount > 0:
+                repaired += int(cur.rowcount)
+            if not seed_showcase and not explicitly_bootstrapped:
+                cur.execute(
+                    "DELETE FROM flow WHERE id IN (?, ?, ?, ?) OR name = ?",
+                    (
+                        "50700000000040008000000000000507",
+                        "50700000-0000-4000-8000-000000000507",
+                        "f0000000000040008000000000000507",
+                        "f0000000-0000-4000-8000-000000000507",
+                        "Snowflake_Full_Memory_Enterprise_Agent",
+                    ),
+                )
+                if cur.rowcount and cur.rowcount > 0:
+                    repaired += int(cur.rowcount)
+                if "transaction" in tables:
+                    cur.execute(
+                        'DELETE FROM "transaction" WHERE id IN (?, ?) OR flow_id IN (?, ?, ?, ?)',
+                        (
+                            "50700000000040008000000000000507",
+                            "50700000-0000-4000-8000-000000000507",
+                            "50700000000040008000000000000507",
+                            "50700000-0000-4000-8000-000000000507",
+                            "f0000000000040008000000000000507",
+                            "f0000000-0000-4000-8000-000000000507",
+                        ),
+                    )
+
             flow_cols = {str(c[1]) for c in cur.execute("PRAGMA table_info(flow)").fetchall()}
             select_cols = ["rowid", "id"] + [
                 c
@@ -738,7 +776,7 @@ def heal_sqlite_invalid_uuid_rows(conn: Any) -> int:
                 raw_id = str(row_map.get("id") or "")
                 norm_id = _normalize_sqlite_uuid_val(raw_id, use_hex=use_hex)
                 if norm_id is None:
-                    if str(row_map.get("name") or "") == "Snowflake_Full_Memory_Enterprise_Agent":
+                    if (seed_showcase or explicitly_bootstrapped) and str(row_map.get("name") or "") == "Snowflake_Full_Memory_Enterprise_Agent":
                         norm_id = showcase_uuid
                     else:
                         norm_id = (
@@ -816,7 +854,8 @@ def heal_sqlite_invalid_uuid_rows(conn: Any) -> int:
                         if uc == "user_id" and valid_user_id:
                             norm_v = valid_user_id
                         elif uc == "flow_id":
-                            norm_v = showcase_uuid
+                            u_flow = uuid.uuid5(uuid.NAMESPACE_DNS, f"flow:{raw_v}")
+                            norm_v = u_flow.hex if use_hex else str(u_flow)
                         else:
                             seed = f"{tbl_name}:{uc}:{raw_v}:{t_rowid}"
                             u_gen = uuid.uuid5(uuid.NAMESPACE_DNS, seed)
@@ -844,6 +883,11 @@ def heal_sqlite_invalid_uuid_rows(conn: Any) -> int:
     except Exception:  # noqa: BLE001
         pass
     return repaired
+
+
+def _should_seed_showcase_flow() -> bool:
+    """Return True only when `SNOWFLAKE_SEED_SHOWCASE_FLOW` is explicitly enabled (`W2-R9-06`)."""
+    return os.getenv("SNOWFLAKE_SEED_SHOWCASE_FLOW", "").strip().lower() in ("1", "true", "yes")
 
 
 def ensure_sqlite_wal_and_uv_cache() -> dict[str, Any]:
@@ -2535,6 +2579,18 @@ class LiveSnowflakeBridge:
             (i for i, m in enumerate(self.memories_registry) if str(m.get("name") or "").strip().upper() == name.upper() and name),
             None,
         )
+        prev_records = (
+            list(self.memories_registry[existing_idx].get("stored_records") or [])
+            if existing_idx is not None
+            else []
+        )
+        if body.get("stored_records"):
+            entry["stored_records"] = list(body.get("stored_records") or [])
+        elif prev_records:
+            entry["stored_records"] = prev_records
+        else:
+            entry["stored_records"] = self._default_stored_records_for_memory(entry)
+
         if existing_idx is not None:
             self.memories_registry[existing_idx] = entry
         else:
@@ -2557,7 +2613,7 @@ class LiveSnowflakeBridge:
                     object_name=postgres_instance,
                     flow_id=norm_fid,
                 )
-        elif create_physical:
+        elif create_physical and not body.get("_skip_context_auto_register"):
             self.register_object_in_context(
                 database=db,
                 schema=sch,
@@ -3909,8 +3965,19 @@ class LiveSnowflakeBridge:
         *,
         dry_run: bool = True,
         execute_simulation: bool = True,
+        explicit_user_request: bool = True,
     ) -> dict[str, Any]:
-        """Bootstrap and optionally run the `Snowflake_Full_Memory_Enterprise_Agent` showcase flow combining `#1..#5` + `#7` + `#8` (`W2-R4-07`)."""
+        """Bootstrap and optionally run the `Snowflake_Full_Memory_Enterprise_Agent` showcase flow combining `#1..#5` + `#7` + `#8` (`W2-R4-07`, `W2-R9-06`)."""
+        if not explicit_user_request and not _should_seed_showcase_flow():
+            return {
+                "ok": True,
+                "skipped_unsolicited_seed": True,
+                "explicit_user_request": False,
+                "flow_persisted_sqlite": False,
+                "flow_id": "f0000000-0000-4000-8000-000000000507",
+                "flow_name": "Snowflake_Full_Memory_Enterprise_Agent",
+            }
+        self._showcase_explicitly_bootstrapped = True
         try:
             from .showcase_full_memory_agent import bootstrap_and_run_full_memory_showcase
 
@@ -3918,6 +3985,7 @@ class LiveSnowflakeBridge:
                 self,
                 dry_run=dry_run,
                 execute_simulation=execute_simulation,
+                explicit_user_request=explicit_user_request,
             )
         except ImportError:
             pass
@@ -5336,8 +5404,10 @@ class LiveSnowflakeBridge:
         *,
         subpath: str = "",
         pattern: str = "",
+        media_filter: str | None = None,
+        flow_id: str | None = None,
     ) -> dict[str, Any]:
-        """Execute `LIST @<stage_fqn>` and return files with `name`, `size`, `md5`, `last_modified` (`W2-R5-05`)."""
+        """Execute `LIST @<stage_fqn>` and return files with `name`, `size`, `md5`, `last_modified`, `media_type`, and `to_file_sql` (`W2-R5-05`, `W2-R9-04`)."""
         clean_fqn = self._normalize_stage_fqn_no_at(stage_fqn)
         clean_subpath = str(subpath or "").strip().strip("/")
         target_at = f"@{clean_fqn}/{clean_subpath}" if clean_subpath else f"@{clean_fqn}"
@@ -5345,12 +5415,27 @@ class LiveSnowflakeBridge:
         list_sql = f"LIST {target_at}{pattern_clause};"
         res = self.execute_sql(list_sql)
 
+        def _classify_media(rel_p: str) -> str:
+            ext = ("." + rel_p.rsplit(".", 1)[-1].lower()) if "." in rel_p else ""
+            if ext in (".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp"):
+                return "image"
+            if ext in (".mp3", ".wav", ".flac", ".m4a", ".ogg", ".aac", ".aiff", ".pcm"):
+                return "audio"
+            if ext in (".mp4", ".mov", ".webm", ".mkv", ".avi", ".mpeg", ".flv", ".mpg", ".wmv", ".3gpp", ".ogv"):
+                return "video"
+            if ext in (".pdf", ".docx", ".pptx", ".txt", ".md", ".html", ".csv", ".json", ".tiff", ".tif"):
+                return "document"
+            return "other"
+
         files_by_path: dict[str, dict[str, Any]] = {}
         for f_rec in self.stage_files_registry.get(clean_fqn, []):
             p_key = str(f_rec.get("path") or f_rec.get("name") or "").strip()
             if clean_subpath and not p_key.startswith(clean_subpath):
                 continue
-            files_by_path[p_key] = dict(f_rec)
+            rec_copy = dict(f_rec)
+            rec_copy.setdefault("media_type", _classify_media(p_key))
+            rec_copy.setdefault("to_file_sql", f"TO_FILE('@{clean_fqn}', '{p_key}')")
+            files_by_path[p_key] = rec_copy
 
         for r in res.get("rows") or []:
             if not isinstance(r, dict):
@@ -5368,17 +5453,197 @@ class LiveSnowflakeBridge:
                 "last_modified": str(r.get("last_modified") or r.get("LAST_MODIFIED") or ""),
                 "stage_fqn": f"@{clean_fqn}",
                 "scoped_path": f"@{clean_fqn}/{rel_path}",
+                "media_type": _classify_media(rel_path),
+                "to_file_sql": f"TO_FILE('@{clean_fqn}', '{rel_path}')",
             }
 
         files_list = list(files_by_path.values())
+        mf = str(media_filter or "").strip().lower()
+        if mf and mf not in ("all", "*"):
+            allowed_kinds: set[str] = set()
+            if mf in ("image", "images"):
+                allowed_kinds.add("image")
+            elif mf in ("audio", "mp3"):
+                allowed_kinds.update({"audio", "video"})
+            elif mf in ("video", "videos"):
+                allowed_kinds.add("video")
+            elif mf in ("document", "documents", "doc", "docs"):
+                allowed_kinds.update({"document", "image"})
+            elif mf == "multimodal":
+                allowed_kinds.update({"image", "audio", "video", "document"})
+            if allowed_kinds:
+                files_list = [f for f in files_list if str(f.get("media_type") or "") in allowed_kinds]
+
         return {
             "ok": True,
             "stage_fqn": f"@{clean_fqn}",
             "sql": list_sql,
+            "directory_sql": f"SELECT * FROM DIRECTORY(@{clean_fqn});",
+            "media_filter": mf or "all",
             "files": files_list,
             "total": len(files_list),
             "active_role": self.active_role,
         }
+
+    def list_custom_tool_identifiers(
+        self,
+        resource_type: str = "procedure",
+        database_schema: str = "Database All",
+        flow_id: str | None = None,
+    ) -> list[str]:
+        """List Snowflake Custom Tool identifiers (`procedure`, `function`, `table_function`) with full argument signatures (`W2-R9-01`)."""
+        res_type = str(resource_type or "procedure").strip().lower()
+        db_sch = str(database_schema or "Database All").strip()
+        target_pairs: list[tuple[str, str]] = []
+        if db_sch and db_sch not in ("Database All", "All", "*") and "." in db_sch:
+            d_part, s_part = db_sch.split(".", 1)
+            target_pairs.append((d_part.strip().upper(), s_part.strip().upper()))
+        else:
+            for d_name in self.get_context_databases(flow_id=flow_id):
+                for s_name in self.get_context_schemas(d_name, flow_id=flow_id):
+                    pair = (str(d_name).strip().upper(), str(s_name).strip().upper())
+                    if pair not in target_pairs:
+                        target_pairs.append(pair)
+        if not target_pairs:
+            target_pairs.append((self.database.upper(), self.schema.upper()))
+
+        identifiers: list[str] = []
+        category = "procedures" if res_type == "procedure" else "functions"
+        for db_n, sch_n in target_pairs:
+            if self._has_spcs_token() or self._is_execute_sql_mocked():
+                show_kind = "PROCEDURES" if res_type == "procedure" else "FUNCTIONS"
+                show_res = self.execute_sql(f"SHOW USER {show_kind} IN SCHEMA {db_n}.{sch_n};")
+                for row in show_res.get("rows") or []:
+                    if not isinstance(row, dict):
+                        continue
+                    is_builtin = str(row.get("is_builtin") or row.get("IS_BUILTIN") or "N").strip().upper()
+                    if is_builtin == "Y":
+                        continue
+                    if res_type in ("function", "table_function"):
+                        is_tbl = str(row.get("is_table_function") or row.get("IS_TABLE_FUNCTION") or "N").strip().upper()
+                        if res_type == "table_function" and is_tbl != "Y":
+                            continue
+                        if res_type == "function" and is_tbl == "Y":
+                            continue
+                    raw_args = str(row.get("arguments") or row.get("ARGUMENTS") or row.get("name") or row.get("NAME") or "").strip()
+                    if not raw_args:
+                        continue
+                    sig_only = raw_args.split(" RETURN ")[0].strip()
+                    fqn_sig = sig_only if "." in sig_only.split("(")[0] else f"{db_n}.{sch_n}.{sig_only}"
+                    if "(" not in fqn_sig:
+                        fqn_sig = f"{fqn_sig}(VARCHAR)"
+                    if fqn_sig not in identifiers:
+                        identifiers.append(fqn_sig)
+
+            for ctx_obj in self.get_context_objects(db_n, sch_n, category, flow_id=flow_id):
+                obj_s = str(ctx_obj or "").strip()
+                if not obj_s:
+                    continue
+                if res_type == "table_function" and "UDTF" not in obj_s.upper() and "TABLE" not in obj_s.upper():
+                    continue
+                if res_type == "function" and "UDTF" in obj_s.upper():
+                    continue
+                sig_only = obj_s.split(" RETURN ")[0].strip()
+                fqn_sig = sig_only if "." in sig_only.split("(")[0] else f"{db_n}.{sch_n}.{sig_only}"
+                if "(" not in fqn_sig:
+                    if res_type == "procedure" and fqn_sig.upper().endswith("SEND_EMAIL_ALL"):
+                        fqn_sig = f"{fqn_sig}(VARCHAR, VARCHAR, VARCHAR)"
+                    else:
+                        fqn_sig = f"{fqn_sig}(VARCHAR)"
+                if fqn_sig not in identifiers:
+                    identifiers.append(fqn_sig)
+
+        prefix = f"{target_pairs[0][0]}.{target_pairs[0][1]}"
+        if not identifiers:
+            if res_type == "procedure":
+                identifiers = [
+                    f"{prefix}.SEND_EMAIL_ALL(VARCHAR, VARCHAR, VARCHAR)",
+                    f"{prefix}.ORCHESTRATE_WORKFLOW_STEP(VARCHAR)",
+                ]
+            elif res_type == "table_function":
+                identifiers = [
+                    f"{prefix}.LOOKUP_CUSTOMERS_UDTF(VARCHAR, NUMBER)",
+                ]
+            else:
+                identifiers = [
+                    f"{prefix}.CALCULATE_DISCOUNT(FLOAT, VARCHAR)",
+                ]
+        return identifiers
+
+    def describe_custom_tool_signature(
+        self,
+        resource_type: str = "procedure",
+        identifier: str = "",
+        database_schema: str | None = None,
+        flow_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Inspect a Snowflake procedure/function signature via `DESCRIBE PROCEDURE/FUNCTION` and map parameters (`W2-R9-01`)."""
+        from lfx_snowflake.components.llm_operations import SnowflakeCustomToolEngine
+
+        res_type = str(resource_type or "procedure").strip().lower()
+        ident = str(identifier or "").strip()
+        if not ident and res_type not in ("procedure", "function", "table_function"):
+            ident = str(resource_type).strip()
+            res_type = "procedure"
+        if not ident:
+            ident = f"{self.database}.{self.schema}.SEND_EMAIL_ALL(VARCHAR, VARCHAR, VARCHAR)"
+
+        default_db_sch = (
+            database_schema
+            if database_schema and database_schema != "Database All" and "." in str(database_schema)
+            else f"{self.database}.{self.schema}"
+        )
+        bare_fqn = SnowflakeCustomToolEngine.extract_bare_identifier(ident, default_db_schema=default_db_sch)
+        arg_types_part = ident[ident.find("(") : ident.rfind(")") + 1] if "(" in ident and ")" in ident else "()"
+        desc_kw = "PROCEDURE" if res_type == "procedure" else "FUNCTION"
+        describe_sql = f"DESCRIBE {desc_kw} {bare_fqn}{arg_types_part};"
+        desc_rows: list[dict[str, Any]] = []
+        if self._has_spcs_token() or self._is_execute_sql_mocked():
+            desc_res = self.execute_sql(describe_sql)
+            if isinstance(desc_res.get("rows"), list):
+                desc_rows = [r for r in desc_res["rows"] if isinstance(r, dict)]
+
+        suggested_name = SnowflakeCustomToolEngine.derive_tool_name(ident)
+        try:
+            params = SnowflakeCustomToolEngine.parse_signature_parameters(ident, describe_rows=desc_rows)
+            payload = SnowflakeCustomToolEngine.build_cortex_agent_tool_payload(
+                resource_type=res_type,
+                custom_tool_identifier=ident,
+                tool_name=suggested_name,
+                parameters=params,
+                default_db_schema=default_db_sch,
+            )
+            return {
+                "ok": True,
+                "status_code": 200,
+                "resource_type": res_type,
+                "identifier": bare_fqn,
+                "full_signature": f"{bare_fqn}{arg_types_part}",
+                "describe_sql": describe_sql,
+                "suggested_tool_name": suggested_name,
+                "parameters": params,
+                "input_schema": payload["tool_spec"]["input_schema"],
+                "tool_spec": payload["tool_spec"],
+                "tool_resources": payload["tool_resources"],
+                "active_role": self.active_role,
+            }
+        except Exception as exc:  # noqa: BLE001
+            err_code = str(getattr(exc, "code", None) or getattr(exc, "error_code", None) or "ERROR_UNSUPPORTED_CAPABILITY")
+            err_msg = str(getattr(exc, "message", None) or str(exc))
+            return {
+                "ok": False,
+                "status_code": 422,
+                "error_code": err_code,
+                "unsupported_object_parameter": True,
+                "message": f"{err_code}: {err_msg}" if not err_msg.startswith(err_code) else err_msg,
+                "resource_type": res_type,
+                "identifier": bare_fqn,
+                "full_signature": f"{bare_fqn}{arg_types_part}",
+                "describe_sql": describe_sql,
+                "suggested_tool_name": suggested_name,
+                "parameters": [],
+                "active_role": self.active_role,
+            }
 
     def upload_stage_file(
         self,
@@ -9057,7 +9322,11 @@ class LiveSnowflakeBridge:
                     if self._has_spcs_token():
                         if not getattr(self, "_showcase_bootstrapped_on_spcs", False):
                             self._showcase_bootstrapped_on_spcs = True
-                            self.bootstrap_full_memory_showcase_flow(dry_run=False, execute_simulation=True)
+                            self.bootstrap_full_memory_showcase_flow(
+                                dry_run=False,
+                                execute_simulation=True,
+                                explicit_user_request=_should_seed_showcase_flow(),
+                            )
                         self.sync_langflow_traces_to_snowflake(limit=25, replicate_sqlite=True)
                 except Exception:  # noqa: BLE001
                     pass
@@ -10158,6 +10427,73 @@ def register_snowflake_fastapi_routes(app: Any) -> None:
         status_code = int(res.get("status_code") or (201 if res.get("ok") else 403))
         return JSONResponse(status_code=status_code, content=res)
 
+    @sf_router.get("/custom-tools")
+    async def get_custom_tools_route(
+        request: Request,
+        resource_type: str = "procedure",
+        database_schema: str = "Database All",
+        flow_id: str | None = None,
+    ) -> JSONResponse:
+        req_fid = flow_id or request.query_params.get("flow_id") or request.headers.get("X-Snowflake-Flow-Id")
+        req_rt = request.query_params.get("resource_type") or resource_type or "procedure"
+        req_dbs = request.query_params.get("database_schema") or database_schema or "Database All"
+        items = await asyncio.to_thread(
+            lambda: LIVE_BRIDGE.list_custom_tool_identifiers(
+                resource_type=req_rt,
+                database_schema=req_dbs,
+                flow_id=req_fid,
+            )
+        )
+        return JSONResponse(
+            status_code=200,
+            content={
+                "ok": True,
+                "resource_type": req_rt,
+                "database_schema": req_dbs,
+                "identifiers": items,
+                "count": len(items),
+                "active_role": LIVE_BRIDGE.active_role,
+            },
+        )
+
+    @sf_router.get("/custom-tools/describe")
+    @sf_router.post("/custom-tools/describe")
+    async def describe_custom_tool_route(
+        request: Request,
+        resource_type: str = "procedure",
+        identifier: str = "",
+        database_schema: str | None = None,
+        flow_id: str | None = None,
+    ) -> JSONResponse:
+        req_fid = flow_id or request.query_params.get("flow_id") or request.headers.get("X-Snowflake-Flow-Id")
+        req_rt = request.query_params.get("resource_type") or resource_type or "procedure"
+        req_id = (
+            request.query_params.get("identifier")
+            or request.query_params.get("custom_tool_identifier")
+            or identifier
+        )
+        req_dbs = request.query_params.get("database_schema") or database_schema
+        if request.method.upper() == "POST":
+            try:
+                body = await request.json()
+                if isinstance(body, dict):
+                    req_rt = str(body.get("resource_type") or req_rt)
+                    req_id = str(body.get("identifier") or body.get("custom_tool_identifier") or req_id)
+                    req_dbs = body.get("database_schema") or req_dbs
+                    req_fid = body.get("flow_id") or req_fid
+            except Exception:  # noqa: BLE001
+                pass
+        res = await asyncio.to_thread(
+            lambda: LIVE_BRIDGE.describe_custom_tool_signature(
+                resource_type=req_rt,
+                identifier=req_id,
+                database_schema=req_dbs,
+                flow_id=req_fid,
+            )
+        )
+        status_code = int(res.get("status_code") or (200 if res.get("ok", True) else 422))
+        return JSONResponse(status_code=status_code, content=res)
+
     @sf_router.get("/stages/files")
     async def get_stage_files_query_route(
         request: Request,
@@ -10165,6 +10501,7 @@ def register_snowflake_fastapi_routes(app: Any) -> None:
         stage: str | None = None,
         subpath: str = "",
         pattern: str = "",
+        media_filter: str | None = None,
     ) -> JSONResponse:
         target_stage = (
             stage_fqn
@@ -10173,8 +10510,16 @@ def register_snowflake_fastapi_routes(app: Any) -> None:
             or request.query_params.get("stage")
             or f"@{LIVE_BRIDGE.database}.{LIVE_BRIDGE.schema}.{LIVE_BRIDGE.stage_name}"
         )
+        req_mf = media_filter or request.query_params.get("media_filter")
+        req_fid = request.query_params.get("flow_id") or request.headers.get("X-Snowflake-Flow-Id")
         res = await asyncio.to_thread(
-            lambda: LIVE_BRIDGE.list_stage_files(target_stage, subpath=subpath, pattern=pattern)
+            lambda: LIVE_BRIDGE.list_stage_files(
+                target_stage,
+                subpath=subpath,
+                pattern=pattern,
+                media_filter=req_mf,
+                flow_id=req_fid,
+            )
         )
         return JSONResponse(status_code=200, content=res)
 
@@ -10275,9 +10620,18 @@ def register_snowflake_fastapi_routes(app: Any) -> None:
         request: Request,
         subpath: str = "",
         pattern: str = "",
+        media_filter: str | None = None,
     ) -> JSONResponse:
+        req_mf = media_filter or request.query_params.get("media_filter")
+        req_fid = request.query_params.get("flow_id") or request.headers.get("X-Snowflake-Flow-Id")
         res = await asyncio.to_thread(
-            lambda: LIVE_BRIDGE.list_stage_files(stage_fqn, subpath=subpath, pattern=pattern)
+            lambda: LIVE_BRIDGE.list_stage_files(
+                stage_fqn,
+                subpath=subpath,
+                pattern=pattern,
+                media_filter=req_mf,
+                flow_id=req_fid,
+            )
         )
         return JSONResponse(status_code=200, content=res)
 

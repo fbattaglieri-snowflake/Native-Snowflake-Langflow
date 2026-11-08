@@ -5,87 +5,411 @@ from typing import Any
 
 import lfx_snowflake._lfx_compat  # noqa: F401
 from lfx.custom import Component
-from lfx.io import DropdownInput, MessageTextInput, MultilineInput, Output, StrInput
-from lfx.schema import Data
+from lfx.io import (
+    BoolInput,
+    DropdownInput,
+    FloatInput,
+    HandleInput,
+    IntInput,
+    MessageTextInput,
+    MultilineInput,
+    Output,
+    StrInput,
+)
+from lfx.schema import Data, DataFrame
 from lfx.schema.message import Message
 
-from lfx_snowflake.components.ai_function import get_compatible_models
-from lfx_snowflake.components.llm_operations import SnowflakeDecisionEngine
+from lfx_snowflake.components.llm_operations import (
+    DECISION_EVALUATION_MODES,
+    SUPPORTED_DECISION_MODELS,
+    SUPPORTED_DECISION_QUESTION_TYPES,
+    SnowflakeDecisionEngine,
+)
+from lfx_snowflake.context_helpers import _resolve_flow_id
 from lfx_snowflake.fastapi_live_bridge import LIVE_BRIDGE
+
+
+DEFAULT_SUPPORT_TICKET_QUESTIONS = json.dumps(
+    {
+        "department": {
+            "type": "choice",
+            "instructions": "Which team should handle this?",
+            "criteria": {
+                "billing": "Payment, invoice, or subscription issues",
+                "technical_support": "Product bugs, outages, or configuration issues",
+                "account_management": "Contract upgrades, renewals, or seat changes",
+                "none_of_these": "None of the listed options apply or not stated in the input.",
+            },
+        },
+        "frustration": {
+            "type": "score",
+            "instructions": "How frustrated the customer appears",
+            "criteria": [
+                "Calm",
+                "Frustrated but civil",
+                "Very angry",
+            ],
+        },
+        "is_urgent": {
+            "type": "noul",
+            "instructions": "The message conveys urgency",
+            "criteria": {
+                "true": "Customer reports a blocker, production outage, or immediate deadline",
+                "false": "Routine inquiry without time-critical impact",
+            },
+        },
+    },
+    indent=2,
+)
+
+
+def _decision_databases(flow_id: str | None = None) -> list[str]:
+    return LIVE_BRIDGE.get_context_databases(flow_id=flow_id or _resolve_flow_id())
+
+
+def _decision_schemas(database: str | None = None, flow_id: str | None = None) -> list[str]:
+    return LIVE_BRIDGE.get_context_schemas(database, flow_id=flow_id or _resolve_flow_id())
+
+
+def _decision_tables(
+    database: str | None = None,
+    schema: str | None = None,
+    flow_id: str | None = None,
+) -> list[str]:
+    eff_fid = flow_id or _resolve_flow_id()
+    items: list[str] = []
+    for cat in ("tables", "views"):
+        for t in LIVE_BRIDGE.get_context_objects(database, schema, cat, flow_id=eff_fid):
+            if t not in items:
+                items.append(t)
+    if "SUPPORT_TICKETS" not in items:
+        items.append("SUPPORT_TICKETS")
+    return items
 
 
 class SnowflakeDecisionComponent(Component):
     display_name = "Decision"
     description = (
-        "Governed Snowflake Decision component (snowflake-decision) supporting "
-        "AI_COMPLETE (Structured Decision JSON enforcing {decision, confidence, reasoning, selected_branch, policy_action}) "
-        "with capability-filtered structured-output models and Cortex SystemOne API (Jev-compatible)."
+        "Official Snowflake Decision component powered by AI_COMPLETE with 'snowflake-decision-fast' "
+        "(low latency, 2..16 choice options, 32k token limit) and 'snowflake-decision' "
+        "(high accuracy, 2..32 choice options, 256 KiB limit), supporting choice, score (0..n-1), "
+        "and noul questions (1..32 questions, max 256 total options), Single State & Table-Level "
+        "Processing, and confidence-based routing."
     )
     icon = "Snowflake"
     name = "SnowflakeDecision"
     legacy_name = "snowflake-decision"
 
     inputs = [
-        DropdownInput(
-            name="engine_mode",
-            display_name="Decision Engine Mode",
-            options=[
-                "AI_COMPLETE (Structured Decision JSON)",
-                "Cortex SystemOne API (Jev-compatible)",
-            ],
-            value="AI_COMPLETE (Structured Decision JSON)",
-            real_time_refresh=True,
+        HandleInput(
+            name="snowflake_context",
+            display_name="Snowflake Context (Optional Override)",
+            input_types=["Data"],
+            required=False,
+            advanced=True,
         ),
         DropdownInput(
             name="model",
-            display_name="Model (Structured Outputs Qualified)",
-            options=get_compatible_models(require_structured_outputs=True),
-            value="claude-sonnet-5-5",
+            display_name="Decision Model",
+            options=list(SUPPORTED_DECISION_MODELS),
+            value="snowflake-decision-fast",
             real_time_refresh=True,
-            combobox=True,
+            info=(
+                "Select 'snowflake-decision-fast' (default, 2..16 choice options, 32k token limit) "
+                "or 'snowflake-decision' (high accuracy, 2..32 choice options, 256 KiB JSON limit)."
+            ),
+        ),
+        DropdownInput(
+            name="evaluation_mode",
+            display_name="Evaluation Mode",
+            options=list(DECISION_EVALUATION_MODES),
+            value="Single State (Text / JSON Input)",
+            real_time_refresh=True,
         ),
         MessageTextInput(
-            name="input_context",
-            display_name="Input Context / Payload",
-            value="Request to approve governed pipeline deployment",
+            name="state_input",
+            display_name="State Input (Text or JSON Object)",
+            value="Our production billing pipeline failed after invoice #42 and we need urgent technical_support.",
+            show=True,
         ),
-        MultilineInput(
-            name="decision_policy",
-            display_name="Decision Policy & Criteria",
-            value="Approve when RBAC checks pass; route to review when manual confirmation is required; reject on policy violation.",
+        DropdownInput(
+            name="database",
+            display_name="Database (Table Mode)",
+            options=_decision_databases(),
+            value="SNOWFLAKE_LANGFLOW",
+            real_time_refresh=True,
+            combobox=True,
+            show=False,
+        ),
+        DropdownInput(
+            name="schema_name",
+            display_name="Schema (Table Mode)",
+            options=_decision_schemas("SNOWFLAKE_LANGFLOW"),
+            value="CORE",
+            real_time_refresh=True,
+            combobox=True,
+            show=False,
+        ),
+        DropdownInput(
+            name="table_name",
+            display_name="Table / View (Table Mode)",
+            options=_decision_tables("SNOWFLAKE_LANGFLOW", "CORE"),
+            value="SUPPORT_TICKETS",
+            real_time_refresh=True,
+            combobox=True,
+            show=False,
         ),
         StrInput(
-            name="branches_csv",
-            display_name="Candidate Branches (CSV)",
-            value="approve,review,reject",
+            name="state_column",
+            display_name="State Column Name (Table Mode)",
+            value="ticket_text",
+            show=False,
+        ),
+        IntInput(
+            name="max_rows",
+            display_name="Max Rows (Table Mode)",
+            value=100,
+            show=False,
+        ),
+        DropdownInput(
+            name="question_type",
+            display_name="Primary Question Type",
+            options=list(SUPPORTED_DECISION_QUESTION_TYPES),
+            value="choice",
+            real_time_refresh=True,
+            info="Question type: 'choice' (finite options), 'score' (2..10 ordered rubric levels 0..n-1), or 'noul' (probability ~0.08–0.92).",
+        ),
+        StrInput(
+            name="question_id",
+            display_name="Primary Question ID (1..64 chars)",
+            value="department",
+        ),
+        MultilineInput(
+            name="question_instructions",
+            display_name="Primary Question Instructions",
+            value="Which team should handle this?",
+        ),
+        MultilineInput(
+            name="question_criteria_json",
+            display_name="Primary Question Criteria JSON",
+            value=json.dumps(
+                {
+                    "billing": "Payment, invoice, or subscription issues",
+                    "technical_support": "Product bugs, outages, or configuration issues",
+                    "account_management": "Contract upgrades, renewals, or seat changes",
+                },
+                indent=2,
+            ),
+        ),
+        BoolInput(
+            name="include_none_of_these",
+            display_name="Include 'none_of_these' / 'not_stated' option",
+            value=True,
+            info="Recommended by Snowflake Decision documentation for 'choice' questions.",
+        ),
+        MultilineInput(
+            name="questions_json",
+            display_name="Multi-Question Payload JSON (1..32 Questions, max 256 Total Options)",
+            value=DEFAULT_SUPPORT_TICKET_QUESTIONS,
+            info=(
+                "Define 1..32 independent questions ('choice', 'score', 'noul') evaluated in a single AI_COMPLETE call. "
+                "When non-empty, this multi-question object is used."
+            ),
+        ),
+        FloatInput(
+            name="confidence_threshold",
+            display_name="Confidence Threshold (choice / score)",
+            value=0.70,
+            info="Normalized confidence threshold using (n * p_max - 1) / (n - 1).",
+        ),
+        FloatInput(
+            name="noul_threshold",
+            display_name="Noul Probability Threshold (<= 0.92)",
+            value=0.70,
+            info="Noul probabilities stay within ~0.08–0.92; thresholds above 0.92 are rejected.",
+        ),
+        BoolInput(
+            name="return_error_details",
+            display_name="Return Error Details (return_error_details => TRUE)",
+            value=True,
         ),
     ]
+
     outputs = [
-        Output(display_name="Decision JSON", name="decision_json", method="get_decision_json"),
-        Output(display_name="Selected Branch", name="selected_branch", method="get_selected_branch"),
-        Output(display_name="Audit Record", name="audit_record", method="get_audit_record"),
+        Output(
+            display_name="Decision Object (answers)",
+            name="decision_object",
+            method="run_decision",
+        ),
+        Output(
+            display_name="Automated Action Route (High Confidence)",
+            name="high_confidence_route",
+            method="route_high_confidence",
+        ),
+        Output(
+            display_name="Human Review / Fallback Route (Low Confidence)",
+            name="low_confidence_route",
+            method="route_low_confidence",
+        ),
+        Output(
+            display_name="Table Decisions (DataFrame)",
+            name="table_decisions",
+            method="run_table_decisions",
+        ),
     ]
 
     def update_build_config(
         self, build_config: dict[str, Any], field_value: Any, field_name: str | None = None
     ) -> dict[str, Any]:
-        compatible = get_compatible_models(require_structured_outputs=True)
+        flow_id = _resolve_flow_id(self, build_config)
         if "model" in build_config:
-            build_config["model"]["options"] = compatible
-            cur = build_config["model"].get("value")
-            if cur and cur not in compatible and compatible:
-                build_config["model"]["value"] = compatible[0]
+            build_config["model"]["options"] = list(SUPPORTED_DECISION_MODELS)
+            cur_m = build_config["model"].get("value")
+            if field_name == "model" and field_value in SUPPORTED_DECISION_MODELS:
+                build_config["model"]["value"] = field_value
+            elif cur_m not in SUPPORTED_DECISION_MODELS:
+                build_config["model"]["value"] = "snowflake-decision-fast"
+
+        eval_mode = (
+            field_value
+            if field_name == "evaluation_mode" and isinstance(field_value, str)
+            else build_config.get("evaluation_mode", {}).get("value")
+            or getattr(self, "evaluation_mode", "Single State (Text / JSON Input)")
+        )
+        is_table_mode = eval_mode == "Table-Level Processing (Database.Schema.Table)"
+
+        if "state_input" in build_config:
+            build_config["state_input"]["show"] = not is_table_mode
+        for tbl_field in ("database", "schema_name", "table_name", "state_column", "max_rows"):
+            if tbl_field in build_config:
+                build_config[tbl_field]["show"] = is_table_mode
+
+        if "database" in build_config:
+            build_config["database"]["options"] = _decision_databases(flow_id=flow_id)
+        db = (
+            field_value
+            if field_name == "database" and isinstance(field_value, str)
+            else build_config.get("database", {}).get("value") or getattr(self, "database", "SNOWFLAKE_LANGFLOW")
+        )
+        schemas = _decision_schemas(db, flow_id=flow_id)
+        if "schema_name" in build_config:
+            build_config["schema_name"]["options"] = schemas
+        sch = (
+            field_value
+            if field_name == "schema_name" and isinstance(field_value, str)
+            else build_config.get("schema_name", {}).get("value") or (schemas[0] if schemas else "CORE")
+        )
+        if "table_name" in build_config:
+            build_config["table_name"]["options"] = _decision_tables(db, sch, flow_id=flow_id)
+
+        qtype = (
+            field_value
+            if field_name == "question_type" and isinstance(field_value, str)
+            else build_config.get("question_type", {}).get("value") or getattr(self, "question_type", "choice")
+        )
+        if "include_none_of_these" in build_config:
+            build_config["include_none_of_these"]["show"] = qtype == "choice"
+
+        if field_name == "noul_threshold" and "noul_threshold" in build_config:
+            raw_nt = float(field_value) if field_value is not None else 0.70
+            if raw_nt > SnowflakeDecisionEngine.MAX_NOUL_THRESHOLD:
+                build_config["noul_threshold"]["value"] = SnowflakeDecisionEngine.MAX_NOUL_THRESHOLD
+
         return build_config
 
-    def _compute(self) -> dict:
+    def _resolve_questions(self) -> dict[str, Any]:
+        raw_multi = getattr(self, "questions_json", None)
+        if isinstance(raw_multi, dict) and raw_multi:
+            return raw_multi
+        if isinstance(raw_multi, str) and raw_multi.strip():
+            parsed = json.loads(raw_multi)
+            if isinstance(parsed, dict) and parsed:
+                return parsed
+
+        qid = (getattr(self, "question_id", "department") or "department").strip()
+        qtype = (getattr(self, "question_type", "choice") or "choice").strip().lower()
+        instr = (getattr(self, "question_instructions", "Which team should handle this?") or "").strip()
+        raw_crit = getattr(self, "question_criteria_json", None)
+        crit = json.loads(raw_crit) if isinstance(raw_crit, str) and raw_crit.strip() else raw_crit
+        entry: dict[str, Any] = {
+            "type": qtype,
+            "instructions": instr,
+        }
+        if crit is not None:
+            entry["criteria"] = crit
+        return {qid: entry}
+
+    def _compute(self) -> dict[str, Any]:
+        raw_state = getattr(self, "state_input", None)
+        if raw_state is None:
+            raw_state = getattr(self, "input_context", "")
+        if isinstance(raw_state, str) and raw_state.strip().startswith("{") and raw_state.strip().endswith("}"):
+            state_val: Any = json.loads(raw_state)
+        else:
+            state_val = raw_state or ""
+
+        questions = self._resolve_questions()
         return SnowflakeDecisionEngine.evaluate_decision(
-            engine_mode=self.engine_mode or "AI_COMPLETE (Structured Decision JSON)",
-            model=self.model or "claude-sonnet-5-5",
-            input_context=self.input_context or "",
-            decision_policy=self.decision_policy or "",
-            branches_csv=self.branches_csv or "approve,review,reject",
+            model=getattr(self, "model", "snowflake-decision-fast") or "snowflake-decision-fast",
+            state=state_val,
+            questions=questions,
+            evaluation_mode=getattr(self, "evaluation_mode", "Single State (Text / JSON Input)")
+            or "Single State (Text / JSON Input)",
+            include_none_of_these=bool(getattr(self, "include_none_of_these", True)),
+            confidence_threshold=float(getattr(self, "confidence_threshold", 0.70) or 0.70),
+            noul_threshold=float(getattr(self, "noul_threshold", 0.70) or 0.70),
+            return_error_details=bool(getattr(self, "return_error_details", True)),
+            database=getattr(self, "database", "SNOWFLAKE_LANGFLOW") or "SNOWFLAKE_LANGFLOW",
+            schema=getattr(self, "schema_name", "CORE") or "CORE",
+            table_name=getattr(self, "table_name", "SUPPORT_TICKETS") or "SUPPORT_TICKETS",
+            state_column=getattr(self, "state_column", "ticket_text") or "ticket_text",
+            max_rows=int(getattr(self, "max_rows", 100) or 100),
             active_role=LIVE_BRIDGE.active_role,
         )
+
+    def run_decision(self) -> Data:
+        res = self._compute()
+        exec_res = LIVE_BRIDGE.execute_sql(res["sql_preview"])
+        payload = {**res, "execution_result": exec_res}
+        return Data(data=payload)
+
+    def route_high_confidence(self) -> Data:
+        res = self._compute()
+        if not res["high_confidence"]:
+            return Data(data={"active": False, "route": "low_confidence", "skipped": True, "decision": res})
+        return Data(data={"active": True, "route": "high_confidence", **res})
+
+    def route_low_confidence(self) -> Data:
+        res = self._compute()
+        if res["high_confidence"]:
+            return Data(data={"active": False, "route": "high_confidence", "skipped": True, "decision": res})
+        return Data(data={"active": True, "route": "low_confidence", **res})
+
+    def run_table_decisions(self) -> DataFrame:
+        res = self._compute()
+        table_sql = SnowflakeDecisionEngine.build_table_decision_sql(
+            model=res["model"],
+            database=getattr(self, "database", "SNOWFLAKE_LANGFLOW") or "SNOWFLAKE_LANGFLOW",
+            schema=getattr(self, "schema_name", "CORE") or "CORE",
+            table_name=getattr(self, "table_name", "SUPPORT_TICKETS") or "SUPPORT_TICKETS",
+            state_column=getattr(self, "state_column", "ticket_text") or "ticket_text",
+            questions=self._resolve_questions(),
+            include_none_of_these=bool(getattr(self, "include_none_of_these", True)),
+            return_error_details=bool(getattr(self, "return_error_details", True)),
+            noul_threshold=float(getattr(self, "noul_threshold", 0.70) or 0.70),
+            max_rows=int(getattr(self, "max_rows", 100) or 100),
+        )
+        exec_res = LIVE_BRIDGE.execute_sql(table_sql)
+        rows = exec_res.get("rows") if isinstance(exec_res, dict) and isinstance(exec_res.get("rows"), list) else []
+        if not rows:
+            rows = [
+                {
+                    "state_column": getattr(self, "state_column", "ticket_text") or "ticket_text",
+                    "decision": res["answers"],
+                    "sql_preview": table_sql,
+                }
+            ]
+        return DataFrame(rows)
 
     def get_decision_json(self) -> Message:
         res = self._compute()
@@ -103,11 +427,12 @@ class SnowflakeDecisionComponent(Component):
                 "component": "snowflake-decision",
                 "active_role": LIVE_BRIDGE.active_role,
                 "context_epoch": LIVE_BRIDGE.context_epoch,
+                "model": res["model"],
                 "decision": res["decision"],
                 "confidence": res["confidence"],
                 "selected_branch": res["selected_branch"],
                 "policy_action": res["policy_action"],
-                "engine_mode": res["engine_mode"],
+                "answers": res["answers"],
                 "sql_preview": res["sql_preview"],
             }
         )

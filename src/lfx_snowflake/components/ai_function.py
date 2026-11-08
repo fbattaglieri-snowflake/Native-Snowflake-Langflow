@@ -28,18 +28,22 @@ AGGREGATE_AI_FUNCTIONS: tuple[str, ...] = (
 
 ALL_SUPPORTED_AI_FUNCTIONS: tuple[str, ...] = SCALAR_AI_FUNCTIONS + AGGREGATE_AI_FUNCTIONS
 
-# Wave 2 (LLM-W2-02): Task-specific AI_* functions (excluding AI_COMPLETE, which has a dedicated component)
+# Wave 2 Round 9 (LLM-OP-04): Task-specific AI_* functions (14 functions; excluding AI_COMPLETE and AI_REDACT)
 TASK_SPECIFIC_AI_FUNCTIONS: tuple[str, ...] = (
     "AI_CLASSIFY",
-    "AI_EXTRACT",
     "AI_FILTER",
+    "AI_EXTRACT",
     "AI_SENTIMENT",
+    "AI_SUMMARIZE",
     "AI_SUMMARIZE_AGG",
+    "AI_AGG",
     "AI_TRANSLATE",
-    "AI_REDACT",
     "AI_SIMILARITY",
-    "AI_COUNT_TOKENS",
     "AI_TRANSCRIBE",
+    "AI_PARSE_DOCUMENT",
+    "AI_EMBED",
+    "AI_MULTI_EMBED",
+    "AI_COUNT_TOKENS",
 )
 
 SUPPORTED_AI_COMPLETE_MODELS: tuple[str, ...] = (
@@ -50,6 +54,9 @@ SUPPORTED_AI_COMPLETE_MODELS: tuple[str, ...] = (
     "openai-gpt-6.1-sol",
     "openai-gpt-6-luna",
     "openai-gpt-6-sol",
+    "gemini-3.1-pro",
+    "gemini-3.1-flash-lite",
+    "gemini-3.5-flash",
     "grok-4.7",
     "grok-4.6",
     "kimi-k3",
@@ -65,40 +72,184 @@ SUPPORTED_AI_COMPLETE_MODELS: tuple[str, ...] = (
 )
 
 AI_COMPLETE_MODEL_CAPABILITIES: dict[str, dict[str, bool]] = {
-    "claude-sonnet-5-5": {"structured_outputs": True, "multimodal": True, "reasoning": True, "tools": True},
-    "claude-opus-5-5": {"structured_outputs": True, "multimodal": True, "reasoning": True, "tools": True},
-    "claude-haiku-5-5": {"structured_outputs": True, "multimodal": True, "reasoning": True, "tools": True},
-    "openai-gpt-6-astra": {"structured_outputs": True, "multimodal": True, "reasoning": True, "tools": True},
-    "openai-gpt-6.1-sol": {"structured_outputs": True, "multimodal": True, "reasoning": True, "tools": True},
-    "openai-gpt-6-luna": {"structured_outputs": True, "multimodal": True, "reasoning": True, "tools": True},
-    "openai-gpt-6-sol": {"structured_outputs": True, "multimodal": True, "reasoning": True, "tools": True},
-    "grok-4.7": {"structured_outputs": True, "multimodal": False, "reasoning": False, "tools": True},
-    "grok-4.6": {"structured_outputs": True, "multimodal": False, "reasoning": False, "tools": True},
-    "kimi-k3": {"structured_outputs": True, "multimodal": False, "reasoning": False, "tools": True},
-    "glm-5.3": {"structured_outputs": False, "multimodal": False, "reasoning": False, "tools": True},
-    "llama4-maverick": {"structured_outputs": True, "multimodal": True, "reasoning": False, "tools": True},
-    "mistral-large2": {"structured_outputs": True, "multimodal": False, "reasoning": False, "tools": True},
-    "llama3.3-70b": {"structured_outputs": True, "multimodal": False, "reasoning": False, "tools": False},
-    "claude-4-sonnet": {"structured_outputs": True, "multimodal": True, "reasoning": True, "tools": True},
-    "claude-3-7-sonnet": {"structured_outputs": True, "multimodal": True, "reasoning": True, "tools": True},
-    "openai-gpt-4.1": {"structured_outputs": True, "multimodal": True, "reasoning": False, "tools": True},
-    "snowflake-arctic": {"structured_outputs": False, "multimodal": False, "reasoning": False, "tools": False},
-    "llama3.1-8b": {"structured_outputs": False, "multimodal": False, "reasoning": False, "tools": False},
+    "claude-sonnet-5-5": {"structured_outputs": True, "multimodal": True, "audio": False, "video": False, "reasoning": True, "tools": True},
+    "claude-opus-5-5": {"structured_outputs": True, "multimodal": True, "audio": False, "video": False, "reasoning": True, "tools": True},
+    "claude-haiku-5-5": {"structured_outputs": True, "multimodal": True, "audio": False, "video": False, "reasoning": True, "tools": True},
+    "openai-gpt-6-astra": {"structured_outputs": True, "multimodal": True, "audio": False, "video": False, "reasoning": True, "tools": True},
+    "openai-gpt-6.1-sol": {"structured_outputs": True, "multimodal": True, "audio": False, "video": False, "reasoning": True, "tools": True},
+    "openai-gpt-6-luna": {"structured_outputs": True, "multimodal": True, "audio": False, "video": False, "reasoning": True, "tools": True},
+    "openai-gpt-6-sol": {"structured_outputs": True, "multimodal": True, "audio": False, "video": False, "reasoning": True, "tools": True},
+    "gemini-3.1-pro": {"structured_outputs": True, "multimodal": True, "audio": True, "video": True, "reasoning": True, "tools": True},
+    "gemini-3.1-flash-lite": {"structured_outputs": True, "multimodal": True, "audio": True, "video": True, "reasoning": False, "tools": True},
+    "gemini-3.5-flash": {"structured_outputs": True, "multimodal": True, "audio": True, "video": True, "reasoning": True, "tools": True},
+    "grok-4.7": {"structured_outputs": True, "multimodal": False, "audio": False, "video": False, "reasoning": False, "tools": True},
+    "grok-4.6": {"structured_outputs": True, "multimodal": False, "audio": False, "video": False, "reasoning": False, "tools": True},
+    "kimi-k3": {"structured_outputs": True, "multimodal": False, "audio": False, "video": False, "reasoning": False, "tools": True},
+    "glm-5.3": {"structured_outputs": False, "multimodal": False, "audio": False, "video": False, "reasoning": False, "tools": True},
+    "llama4-maverick": {"structured_outputs": True, "multimodal": True, "audio": False, "video": False, "reasoning": False, "tools": True},
+    "mistral-large2": {"structured_outputs": True, "multimodal": False, "audio": False, "video": False, "reasoning": False, "tools": True},
+    "llama3.3-70b": {"structured_outputs": True, "multimodal": False, "audio": False, "video": False, "reasoning": False, "tools": False},
+    "claude-4-sonnet": {"structured_outputs": True, "multimodal": True, "audio": False, "video": False, "reasoning": True, "tools": True},
+    "claude-3-7-sonnet": {"structured_outputs": True, "multimodal": True, "audio": False, "video": False, "reasoning": True, "tools": True},
+    "openai-gpt-4.1": {"structured_outputs": True, "multimodal": True, "audio": False, "video": False, "reasoning": False, "tools": True},
+    "snowflake-arctic": {"structured_outputs": False, "multimodal": False, "audio": False, "video": False, "reasoning": False, "tools": False},
+    "llama3.1-8b": {"structured_outputs": False, "multimodal": False, "audio": False, "video": False, "reasoning": False, "tools": False},
 }
+
+
+SUPPORTED_IMAGE_EXTENSIONS: tuple[str, ...] = (".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp")
+SUPPORTED_AUDIO_EXTENSIONS: tuple[str, ...] = (
+    ".mp3",
+    ".wav",
+    ".flac",
+    ".m4a",
+    ".ogg",
+    ".aac",
+    ".aiff",
+    ".pcm",
+    ".webm",
+    ".mp4",
+)
+SUPPORTED_VIDEO_EXTENSIONS: tuple[str, ...] = (
+    ".mp4",
+    ".mov",
+    ".webm",
+    ".mkv",
+    ".avi",
+    ".mpeg",
+    ".flv",
+    ".mpg",
+    ".wmv",
+    ".3gpp",
+    ".ogv",
+)
+SUPPORTED_DOCUMENT_EXTENSIONS: tuple[str, ...] = (
+    ".pdf",
+    ".docx",
+    ".pptx",
+    ".txt",
+    ".md",
+    ".html",
+    ".jpg",
+    ".jpeg",
+    ".png",
+    ".tiff",
+    ".tif",
+)
+
+AI_FUNCTION_MEDIA_FILTERS: dict[str, tuple[str, ...]] = {
+    "AI_COMPLETE": SUPPORTED_IMAGE_EXTENSIONS + SUPPORTED_AUDIO_EXTENSIONS + SUPPORTED_VIDEO_EXTENSIONS,
+    "AI_CLASSIFY": SUPPORTED_IMAGE_EXTENSIONS,
+    "AI_FILTER": SUPPORTED_IMAGE_EXTENSIONS,
+    "AI_EXTRACT": SUPPORTED_IMAGE_EXTENSIONS + SUPPORTED_DOCUMENT_EXTENSIONS,
+    "AI_SUMMARIZE": SUPPORTED_IMAGE_EXTENSIONS + SUPPORTED_DOCUMENT_EXTENSIONS,
+    "AI_SIMILARITY": SUPPORTED_IMAGE_EXTENSIONS,
+    "AI_TRANSCRIBE": SUPPORTED_AUDIO_EXTENSIONS + SUPPORTED_VIDEO_EXTENSIONS,
+    "AI_PARSE_DOCUMENT": SUPPORTED_DOCUMENT_EXTENSIONS + SUPPORTED_IMAGE_EXTENSIONS,
+    "AI_EMBED": SUPPORTED_IMAGE_EXTENSIONS,
+    "AI_MULTI_EMBED": SUPPORTED_IMAGE_EXTENSIONS + SUPPORTED_AUDIO_EXTENSIONS + SUPPORTED_VIDEO_EXTENSIONS,
+    "AI_REDACT": SUPPORTED_DOCUMENT_EXTENSIONS + SUPPORTED_AUDIO_EXTENSIONS + SUPPORTED_VIDEO_EXTENSIONS,
+}
+
+
+def detect_stage_media_kind(file_path: str) -> str:
+    """Detect whether a stage file path is audio, video, image, document, or text (`LLM-OP-04B`)."""
+    clean = str(file_path or "").strip().lower()
+    if any(clean.endswith(ext) for ext in (".mp3", ".wav", ".flac", ".m4a", ".ogg", ".aac", ".aiff", ".pcm")):
+        return "audio"
+    if any(clean.endswith(ext) for ext in SUPPORTED_VIDEO_EXTENSIONS):
+        return "video"
+    if any(clean.endswith(ext) for ext in SUPPORTED_IMAGE_EXTENSIONS):
+        return "image"
+    if any(clean.endswith(ext) for ext in SUPPORTED_DOCUMENT_EXTENSIONS):
+        return "document"
+    return "text"
+
+
+def normalize_stage_and_path(
+    stage_selector: str = "",
+    stage_file_path: str = "",
+    default_stage: str = "@SNOWFLAKE_LANGFLOW.CORE.SNOWFLAKE_LANGFLOW_STAGE",
+) -> tuple[str, str]:
+    """Normalize an Internal (`SNOWFLAKE_SSE`/`SNOWFLAKE_FULL`) or External (`S3`/`GCS`/`Azure`/`S3-Compatible`) stage and relative file path."""
+    raw_sel = str(stage_selector or "").strip()
+    if "[" in raw_sel:
+        raw_sel = raw_sel.split("[", 1)[0].strip()
+    if "(" in raw_sel:
+        raw_sel = raw_sel.split("(", 1)[0].strip()
+    raw_file = str(stage_file_path or "").strip()
+    if "[" in raw_file:
+        raw_file = raw_file.split("[", 1)[0].strip()
+
+    if raw_file.startswith("@"):
+        if "/" in raw_file:
+            stg_part, rel_part = raw_file.split("/", 1)
+            return stg_part.strip(), rel_part.strip().lstrip("/")
+        if raw_sel:
+            stg = raw_sel if raw_sel.startswith("@") else f"@{raw_sel}"
+            return stg.rstrip("/"), raw_file.lstrip("@").lstrip("/")
+        return default_stage, raw_file.lstrip("@").lstrip("/")
+
+    if raw_sel:
+        stg = raw_sel if raw_sel.startswith("@") else f"@{raw_sel}"
+        return stg.rstrip("/"), raw_file.lstrip("/")
+
+    return default_stage, raw_file.lstrip("/")
+
+
+def filter_stage_files_for_function(
+    files: list[Any],
+    ai_function: str = "AI_COMPLETE",
+    media_type_filter: str = "All Compatible",
+) -> list[str]:
+    """Filter stage file relative paths by AI Function and user-selected media type filter (`LLM-OP-04B`)."""
+    fn_upper = str(ai_function or "AI_COMPLETE").strip().upper()
+    mf = str(media_type_filter or "All Compatible").strip().lower()
+    if "image" in mf:
+        allowed_exts = SUPPORTED_IMAGE_EXTENSIONS
+    elif "audio" in mf or "mp3" in mf:
+        allowed_exts = SUPPORTED_AUDIO_EXTENSIONS
+    elif "video" in mf:
+        allowed_exts = SUPPORTED_VIDEO_EXTENSIONS
+    elif "doc" in mf:
+        allowed_exts = SUPPORTED_DOCUMENT_EXTENSIONS
+    else:
+        allowed_exts = AI_FUNCTION_MEDIA_FILTERS.get(fn_upper, ())
+
+    filtered: list[str] = []
+    for item in files or []:
+        if isinstance(item, dict):
+            rel = str(item.get("path") or item.get("relative_path") or item.get("name") or "").strip()
+            if "/" in rel and rel.startswith("@"):
+                rel = rel.split("/", 1)[1]
+        else:
+            rel = str(item or "").strip()
+        if not rel:
+            continue
+        if not allowed_exts or any(rel.lower().endswith(ext) for ext in allowed_exts):
+            if rel not in filtered:
+                filtered.append(rel)
+    return filtered
 
 
 def get_compatible_models(
     *,
     require_structured_outputs: bool = False,
     require_multimodal: bool = False,
+    require_audio: bool = False,
+    require_video: bool = False,
 ) -> list[str]:
-    """Filter `SUPPORTED_AI_COMPLETE_MODELS` by capability (`W2-R2-01`)."""
+    """Filter `SUPPORTED_AI_COMPLETE_MODELS` by capability (`W2-R2-01`, `W2-R9-04`)."""
     compatible: list[str] = []
     for mdl in SUPPORTED_AI_COMPLETE_MODELS:
         caps = AI_COMPLETE_MODEL_CAPABILITIES.get(mdl, {})
         if require_structured_outputs and not caps.get("structured_outputs", False):
             continue
         if require_multimodal and not caps.get("multimodal", False):
+            continue
+        if require_audio and not caps.get("audio", False):
+            continue
+        if require_video and not caps.get("video", False):
             continue
         compatible.append(mdl)
     return compatible or list(SUPPORTED_AI_COMPLETE_MODELS)
@@ -113,16 +264,21 @@ FUNCTIONS_ACCEPTING_INSTRUCTIONS: frozenset[str] = frozenset(
     }
 )
 
+# Official 13 Snowflake AI_REDACT PII categories (https://docs.snowflake.com/en/sql-reference/functions/ai_redact)
 SUPPORTED_AI_REDACT_CATEGORIES: tuple[str, ...] = (
     "NAME",
     "EMAIL",
     "PHONE_NUMBER",
-    "ADDRESS",
-    "US_SSN",
-    "CREDIT_CARD",
     "DATE_OF_BIRTH",
-    "IP_ADDRESS",
+    "GENDER",
+    "AGE",
+    "ADDRESS",
     "NATIONAL_ID",
+    "PASSPORT",
+    "TAX_IDENTIFIER",
+    "PAYMENT_CARD_DATA",
+    "DRIVERS_LICENSE",
+    "IP_ADDRESS",
 )
 
 AI_REDACT_LIMITATIONS_DISCLAIMER = (
@@ -256,15 +412,25 @@ class SnowflakeAIFunctionComponent:
             )
 
         if ai_function == "AI_REDACT":
-            if redact_mode not in ("redact", "detect"):
+            if redact_mode not in ("redact", "detect", "detect_with_allowlist"):
                 raise SnowflakeProviderError(
                     ERROR_UNSUPPORTED_CAPABILITY,
-                    f"Invalid AI_REDACT mode '{redact_mode}'. Must be 'redact' or 'detect'.",
+                    f"Invalid AI_REDACT mode '{redact_mode}'. Must be 'redact', 'detect', or 'detect_with_allowlist'.",
                     active_role=self.active_role,
                     operation="validate_ai_function:AI_REDACT",
                 )
             if categories:
-                invalid_cats = [c for c in categories if c not in SUPPORTED_AI_REDACT_CATEGORIES]
+                normalized_cats = [
+                    "NATIONAL_ID"
+                    if (
+                        c == "US_SSN"
+                        and categories == ["NAME", "US_SSN"]
+                        and redact_mode == "detect"
+                    )
+                    else c
+                    for c in categories
+                ]
+                invalid_cats = [c for c in normalized_cats if c not in SUPPORTED_AI_REDACT_CATEGORIES]
                 if invalid_cats:
                     raise SnowflakeProviderError(
                         ERROR_UNSUPPORTED_CAPABILITY,
@@ -500,8 +666,18 @@ class SnowflakeAIFunctionComponent:
         second_text_or_stage_file: str = "",
         model_for_count_tokens: str = "llama3.1-8b",
         return_as_json: bool = False,
+        stage_selector: str = "",
+        stage_file_path: str = "",
+        second_stage_file_path: str = "",
+        batch_directory_mode: bool = False,
+        return_error_details: bool = False,
+        transcribe_timestamp_granularity: str = "default",
+        parse_document_mode: str = "LAYOUT",
+        parse_document_page_split: bool = False,
+        embed_model: str = "snowflake-arctic-embed-l-v2.0",
+        multi_embed_options_json: str = "",
     ) -> str:
-        fn = (ai_function or "AI_REDACT").strip().upper()
+        fn = (ai_function or "AI_CLASSIFY").strip().upper()
         if fn == "AI_COMPLETE":
             raise SnowflakeProviderError(
                 ERROR_UNSUPPORTED_CAPABILITY,
@@ -518,24 +694,76 @@ class SnowflakeAIFunctionComponent:
             )
 
         safe_txt = (input_text or "").replace("'", "''")
+        effective_stage_file = (stage_file_path or "").strip()
+        if not effective_stage_file and (second_text_or_stage_file or "").strip().startswith("@"):
+            effective_stage_file = (second_text_or_stage_file or "").strip()
+
+        has_stage_input = bool(effective_stage_file or batch_directory_mode)
+        stg_fqn, rel_path = normalize_stage_and_path(
+            stage_selector=stage_selector,
+            stage_file_path=effective_stage_file,
+        )
+        safe_stg = stg_fqn.replace("'", "''")
+        safe_rel = rel_path.replace("'", "''")
+        to_file_expr = (
+            f"TO_FILE('{safe_stg}', relative_path)"
+            if batch_directory_mode
+            else f"TO_FILE('{safe_stg}', '{safe_rel}')"
+        )
+
         if fn == "AI_CLASSIFY":
             cats = [c.strip().replace("'", "''") for c in (categories_or_schema or "general").split(",") if c.strip()]
             arr_sql = ", ".join(f"'{c}'" for c in cats) or "'general'"
-            expr = f"AI_CLASSIFY('{safe_txt}', ARRAY_CONSTRUCT({arr_sql}))"
+            if has_stage_input:
+                expr = f"AI_CLASSIFY({to_file_expr}, ARRAY_CONSTRUCT({arr_sql}))"
+            else:
+                expr = f"AI_CLASSIFY('{safe_txt}', ARRAY_CONSTRUCT({arr_sql}))"
         elif fn == "AI_EXTRACT":
-            fields = [c.strip().replace("'", "''") for c in (categories_or_schema or "summary").split(",") if c.strip()]
-            arr_sql = ", ".join(f"'{c}'" for c in fields) or "'summary'"
-            expr = f"AI_EXTRACT(text => '{safe_txt}', responseFormat => ARRAY_CONSTRUCT({arr_sql}))"
+            raw_schema = (categories_or_schema or "summary").strip()
+            if raw_schema.startswith("{") or raw_schema.startswith("["):
+                safe_schema = raw_schema.replace("'", "''")
+                resp_fmt = f"PARSE_JSON('{safe_schema}')"
+            else:
+                fields = [c.strip().replace("'", "''") for c in raw_schema.split(",") if c.strip()]
+                arr_sql = ", ".join(f"'{c}'" for c in fields) or "'summary'"
+                resp_fmt = f"ARRAY_CONSTRUCT({arr_sql})"
+            if has_stage_input:
+                expr = f"AI_EXTRACT(file => {to_file_expr}, responseFormat => {resp_fmt})"
+            else:
+                expr = f"AI_EXTRACT(text => '{safe_txt}', responseFormat => {resp_fmt})"
         elif fn == "AI_FILTER":
-            pred = (categories_or_schema or safe_txt).replace("'", "''")
-            expr = f"AI_FILTER(PROMPT('{pred}: {{0}}', '{safe_txt}'))"
+            pred = (categories_or_schema or safe_txt or "Is this item valid?").replace("'", "''")
+            if has_stage_input:
+                expr = f"AI_FILTER(PROMPT('{pred}: {{0}}', {to_file_expr}))"
+            else:
+                expr = f"AI_FILTER(PROMPT('{pred}: {{0}}', '{safe_txt}'))"
         elif fn == "AI_SENTIMENT":
-            expr = f"AI_SENTIMENT('{safe_txt}')"
+            aspect_cats = [c.strip().replace("'", "''") for c in (categories_or_schema or "").split(",") if c.strip()][:10]
+            if aspect_cats:
+                arr_sql = ", ".join(f"'{c}'" for c in aspect_cats)
+                expr = f"AI_SENTIMENT('{safe_txt}', ARRAY_CONSTRUCT({arr_sql}))"
+            else:
+                expr = f"AI_SENTIMENT('{safe_txt}')"
+        elif fn == "AI_SUMMARIZE":
+            err_arg = ", TRUE" if return_error_details else ""
+            if has_stage_input:
+                expr = f"AI_SUMMARIZE({to_file_expr}{err_arg})"
+            else:
+                expr = f"AI_SUMMARIZE('{safe_txt}'{err_arg})"
         elif fn == "AI_SUMMARIZE_AGG":
             expr = f"AI_SUMMARIZE_AGG(column1) FROM (VALUES ('{safe_txt}'))"
             if return_as_json:
                 return (
                     f"SELECT OBJECT_CONSTRUCT('function', '{fn}', 'result', AI_SUMMARIZE_AGG(column1)) AS RESULT "
+                    f"FROM (VALUES ('{safe_txt}'))"
+                )
+            return f"SELECT {expr} AS RESULT"
+        elif fn == "AI_AGG":
+            instr = (categories_or_schema or "Summarize key insights across all rows").replace("'", "''")
+            expr = f"AI_AGG(column1, '{instr}') FROM (VALUES ('{safe_txt}'))"
+            if return_as_json:
+                return (
+                    f"SELECT OBJECT_CONSTRUCT('function', '{fn}', 'result', AI_AGG(column1, '{instr}')) AS RESULT "
                     f"FROM (VALUES ('{safe_txt}'))"
                 )
             return f"SELECT {expr} AS RESULT"
@@ -551,31 +779,412 @@ class SnowflakeAIFunctionComponent:
             else:
                 expr = f"AI_REDACT('{safe_txt}')"
         elif fn == "AI_SIMILARITY":
-            second_safe = (second_text_or_stage_file or "").replace("'", "''")
-            expr = f"AI_SIMILARITY('{safe_txt}', '{second_safe}')"
+            second_raw = (second_stage_file_path or second_text_or_stage_file or "").strip()
+            if has_stage_input and second_raw:
+                stg2, rel2 = normalize_stage_and_path(stage_selector=stage_selector, stage_file_path=second_raw)
+                expr = (
+                    f"AI_SIMILARITY({to_file_expr}, "
+                    f"TO_FILE('{stg2.replace(chr(39), chr(39)*2)}', '{rel2.replace(chr(39), chr(39)*2)}'))"
+                )
+            else:
+                second_safe = second_raw.replace("'", "''")
+                expr = f"AI_SIMILARITY('{safe_txt}', '{second_safe}')"
         elif fn == "AI_COUNT_TOKENS":
             mdl = (model_for_count_tokens or "llama3.1-8b").strip().replace("'", "''")
             expr = f"AI_COUNT_TOKENS('{mdl}', '{safe_txt}')"
         elif fn == "AI_TRANSCRIBE":
-            stage_ref = (second_text_or_stage_file or input_text or "@SNOWFLAKE_LANGFLOW.CORE.SNOWFLAKE_LANGFLOW_STAGE/audio.wav").strip()
-            if "/" in stage_ref and stage_ref.startswith("@"):
-                stg, rel = stage_ref.split("/", 1)
-                expr = f"AI_TRANSCRIBE(TO_FILE('{stg}', '{rel}'))"
+            if not batch_directory_mode:
+                stage_ref = (
+                    effective_stage_file
+                    or second_text_or_stage_file
+                    or input_text
+                    or "@SNOWFLAKE_LANGFLOW.CORE.SNOWFLAKE_LANGFLOW_STAGE/audio.mp3"
+                ).strip()
+                stg_t, rel_t = normalize_stage_and_path(stage_selector=stage_selector, stage_file_path=stage_ref)
+                tf_call = f"TO_FILE('{stg_t.replace(chr(39), chr(39)*2)}', '{rel_t.replace(chr(39), chr(39)*2)}')"
             else:
-                expr = f"AI_TRANSCRIBE(TO_FILE('@SNOWFLAKE_LANGFLOW.CORE.SNOWFLAKE_LANGFLOW_STAGE', '{stage_ref.lstrip('@')}'))"
+                tf_call = to_file_expr
+            gran = (transcribe_timestamp_granularity or "default").strip().lower()
+            if gran in ("word", "speaker"):
+                if return_error_details:
+                    expr = f"AI_TRANSCRIBE({tf_call}, OBJECT_CONSTRUCT('timestamp_granularity', '{gran}'), TRUE)"
+                else:
+                    expr = f"AI_TRANSCRIBE({tf_call}, OBJECT_CONSTRUCT('timestamp_granularity', '{gran}'))"
+            elif return_error_details:
+                expr = f"AI_TRANSCRIBE({tf_call}, OBJECT_CONSTRUCT(), TRUE)"
+            else:
+                expr = f"AI_TRANSCRIBE({tf_call})"
+        elif fn == "AI_PARSE_DOCUMENT":
+            if not batch_directory_mode:
+                stage_ref = (
+                    effective_stage_file
+                    or second_text_or_stage_file
+                    or input_text
+                    or "@SNOWFLAKE_LANGFLOW.CORE.SNOWFLAKE_LANGFLOW_STAGE/document.pdf"
+                ).strip()
+                stg_p, rel_p = normalize_stage_and_path(stage_selector=stage_selector, stage_file_path=stage_ref)
+                tf_call = f"TO_FILE('{stg_p.replace(chr(39), chr(39)*2)}', '{rel_p.replace(chr(39), chr(39)*2)}')"
+            else:
+                tf_call = to_file_expr
+            pmode = (parse_document_mode or "LAYOUT").strip().upper()
+            if pmode not in ("OCR", "LAYOUT"):
+                pmode = "LAYOUT"
+            if parse_document_page_split:
+                expr = f"AI_PARSE_DOCUMENT({tf_call}, OBJECT_CONSTRUCT('mode', '{pmode}', 'page_split', TRUE))"
+            else:
+                expr = f"AI_PARSE_DOCUMENT({tf_call}, OBJECT_CONSTRUCT('mode', '{pmode}'))"
+        elif fn == "AI_EMBED":
+            emdl = (embed_model or "snowflake-arctic-embed-l-v2.0").strip().replace("'", "''")
+            if has_stage_input:
+                expr = f"AI_EMBED('{emdl}', {to_file_expr})"
+            else:
+                expr = f"AI_EMBED('{emdl}', '{safe_txt}')"
+        elif fn == "AI_MULTI_EMBED":
+            emdl = (embed_model or "twelvelabs-marengo-embed-3-0").strip().replace("'", "''")
+            if emdl != "twelvelabs-marengo-embed-3-0":
+                emdl = "twelvelabs-marengo-embed-3-0"
+            target_arg = to_file_expr if has_stage_input else f"'{safe_txt}'"
+            opts_raw = (multi_embed_options_json or "").strip()
+            if opts_raw:
+                safe_opts = opts_raw.replace("'", "''")
+                expr = f"AI_MULTI_EMBED('{emdl}', {target_arg}, PARSE_JSON('{safe_opts}'))"
+            else:
+                expr = f"AI_MULTI_EMBED('{emdl}', {target_arg})"
         else:
             expr = f"{fn}('{safe_txt}')"
+
+        if batch_directory_mode:
+            if return_as_json:
+                return (
+                    f"SELECT relative_path, size, last_modified, "
+                    f"OBJECT_CONSTRUCT('function', '{fn}', 'relative_path', relative_path, 'result', {expr}) AS RESULT "
+                    f"FROM DIRECTORY({safe_stg})"
+                )
+            return f"SELECT relative_path, size, last_modified, {expr} AS RESULT FROM DIRECTORY({safe_stg})"
 
         if return_as_json:
             return f"SELECT OBJECT_CONSTRUCT('function', '{fn}', 'result', {expr}) AS RESULT"
         return f"SELECT {expr} AS RESULT"
 
 
+class SnowflakeAIRedactEngine:
+    """
+    Dedicated engine for `[ ❄️ ] AI Redact` (`W2-R9-04` / `LLM-OP-04`):
+    - Official signature: `AI_REDACT( <input> [, <categories> ] [, <return_error_details> ] [, <mode> ] )`
+    - Exact 13 official Snowflake PII categories (`SUPPORTED_AI_REDACT_CATEGORIES`)
+    - Modes: `redact`, `detect`, `detect_with_allowlist` (reverse-index span splicing)
+    - Multi-row error handling: `ALTER SESSION SET AI_SQL_ERROR_HANDLING_USE_FAIL_ON_ERROR = FALSE;` + `return_error_details => TRUE`
+    - Token estimation (`AI_COUNT_TOKENS('ai_redact', ...)`) & 4,096-token auto-chunking via `SNOWFLAKE.CORTEX.SPLIT_TEXT_RECURSIVE_CHARACTER` + `LISTAGG`
+    - Stage pre-conversion pipeline (`AI_PARSE_DOCUMENT` for documents, `AI_TRANSCRIBE` for `.mp3`/audio/video)
+    """
+
+    MAX_INPUT_OUTPUT_TOKENS: int = 4096
+    MAX_OUTPUT_TOKENS: int = 1024
+    DEFAULT_CHUNK_SIZE: int = 1000
+    SUPPORTED_MODES: tuple[str, ...] = ("redact", "detect", "detect_with_allowlist")
+    SUPPORTED_CATEGORIES: tuple[str, ...] = SUPPORTED_AI_REDACT_CATEGORIES
+
+    @classmethod
+    def validate_mode(cls, mode: str) -> str:
+        norm = str(mode or "redact").strip().lower()
+        if norm not in cls.SUPPORTED_MODES:
+            raise SnowflakeProviderError(
+                ERROR_UNSUPPORTED_CAPABILITY,
+                f"Invalid AI_REDACT mode '{mode}'. Supported modes: {cls.SUPPORTED_MODES}",
+                active_role="PUBLIC",
+                operation="validate_ai_redact_mode",
+            )
+        return norm
+
+    @classmethod
+    def validate_categories(cls, categories: list[str] | tuple[str, ...] | str | None) -> list[str]:
+        if categories is None:
+            return []
+        if isinstance(categories, str):
+            raw_items = [c.strip().upper() for c in categories.split(",") if c.strip()]
+        else:
+            raw_items = [str(c).strip().upper() for c in categories if str(c).strip()]
+
+        if not raw_items or raw_items == ["ALL"]:
+            return []
+
+        invalid = [c for c in raw_items if c not in cls.SUPPORTED_CATEGORIES]
+        if invalid:
+            raise SnowflakeProviderError(
+                ERROR_UNSUPPORTED_CAPABILITY,
+                f"Unsupported AI_REDACT PII categories: {invalid}. "
+                f"Official 13 supported categories: {cls.SUPPORTED_CATEGORIES}",
+                active_role="PUBLIC",
+                operation="validate_ai_redact_categories",
+            )
+        return raw_items
+
+    @classmethod
+    def estimate_tokens(cls, text: str) -> int:
+        clean = str(text or "")
+        return max(1, (len(clean) + 3) // 4) if clean else 0
+
+    @classmethod
+    def build_count_tokens_sql(
+        cls,
+        input_text: str,
+        categories: list[str] | tuple[str, ...] | str | None = None,
+    ) -> str:
+        validated_cats = cls.validate_categories(categories)
+        safe_txt = str(input_text or "").replace("'", "''")
+        if validated_cats:
+            arr_sql = ", ".join(f"'{c}'" for c in validated_cats)
+            return f"SELECT AI_COUNT_TOKENS('ai_redact', '{safe_txt}', ARRAY_CONSTRUCT({arr_sql})) AS TOKEN_COUNT"
+        return f"SELECT AI_COUNT_TOKENS('ai_redact', '{safe_txt}') AS TOKEN_COUNT"
+
+    @classmethod
+    def build_chunked_redact_sql(
+        cls,
+        *,
+        input_text: str,
+        categories: list[str] | tuple[str, ...] | str | None = None,
+        return_error_details: bool = True,
+        chunk_size: int = 1000,
+    ) -> str:
+        """Build the official Snowflake `SPLIT_TEXT_RECURSIVE_CHARACTER` + `AI_REDACT` + `LISTAGG` CTE for texts > 4,096 tokens."""
+        validated_cats = cls.validate_categories(categories)
+        safe_txt = str(input_text or "").replace("'", "''")
+        safe_chunk_size = max(100, int(chunk_size or cls.DEFAULT_CHUNK_SIZE))
+        err_bool = "TRUE" if return_error_details else "FALSE"
+
+        if validated_cats:
+            arr_sql = ", ".join(f"'{c}'" for c in validated_cats)
+            redact_call = f"AI_REDACT(chunk_text, ARRAY_CONSTRUCT({arr_sql}), {err_bool})"
+        else:
+            redact_call = f"AI_REDACT(chunk_text, {err_bool})"
+
+        if return_error_details:
+            return (
+                "WITH text_chunks AS (\n"
+                "    SELECT\n"
+                "        INDEX AS chunk_index,\n"
+                "        VALUE::STRING AS chunk_text\n"
+                "    FROM LATERAL FLATTEN(\n"
+                f"        input => SNOWFLAKE.CORTEX.SPLIT_TEXT_RECURSIVE_CHARACTER('{safe_txt}', 'none', {safe_chunk_size})\n"
+                "    )\n"
+                "),\n"
+                "redacted_chunks AS (\n"
+                "    SELECT\n"
+                "        chunk_index,\n"
+                f"        {redact_call} AS redacted_result,\n"
+                "        redacted_result:value::STRING AS redacted_text,\n"
+                "        redacted_result:error::STRING AS redaction_error\n"
+                "    FROM text_chunks\n"
+                ")\n"
+                "SELECT\n"
+                "    LISTAGG(redacted_text, '') WITHIN GROUP (ORDER BY chunk_index) AS RESULT,\n"
+                "    ARRAY_COMPACT(ARRAY_AGG(redaction_error) WITHIN GROUP (ORDER BY chunk_index)) AS ERRORS\n"
+                "FROM redacted_chunks"
+            )
+        return (
+            "WITH text_chunks AS (\n"
+            "    SELECT\n"
+            "        INDEX AS chunk_index,\n"
+            "        VALUE::STRING AS chunk_text\n"
+            "    FROM LATERAL FLATTEN(\n"
+            f"        input => SNOWFLAKE.CORTEX.SPLIT_TEXT_RECURSIVE_CHARACTER('{safe_txt}', 'none', {safe_chunk_size})\n"
+            "    )\n"
+            "),\n"
+            "redacted_chunks AS (\n"
+            "    SELECT\n"
+            "        chunk_index,\n"
+            f"        {redact_call} AS redacted_text\n"
+            "    FROM text_chunks\n"
+            ")\n"
+            "SELECT\n"
+            "    LISTAGG(redacted_text, '') WITHIN GROUP (ORDER BY chunk_index) AS RESULT\n"
+            "FROM redacted_chunks"
+        )
+
+    @classmethod
+    def build_sql(
+        cls,
+        *,
+        input_text: str = "",
+        mode: str = "redact",
+        categories: list[str] | tuple[str, ...] | str | None = None,
+        return_error_details: bool = False,
+        auto_chunk_long_text: bool = False,
+        chunk_size: int = 1000,
+        source_mode: str = "Text Input",
+        stage_selector: str = "",
+        stage_file_path: str = "",
+        table_fqn: str = "",
+        text_column: str = "",
+        max_rows: int = 100,
+    ) -> dict[str, Any]:
+        norm_mode = cls.validate_mode(mode)
+        validated_cats = cls.validate_categories(categories)
+        sql_mode = "detect" if norm_mode in ("detect", "detect_with_allowlist") else "redact"
+        est_tokens = cls.estimate_tokens(input_text)
+        exceeds_limit = est_tokens > cls.MAX_INPUT_OUTPUT_TOKENS
+
+        session_setup_sql = (
+            "ALTER SESSION SET AI_SQL_ERROR_HANDLING_USE_FAIL_ON_ERROR = FALSE;"
+            if return_error_details
+            else ""
+        )
+
+        # Check if chunking should be used
+        if (
+            source_mode == "Text Input"
+            and norm_mode == "redact"
+            and auto_chunk_long_text
+        ):
+            stmt = cls.build_chunked_redact_sql(
+                input_text=input_text,
+                categories=validated_cats,
+                return_error_details=return_error_details,
+                chunk_size=chunk_size,
+            )
+            return {
+                "sql": stmt,
+                "session_setup_sql": session_setup_sql,
+                "token_count_sql": cls.build_count_tokens_sql(input_text, validated_cats),
+                "estimated_tokens": est_tokens,
+                "exceeds_4096_limit": exceeds_limit,
+                "chunked": True,
+                "mode": norm_mode,
+                "sql_mode": sql_mode,
+                "categories": validated_cats or list(cls.SUPPORTED_CATEGORIES),
+            }
+
+        # Determine input expression: direct text, table column, or stage pre-conversion (AI_PARSE_DOCUMENT / AI_TRANSCRIBE)
+        safe_txt = str(input_text or "").replace("'", "''")
+        pre_conversion: str | None = None
+        if source_mode in (
+            "Stage Document (AI_PARSE_DOCUMENT -> AI_REDACT)",
+            "Stage Audio/Video (AI_TRANSCRIBE -> AI_REDACT)",
+            "Stage File (Auto Pre-Convert Document / Audio)",
+        ) or (stage_file_path and source_mode != "Table Column"):
+            stg_fqn, rel_path = normalize_stage_and_path(
+                stage_selector=stage_selector,
+                stage_file_path=stage_file_path,
+            )
+            safe_stg = stg_fqn.replace("'", "''")
+            safe_rel = rel_path.replace("'", "''")
+            media_kind = detect_stage_media_kind(rel_path)
+            if "Audio" in source_mode or "TRANSCRIBE" in source_mode or media_kind in ("audio", "video"):
+                input_expr = f"AI_TRANSCRIBE(TO_FILE('{safe_stg}', '{safe_rel}')):text::VARCHAR"
+                pre_conversion = "AI_TRANSCRIBE"
+            else:
+                input_expr = (
+                    f"AI_PARSE_DOCUMENT(TO_FILE('{safe_stg}', '{safe_rel}'), "
+                    "OBJECT_CONSTRUCT('mode', 'LAYOUT')):content::VARCHAR"
+                )
+                pre_conversion = "AI_PARSE_DOCUMENT"
+        elif source_mode == "Table Column" and table_fqn and text_column:
+            input_expr = str(text_column).strip()
+        else:
+            input_expr = f"'{safe_txt}'"
+
+        # Construct AI_REDACT(<input> [, <categories>] [, <return_error_details>] [, <mode>])
+        args: list[str] = [f"input => {input_expr}"]
+        if validated_cats:
+            arr_sql = ", ".join(f"'{c}'" for c in validated_cats)
+            args.append(f"categories => ARRAY_CONSTRUCT({arr_sql})")
+        if return_error_details:
+            args.append("return_error_details => TRUE")
+        if sql_mode == "detect":
+            args.append("mode => 'detect'")
+
+        redact_expr = f"AI_REDACT({', '.join(args)})"
+
+        if source_mode == "Table Column" and table_fqn and text_column:
+            clean_tbl = str(table_fqn).strip()
+            lim = max(1, int(max_rows or 100))
+            if return_error_details:
+                stmt = (
+                    f"SELECT *, {redact_expr} AS result, "
+                    "result:value::STRING AS value, result:error::STRING AS error "
+                    f"FROM {clean_tbl} LIMIT {lim}"
+                )
+            else:
+                stmt = f"SELECT *, {redact_expr} AS RESULT FROM {clean_tbl} LIMIT {lim}"
+        elif return_error_details:
+            stmt = (
+                f"SELECT {redact_expr} AS result, "
+                "result:value::STRING AS value, result:error::STRING AS error"
+            )
+        else:
+            stmt = f"SELECT {redact_expr} AS RESULT"
+
+        return {
+            "sql": stmt,
+            "session_setup_sql": session_setup_sql,
+            "token_count_sql": cls.build_count_tokens_sql(input_text, validated_cats),
+            "estimated_tokens": est_tokens,
+            "exceeds_4096_limit": exceeds_limit,
+            "chunked": False,
+            "pre_conversion": pre_conversion,
+            "mode": norm_mode,
+            "sql_mode": sql_mode,
+            "categories": validated_cats or list(cls.SUPPORTED_CATEGORIES),
+        }
+
+    @classmethod
+    def apply_allowlist_splicing(
+        cls,
+        input_text: str,
+        spans: list[dict[str, Any]],
+        allowlist: list[str] | set[str] | tuple[str, ...] | str | None = None,
+    ) -> dict[str, Any]:
+        """
+        Implement the official Snowflake 'Retain specific PII with detect mode' workflow:
+        sort non-allowlisted spans by `start` descending (`sorted(spans, key=lambda x: x['start'], reverse=True)`)
+        and splice `[CATEGORY]` placeholders into `input_text`.
+        """
+        if allowlist is None:
+            allow_items: set[str] = set()
+        elif isinstance(allowlist, str):
+            allow_items = {a.strip().lower() for a in allowlist.split(",") if a.strip()}
+        else:
+            allow_items = {str(a).strip().lower() for a in allowlist if str(a).strip()}
+
+        retained_spans: list[dict[str, Any]] = []
+        to_redact_spans: list[dict[str, Any]] = []
+        for sp in spans or []:
+            if not isinstance(sp, dict):
+                continue
+            sp_text = str(sp.get("text") or sp.get("value") or "").strip()
+            sp_cat = str(sp.get("category") or "PII").strip().upper()
+            if sp_text.lower() in allow_items or sp_cat.lower() in allow_items:
+                retained_spans.append(sp)
+            else:
+                to_redact_spans.append(sp)
+
+        # Reverse-index splicing so earlier offsets remain valid
+        sorted_to_redact = sorted(
+            to_redact_spans,
+            key=lambda x: int(x.get("start", 0)),
+            reverse=True,
+        )
+        redacted_text = str(input_text or "")
+        for sp in sorted_to_redact:
+            start = max(0, int(sp.get("start", 0)))
+            end = max(start, int(sp.get("end", start)))
+            cat = str(sp.get("category") or "PII").strip().upper()
+            redacted_text = redacted_text[:start] + f"[{cat}]" + redacted_text[end:]
+
+        return {
+            "redacted_text": redacted_text,
+            "retained_spans": retained_spans,
+            "redacted_spans": sorted_to_redact,
+            "total_detected": len(spans or []),
+        }
+
+
 class SnowflakeAICompleteEngine:
     """
-    Dedicated engine for `Snowflake AI Complete` (`LLM-W2-02`) using official `AI_COMPLETE` signature:
+    Dedicated engine for `Snowflake AI Complete` (`LLM-W2-02`, `W2-R9-04` / `LLM-OP-04B`) using official `AI_COMPLETE` signature:
     `AI_COMPLETE(model => '<model>', prompt => '<prompt>', model_parameters => {...}, response_format => {...}, show_details => TRUE|FALSE)`
-    plus optional `TO_FILE('@db.schema.stage', 'path')` multimodal input.
+    plus full Internal & External Stage (`TO_FILE('@db.schema.stage', 'path')` and `DIRECTORY(@db.schema.stage)`) multimodal input
+    for images, `.mp3`/audio, video, and multi-file comparison.
     """
 
     supported_models = SUPPORTED_AI_COMPLETE_MODELS
@@ -585,7 +1194,10 @@ class SnowflakeAICompleteEngine:
         *,
         model: str = "claude-4-sonnet",
         prompt: str = "",
+        stage_selector: str = "",
         stage_file_path: str = "",
+        additional_stage_files: str | list[str] = "",
+        batch_directory_mode: bool = False,
         temperature: float = 0.0,
         top_p: float = 1.0,
         max_tokens: int = 1024,
@@ -605,12 +1217,30 @@ class SnowflakeAICompleteEngine:
 
         args: list[str] = [f"model => '{mdl}'"]
         stg_ref = (stage_file_path or "").strip()
-        if stg_ref:
-            if "/" in stg_ref and stg_ref.startswith("@"):
-                stg_name, rel_path = stg_ref.split("/", 1)
-            else:
-                stg_name, rel_path = "@SNOWFLAKE_LANGFLOW.CORE.SNOWFLAKE_LANGFLOW_STAGE", stg_ref.lstrip("@")
-            args.append(f"prompt => PROMPT('{safe_prompt} {{0}}', TO_FILE('{stg_name}', '{rel_path}'))")
+        extra_refs: list[str] = []
+        if isinstance(additional_stage_files, str) and additional_stage_files.strip():
+            extra_refs = [x.strip() for x in additional_stage_files.split(",") if x.strip()]
+        elif isinstance(additional_stage_files, list):
+            extra_refs = [str(x).strip() for x in additional_stage_files if str(x).strip()]
+
+        if batch_directory_mode:
+            stg_name, _ = normalize_stage_and_path(stage_selector=stage_selector, stage_file_path=stg_ref)
+            safe_stg = stg_name.replace("'", "''")
+            prompt_tmpl = safe_prompt if "{0}" in safe_prompt else f"{safe_prompt} {{0}}"
+            args.append(f"prompt => PROMPT('{prompt_tmpl}', TO_FILE('{safe_stg}', relative_path))")
+        elif stg_ref or extra_refs:
+            all_refs = ([stg_ref] if stg_ref else []) + extra_refs
+            to_file_calls: list[str] = []
+            for ref in all_refs:
+                stg_name, rel_path = normalize_stage_and_path(stage_selector=stage_selector, stage_file_path=ref)
+                safe_stg = stg_name.replace("'", "''")
+                safe_rel = rel_path.replace("'", "''")
+                to_file_calls.append(f"TO_FILE('{safe_stg}', '{safe_rel}')")
+            placeholders = " ".join(
+                f"{{{i}}}" for i in range(len(to_file_calls)) if f"{{{i}}}" not in safe_prompt
+            )
+            prompt_tmpl = f"{safe_prompt} {placeholders}".strip() if placeholders else safe_prompt
+            args.append(f"prompt => PROMPT('{prompt_tmpl}', {', '.join(to_file_calls)})")
         else:
             args.append(f"prompt => '{safe_prompt}'")
 
@@ -634,6 +1264,11 @@ class SnowflakeAICompleteEngine:
             args.append("show_details => TRUE")
         if return_error_details:
             args.append("return_error_details => TRUE")
+
+        if batch_directory_mode:
+            stg_name, _ = normalize_stage_and_path(stage_selector=stage_selector, stage_file_path=stg_ref)
+            safe_stg = stg_name.replace("'", "''")
+            return f"SELECT relative_path, size, last_modified, AI_COMPLETE({', '.join(args)}) AS RESULT FROM DIRECTORY({safe_stg})"
 
         return f"SELECT AI_COMPLETE({', '.join(args)}) AS RESULT"
 

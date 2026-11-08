@@ -5,29 +5,51 @@ from typing import Any
 
 import lfx_snowflake._lfx_compat  # noqa: F401
 from lfx.custom import Component
-from lfx.io import BoolInput, DropdownInput, FloatInput, IntInput, MessageTextInput, MultilineInput, Output, StrInput
+from lfx.io import (
+    BoolInput,
+    DropdownInput,
+    FloatInput,
+    HandleInput,
+    IntInput,
+    MessageTextInput,
+    MultilineInput,
+    Output,
+    StrInput,
+)
 from lfx.schema import Data
 from lfx.schema.message import Message
 
 from lfx_snowflake.components.ai_function import (
     SUPPORTED_AI_COMPLETE_MODELS,
     SnowflakeAICompleteEngine,
+    detect_stage_media_kind,
+    filter_stage_files_for_function,
     get_compatible_models,
 )
+from lfx_snowflake.context_helpers import _resolve_flow_id
 from lfx_snowflake.fastapi_live_bridge import LIVE_BRIDGE
 
 
 class SnowflakeAICompleteComponent(Component):
     display_name = "AI Complete"
     description = (
-        "Dedicated Snowflake AI_COMPLETE generative component with capability-filtered model catalog, "
+        "Dedicated Snowflake AI_COMPLETE generative component with capability-filtered model catalog "
+        "(including gemini-3.1-pro, gemini-3.1-flash-lite, gemini-3.5-flash for .mp3/audio and video), "
         "model_parameters (temperature, top_p, max_tokens, guardrails), structured JSON Schema response_format, "
-        "optional multimodal TO_FILE('@db.schema.stage', 'path'), show_details, and return_error_details."
+        "full Internal & External Stage multimodal TO_FILE('@db.schema.stage', 'path') + DIRECTORY(@stage) batch mode, "
+        "multi-file comparison, show_details, and return_error_details."
     )
     icon = "Snowflake"
     name = "SnowflakeAIComplete"
 
     inputs = [
+        HandleInput(
+            name="snowflake_context",
+            display_name="Snowflake Context",
+            info="Optional connection from [ ❄️ Context ] / Operations node.",
+            input_types=["Data"],
+            required=False,
+        ),
         DropdownInput(
             name="model",
             display_name="Model",
@@ -41,12 +63,47 @@ class SnowflakeAICompleteComponent(Component):
             display_name="Prompt",
             value="Summarize the operational status of this workflow.",
         ),
-        StrInput(
+        DropdownInput(
+            name="stage_selector",
+            display_name="Stage / Bucket (@Database.Schema.Stage)",
+            info="Internal Stage (SNOWFLAKE_SSE / SNOWFLAKE_FULL) or External Stage (S3 / GCS / Azure / S3-Compatible).",
+            options=["@SNOWFLAKE_LANGFLOW.CORE.SNOWFLAKE_LANGFLOW_STAGE"],
+            value="@SNOWFLAKE_LANGFLOW.CORE.SNOWFLAKE_LANGFLOW_STAGE",
+            real_time_refresh=True,
+            combobox=True,
+        ),
+        DropdownInput(
+            name="media_type_filter",
+            display_name="Stage Media Type Filter",
+            options=[
+                "All Compatible",
+                "Images (.jpg/.png/.webp/.gif/.bmp)",
+                "Audio (.mp3/.wav/.flac/.m4a/.ogg)",
+                "Video (.mp4/.mov/.webm/.mkv/.avi)",
+            ],
+            value="All Compatible",
+            real_time_refresh=True,
+        ),
+        DropdownInput(
             name="stage_file_path",
-            display_name="Optional Stage File (@DB.SCHEMA.STAGE/path for TO_FILE)",
+            display_name="Stage Media File (Relative Path or @DB.SCHEMA.STAGE/path for TO_FILE)",
+            options=[],
             value="",
             real_time_refresh=True,
+            combobox=True,
             advanced=False,
+        ),
+        StrInput(
+            name="additional_stage_files",
+            display_name="Additional Stage Files CSV (Multi-File PROMPT('{0} ... {1}', TO_FILE(...), TO_FILE(...)))",
+            value="",
+            advanced=True,
+        ),
+        BoolInput(
+            name="batch_directory_mode",
+            display_name="Batch Directory Table (DIRECTORY(@stage))",
+            info="Evaluate AI_COMPLETE across all compatible files in the Internal or External Stage via DIRECTORY(@stage).",
+            value=False,
         ),
         FloatInput(
             name="temperature",
@@ -104,6 +161,7 @@ class SnowflakeAICompleteComponent(Component):
     def update_build_config(
         self, build_config: dict[str, Any], field_value: Any, field_name: str | None = None
     ) -> dict[str, Any]:
+        flow_id = _resolve_flow_id(self, build_config)
         fmt_mode = (
             field_value
             if field_name == "response_format_mode" and isinstance(field_value, str)
@@ -116,12 +174,49 @@ class SnowflakeAICompleteComponent(Component):
             else build_config.get("stage_file_path", {}).get("value")
             or getattr(self, "stage_file_path", "")
         ).strip()
+        mfilter = (
+            field_value
+            if field_name == "media_type_filter" and isinstance(field_value, str)
+            else build_config.get("media_type_filter", {}).get("value")
+            or getattr(self, "media_type_filter", "All Compatible")
+        ).strip()
 
+        stg_resp = LIVE_BRIDGE.list_stages_for_context(flow_id=flow_id)
+        stg_items = stg_resp.get("stages") or []
+        stg_opts = [
+            str(s.get("stage_fqn") or f"@{s.get('fqn')}")
+            for s in stg_items
+            if isinstance(s, dict) and (s.get("stage_fqn") or s.get("fqn"))
+        ]
+        if not stg_opts:
+            stg_opts = ["@SNOWFLAKE_LANGFLOW.CORE.SNOWFLAKE_LANGFLOW_STAGE"]
+        if "stage_selector" in build_config:
+            build_config["stage_selector"]["options"] = stg_opts
+            cur_stg = build_config["stage_selector"].get("value") or stg_opts[0]
+        else:
+            cur_stg = stg_opts[0]
+        if field_name == "stage_selector" and isinstance(field_value, str) and field_value.strip():
+            cur_stg = field_value.strip()
+
+        files_resp = LIVE_BRIDGE.list_stage_files(cur_stg)
+        file_opts = filter_stage_files_for_function(
+            files_resp.get("files") or [],
+            ai_function="AI_COMPLETE",
+            media_type_filter=mfilter,
+        )
+        if "stage_file_path" in build_config:
+            build_config["stage_file_path"]["options"] = file_opts
+
+        media_kind = detect_stage_media_kind(stg_file) if stg_file else ""
+        req_audio = media_kind == "audio" or "audio" in mfilter.lower()
+        req_video = media_kind == "video" or "video" in mfilter.lower()
         req_structured = fmt_mode not in ("None (Text)", "Text (Default)", "")
-        req_multimodal = bool(stg_file)
+        req_multimodal = bool(stg_file) or req_audio or req_video
         compatible = get_compatible_models(
             require_structured_outputs=req_structured,
             require_multimodal=req_multimodal,
+            require_audio=req_audio,
+            require_video=req_video,
         )
         if "model" in build_config:
             build_config["model"]["options"] = compatible
@@ -136,7 +231,10 @@ class SnowflakeAICompleteComponent(Component):
         return SnowflakeAICompleteEngine.build_sql(
             model=self.model or "claude-sonnet-5-5",
             prompt=self.prompt or "",
+            stage_selector=getattr(self, "stage_selector", "") or "",
             stage_file_path=getattr(self, "stage_file_path", "") or "",
+            additional_stage_files=getattr(self, "additional_stage_files", "") or "",
+            batch_directory_mode=bool(getattr(self, "batch_directory_mode", False)),
             temperature=float(getattr(self, "temperature", 0.0) or 0.0),
             top_p=float(getattr(self, "top_p", 1.0) or 1.0),
             max_tokens=int(getattr(self, "max_tokens", 1024) or 1024),
@@ -155,6 +253,8 @@ class SnowflakeAICompleteComponent(Component):
                 return Message(text=json.dumps({"error": res, "sql_preview": stmt}, indent=2))
             raise ValueError(res.get("message", "AI_COMPLETE execution failed"))
         rows = res.get("rows", [])
+        if bool(getattr(self, "batch_directory_mode", False)):
+            return Message(text=json.dumps({"rows": rows, "count": len(rows)}, indent=2))
         val = rows[0].get("RESULT") if rows else ""
         return Message(text=str(val) if not isinstance(val, (dict, list)) else json.dumps(val, indent=2))
 
@@ -163,6 +263,9 @@ class SnowflakeAICompleteComponent(Component):
             data={
                 "function": "AI_COMPLETE",
                 "model": self.model,
+                "stage_selector": getattr(self, "stage_selector", "") or "",
+                "stage_file_path": getattr(self, "stage_file_path", "") or "",
+                "batch_directory_mode": bool(getattr(self, "batch_directory_mode", False)),
                 "response_format_mode": self.response_format_mode,
                 "show_details": bool(self.show_details),
                 "return_error_details": bool(self.return_error_details),

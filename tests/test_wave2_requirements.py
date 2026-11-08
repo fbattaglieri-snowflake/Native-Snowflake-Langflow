@@ -99,8 +99,8 @@ from lfx_snowflake.native_category_components.files_and_knowledge.snowflake_cort
 from lfx_snowflake.native_category_components.files_and_knowledge.snowflake_cortex_search_stream_task import (  # noqa: E402
     SnowflakeCortexSearchStreamTaskComponent,
 )
-from lfx_snowflake.native_category_components.files_and_knowledge.snowflake_object_provisioner_fk import (  # noqa: E402
-    SnowflakeObjectProvisionerFKComponent,
+from lfx_snowflake.context_helpers import (  # noqa: E402
+    INFRASTRUCTURE_OBJECT_FAMILIES,
 )
 from lfx_snowflake.native_category_components.llm_operations.snowflake_ai_complete import (  # noqa: E402
     SnowflakeAICompleteComponent as SidebarAICompleteComponent,
@@ -108,17 +108,14 @@ from lfx_snowflake.native_category_components.llm_operations.snowflake_ai_comple
 from lfx_snowflake.native_category_components.llm_operations.snowflake_ai_function import (  # noqa: E402
     SnowflakeAIFunctionComponent as SidebarAIFunctionComponent,
 )
+from lfx_snowflake.native_category_components.llm_operations.snowflake_ai_redact import (  # noqa: E402
+    SnowflakeAIRedactComponent,
+)
+from lfx_snowflake.native_category_components.llm_operations.snowflake_custom_tool import (  # noqa: E402
+    SnowflakeCustomToolComponent,
+)
 from lfx_snowflake.native_category_components.llm_operations.snowflake_decision import (  # noqa: E402
     SnowflakeDecisionComponent,
-)
-from lfx_snowflake.native_category_components.llm_operations.snowflake_function_udf import (  # noqa: E402
-    SnowflakeFunctionComponent,
-)
-from lfx_snowflake.native_category_components.llm_operations.snowflake_object_provisioner import (  # noqa: E402
-    SnowflakeObjectProvisionerSidebarComponent,
-)
-from lfx_snowflake.native_category_components.llm_operations.snowflake_stored_procedure import (  # noqa: E402
-    SnowflakeStoredProcedureComponent,
 )
 from lfx_snowflake.native_category_components.models_and_agents.snowflake_standard_chat import (  # noqa: E402
     StandardChat,
@@ -244,14 +241,16 @@ def test_ds_w2_01_prov_w2_01_and_ma_w2_01_sidebar_components() -> None:
     tables_src = (comp_dir / "data_source" / "snowflake_tables.py").read_text(encoding="utf-8")
     assert tables_src.index('name="database"') < tables_src.index('name="schema_name"') < tables_src.index('name="table_name"')
 
-    # PROV-W2-01: Removed from data_source, present in llm_operations and files_and_knowledge with distinct internal names
+    # PROV-W2-01 & W2-R9-03: Object Provisioner removed from all workflow node categories (data_source, llm_operations, files_and_knowledge)
     assert not (comp_dir / "data_source" / "snowflake_object_provisioner.py").exists()
-    prov_llm = (comp_dir / "llm_operations" / "snowflake_object_provisioner.py").read_text(encoding="utf-8")
-    prov_fk = (comp_dir / "files_and_knowledge" / "snowflake_object_provisioner_fk.py").read_text(encoding="utf-8")
-    assert 'name = "SnowflakeObjectProvisioner"' in prov_llm
-    assert 'name = "SnowflakeObjectProvisionerFK"' in prov_fk
-    assert prov_llm.index('name="database"') < prov_llm.index('name="schema_name"') < prov_llm.index('name="object_kind"')
-    assert prov_fk.index('name="database"') < prov_fk.index('name="schema_name"') < prov_fk.index('name="object_kind"')
+    assert not (comp_dir / "llm_operations" / "snowflake_object_provisioner.py").exists()
+    assert not (comp_dir / "files_and_knowledge" / "snowflake_object_provisioner_fk.py").exists()
+    assert not (comp_dir / "llm_operations" / "snowflake_stored_procedure.py").exists()
+    assert not (comp_dir / "llm_operations" / "snowflake_function_udf.py").exists()
+    custom_tool_src = (comp_dir / "llm_operations" / "snowflake_custom_tool.py").read_text(encoding="utf-8")
+    ai_redact_src = (comp_dir / "llm_operations" / "snowflake_ai_redact.py").read_text(encoding="utf-8")
+    assert 'name = "SnowflakeCustomTool"' in custom_tool_src
+    assert 'name = "SnowflakeAIRedact"' in ai_redact_src
 
     # MA-W2-01: Models & Agents Cortex Agent cascading Database -> Schema -> Cortex Agent
     agent_src = (comp_dir / "models_and_agents" / "snowflake_cortex_agent.py").read_text(encoding="utf-8")
@@ -461,10 +460,8 @@ def test_fk_w2_01_to_04_files_and_knowledge_and_4_tab_cortex_search_pipeline() -
         "snowflake_postgres",
         "snowflake_cortex_search",
         "snowflake_cortex_analyst",
-        "snowflake_object_provisioner_llm",
-        "snowflake_object_provisioner_fk",
-        "snowflake_stored_procedure",
-        "snowflake_function_udf",
+        "snowflake_custom_tool",
+        "snowflake_ai_redact",
         "snowflake_ai_complete",
         "snowflake_ai_function",
         "snowflake_sql_statement",
@@ -481,6 +478,13 @@ def test_fk_w2_01_to_04_files_and_knowledge_and_4_tab_cortex_search_pipeline() -
         "snowflake_alert_trigger",
     ):
         assert expected_id in comp_ids
+    for removed_id in (
+        "snowflake_object_provisioner_llm",
+        "snowflake_object_provisioner_fk",
+        "snowflake_stored_procedure",
+        "snowflake_function_udf",
+    ):
+        assert removed_id not in comp_ids
 
     seen_names: dict[str, str] = {}
     for py_path in sorted((REPO_ROOT / "src" / "lfx_snowflake" / "native_category_components").rglob("*.py")):
@@ -497,7 +501,7 @@ def test_fk_w2_01_to_04_files_and_knowledge_and_4_tab_cortex_search_pipeline() -
                                 comp_name = str(stmt.value.value)
                 assert comp_name not in seen_names, f"Duplicate component name {comp_name} in {py_path} and {seen_names[comp_name]}"
                 seen_names[comp_name] = str(py_path)
-    assert len(seen_names) in (26, 28, 32, 34, 38)
+    assert len(seen_names) in (26, 28, 32, 34, 36, 38)
 
 
 def test_wave2_undefined_headers_fetch_intercept_guard() -> None:
@@ -599,84 +603,59 @@ def test_w2_r2_01_02_03_model_catalog_and_dynamic_update_build_config() -> None:
 
     dec_comp = SnowflakeDecisionComponent()
     dec_cfg = dec_comp.to_build_config()
-    dec_comp.update_build_config(dec_cfg, "AI_COMPLETE (Structured Decision JSON)", "engine_mode")
-    assert "glm-5.3" not in dec_cfg["model"]["options"]
+    assert dec_cfg["model"]["options"] == ["snowflake-decision-fast", "snowflake-decision"]
+    dec_comp.update_build_config(dec_cfg, "score", "question_type")
+    assert dec_cfg["include_none_of_these"]["show"] is False
+    dec_comp.update_build_config(dec_cfg, "Table-Level Processing (Database.Schema.Table)", "evaluation_mode")
+    assert dec_cfg["table_name"]["show"] is True
+    assert dec_cfg["state_input"]["show"] is False
 
-    # W2-R2-02: Stored Procedure & Function dynamic update_build_config
-    sp_comp = SnowflakeStoredProcedureComponent()
-    sp_cfg = sp_comp.to_build_config()
-    sp_comp.update_build_config(sp_cfg, "CALL Existing", "action_mode")
-    assert sp_cfg["body"]["show"] is False
-    assert sp_cfg["procedure_name"]["show"] is False
-    assert sp_cfg["call_args"]["show"] is True
+    # W2-R2-02 & W2-R9-01: Custom Tool dynamic update_build_config (replacing Stored Procedure & Function)
+    ct_comp = SnowflakeCustomToolComponent()
+    ct_cfg = ct_comp.to_build_config()
+    ct_comp.update_build_config(ct_cfg, "Custom", "warehouse_mode")
+    assert ct_cfg["custom_warehouse"]["show"] is True
+    ct_comp.update_build_config(ct_cfg, "User's default", "warehouse_mode")
+    assert ct_cfg["custom_warehouse"]["show"] is False
+    ct_comp.update_build_config(ct_cfg, "function", "resource_type")
+    assert ct_cfg["custom_tool_identifier"]["options"]
 
-    sp_comp.update_build_config(sp_cfg, "CREATE OR REPLACE", "action_mode")
-    assert sp_cfg["body"]["show"] is True
-    sp_comp.update_build_config(sp_cfg, "PYTHON", "language")
-    assert "def run(session):" in sp_cfg["body"]["value"]
-
-    fn_comp = SnowflakeFunctionComponent()
-    fn_cfg = fn_comp.to_build_config()
-    fn_comp.update_build_config(fn_cfg, "Execute Existing", "action_mode")
-    assert fn_cfg["body"]["show"] is False
-    assert fn_cfg["function_name"]["show"] is False
-    assert fn_cfg["call_args"]["show"] is True
-
-    fn_comp.update_build_config(fn_cfg, "CREATE OR REPLACE", "action_mode")
-    assert fn_cfg["body"]["show"] is True
-    fn_comp.update_build_config(fn_cfg, "PYTHON", "language")
-    assert "def compute(" in fn_cfg["body"]["value"]
-
-    # W2-R2-03: AI Function dynamic per-function field visibility
+    # W2-R2-03 & W2-R9-04: AI Function & AI Redact dynamic field visibility
     aif_comp = SidebarAIFunctionComponent()
     aif_cfg = aif_comp.to_build_config()
 
     aif_comp.update_build_config(aif_cfg, "AI_TRANSLATE", "ai_function")
     assert aif_cfg["source_lang"]["show"] is True
     assert aif_cfg["target_lang"]["show"] is True
-    assert aif_cfg["redact_mode"]["show"] is False
-    assert aif_cfg["pii_categories"]["show"] is False
+    assert aif_cfg["stage_selector"]["show"] is False
 
-    aif_comp.update_build_config(aif_cfg, "AI_REDACT", "ai_function")
-    assert aif_cfg["redact_mode"]["show"] is True
-    assert aif_cfg["pii_categories"]["show"] is True
-    assert aif_cfg["source_lang"]["show"] is False
+    air_comp = SnowflakeAIRedactComponent()
+    air_cfg = air_comp.to_build_config()
+    air_comp.update_build_config(air_cfg, "detect_with_allowlist", "redact_mode")
+    assert air_cfg["allowlist_values"]["show"] is True
+    air_comp.update_build_config(air_cfg, "redact", "redact_mode")
+    assert air_cfg["allowlist_values"]["show"] is False
 
     aif_comp.update_build_config(aif_cfg, "AI_COUNT_TOKENS", "ai_function")
     assert aif_cfg["model_for_count_tokens"]["show"] is True
-    assert aif_cfg["redact_mode"]["show"] is False
+    assert aif_cfg["source_lang"]["show"] is False
 
     aif_comp.update_build_config(aif_cfg, "AI_TRANSCRIBE", "ai_function")
     assert aif_cfg["second_text_or_stage_file"]["show"] is True
+    assert aif_cfg["stage_selector"]["show"] is True
     assert aif_cfg["input_text"]["show"] is False
 
 
 def test_w2_r2_04_object_provisioner_4_families_without_memory() -> None:
-    """Verify W2-R2-04B: Object Provisioner enforces the 4 infrastructure families (table, view, stage, postgres) and excludes memory."""
-    for comp_cls in (SnowflakeObjectProvisionerSidebarComponent, SnowflakeObjectProvisionerFKComponent):
-        comp = comp_cls()
-        cfg = comp.to_build_config()
-        assert cfg["object_kind"]["options"] == ["table", "view", "stage", "postgres"]
-        assert "memory" not in cfg["object_kind"]["options"]
-
-        comp.update_build_config(cfg, "view", "object_kind")
-        assert cfg["view_type"]["show"] is True
-        assert cfg["as_select_query"]["show"] is True
-        assert cfg["table_subtype"]["show"] is False
-
-        comp.update_build_config(cfg, "stage", "object_kind")
-        cfg["stage_type"]["value"] = "EXTERNAL"
-        comp.update_build_config(cfg, "EXTERNAL", "stage_type")
-        assert cfg["external_url"]["show"] is True
-        assert cfg["storage_integration"]["show"] is True
-
-        comp.update_build_config(cfg, "postgres", "object_kind")
-        assert cfg["postgres_instance_name"]["show"] is True
-        assert cfg["compute_family"]["show"] is True
-
-        comp.object_kind = "memory"
-        with pytest.raises(ValueError, match="Memories"):
-            comp.provision_object()
+    """Verify W2-R2-04B & W2-R9-03: Infrastructure families (table, view, stage, postgres) exclude memory, and Object Provisioner is removed from workflow nodes."""
+    assert INFRASTRUCTURE_OBJECT_FAMILIES == ("table", "view", "stage", "postgres")
+    assert "memory" not in INFRASTRUCTURE_OBJECT_FAMILIES
+    comp_dir = REPO_ROOT / "src" / "lfx_snowflake" / "native_category_components"
+    assert not (comp_dir / "llm_operations" / "snowflake_object_provisioner.py").exists()
+    assert not (comp_dir / "files_and_knowledge" / "snowflake_object_provisioner_fk.py").exists()
+    with pytest.raises(SnowflakeGovernanceError) as exc_info:
+        SnowflakeObjectProvisioner.enforce_hub_object_exclusion("memory", source="hub", active_role="ACCOUNTADMIN")
+    assert exc_info.value.error_code == SnowflakeErrorCode.UNSUPPORTED_CAPABILITY
 
 
 def test_w2_r2_05_deprefixed_sidebar_display_names() -> None:

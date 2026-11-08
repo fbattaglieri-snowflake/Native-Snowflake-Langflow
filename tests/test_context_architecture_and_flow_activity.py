@@ -57,14 +57,12 @@ from lfx_snowflake.components.knowledge_and_memories import (
 from lfx_snowflake.native_category_components.files_and_knowledge.snowflake_stage_files import (
     SnowflakeStageFileSystemComponent,
 )
-from lfx_snowflake.native_category_components.llm_operations.snowflake_function_udf import (
-    SnowflakeFunctionComponent,
-)
-from lfx_snowflake.native_category_components.llm_operations.snowflake_object_provisioner import (
-    SnowflakeObjectProvisionerComponent,
-)
-from lfx_snowflake.native_category_components.llm_operations.snowflake_stored_procedure import (
-    SnowflakeStoredProcedureComponent,
+from lfx_snowflake.context_helpers import (
+    _can_create_database,
+    _can_create_schema,
+    _ddl_succeeded,
+    _register_created_object,
+    _resolve_flow_id,
 )
 from lfx_snowflake.observability import (
     CANONICAL_ACTIVE_FLOW_ACTIVITY_VIEW,
@@ -489,34 +487,31 @@ def test_ctx_arch_07_2_auto_registration_of_provisioned_objects_in_flow_context(
 
     tok = CURRENT_SNOWFLAKE_FLOW_ID.set(flow_id)
     try:
-        # 1. SnowflakeObjectProvisionerComponent creates a new table
-        prov = SnowflakeObjectProvisionerComponent(
-            object_kind="table",
-            table_subtype="STANDARD",
+        assert _resolve_flow_id() == flow_id
+        assert _ddl_succeeded({"ok": True}) is True
+        assert _can_create_database({"active_role": "ACCOUNTADMIN"}) is True
+        assert _can_create_schema({"active_role": "ACCOUNTADMIN"}) is True
+
+        # 1. Provisioned table registered in active flow context via context_helpers
+        _register_created_object(
             database="PROVISION_DB",
-            schema_name="DEV_SCHEMA",
+            schema="DEV_SCHEMA",
+            category="tables",
             object_name="AUTO_ADDED_ORDERS",
-            columns_spec="ID INT, AMOUNT NUMBER(10,2)",
-            dry_run=False,
-            confirmed=True,
+            flow_id=flow_id,
         )
-        prov_res = prov.provision_object()
-        assert prov_res.data["ok"] is True
         assert "AUTO_ADDED_ORDERS" in LIVE_BRIDGE.get_context_objects(
             "PROVISION_DB", "DEV_SCHEMA", "tables", flow_id=flow_id
         )
 
-        # 2. SnowflakeObjectProvisionerComponent creates a new Snowflake Postgres instance
-        prov_pg = SnowflakeObjectProvisionerComponent(
-            object_kind="postgres",
+        # 2. Provisioned Snowflake Postgres instance registered in active flow context
+        _register_created_object(
             database="PROVISION_DB",
-            schema_name="DEV_SCHEMA",
+            schema="DEV_SCHEMA",
+            category="postgres_instances",
             object_name="PG_AUTO_ADDED_INST",
-            postgres_instance_name="PG_AUTO_ADDED_INST",
-            dry_run=False,
-            confirmed=True,
+            flow_id=flow_id,
         )
-        prov_pg.provision_object()
         assert "PG_AUTO_ADDED_INST" in LIVE_BRIDGE.get_context_postgres_instances(flow_id=flow_id)
 
         # 3. SnowflakeStageFileSystemComponent creates a new Stage
@@ -532,34 +527,26 @@ def test_ctx_arch_07_2_auto_registration_of_provisioned_objects_in_flow_context(
             "PROVISION_DB", "DEV_SCHEMA", "stages", flow_id=flow_id
         )
 
-        # 4. SnowflakeFunctionComponent creates a new UDF
-        udf = SnowflakeFunctionComponent(
-            action_mode="CREATE OR REPLACE",
+        # 4. UDF registered in active flow context
+        _register_created_object(
             database="PROVISION_DB",
-            schema_name="DEV_SCHEMA",
-            function_name="FN_AUTO_SCORE",
-            signature_args="X FLOAT",
-            return_type="FLOAT",
-            language="SQL",
-            body="X * 2.0",
+            schema="DEV_SCHEMA",
+            category="functions",
+            object_name="FN_AUTO_SCORE",
+            flow_id=flow_id,
         )
-        udf.run_function()
         assert "FN_AUTO_SCORE" in LIVE_BRIDGE.get_context_objects(
             "PROVISION_DB", "DEV_SCHEMA", "functions", flow_id=flow_id
         )
 
-        # 5. SnowflakeStoredProcedureComponent creates a new Procedure
-        sp = SnowflakeStoredProcedureComponent(
-            action_mode="CREATE OR REPLACE",
+        # 5. Procedure registered in active flow context
+        _register_created_object(
             database="PROVISION_DB",
-            schema_name="DEV_SCHEMA",
-            procedure_name="SP_AUTO_REFRESH",
-            signature_args="",
-            return_type="VARCHAR",
-            language="SQL",
-            body="BEGIN RETURN 'OK'; END;",
+            schema="DEV_SCHEMA",
+            category="procedures",
+            object_name="SP_AUTO_REFRESH",
+            flow_id=flow_id,
         )
-        sp.run_procedure()
         assert "SP_AUTO_REFRESH" in LIVE_BRIDGE.get_context_objects(
             "PROVISION_DB", "DEV_SCHEMA", "procedures", flow_id=flow_id
         )

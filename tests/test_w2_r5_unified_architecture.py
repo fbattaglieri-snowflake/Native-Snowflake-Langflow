@@ -754,9 +754,14 @@ def test_w2_r5_06_files_and_knowledge_exact_5_canonical_components() -> None:
         "SnowflakeCortexSearchServiceCreator",
         "SnowflakeCortexSearchStreamTask",
         "SnowflakeObjectProvisionerFK",
+        "SnowflakeObjectProvisioner",
+        "SnowflakeStoredProcedure",
+        "SnowflakeFunctionUDF",
         "SnowflakeStageFileSystem",
     ):
         assert f'"{removed_dup}"' in hooks_py
+    for required_llm_comp in ("SnowflakeCustomTool", "SnowflakeAIRedact", "SnowflakeDecision"):
+        assert f'"{required_llm_comp}"' in hooks_py
 
     # Verify install_live_hooks_in_container.py enforces 5 distinct display_names & icons (never 4x 'File System')
     assert "non_indexed_fk_helper_files" in hooks_py

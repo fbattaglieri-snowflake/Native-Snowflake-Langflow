@@ -601,6 +601,9 @@ def install_all() -> None:
     stale_component_files = (
         ("data_source", "snowflake_object_provisioner.py"),
         ("data_source", "snowflake_data_source.py"),
+        ("llm_operations", "snowflake_object_provisioner.py"),
+        ("llm_operations", "snowflake_stored_procedure.py"),
+        ("llm_operations", "snowflake_function_udf.py"),
         ("llm_operations", "snowflake_cortex_search.py"),
         ("llm_operations", "snowflake_cortex_analyst_llm.py"),
         ("llm_operations", "snowflake_smart_router.py"),
@@ -707,6 +710,9 @@ def install_all() -> None:
     stale_index_entries = (
         ("data_source", "SnowflakeObjectProvisioner"),
         ("data_source", "SnowflakeDataSource"),
+        ("llm_operations", "SnowflakeObjectProvisioner"),
+        ("llm_operations", "SnowflakeStoredProcedure"),
+        ("llm_operations", "SnowflakeFunctionUDF"),
         ("llm_operations", "SnowflakeCortexSearch"),
         ("llm_operations", "SnowflakeCortexAnalystLLM"),
         ("llm_operations", "SnowflakeSmartRouter"),
@@ -1770,16 +1776,18 @@ def install_all() -> None:
     assert all(m["metadata"].get("default") is True for m in emb_detailed["Snowflake Cortex"]["models"])
 
     for llm_comp in (
-        "SnowflakeObjectProvisioner",
-        "SnowflakeStoredProcedure",
-        "SnowflakeFunctionUDF",
+        "SnowflakeCustomTool",
         "SnowflakeAIComplete",
         "SnowflakeAIFunction",
+        "SnowflakeAIRedact",
         "SnowflakeSQLStatement",
         "SnowflakeLLMNode",
         "SnowflakeDecision",
     ):
         assert llm_comp in idx_cats["llm_operations"], f"Missing {llm_comp} in llm_operations"
+    assert "SnowflakeObjectProvisioner" not in idx_cats["llm_operations"]
+    assert "SnowflakeStoredProcedure" not in idx_cats["llm_operations"]
+    assert "SnowflakeFunctionUDF" not in idx_cats["llm_operations"]
     assert "SnowflakeCortexSearch" not in idx_cats["llm_operations"]
     assert "SnowflakeCortexAnalystLLM" not in idx_cats["llm_operations"]
     assert "SnowflakeSmartRouter" not in idx_cats["llm_operations"]
