@@ -1433,37 +1433,61 @@
         }
       }
     }
-    // 2. If a container restart redirected the browser to /login while LANGFLOW_AUTO_LOGIN=true is active, recover session & redirect to /
+    // 2. If a container restart or SPCS ingress token refresh redirected the browser to /login while LANGFLOW_AUTO_LOGIN=true is active, recover session & redirect to /
     if (
       typeof window !== "undefined" &&
       window.location &&
-      String(window.location.pathname || "").includes("/login") &&
-      !_autoLoginProbeInFlight &&
-      Date.now() - _lastAutoLoginProbeTs > 3000
+      String(window.location.pathname || "").includes("/login")
     ) {
-      _autoLoginProbeInFlight = true;
-      _lastAutoLoginProbeTs = Date.now();
-      fetch("/api/v1/auto_login", { headers: { Accept: "application/json" } })
-        .then(function (r) {
-          return r.ok ? r.json() : null;
+      const loginInputs = document.querySelectorAll('input[name="username"], input[name="password"]');
+      for (let li = 0; li < loginInputs.length; li++) {
+        const card = loginInputs[li].closest("form") || loginInputs[li].parentElement;
+        if (card) card.style.opacity = "0";
+      }
+      if (!_autoLoginProbeInFlight && Date.now() - _lastAutoLoginProbeTs > 1500) {
+        _autoLoginProbeInFlight = true;
+        _lastAutoLoginProbeTs = Date.now();
+        fetch("/api/v1/auto_login", {
+          credentials: "include",
+          headers: { Accept: "application/json" },
         })
-        .then(function (data) {
-          if (data && data.access_token) {
+          .then(function (r) {
+            return r.ok ? r.json() : null;
+          })
+          .then(function (data) {
+            if (data && data.access_token) {
+              try {
+                localStorage.setItem("access_token_lf", data.access_token);
+                localStorage.setItem("refresh_token_lf", data.refresh_token || "auto");
+                localStorage.setItem("auto_login_lf", "true");
+                document.cookie = "access_token_lf=" + data.access_token + "; path=/; SameSite=Lax";
+                document.cookie = "refresh_token_lf=" + (data.refresh_token || "auto") + "; path=/; SameSite=Lax";
+                document.cookie = "auto_login_lf=true; path=/; SameSite=Lax";
+              } catch (_e) {}
+              window.location.replace("/");
+              return;
+            }
+            // If SPCS ingress returned a non-JSON redirect or requires top-level navigation to refresh OAuth cookie
+            const lastTopRedir = Number(sessionStorage.getItem("sflf_login_top_redirect_ts") || "0");
+            if (Date.now() - lastTopRedir > 6000) {
+              sessionStorage.setItem("sflf_login_top_redirect_ts", String(Date.now()));
+              window.location.replace("/");
+            }
+          })
+          .catch(function () {
+            // Network Error on XHR /api/v1/auto_login indicates SPCS ingress 302 cross-origin OAuth refresh: top-level navigate to /
             try {
-              localStorage.setItem("access_token_lf", data.access_token);
-              localStorage.setItem("refresh_token_lf", "auto");
-              localStorage.setItem("auto_login_lf", "true");
-              document.cookie = "access_token_lf=" + data.access_token + "; path=/; SameSite=Lax";
-              document.cookie = "refresh_token_lf=auto; path=/; SameSite=Lax";
-              document.cookie = "auto_login_lf=true; path=/; SameSite=Lax";
+              const lastTopRedir = Number(sessionStorage.getItem("sflf_login_top_redirect_ts") || "0");
+              if (Date.now() - lastTopRedir > 6000) {
+                sessionStorage.setItem("sflf_login_top_redirect_ts", String(Date.now()));
+                window.location.replace("/");
+              }
             } catch (_e) {}
-            window.location.replace("/");
-          }
-        })
-        .catch(function () {})
-        .finally(function () {
-          _autoLoginProbeInFlight = false;
-        });
+          })
+          .finally(function () {
+            _autoLoginProbeInFlight = false;
+          });
+      }
     }
   }
 

@@ -9537,6 +9537,83 @@ def register_snowflake_fastapi_routes(app: Any) -> None:
                     return JSONResponse(status_code=200, content={"status": "ok"})
                 return JSONResponse(status_code=200, content={"status": "ok", "chat": "ok", "db": "ok"})
 
+            # SPCS Auto-Login Always-On Guard: never prompt for username/password on /login or expire /api/v1/* sessions when LANGFLOW_AUTO_LOGIN=true
+            auto_login_enabled = os.getenv("LANGFLOW_AUTO_LOGIN", "true").strip().lower() not in ("0", "false", "no")
+            if auto_login_enabled:
+                if clean_path == "/api/v1/logout" and method in ("POST", "GET"):
+                    return JSONResponse(status_code=200, content={"detail": "Auto-login active; session preserved"})
+                if clean_path in ("/api/v1/login", "/api/v1/refresh") and method == "POST":
+                    request.scope["method"] = "GET"
+                    request.scope["path"] = "/api/v1/auto_login"
+                    request.scope["raw_path"] = b"/api/v1/auto_login"
+                    clean_path = "/api/v1/auto_login"
+                    path = "/api/v1/auto_login"
+                    method = "GET"
+                elif clean_path == "/login" and method == "GET":
+                    redirect_target = str(request.query_params.get("redirect") or "/").strip()
+                    if not redirect_target.startswith("/") or redirect_target.startswith("/login"):
+                        redirect_target = "/"
+                    from starlette.responses import RedirectResponse
+                    redir_resp = RedirectResponse(url=redirect_target, status_code=302)
+                    cached_tok = getattr(LIVE_BRIDGE, "_cached_auto_login_access_token", None)
+                    cached_ref = getattr(LIVE_BRIDGE, "_cached_auto_login_refresh_token", None)
+                    if cached_tok:
+                        redir_resp.set_cookie("access_token_lf", cached_tok, httponly=True, path="/", samesite="lax")
+                    if cached_ref:
+                        redir_resp.set_cookie("refresh_token_lf", cached_ref, httponly=True, path="/", samesite="lax")
+                    redir_resp.set_cookie("auto_login_lf", "true", httponly=False, path="/", samesite="lax")
+                    return redir_resp
+
+                # Inject cached superuser Bearer token into /api/v1/* requests when cookie/Authorization is missing
+                cached_tok = getattr(LIVE_BRIDGE, "_cached_auto_login_access_token", None)
+                cached_ts = float(getattr(LIVE_BRIDGE, "_cached_auto_login_ts", 0.0) or 0.0)
+                if (
+                    (not cached_tok or (time.time() - cached_ts) >= 2400.0)
+                    and clean_path.startswith("/api/v1/")
+                    and clean_path not in ("/api/v1/auto_login", "/api/v1/config")
+                    and not clean_path.startswith("/api/v1/snowflake")
+                ):
+                    def _warmup_auto_login_token() -> tuple[str | None, str | None]:
+                        try:
+                            port = os.getenv("LANGFLOW_PORT", "7860").strip() or "7860"
+                            req_al = urllib_request.Request(
+                                f"http://127.0.0.1:{port}/api/v1/auto_login",
+                                headers={"Accept": "application/json"},
+                            )
+                            with urllib_request.urlopen(req_al, timeout=3.0) as r_al:
+                                data_al = json.loads(r_al.read().decode("utf-8"))
+                                return data_al.get("access_token"), data_al.get("refresh_token")
+                        except Exception:  # noqa: BLE001
+                            return None, None
+
+                    warm_tok, warm_ref = await asyncio.to_thread(_warmup_auto_login_token)
+                    if warm_tok:
+                        LIVE_BRIDGE._cached_auto_login_access_token = str(warm_tok)
+                        LIVE_BRIDGE._cached_auto_login_refresh_token = str(warm_ref or "")
+                        LIVE_BRIDGE._cached_auto_login_ts = time.time()
+                        cached_tok = str(warm_tok)
+                        cached_ts = LIVE_BRIDGE._cached_auto_login_ts
+
+                if (
+                    cached_tok
+                    and (time.time() - cached_ts) < 2400.0
+                    and clean_path.startswith("/api/v1/")
+                    and clean_path != "/api/v1/auto_login"
+                ):
+                    raw_headers = list(request.scope.get("headers") or [])
+                    has_auth_hdr = any(k.lower() == b"authorization" and b"bearer " in v.lower() for k, v in raw_headers)
+                    cookie_hdr = b"; ".join(v for k, v in raw_headers if k.lower() == b"cookie")
+                    if not has_auth_hdr and b"access_token_lf=" not in cookie_hdr:
+                        raw_headers.append((b"authorization", f"Bearer {cached_tok}".encode("utf-8")))
+                        if cookie_hdr:
+                            raw_headers = [
+                                (k, (v + f"; access_token_lf={cached_tok}; auto_login_lf=true".encode("utf-8")) if k.lower() == b"cookie" else v)
+                                for k, v in raw_headers
+                            ]
+                        else:
+                            raw_headers.append((b"cookie", f"access_token_lf={cached_tok}; auto_login_lf=true".encode("utf-8")))
+                        request.scope["headers"] = raw_headers
+
             # Intercept native Langflow /api/v1/memories* so Snowflake Memories are first-class citizens (`W2-R4-08G`)
             if clean_path == "/api/v1/memories" and method == "GET":
                 req_search = request.query_params.get("search") or request.query_params.get("q")
@@ -9634,6 +9711,22 @@ def register_snowflake_fastapi_routes(app: Any) -> None:
                 response = await call_next(request)
             finally:
                 CURRENT_SNOWFLAKE_FLOW_ID.reset(token)
+
+            if auto_login_enabled and clean_path == "/api/v1/auto_login" and getattr(response, "status_code", 200) == 200:
+                try:
+                    raw_resp_headers = getattr(response, "raw_headers", None) or []
+                    for hk, hv in raw_resp_headers:
+                        if hk.lower() == b"set-cookie":
+                            sc_str = hv.decode("utf-8", errors="ignore")
+                            m_acc = re.search(r"access_token_lf=([^;\s]+)", sc_str)
+                            if m_acc:
+                                LIVE_BRIDGE._cached_auto_login_access_token = m_acc.group(1).strip('"')
+                                LIVE_BRIDGE._cached_auto_login_ts = time.time()
+                            m_ref = re.search(r"refresh_token_lf=([^;\s]+)", sc_str)
+                            if m_ref:
+                                LIVE_BRIDGE._cached_auto_login_refresh_token = m_ref.group(1).strip('"')
+                except Exception:  # noqa: BLE001
+                    pass
 
             if method == "DELETE" and "/api/v1/flows/" in path and matched_fid:
                 await asyncio.to_thread(

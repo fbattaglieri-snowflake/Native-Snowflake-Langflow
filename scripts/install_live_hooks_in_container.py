@@ -1476,6 +1476,23 @@ def install_all() -> None:
             'if(E.name!=="CanceledError"){a(!1);const z=QKr(E.response?.data);!u&&!z&&await b()}',
             'if(E.name!=="CanceledError"){const z=QKr(E.response?.data);if(z){a(!1)}else{await b()}}',
         )
+        # Never redirect to /login or render the Username/Password login screen when LANGFLOW_AUTO_LOGIN=true in SPCS
+        txt = txt.replace(
+            'c=!t&&o!==void 0&&(!o||!s);',
+            'c=!1;',
+        )
+        txt = txt.replace(
+            'const Xct=({children:e})=>{const t=Kl(o=>o.autoLogin),n=Kl(o=>o.isAuthenticated);if(t===!0||n){',
+            'const Xct=({children:e})=>{const t=Kl(o=>o.autoLogin),n=Kl(o=>o.isAuthenticated);if(!0){',
+        )
+        txt = txt.replace(
+            'else h&&!h.authenticated&&kBn()&&o(!1);',
+            'else h&&!h.authenticated&&o(!0);',
+        )
+        txt = txt.replace(
+            'e({isAdmin:!1,userData:null,accessToken:null,isAuthenticated:!1,autoLogin:!1,apiKey:null})',
+            'e({isAdmin:!0,userData:null,accessToken:"auto",isAuthenticated:!0,autoLogin:!0,apiKey:null})',
+        )
         # W2-R5-02 & W2-R5-04: Native + Create Memory & Knowledge Base Snowflake Cortex (AI_EMBED) & 6 Snowflake Vector Backends
         if 'id:"snowflake_table"' not in txt and 'CQ=[{id:"chroma"' in txt:
             sf_cq_entries = (
