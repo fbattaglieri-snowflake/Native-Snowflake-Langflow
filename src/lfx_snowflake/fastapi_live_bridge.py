@@ -9563,6 +9563,37 @@ def register_snowflake_fastapi_routes(app: Any) -> None:
                         redir_resp.set_cookie("refresh_token_lf", cached_ref, httponly=True, path="/", samesite="lax")
                     redir_resp.set_cookie("auto_login_lf", "true", httponly=False, path="/", samesite="lax")
                     return redir_resp
+                elif method == "GET" and re.match(r"^/assets/index-[^/]+\.js$", clean_path):
+                    cached_bundle = getattr(LIVE_BRIDGE, "_cached_patched_index_js", None)
+                    if cached_bundle is None:
+                        fe_dir = Path(
+                            os.getenv(
+                                "LANGFLOW_FRONTEND_DIR",
+                                "/app/.venv/lib/python3.14/site-packages/langflow/frontend",
+                            )
+                        )
+                        asset_file = fe_dir / clean_path.lstrip("/")
+                        if asset_file.exists():
+                            b_txt = asset_file.read_text(encoding="utf-8", errors="ignore")
+                            b_txt = b_txt.replace("c=!t&&o!==void 0&&(!o||!s);", "c=!1;")
+                            b_txt = b_txt.replace(
+                                "const Xct=({children:e})=>{const t=Kl(o=>o.autoLogin),n=Kl(o=>o.isAuthenticated);if(t===!0||n){",
+                                "const Xct=({children:e})=>{const t=Kl(o=>o.autoLogin),n=Kl(o=>o.isAuthenticated);if(!0){",
+                            )
+                            b_txt = b_txt.replace("else h&&!h.authenticated&&kBn()&&o(!1);", "else h&&!h.authenticated&&o(!0);")
+                            b_txt = b_txt.replace(
+                                "e({isAdmin:!1,userData:null,accessToken:null,isAuthenticated:!1,autoLogin:!1,apiKey:null})",
+                                'e({isAdmin:!0,userData:null,accessToken:"auto",isAuthenticated:!0,autoLogin:!0,apiKey:null})',
+                            )
+                            cached_bundle = b_txt.encode("utf-8")
+                            LIVE_BRIDGE._cached_patched_index_js = cached_bundle
+                    if cached_bundle is not None:
+                        from starlette.responses import Response
+                        return Response(
+                            content=cached_bundle,
+                            media_type="application/javascript; charset=utf-8",
+                            headers={"Cache-Control": "no-cache, must-revalidate"},
+                        )
 
                 # Inject cached superuser Bearer token into /api/v1/* requests when cookie/Authorization is missing
                 cached_tok = getattr(LIVE_BRIDGE, "_cached_auto_login_access_token", None)
