@@ -76,44 +76,31 @@ def _clean_stage_options(
         for s in LIVE_BRIDGE.get_context_objects(database, schema_name, "stages", flow_id=eff_fid)
         if str(s).strip() and not str(s).startswith("+") and not str(s).startswith("[DISABLED")
     ]
-    if not stages:
-        stages = ["SNOWFLAKE_LANGFLOW_STAGE"]
     return stages
 
 
 def _list_files_on_stage(stage_fqn: str, subpath: str = "") -> list[dict[str, Any]]:
-    clean = str(stage_fqn or "").lstrip("@").strip() or "SNOWFLAKE_LANGFLOW.CORE.SNOWFLAKE_LANGFLOW_STAGE"
-    suffix = f"/{subpath.lstrip('/')}" if subpath and subpath.strip() else ""
-    res = LIVE_BRIDGE.execute_sql(f"LIST @{clean}{suffix}")
-    rows = res.get("rows", []) if isinstance(res, dict) else []
-    if isinstance(rows, list) and rows:
-        out: list[dict[str, Any]] = []
-        for r in rows:
-            if isinstance(r, dict):
-                out.append(
-                    {
-                        "name": str(r.get("name") or r.get("NAME") or r.get("file_name") or ""),
-                        "size": int(r.get("size") or r.get("SIZE") or 0),
-                        "md5": str(r.get("md5") or r.get("MD5") or ""),
-                        "last_modified": str(r.get("last_modified") or r.get("LAST_MODIFIED") or ""),
-                    }
-                )
-        if out:
-            return out
+    """Return files from a real `LIST` on the stage; empty list when no stage, no files or on error."""
+    if not str(stage_fqn or "").strip():
+        return []
+    res = LIVE_BRIDGE.list_stage_files(stage_fqn, subpath=subpath or "")
+    if not isinstance(res, dict) or not res.get("ok"):
+        return []
     return [
         {
-            "name": f"{clean.split('.')[-1].lower()}/README.md",
-            "size": 1024,
-            "md5": "00000000000000000000000000000000",
-            "last_modified": "2026-10-27T00:00:00Z",
+            "name": str(f.get("name") or ""),
+            "size": int(f.get("size") or 0),
+            "md5": str(f.get("md5") or ""),
+            "last_modified": str(f.get("last_modified") or ""),
         }
+        for f in res.get("files") or []
+        if isinstance(f, dict) and f.get("name")
     ]
 
 
 def _stage_file_name_options(stage_fqn: str) -> list[str]:
     files = _list_files_on_stage(stage_fqn)
-    names = [str(f.get("name") or "").strip() for f in files if str(f.get("name") or "").strip()]
-    return names or ["README.md", "docs/architecture.pdf"]
+    return [str(f.get("name") or "").strip() for f in files if str(f.get("name") or "").strip()]
 
 
 class SnowflakeFileSystemToolComponent(Component):
@@ -147,7 +134,7 @@ class SnowflakeFileSystemToolComponent(Component):
             name="stage_name",
             display_name="Snowflake Stage",
             options=_clean_stage_options("SNOWFLAKE_LANGFLOW", "CORE"),
-            value="SNOWFLAKE_LANGFLOW_STAGE",
+            value="",
             real_time_refresh=True,
             combobox=True,
         ),
@@ -155,7 +142,7 @@ class SnowflakeFileSystemToolComponent(Component):
             name="stage_fqn",
             display_name="Stage FQN (@DB.SCHEMA.STAGE)",
             options=_stage_fqn_options(),
-            value="@SNOWFLAKE_LANGFLOW.CORE.SNOWFLAKE_LANGFLOW_STAGE",
+            value="",
             real_time_refresh=True,
             combobox=True,
         ),
@@ -219,7 +206,7 @@ class SnowflakeFileSystemToolComponent(Component):
         stg_val = (
             field_value
             if field_name == "stage_name" and isinstance(field_value, str)
-            else build_config.get("stage_name", {}).get("value") or (stages[0] if stages else "SNOWFLAKE_LANGFLOW_STAGE")
+            else build_config.get("stage_name", {}).get("value") or (stages[0] if stages else "")
         )
         fqn_opts = _stage_fqn_options(flow_id=flow_id)
         computed_fqn = f"@{db_val}.{sch_val}.{stg_val.lstrip('@').split('.')[-1]}"
@@ -233,9 +220,9 @@ class SnowflakeFileSystemToolComponent(Component):
     def _effective_stage_fqn(self) -> str:
         db = str(getattr(self, "database", "") or LIVE_BRIDGE.database or "SNOWFLAKE_LANGFLOW").strip()
         sch = str(getattr(self, "schema_name", "") or LIVE_BRIDGE.schema or "CORE").strip()
-        stg = str(getattr(self, "stage_name", "") or "SNOWFLAKE_LANGFLOW_STAGE").lstrip("@").strip()
+        stg = str(getattr(self, "stage_name", "") or "").lstrip("@").strip()
         explicit_fqn = str(getattr(self, "stage_fqn", "") or "").lstrip("@").strip()
-        if explicit_fqn and explicit_fqn.count(".") == 2 and explicit_fqn != "SNOWFLAKE_LANGFLOW.CORE.SNOWFLAKE_LANGFLOW_STAGE":
+        if explicit_fqn and explicit_fqn.count(".") == 2:
             return f"@{explicit_fqn}"
         if stg.count(".") == 2:
             return f"@{stg}"
@@ -622,15 +609,15 @@ class SnowflakeReadFileComponent(Component):
             name="stage_name",
             display_name="Snowflake Stage",
             options=_clean_stage_options("SNOWFLAKE_LANGFLOW", "CORE"),
-            value="SNOWFLAKE_LANGFLOW_STAGE",
+            value="",
             real_time_refresh=True,
             combobox=True,
         ),
         DropdownInput(
             name="stage_file_path",
             display_name="Stage File (from LIST @stage)",
-            options=["README.md", "docs/architecture.pdf"],
-            value="README.md",
+            options=[],
+            value="",
             real_time_refresh=True,
             combobox=True,
         ),
@@ -698,7 +685,7 @@ class SnowflakeReadFileComponent(Component):
         stg_val = (
             field_value
             if field_name == "stage_name" and isinstance(field_value, str)
-            else build_config.get("stage_name", {}).get("value") or (stages[0] if stages else "SNOWFLAKE_LANGFLOW_STAGE")
+            else build_config.get("stage_name", {}).get("value") or (stages[0] if stages else "")
         )
         fqn = f"@{db_val}.{sch_val}.{stg_val.lstrip('@').split('.')[-1]}"
         if "stage_file_path" in build_config:
@@ -713,9 +700,9 @@ class SnowflakeReadFileComponent(Component):
     def _read_impl(self) -> dict[str, Any]:
         db = str(getattr(self, "database", "") or LIVE_BRIDGE.database or "SNOWFLAKE_LANGFLOW").strip()
         sch = str(getattr(self, "schema_name", "") or LIVE_BRIDGE.schema or "CORE").strip()
-        stg = str(getattr(self, "stage_name", "") or "SNOWFLAKE_LANGFLOW_STAGE").lstrip("@").strip().split(".")[-1]
+        stg = str(getattr(self, "stage_name", "") or "").lstrip("@").strip().split(".")[-1]
         stage_fqn = f"@{db}.{sch}.{stg}"
-        rel_path = str(getattr(self, "stage_file_path", "") or getattr(self, "path", "") or "README.md").strip()
+        rel_path = str(getattr(self, "stage_file_path", "") or getattr(self, "path", "") or "").strip()
         stage_prefix = f"{stg.lower()}/"
         if rel_path.lower().startswith(stage_prefix):
             rel_path = rel_path[len(stage_prefix) :]
@@ -746,8 +733,9 @@ class SnowflakeReadFileComponent(Component):
                     extracted_text = str(val.get("content") or json.dumps(val))
                 else:
                     extracted_text = str(val)
-        if not extracted_text:
-            extracted_text = f"Parsed content from {stage_fqn}/{rel_path} (mode={mode})"
+        if not isinstance(res, dict) or not res.get("ok"):
+            msg = res.get("message") or res.get("error") if isinstance(res, dict) else "no response"
+            raise ValueError(f"Reading {stage_fqn}/{rel_path} failed: {msg}")
 
         return {
             "database": db,
@@ -829,7 +817,7 @@ class SnowflakeWriteFileComponent(Component):
             name="stage_name",
             display_name="Snowflake Stage",
             options=_clean_stage_options("SNOWFLAKE_LANGFLOW", "CORE"),
-            value="SNOWFLAKE_LANGFLOW_STAGE",
+            value="",
             real_time_refresh=True,
             combobox=True,
         ),
@@ -919,23 +907,21 @@ class SnowflakeWriteFileComponent(Component):
     def _write_impl(self) -> dict[str, Any]:
         db = str(getattr(self, "database", "") or LIVE_BRIDGE.database or "SNOWFLAKE_LANGFLOW").strip()
         sch = str(getattr(self, "schema_name", "") or LIVE_BRIDGE.schema or "CORE").strip()
-        stg = str(getattr(self, "stage_name", "") or "SNOWFLAKE_LANGFLOW_STAGE").lstrip("@").strip().split(".")[-1]
+        stg = str(getattr(self, "stage_name", "") or "").lstrip("@").strip().split(".")[-1]
         file_name = str(getattr(self, "file_name", "") or "output/result.json").lstrip("/").strip()
         stage_fqn = f"{db}.{sch}.{stg}"
         target_uri = f"@{stage_fqn}/{file_name}"
         body = self._serialize_payload()
 
-        upload_fn = getattr(LIVE_BRIDGE, "upload_file_to_stage", None)
-        if callable(upload_fn):
-            res = upload_fn(
-                stage_fqn=stage_fqn,
-                file_name=file_name,
-                content=body,
-            )
-        else:
-            put_sql = f"PUT 'file:///tmp/{file_name.split('/')[-1]}' @{stage_fqn} AUTO_COMPRESS=FALSE OVERWRITE=TRUE"
-            res = LIVE_BRIDGE.execute_sql(put_sql)
-            LIVE_BRIDGE.execute_sql(f"ALTER STAGE {stage_fqn} REFRESH")
+        sub, _, base_name = file_name.rpartition("/")
+        res = LIVE_BRIDGE.upload_stage_file(
+            stage_fqn=f"@{stage_fqn}",
+            file_name=base_name,
+            content_text=body,
+            subpath=sub,
+        )
+        if not res.get("ok"):
+            raise ValueError(str(res.get("message") or "Stage upload failed"))
 
         return {
             "database": db,

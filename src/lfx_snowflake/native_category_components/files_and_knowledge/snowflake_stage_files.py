@@ -63,9 +63,7 @@ def _resolve_flow_id(component: Any = None, build_config: dict[str, Any] | None 
 def _ddl_succeeded(res: dict[str, Any] | None) -> bool:
     if not isinstance(res, dict):
         return False
-    if res.get("ok", False):
-        return True
-    return res.get("mode") == "offline" and not res.get("error") and not res.get("error_code")
+    return bool(res.get("ok", False))
 
 
 def _register_created_object(
@@ -127,8 +125,6 @@ def _stage_options(
 ) -> list[str]:
     eff_fid = flow_id or _resolve_flow_id()
     stages = list(LIVE_BRIDGE.get_context_objects(database, schema_name, "stages", flow_id=eff_fid))
-    if "SNOWFLAKE_LANGFLOW_STAGE" not in stages:
-        stages.insert(0, "SNOWFLAKE_LANGFLOW_STAGE")
     if _can_create_stage():
         stages.extend([CREATE_INTERNAL_STAGE_OPTION, CREATE_EXTERNAL_STAGE_OPTION])
     else:
@@ -147,8 +143,6 @@ def _stage_fqn_options(flow_id: str | None = None) -> list[str]:
                 fqn = f"@{clean}" if clean.count(".") >= 2 else f"@{db}.{sch}.{clean}"
                 if fqn not in out:
                     out.append(fqn)
-    if not out:
-        out.append("@SNOWFLAKE_LANGFLOW.CORE.SNOWFLAKE_LANGFLOW_STAGE")
     return out
 
 
@@ -184,7 +178,7 @@ class SnowflakeStageFileSystemComponent(Component):
             name="stage_name",
             display_name="3. Stage",
             options=_stage_options("SNOWFLAKE_LANGFLOW", "CORE"),
-            value="SNOWFLAKE_LANGFLOW_STAGE",
+            value="",
             real_time_refresh=True,
             combobox=True,
         ),
@@ -226,7 +220,7 @@ class SnowflakeStageFileSystemComponent(Component):
         StrInput(
             name="stage_fqn",
             display_name="Stage FQN Override (@DB.SCHEMA.STAGE)",
-            value="@SNOWFLAKE_LANGFLOW.CORE.SNOWFLAKE_LANGFLOW_STAGE",
+            value="",
             advanced=True,
         ),
         StrInput(
@@ -287,9 +281,9 @@ class SnowflakeStageFileSystemComponent(Component):
     def _resolve_stage_fqn(self) -> tuple[str, str, str, str]:
         db = (getattr(self, "database", "") or getattr(LIVE_BRIDGE, "database", "SNOWFLAKE_LANGFLOW")).strip()
         sch = (getattr(self, "schema_name", "") or getattr(LIVE_BRIDGE, "schema", "CORE")).strip()
-        stg = (getattr(self, "stage_name", "") or "SNOWFLAKE_LANGFLOW_STAGE").strip()
+        stg = (getattr(self, "stage_name", "") or "").strip()
         override = (getattr(self, "stage_fqn", "") or "").lstrip("@").strip()
-        if override and override != "SNOWFLAKE_LANGFLOW.CORE.SNOWFLAKE_LANGFLOW_STAGE":
+        if override:
             parts = override.split(".")
             if len(parts) == 3:
                 return parts[0], parts[1], parts[2], override
@@ -388,12 +382,5 @@ class SnowflakeStageFileSystemComponent(Component):
         denied = LIVE_BRIDGE.check_write_privilege_or_deny("WRITE_STAGE", f"@{clean_stage}/{self.file_subpath}")
         if denied:
             raise ValueError(denied["message"])
-        return Data(
-            data={
-                "operation": "WRITE_APPEND" if self.append_mode else "WRITE_OVERWRITE",
-                "target": f"@{clean_stage}/{self.file_subpath}",
-                "active_role": LIVE_BRIDGE.active_role,
-                "bytes_prepared": len((self.file_content or "").encode("utf-8")),
-                "atomic_append_verified": bool(self.append_mode),
-            }
-        )
+        # Writing requires PUT, which the SQL API cannot execute: fail closed instead of reporting success.
+        raise ValueError(LIVE_BRIDGE.UPLOAD_DISABLED_MESSAGE)

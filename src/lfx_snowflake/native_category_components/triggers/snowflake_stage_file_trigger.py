@@ -56,7 +56,7 @@ class SnowflakeStageFileTrigger(Component):
             name="stage_name",
             display_name="Stage",
             options=get_trigger_stage_objects("SNOWFLAKE_LANGFLOW", "CORE"),
-            value="SNOWFLAKE_LANGFLOW_STAGE",
+            value="",
             real_time_refresh=True,
             combobox=True,
         ),
@@ -193,7 +193,7 @@ class SnowflakeStageFileTrigger(Component):
         flow_id = resolve_trigger_flow_id(self)
         db = str(getattr(self, "database", "SNOWFLAKE_LANGFLOW") or "SNOWFLAKE_LANGFLOW").strip()
         sch = str(getattr(self, "schema", "CORE") or "CORE").strip()
-        stg = str(getattr(self, "stage_name", "SNOWFLAKE_LANGFLOW_STAGE") or "SNOWFLAKE_LANGFLOW_STAGE").strip()
+        stg = str(getattr(self, "stage_name", "") or "").strip()
         ddl_spec = build_stage_file_trigger_ddl(
             flow_id=flow_id,
             database=db,
