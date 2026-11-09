@@ -20,6 +20,8 @@ from lfx.schema.message import Message
 
 from lfx_snowflake._lfx_compat import Tool
 from lfx_snowflake.fastapi_live_bridge import LIVE_BRIDGE, LiveSnowflakeBridge
+from lfx_snowflake.traceability import AuditAction
+from lfx_snowflake.traceability import emit as emit_audit
 
 
 def _ensure_bridge_memory_catalog_flow_id_compat() -> None:
@@ -733,6 +735,14 @@ class SnowflakeReadFileComponent(Component):
                     extracted_text = str(val.get("content") or json.dumps(val))
                 else:
                     extracted_text = str(val)
+        # TR-01: STAGE_FILE_READ with the real SQL outcome; metadata only (never the extracted text).
+        emit_audit(
+            LIVE_BRIDGE.record_audit_event,
+            AuditAction.STAGE_FILE_READ,
+            res if isinstance(res, dict) else {"ok": False, "error_code": "NO_RESPONSE"},
+            target_object=f"{stage_fqn}/{rel_path}",
+            details={"stage": stage_fqn, "relative_path": rel_path, "size": len(extracted_text)},
+        )
         if not isinstance(res, dict) or not res.get("ok"):
             msg = res.get("message") or res.get("error") if isinstance(res, dict) else "no response"
             raise ValueError(f"Reading {stage_fqn}/{rel_path} failed: {msg}")

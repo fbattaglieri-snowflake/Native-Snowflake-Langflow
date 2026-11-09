@@ -21,6 +21,7 @@ import hashlib
 import json
 import logging
 import re
+import uuid
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -67,6 +68,38 @@ def trace_scope(**values: str | None) -> Iterator[None]:
     finally:
         for var, token in reversed(tokens):
             var.reset(token)
+
+
+def valid_uuid_or_none(value: Any) -> str | None:
+    """Return the canonical form of ``value`` if it is a UUID, else None (untrusted header input)."""
+    if not value:
+        return None
+    try:
+        return str(uuid.UUID(str(value).strip()[:64]))
+    except (ValueError, AttributeError, TypeError):
+        return None
+
+
+def request_id_from_header(value: Any) -> str:
+    """Use an incoming ``X-Request-Id`` only when it is a valid UUID; otherwise mint a new one."""
+    return valid_uuid_or_none(value) or str(uuid.uuid4())
+
+
+FLOW_RUN_PATH_SEGMENTS: tuple[str, ...] = ("/api/v1/build/", "/api/v1/run/", "/api/v1/webhook/")
+
+
+def is_flow_run_path(path: str) -> bool:
+    return any(seg in (path or "") for seg in FLOW_RUN_PATH_SEGMENTS)
+
+
+def run_id_for_request(path: str, header_value: Any = None) -> str | None:
+    """Flow run id for flow execution routes: incoming ``X-Run-Id`` if a valid UUID, else a new UUID.
+
+    Non-run routes get ``None`` (no run exists), never a placeholder.
+    """
+    if not is_flow_run_path(path):
+        return None
+    return valid_uuid_or_none(header_value) or str(uuid.uuid4())
 
 
 def _clip(value: Any, limit: int = 256) -> str | None:
@@ -153,21 +186,46 @@ _DETAIL_ALLOWLIST: frozenset[str] = frozenset(
         "top_k", "n_results", "session_filter", "stage", "relative_path", "size", "md5",
         "rows", "query_id", "required_privilege", "object", "status_code", "origin_user",
         "execution_mode",
+        # Identifier / count metadata used by context, role and flow audit events (no free text).
+        "flow_id", "database", "schema", "databases", "schemas_by_db", "full_databases", "full_schemas",
+        "postgres_instances", "selected_pairs_count", "added_objects", "removed_objects", "removed_databases",
+        "removed_schemas", "context_epoch", "previous_role", "new_role", "requested_role", "available_roles",
+        "role", "agent_fqn", "retained_objects_count", "hidden_by_role_count", "trigger_type", "path", "method",
+        "durable_snowflake_audit_preserved", "source", "object_kind", "hierarchy_path",
     }
 )
+# Never allowlisted: message, reason, ddl, sql, text, content, prompt, trigger_payload, result, ...
 _DETAIL_MAX_STR = 512
+_DETAIL_MAX_ITEMS = 200
+
+
+def _sanitize_value(value: Any, depth: int = 0) -> Any:
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    if isinstance(value, str):
+        return value[:_DETAIL_MAX_STR]
+    if depth >= 2:
+        return None
+    if isinstance(value, Mapping):
+        return {
+            str(k)[:_DETAIL_MAX_STR]: _sanitize_value(v, depth + 1)
+            for k, v in list(value.items())[:_DETAIL_MAX_ITEMS]
+        }
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return [_sanitize_value(v, depth + 1) for v in list(value)[:_DETAIL_MAX_ITEMS]]
+    return str(value)[:_DETAIL_MAX_STR]
 
 
 def sanitize_details(details: Mapping[str, Any] | None) -> dict[str, Any]:
-    """Keep only allowlisted, scalar metadata keys; drop everything else (no text content)."""
+    """Keep only allowlisted metadata keys (ids, names, counts); drop everything else (no text content).
+
+    Values are scalars, or bounded lists/maps of scalars (identifier lists such as removed objects).
+    """
     clean: dict[str, Any] = {}
     for key, value in (details or {}).items():
         if key not in _DETAIL_ALLOWLIST:
             continue
-        if value is None or isinstance(value, (bool, int, float)):
-            clean[key] = value
-        else:
-            clean[key] = str(value)[:_DETAIL_MAX_STR]
+        clean[key] = _sanitize_value(value)
     return clean
 
 

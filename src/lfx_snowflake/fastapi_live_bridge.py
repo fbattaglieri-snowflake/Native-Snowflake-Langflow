@@ -27,6 +27,7 @@ os.environ.setdefault("LANGFLOW_A2A_ENABLED", "true")
 
 CURRENT_SNOWFLAKE_FLOW_ID: ContextVar[str | None] = ContextVar("current_snowflake_flow_id", default=None)
 
+from lfx_snowflake import traceability as _trace  # noqa: E402
 from lfx_snowflake.traceability import (  # noqa: E402
     CURRENT_REQUEST_ID,
     CURRENT_RUN_ID,
@@ -36,6 +37,7 @@ from lfx_snowflake.traceability import (  # noqa: E402
     build_query_tag,
     deterministic_event_id,
     emit as emit_audit,
+    sanitize_details,
 )
 
 CANONICAL_TECHNICAL_MEMORY_TABLES: frozenset[str] = frozenset(
@@ -1818,6 +1820,21 @@ class LiveSnowflakeBridge:
         if not ok:
             out["error_code"] = res.get("error_code") or ("NOT_CONFIGURED" if res.get("mode") == "offline" else "SNOWFLAKE_ERROR")
             out["message"] = res.get("message") or "Snowflake did not execute the recall query."
+        # TR-01: audit the recall only now, with the real SQL outcome (metadata only, never rows or query text).
+        emit_audit(
+            self.record_audit_event,
+            AuditAction.MEMORY_RECALL,
+            res,
+            target_object=fqn,
+            details={
+                "memory_base_id": matched.get("memory_id"),
+                "name": matched.get("name"),
+                "table_fqn": fqn,
+                "top_k": bounded_limit,
+                "n_results": len(out["rows"]),
+            },
+            flow_id=matched.get("flow_id"),
+        )
         return out
 
     def create_or_register_memory(self, body: dict[str, Any]) -> dict[str, Any]:
@@ -3503,7 +3520,34 @@ class LiveSnowflakeBridge:
         if llm_pre:
             entry["llm_preprocessing"] = llm_pre
 
-        self._persist_memory_in_langflow_sqlite(entry, flow_id=entry.get("flow_id"))
+        audit_details = {
+            "memory_base_id": entry.get("memory_id"),
+            "name": entry.get("name"),
+            "table_fqn": fqn,
+            "threshold": entry.get("threshold"),
+        }
+        try:
+            self._persist_memory_in_langflow_sqlite(entry, flow_id=entry.get("flow_id"))
+        except Exception:  # noqa: BLE001 - fail closed: report and audit the real failure
+            failure = {"ok": False, "status_code": 500, "error_code": "PERSISTENCE_ERROR"}
+            emit_audit(
+                self.record_audit_event,
+                AuditAction.MEMORY_BASE_UPDATE,
+                failure,
+                target_object=fqn,
+                details=audit_details,
+                flow_id=entry.get("flow_id"),
+            )
+            return {**failure, "message": f"Snowflake Memory '{memory_id}' could not be updated."}
+        # TR-01: the update is the local persistence above; audit only after it succeeded.
+        emit_audit(
+            self.record_audit_event,
+            AuditAction.MEMORY_BASE_UPDATE,
+            {"ok": True},
+            target_object=fqn,
+            details=audit_details,
+            flow_id=entry.get("flow_id"),
+        )
         updated = self._to_langflow_memory_base_read(entry)
         updated["ok"] = True
         updated["status_code"] = 200
@@ -8218,6 +8262,8 @@ class LiveSnowflakeBridge:
         if _sf_identity.origin_user() and "origin_user" not in details:
             details["origin_user"] = _sf_identity.origin_user()
         details.setdefault("execution_mode", _sf_identity.resolve_mode(_sf_identity.current_request_mode()))
+        # TR-01: enforce the metadata allowlist for every caller (no content can reach the audit row).
+        details = sanitize_details(details)
         redacted = redact_for_sink(details)
         details_json = json.dumps(redacted)
         if len(details_json) > 12000:
@@ -9108,6 +9154,9 @@ def _emit_mcp_denial(tool_name: str, result: dict[str, Any], target_object: str 
 
 def register_snowflake_fastapi_routes(app: Any) -> None:
     """Mount `/api/v1/snowflake/*` endpoints and automatic Flow Activity replication middleware onto Langflow's FastAPI app."""
+    # W3-R1-14d: structured JSON container logs (allowlisted fields only) from startup.
+    _trace.get_trace_logger()
+    _trace.log_event("bridge_startup")
     from fastapi import APIRouter, Request
     from fastapi.responses import JSONResponse
 
@@ -9552,7 +9601,7 @@ def register_snowflake_fastapi_routes(app: Any) -> None:
             elif any(seg in path for seg in ("/api/v1/build/", "/api/v1/run/", "/api/v1/webhook/")):
                 if "/api/v1/webhook/" in path:
                     wh_fid = str(norm_fid or matched_fid or "webhook-flow")
-                    wh_run_id = f"wh_run_{uuid.uuid4().hex[:16]}"
+                    wh_run_id = CURRENT_RUN_ID.get() or f"wh_run_{uuid.uuid4().hex[:16]}"
                     wh_status = "SUCCEEDED" if getattr(response, "status_code", 200) < 400 else "FAILED"
                     await asyncio.to_thread(
                         lambda: LIVE_BRIDGE.record_trigger_execution_telemetry(
@@ -9579,8 +9628,39 @@ def register_snowflake_fastapi_routes(app: Any) -> None:
             ident_token = _sf_identity.bind_identity(_sf_identity.identity_from_headers(request.headers))
             # W3-R1-10c: user-facing routes request caller mode (effective only when the flag is ON).
             mode_token = _sf_identity.bind_request_mode(_sf_identity.mode_for_path(request.url.path))
+            # W3-R1-14a/14d: per-request correlation ids + allowlisted lifecycle logs (no content).
+            req_path = str(getattr(request.url, "path", "") or "")
+            request_id = _trace.request_id_from_header(request.headers.get("X-Request-Id"))
+            run_id = _trace.run_id_for_request(req_path, request.headers.get("X-Run-Id"))
+            started = time.monotonic()
+            outcome = "FAILURE"
+            status_code = 500
             try:
-                return await _snowflake_flow_context_and_trace(request, call_next)
+                with _trace.trace_scope(request_id=request_id, run_id=run_id):
+                    _trace.log_event("request_start")
+                    if run_id:
+                        _trace.log_event("flow_run_start")
+                    try:
+                        response = await _snowflake_flow_context_and_trace(request, call_next)
+                        status_code = int(getattr(response, "status_code", 200) or 200)
+                        outcome = "SUCCESS" if status_code < 400 else "FAILURE"
+                        try:
+                            response.headers["X-Request-Id"] = request_id
+                        except Exception:  # noqa: BLE001
+                            pass
+                        return response
+                    finally:
+                        duration_ms = int((time.monotonic() - started) * 1000)
+                        err = None if outcome == "SUCCESS" else f"HTTP_{status_code}"
+                        _trace.log_event("request_end", outcome=outcome, duration_ms=duration_ms, error_code=err)
+                        if run_id:
+                            _trace.log_event(
+                                "flow_run_end",
+                                flow_id=CURRENT_SNOWFLAKE_FLOW_ID.get() or LIVE_BRIDGE.active_flow_id,
+                                outcome=outcome,
+                                duration_ms=duration_ms,
+                                error_code=err,
+                            )
             finally:
                 _sf_identity.reset_request_mode(mode_token)
                 _sf_identity.reset_identity(ident_token)
