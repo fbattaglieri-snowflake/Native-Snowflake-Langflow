@@ -993,7 +993,7 @@ class LiveSnowflakeBridge:
             "SNOWFLAKE_LANGFLOW_VIEWER_ROLE",
             "PUBLIC",
         ]
-        self.authenticated_user: str = os.getenv("SNOWFLAKE_USER", "SPCS_CALLER")
+        self._service_user: str = os.getenv("SNOWFLAKE_USER", "SPCS_CALLER")
         self.context_epoch: int = 1
         self.secondary_roles_mode: str = "NONE"
         self.memories_registry: list[dict[str, Any]] = []
@@ -7875,6 +7875,16 @@ class LiveSnowflakeBridge:
                 "volume_type": "SPCS Persistent Block Volume (10Gi, SNOWFLAKE_SSE, survives Compute Pool SUSPEND/RESUME)",
             }
 
+    @property
+    def authenticated_user(self) -> str:
+        """Per-request Snowflake user (ContextVar); falls back to the service user. Display/attribution only."""
+        return _sf_identity.current_identity().sf_user or self._service_user
+
+    @authenticated_user.setter
+    def authenticated_user(self, value: str) -> None:
+        # Only the service-session user may be stored on the shared bridge instance.
+        self._service_user = value
+
     def _has_spcs_token(self) -> bool:
         return SPCS_TOKEN_PATH.exists() and bool(os.getenv("SNOWFLAKE_HOST"))
 
@@ -9438,6 +9448,16 @@ def register_snowflake_fastapi_routes(app: Any) -> None:
                 )
             return response
 
+        # Registered last so it is the outermost middleware and wraps every other handler.
+        @app.middleware("http")
+        async def snowflake_request_identity_middleware(request: Request, call_next: Any) -> Any:
+            # W3-R1-10b: identity is bound per request from ingress headers, never stored globally.
+            ident_token = _sf_identity.bind_identity(_sf_identity.identity_from_headers(request.headers))
+            try:
+                return await call_next(request)
+            finally:
+                _sf_identity.reset_identity(ident_token)
+
     @sf_router.get("/persistence")
     async def get_persistence_status() -> JSONResponse:
         info = await asyncio.to_thread(LIVE_BRIDGE.sync_persistent_workflows_backup)
@@ -9447,9 +9467,6 @@ def register_snowflake_fastapi_routes(app: Any) -> None:
     async def get_snowflake_context(request: Request, flow_id: str | None = None) -> JSONResponse:
         await asyncio.to_thread(LIVE_BRIDGE.sync_superuser_credentials)
         await asyncio.to_thread(LIVE_BRIDGE.refresh_roles_from_snowflake)
-        sf_header_user = request.headers.get("Sf-Context-Current-User")
-        if sf_header_user:
-            LIVE_BRIDGE.authenticated_user = sf_header_user
         req_flow_id = LIVE_BRIDGE._normalize_flow_id(
             flow_id or request.query_params.get("flow_id") or request.headers.get("X-Snowflake-Flow-Id")
         )
@@ -10747,9 +10764,6 @@ def register_snowflake_fastapi_routes(app: Any) -> None:
     @sf_router.post("/service-trigger")
     async def post_snowflake_service_trigger(request: Request) -> JSONResponse:
         """SPCS Service Function batch endpoint (`SNOWFLAKE_LANGFLOW.CORE.RUN_LANGFLOW_FLOW`)."""
-        sf_header_user = request.headers.get("Sf-Context-Current-User")
-        if sf_header_user:
-            LIVE_BRIDGE.authenticated_user = sf_header_user
         try:
             body = await request.json()
         except Exception as exc:  # noqa: BLE001
