@@ -1,0 +1,38 @@
+# syntax=docker/dockerfile:1.7
+# SnowflakeLangflow release image: upstream Langflow base + Snowflake bundle and live hooks.
+# The Langflow version is pinned here and only here. Pin by digest for reproducible releases:
+#   --build-arg LANGFLOW_BASE=langflowai/langflow:1.13.2@sha256:<digest>
+ARG LANGFLOW_BASE=langflowai/langflow:1.13.2
+FROM --platform=linux/amd64 ${LANGFLOW_BASE}
+
+ARG LANGFLOW_BASE
+LABEL org.opencontainers.image.title="snowflake-langflow" \
+      org.opencontainers.image.base.name="${LANGFLOW_BASE}"
+
+USER root
+
+# Clean source tree consumed by scripts/install_live_hooks_in_container.py (SOURCE_ROOT).
+COPY src/ /opt/snowflake-langflow/src/
+COPY frontend_patches/ /opt/snowflake-langflow/frontend_patches/
+COPY scripts/ /opt/snowflake-langflow/scripts/
+COPY sql/ /opt/snowflake-langflow/sql/
+COPY starter_projects/ /opt/snowflake-langflow/starter_projects/
+COPY pyproject.toml /opt/snowflake-langflow/pyproject.toml
+
+# Patch the upstream site-packages in place. The installer must fail the build on any error.
+RUN set -eu \
+    && /app/.venv/bin/python /opt/snowflake-langflow/scripts/install_live_hooks_in_container.py \
+    && /app/.venv/bin/python -c "import lfx_snowflake, langflow.main" \
+    && mkdir -p /persist /tmp/uv-cache /tmp/.cache \
+    && chown -R user /persist /opt/snowflake-langflow
+
+ENV PYTHONPATH="/opt/snowflake-langflow/src" \
+    UV_CACHE_DIR=/tmp/uv-cache \
+    XDG_CACHE_HOME=/tmp/.cache \
+    SQLITE_TMPDIR=/tmp \
+    LANGFLOW_PERSIST_DIR=/persist
+
+# Same runtime user, workdir and command as upstream.
+USER user
+WORKDIR /app
+CMD ["langflow", "run"]

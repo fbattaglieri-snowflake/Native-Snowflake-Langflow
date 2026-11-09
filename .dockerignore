@@ -1,0 +1,41 @@
+# VCS and tooling
+.git
+.gitignore
+.github
+.cortex
+.vscode
+.idea
+# Python caches and test artifacts
+**/__pycache__
+**/*.py[cod]
+**/.pytest_cache
+**/.mypy_cache
+**/.ruff_cache
+**/.coverage
+**/htmlcov
+**/*.egg-info
+build
+dist
+.venv
+venv
+tests
+# Private notes and docs (bundle does not need them)
+*.md
+docs
+# Secrets and keys
+.env
+.env.*
+**/*.pem
+**/*.p8
+**/*.key
+**/*.p12
+**/*.pfx
+**/*.crt
+**/id_rsa*
+**/connections.toml
+**/config.toml
+# Local databases and logs
+**/*.db
+**/*.db-wal
+**/*.db-shm
+**/*.log
