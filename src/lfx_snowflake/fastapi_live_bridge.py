@@ -8,6 +8,7 @@ import copy
 import hashlib
 import json
 import os
+import logging
 import re
 import sqlite3
 import threading
@@ -958,6 +959,7 @@ def ensure_sqlite_wal_and_uv_cache() -> dict[str, Any]:
                         )
                         conn.commit()
                     heal_sqlite_invalid_uuid_rows(conn)
+                    purge_snowflake_rows_from_native_knowledge_base(conn)
                 except Exception:  # noqa: BLE001
                     pass
                 conn.close()
@@ -2645,7 +2647,7 @@ class LiveSnowflakeBridge:
             tables = {
                 r[0] for r in cur.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
             }
-            if "memory_base" not in tables or "knowledge_base" not in tables:
+            if "memory_base" not in tables:
                 conn.close()
                 return
 
@@ -2711,47 +2713,10 @@ class LiveSnowflakeBridge:
                 }
             )
 
-            existing_kb = cur.execute(
-                "SELECT id, name FROM knowledge_base WHERE user_id = ? AND name = ?",
-                (user_id_hex, mem_name),
-            ).fetchone()
-            if existing_kb:
-                kb_name = str(existing_kb["name"])
-                cur.execute(
-                    "UPDATE knowledge_base SET model_selection = ?, backend_type = ?, backend_config = ?, updated_at = ? WHERE id = ?",
-                    (model_sel_json, native_backend_type, backend_cfg_json, now_str, existing_kb["id"]),
-                )
-            else:
-                kb_id_hex = uuid.uuid5(uuid.NAMESPACE_DNS, f"snowflake-kb:{mem_name.upper()}").hex
-                kb_name = mem_name
-                upsert_sqlite_row_preserving_columns(
-                    cur,
-                    "knowledge_base",
-                    {
-                        "id": kb_id_hex,
-                        "name": kb_name,
-                        "user_id": user_id_hex,
-                        "model_selection": model_sel_json,
-                        "chunk_size": 1000,
-                        "chunk_overlap": 200,
-                        "separator": None,
-                        "column_config": "[]",
-                        "backend_type": native_backend_type,
-                        "backend_config": backend_cfg_json,
-                        "chunks": 0,
-                        "words": 0,
-                        "characters": 0,
-                        "size_bytes": 0,
-                        "source_types": '["snowflake"]',
-                        "status": "ready",
-                        "failure_reason": None,
-                        "created_at": now_str,
-                        "updated_at": now_str,
-                    },
-                    conflict_column="id",
-                    insert_only_columns=("created_at", "chunks", "words", "characters", "size_bytes", "status", "failure_reason"),
-                )
-
+            # A8 Phase C VETO: Snowflake memories are NOT registered in native `knowledge_base`
+            # (native KB routes would resolve a local SQLite vector store = split brain).
+            # Only `memory_base`, owned by the intercepted /api/v1/memories* routes, is written.
+            purge_snowflake_rows_from_native_knowledge_base(conn)
 
             mb_id_hex = det_uuid.hex
             existing_mb = cur.execute(
@@ -9345,9 +9310,62 @@ def register_snowflake_fastapi_routes(app: Any) -> None:
         return JSONResponse(status_code=200, content=res)
 
     if hasattr(app, "middleware"):
+        async def _guard_native_kb_request(request: Request, path: str, method: str) -> Any:
+            """Fail closed (409) when a native KB route targets a Snowflake-mode knowledge_base row."""
+            body = await request.body() if method == "DELETE" else None
+            names = native_kb_target_names(path, method, body)
+            if not names:
+                return None
+            request_id = (getattr(request, "scope", None) or {}).get(_trace.REQUEST_ID_SCOPE_KEY) or _trace.request_id_from_header(
+                request.headers.get(_trace.REQUEST_ID_HEADER)
+            )
+
+            def _lookup() -> set[str] | None:
+                db_path = Path(os.getenv("LANGFLOW_PERSIST_DIR", "/persist")) / "langflow.db"
+                if not db_path.exists():
+                    return set()
+                try:
+                    conn = _open_sqlite_conn(db_path, readonly=True, timeout=10.0)
+                    try:
+                        return snowflake_kb_names_in_native_table(conn)
+                    finally:
+                        conn.close()
+                except Exception:  # noqa: BLE001
+                    return None
+
+            sf_names = await asyncio.to_thread(_lookup)
+            hits = [n for n in names if sf_names is None or n.upper() in sf_names]
+            if not hits:
+                return None
+            target = hits[0]
+            try:
+                LIVE_BRIDGE.record_audit_event(
+                    action=AuditAction.AUTHZ_ROLE_DENIED.value,
+                    outcome="DENIED",
+                    error_code=SNOWFLAKE_KB_NOT_NATIVE,
+                    target_object=target,
+                    details={"route": "native_knowledge_bases", "method": method, "request_id": request_id},
+                )
+            except Exception:  # noqa: BLE001
+                pass
+            return JSONResponse(
+                status_code=409,
+                content={
+                    "ok": False,
+                    "error_code": SNOWFLAKE_KB_NOT_NATIVE,
+                    "message": "Snowflake memories are not native Langflow knowledge bases; use /api/v1/memories.",
+                    "target": target,
+                    "request_id": request_id,
+                },
+            )
+
         async def _snowflake_flow_context_and_trace(request: Request, call_next: Any) -> Any:
             path = str(getattr(request.url, "path", "") or "")
             method = str(getattr(request, "method", "GET") or "GET").upper()
+            if path.startswith("/api/v1/knowledge_bases"):
+                blocked = await _guard_native_kb_request(request, path, method)
+                if blocked is not None:
+                    return blocked
             if not getattr(LIVE_BRIDGE, "_sqlite_uuid_healed_at_request", False) and path.startswith("/api/"):
                 LIVE_BRIDGE._sqlite_uuid_healed_at_request = True
                 await asyncio.to_thread(ensure_sqlite_wal_and_uv_cache)
@@ -11222,6 +11240,69 @@ def resolve_snowflake_backend_key(entry: dict[str, Any]) -> str:
         if token in vec_db:
             return key
     return "snowflake_table"
+
+
+SNOWFLAKE_KB_NOT_NATIVE = "SNOWFLAKE_KB_NOT_NATIVE"
+_NATIVE_KB_PATH_RE = re.compile(r"^/api/v1/knowledge_bases(?:/(?P<name>[^/]+))?(?:/.*)?/?$")
+_NATIVE_KB_NON_NAME_SEGMENTS = frozenset({"connectors", "preview-chunks", "test-connection"})
+
+
+def _is_snowflake_backend_config(raw: Any) -> bool:
+    try:
+        cfg = json.loads(raw) if isinstance(raw, (str, bytes)) else raw
+    except Exception:  # noqa: BLE001
+        return False
+    return isinstance(cfg, dict) and str(cfg.get("mode") or "").lower() == "snowflake"
+
+
+def snowflake_kb_names_in_native_table(conn: Any) -> set[str]:
+    """Names of native `knowledge_base` rows whose backend_config.mode == 'snowflake' (upper-cased)."""
+    cur = conn.cursor()
+    if not cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='knowledge_base'").fetchone():
+        return set()
+    return {
+        str(name).upper()
+        for name, cfg in cur.execute("SELECT name, backend_config FROM knowledge_base").fetchall()
+        if _is_snowflake_backend_config(cfg)
+    }
+
+
+def purge_snowflake_rows_from_native_knowledge_base(conn: Any) -> int:
+    """Idempotently delete ONLY native `knowledge_base` rows with backend_config.mode == 'snowflake'."""
+    cur = conn.cursor()
+    if not cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='knowledge_base'").fetchone():
+        return 0
+    ids = [
+        row_id
+        for row_id, cfg in cur.execute("SELECT id, backend_config FROM knowledge_base").fetchall()
+        if _is_snowflake_backend_config(cfg)
+    ]
+    for row_id in ids:
+        cur.execute("DELETE FROM knowledge_base WHERE id = ?", (row_id,))
+    if ids:
+        conn.commit()
+        logging.getLogger(__name__).info("purged %d snowflake-mode rows from native knowledge_base", len(ids))
+    return len(ids)
+
+
+def native_kb_target_names(path: str, method: str, body: bytes | None) -> list[str] | None:
+    """KB names targeted by a native /api/v1/knowledge_bases* request, or None if not a native KB route."""
+    m = _NATIVE_KB_PATH_RE.match(path or "")
+    if not m:
+        return None
+    name = m.group("name")
+    if name and name not in _NATIVE_KB_NON_NAME_SEGMENTS:
+        from urllib.parse import unquote
+
+        return [unquote(name)]
+    if not name and method.upper() == "DELETE" and body:
+        try:
+            payload = json.loads(body)
+        except Exception:  # noqa: BLE001
+            return []
+        names = payload.get("kb_names") if isinstance(payload, dict) else None
+        return [str(n) for n in names] if isinstance(names, list) else []
+    return []
 
 
 def native_kb_backend_type_value(snowflake_key: str) -> str:
