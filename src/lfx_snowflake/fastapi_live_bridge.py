@@ -7935,10 +7935,15 @@ class LiveSnowflakeBridge:
     def _has_spcs_token(self) -> bool:
         return SPCS_TOKEN_PATH.exists() and bool(os.getenv("SNOWFLAKE_HOST"))
 
-    def _get_spcs_headers(self) -> dict[str, str]:
+    def _service_role(self) -> str:
+        """Role for background/service writes (W3-R1-10e): configured service role, never a hard-coded admin."""
+        return _sf_identity.service_role() or self.active_role
+
+    def _get_spcs_headers(self, mode: str = _sf_identity.MODE_SERVICE) -> dict[str, str]:
         token = SPCS_TOKEN_PATH.read_text(encoding="utf-8").strip()
         return {
-            "Authorization": f"Bearer {token}",
+            # Raises CallerIdentityMissing in caller mode without a caller token (fail closed).
+            "Authorization": _sf_identity.authorization_value(token, mode),
             "X-Snowflake-Authorization-Token-Type": "OAUTH",
             "Content-Type": "application/json",
             "Accept": "application/json",
@@ -7953,9 +7958,18 @@ class LiveSnowflakeBridge:
         bindings: dict[str, Any] | None = None,
         timeout: int = 60,
         query_tag: str | None = None,
+        mode: str = _sf_identity.MODE_SERVICE,
     ) -> dict[str, Any]:
-        """Execute a SQL statement via Snowflake SQL REST API (`/api/v2/statements`) using SPCS OAuth."""
-        effective_role = (role or self.active_role).strip()
+        """Execute a SQL statement via Snowflake SQL REST API (`/api/v2/statements`) using SPCS OAuth.
+
+        ``mode="caller"`` runs with restricted caller's rights when SNOWFLAKE_LANGFLOW_CALLERS_RIGHTS=1;
+        the UI role selector is then display-only and only an explicit ``role`` is sent.
+        """
+        exec_mode = _sf_identity.resolve_mode(mode)
+        if exec_mode == _sf_identity.MODE_CALLER:
+            effective_role = (role or "").strip()
+        else:
+            effective_role = (role or self.active_role).strip()
         if not self._has_spcs_token():
             # Fail closed: nothing was executed, so nothing may be registered locally.
             return {
@@ -7977,14 +7991,34 @@ class LiveSnowflakeBridge:
             "timeout": timeout,
             "database": self.database,
             "schema": self.schema,
-            "role": effective_role,
         }
+        if effective_role:
+            payload["role"] = effective_role
         if self.warehouse:
             payload["warehouse"] = self.warehouse
         if bindings:
             payload["bindings"] = bindings
         # TR-02: every SQL API call carries the JSON query tag (callers on worker threads pass it explicitly).
         payload["parameters"] = {"query_tag": query_tag or build_query_tag()}
+
+        try:
+            request_headers = (
+                self._get_spcs_headers(exec_mode)
+                if exec_mode == _sf_identity.MODE_CALLER
+                else self._get_spcs_headers()
+            )
+        except _sf_identity.CallerIdentityMissing as exc:
+            return {
+                "ok": False,
+                "mode": exec_mode,
+                "status_code": 401,
+                "error_code": exc.error_code,
+                "message": str(exc),
+                "effective_role": effective_role,
+                "rows": [],
+                "columns": [],
+                "statement_handle": None,
+            }
 
         try:
             if self._http_client is None and httpx is not None:
@@ -7996,7 +8030,7 @@ class LiveSnowflakeBridge:
             client = self._http_client
             resp = client.post(
                 url,
-                headers=self._get_spcs_headers(),
+                headers=request_headers,
                 json=payload,
                 timeout=float(min(max(timeout, 5), 60) + 5),
             )
@@ -8247,13 +8281,13 @@ class LiveSnowflakeBridge:
         # In live SPCS mode, dispatch audit INSERT and LANGFLOW_FLOW_ACTIVITY MERGE asynchronously so UI requests never block on Snowflake DML
         if self._has_spcs_token() and not self._is_execute_sql_mocked():
             _AUDIT_EXECUTOR.submit(
-                self.execute_sql, stmt, role="ACCOUNTADMIN", bindings=audit_bindings, timeout=15, query_tag=audit_query_tag
+                self.execute_sql, stmt, role=self._service_role(), bindings=audit_bindings, timeout=15, query_tag=audit_query_tag
             )
             act_merge = self._build_activity_merge_sql(act_record)
-            _AUDIT_EXECUTOR.submit(self.execute_sql, act_merge, role="ACCOUNTADMIN", timeout=15, query_tag=audit_query_tag)
+            _AUDIT_EXECUTOR.submit(self.execute_sql, act_merge, role=self._service_role(), timeout=15, query_tag=audit_query_tag)
             self._synced_activity_ids.add(event_id)
         else:
-            self.execute_sql(stmt, role="ACCOUNTADMIN", bindings=audit_bindings)
+            self.execute_sql(stmt, role=self._service_role(), bindings=audit_bindings)
         return event_id
 
     def record_trigger_execution_telemetry(
@@ -8361,13 +8395,13 @@ class LiveSnowflakeBridge:
         )
 
         if self._has_spcs_token() and not self._is_execute_sql_mocked():
-            _AUDIT_EXECUTOR.submit(self.execute_sql, act_sql, role="ACCOUNTADMIN", timeout=15)
-            _AUDIT_EXECUTOR.submit(self.execute_sql, merge_run, role="ACCOUNTADMIN", timeout=15)
-            _AUDIT_EXECUTOR.submit(self.execute_sql, merge_span, role="ACCOUNTADMIN", timeout=15)
+            _AUDIT_EXECUTOR.submit(self.execute_sql, act_sql, role=self._service_role(), timeout=15)
+            _AUDIT_EXECUTOR.submit(self.execute_sql, merge_run, role=self._service_role(), timeout=15)
+            _AUDIT_EXECUTOR.submit(self.execute_sql, merge_span, role=self._service_role(), timeout=15)
         else:
-            self.execute_sql(act_sql, role="ACCOUNTADMIN")
-            self.execute_sql(merge_run, role="ACCOUNTADMIN")
-            self.execute_sql(merge_span, role="ACCOUNTADMIN")
+            self.execute_sql(act_sql, role=self._service_role())
+            self.execute_sql(merge_run, role=self._service_role())
+            self.execute_sql(merge_span, role=self._service_role())
 
         self.record_audit_event(
             action=f"TRIGGER_{ev_type}",
@@ -8426,7 +8460,12 @@ class LiveSnowflakeBridge:
 
     def switch_role(self, target_role: str, flow_id: str | None = None) -> dict[str, Any]:
         clean = (target_role or "").strip().upper()
-        if not clean or clean not in [r.upper() for r in self.available_roles]:
+        # W3-R1-10d: under caller's rights the selector is display-only and privileged roles are never selectable.
+        if _sf_identity.callers_rights_enabled():
+            role_allowed = _sf_identity.is_selectable_role(clean, self.available_roles)
+        else:
+            role_allowed = bool(clean) and clean in [r.upper() for r in self.available_roles]
+        if not role_allowed:
             self.record_audit_event(
                 action="ROLE_SWITCH",
                 outcome="DENIED",
@@ -8619,7 +8658,7 @@ class LiveSnowflakeBridge:
                 f"AND DELETED_IN_UI_AT IS NULL"
             )
             for stmt in (upd_act, upd_runs, upd_spans):
-                self.execute_sql(stmt, role="ACCOUNTADMIN", timeout=12)
+                self.execute_sql(stmt, role=self._service_role(), timeout=12)
                 executed_updates.append(stmt)
         elif norm_fid:
             safe_fid = norm_fid.replace("'", "''")
@@ -8628,7 +8667,7 @@ class LiveSnowflakeBridge:
                 f"SET DELETED_IN_UI_AT = CURRENT_TIMESTAMP() "
                 f"WHERE FLOW_ID = '{safe_fid}' AND DELETED_IN_UI_AT IS NULL"
             )
-            self.execute_sql(upd_act, role="ACCOUNTADMIN", timeout=12)
+            self.execute_sql(upd_act, role=self._service_role(), timeout=12)
             executed_updates.append(upd_act)
 
         return {
@@ -8793,7 +8832,7 @@ class LiveSnowflakeBridge:
                             f"CURRENT_TIMESTAMP(), CURRENT_TIMESTAMP(), '{status_val}', "
                             f"PARSE_JSON('{inputs_redacted}'), PARSE_JSON('{outputs_redacted}'))"
                         )
-                        self.execute_sql(merge_span, role="ACCOUNTADMIN", timeout=12)
+                        self.execute_sql(merge_span, role=self._service_role(), timeout=12)
                         replicated_spans += 1
 
                         merge_run = (
@@ -8807,7 +8846,7 @@ class LiveSnowflakeBridge:
                             f"CURRENT_TIMESTAMP(), CURRENT_TIMESTAMP(), '{status_val}', "
                             f"PARSE_JSON('{inputs_redacted}'), PARSE_JSON('{outputs_redacted}'))"
                         )
-                        self.execute_sql(merge_run, role="ACCOUNTADMIN", timeout=12)
+                        self.execute_sql(merge_run, role=self._service_role(), timeout=12)
                         replicated_runs += 1
 
                         act_id = f"act-tx-{tx_id[:24]}"
@@ -8850,7 +8889,7 @@ class LiveSnowflakeBridge:
                                 "deleted_in_ui_at": None if act_id not in self._soft_deleted_activity_ids else datetime.now(timezone.utc).isoformat(),
                             }
                             self._recent_activity_events.insert(0, act_rec)
-                            self.execute_sql(self._build_activity_merge_sql(act_rec), role="ACCOUNTADMIN", timeout=12)
+                            self.execute_sql(self._build_activity_merge_sql(act_rec), role=self._service_role(), timeout=12)
                             self._synced_activity_ids.add(act_id)
                             replicated_activities += 1
 
@@ -8885,7 +8924,7 @@ class LiveSnowflakeBridge:
                             f"CURRENT_TIMESTAMP(), CURRENT_TIMESTAMP(), '{status_val}', "
                             f"PARSE_JSON('{params_redacted}'), PARSE_JSON('{data_redacted}'))"
                         )
-                        self.execute_sql(merge_vb_span, role="ACCOUNTADMIN", timeout=12)
+                        self.execute_sql(merge_vb_span, role=self._service_role(), timeout=12)
                         replicated_spans += 1
 
                         act_vb_id = f"act-vb-{vb_id[:24]}"
@@ -8928,7 +8967,7 @@ class LiveSnowflakeBridge:
                                 "deleted_in_ui_at": None if act_vb_id not in self._soft_deleted_activity_ids else datetime.now(timezone.utc).isoformat(),
                             }
                             self._recent_activity_events.insert(0, act_vb_rec)
-                            self.execute_sql(self._build_activity_merge_sql(act_vb_rec), role="ACCOUNTADMIN", timeout=12)
+                            self.execute_sql(self._build_activity_merge_sql(act_vb_rec), role=self._service_role(), timeout=12)
                             self._synced_activity_ids.add(act_vb_id)
                             replicated_activities += 1
 
@@ -8960,19 +8999,19 @@ class LiveSnowflakeBridge:
             f"FROM {self.audit_table} ORDER BY event_ts DESC LIMIT {int(limit)}"
         )
         if self._has_spcs_token() and not self._is_execute_sql_mocked():
-            f_act = _CATALOG_EXECUTOR.submit(self.execute_sql, q_activity, role="ACCOUNTADMIN", timeout=12)
-            f_runs = _CATALOG_EXECUTOR.submit(self.execute_sql, q_runs, role="ACCOUNTADMIN", timeout=12)
-            f_spans = _CATALOG_EXECUTOR.submit(self.execute_sql, q_spans, role="ACCOUNTADMIN", timeout=12)
-            f_audit = _CATALOG_EXECUTOR.submit(self.execute_sql, q_audit, role="ACCOUNTADMIN", timeout=12)
+            f_act = _CATALOG_EXECUTOR.submit(self.execute_sql, q_activity, role=self._service_role(), timeout=12)
+            f_runs = _CATALOG_EXECUTOR.submit(self.execute_sql, q_runs, role=self._service_role(), timeout=12)
+            f_spans = _CATALOG_EXECUTOR.submit(self.execute_sql, q_spans, role=self._service_role(), timeout=12)
+            f_audit = _CATALOG_EXECUTOR.submit(self.execute_sql, q_audit, role=self._service_role(), timeout=12)
             act_res = f_act.result()
             runs_res = f_runs.result()
             spans_res = f_spans.result()
             audit_res = f_audit.result()
         else:
-            act_res = self.execute_sql(q_activity, role="ACCOUNTADMIN")
-            runs_res = self.execute_sql(q_runs, role="ACCOUNTADMIN")
-            spans_res = self.execute_sql(q_spans, role="ACCOUNTADMIN")
-            audit_res = self.execute_sql(q_audit, role="ACCOUNTADMIN")
+            act_res = self.execute_sql(q_activity, role=self._service_role())
+            runs_res = self.execute_sql(q_runs, role=self._service_role())
+            spans_res = self.execute_sql(q_spans, role=self._service_role())
+            audit_res = self.execute_sql(q_audit, role=self._service_role())
 
         active_mem_events = [
             ev

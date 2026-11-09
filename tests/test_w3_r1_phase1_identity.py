@@ -82,10 +82,6 @@ def test_read_only_guard_rejects(sql: str) -> None:
     assert not idm.is_read_only_statement(sql)
 
 
-def test_query_tag_has_mode_and_purpose() -> None:
-    assert idm.query_tag("audit emit", idm.MODE_SERVICE) == "snowflake-langflow:service:audit_emit"
-
-
 def test_selectable_role_blocks_privileged() -> None:
     assert not idm.is_selectable_role("ACCOUNTADMIN", ["ACCOUNTADMIN", "PUBLIC"])
     assert idm.is_selectable_role("public", ["PUBLIC"])
@@ -118,3 +114,39 @@ def test_bridge_never_writes_header_user_globally() -> None:
     src = Path(__file__).resolve().parents[1].joinpath("src/lfx_snowflake/fastapi_live_bridge.py").read_text()
     assert "LIVE_BRIDGE.authenticated_user =" not in src
     assert "_sf_identity.bind_identity(_sf_identity.identity_from_headers(request.headers))" in src
+
+
+def test_execute_sql_caller_mode_fails_closed_without_token(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    from lfx_snowflake import fastapi_live_bridge as flb
+
+    token_file = tmp_path / "token"
+    token_file.write_text("svc")
+    monkeypatch.setattr(flb, "SPCS_TOKEN_PATH", token_file)
+    monkeypatch.setenv("SNOWFLAKE_HOST", "example.invalid")
+    monkeypatch.setenv(idm.CALLERS_RIGHTS_ENV, "1")
+
+    class _NoNetwork:
+        def post(self, *a, **k):  # pragma: no cover - must never be reached
+            raise AssertionError("no request may be sent without a caller token")
+
+    monkeypatch.setattr(flb.LIVE_BRIDGE, "_http_client", _NoNetwork())
+    res = flb.LIVE_BRIDGE.execute_sql("SELECT 1", mode=idm.MODE_CALLER)
+    assert res["ok"] is False and res["status_code"] == 401
+    assert res["error_code"] == idm.CallerIdentityMissing.error_code
+
+
+def test_no_hardcoded_admin_role_in_background_writes() -> None:
+    from pathlib import Path
+
+    src = Path(__file__).resolve().parents[1].joinpath("src/lfx_snowflake/fastapi_live_bridge.py").read_text()
+    assert 'role="ACCOUNTADMIN"' not in src
+    assert "return _sf_identity.service_role() or self.active_role" in src
+
+
+def test_switch_role_rejects_privileged_role_under_callers_rights(monkeypatch: pytest.MonkeyPatch) -> None:
+    from lfx_snowflake.fastapi_live_bridge import LIVE_BRIDGE
+
+    monkeypatch.setenv(idm.CALLERS_RIGHTS_ENV, "1")
+
+    res = LIVE_BRIDGE.switch_role("ACCOUNTADMIN")
+    assert res["ok"] is False and res["status_code"] == 403

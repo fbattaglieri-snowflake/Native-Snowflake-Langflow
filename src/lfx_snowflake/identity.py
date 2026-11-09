@@ -115,15 +115,6 @@ def authorization_value(service_token: str, mode: str) -> str:
     return f"Bearer {service_token}"
 
 
-_TAG_SAFE = re.compile(r"[^A-Za-z0-9_.:\-]")
-
-
-def query_tag(purpose: str | None, mode: str) -> str:
-    """QUERY_TAG value ``snowflake-langflow:<mode>:<purpose>`` (no user data, bounded length)."""
-    clean = _TAG_SAFE.sub("_", (purpose or "unspecified").strip())[:80] or "unspecified"
-    return f"snowflake-langflow:{resolve_mode(mode)}:{clean}"
-
-
 _READ_ONLY_LEAD = re.compile(r"^\s*(SELECT|WITH|SHOW|DESCRIBE|DESC|EXPLAIN|LIST|LS)\b", re.IGNORECASE)
 _COMMENTS = re.compile(r"--[^\n]*|/\*.*?\*/", re.DOTALL)
 _STRINGS = re.compile(r"'(?:[^'\\]|\\.|'')*'|\$\$.*?\$\$", re.DOTALL)
