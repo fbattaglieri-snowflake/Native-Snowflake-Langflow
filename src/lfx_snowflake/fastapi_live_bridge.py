@@ -1177,7 +1177,7 @@ class LiveSnowflakeBridge:
                 "tables": ["LANGFLOW_FLOW_RUNS", "LANGFLOW_FLOW_SPANS", "LANGFLOW_AUDIT_LOG"],
                 "views": [],
                 "iceberg_tables": [],
-                "stages": [self.stage_name],
+                "stages": [],
                 "memories": ["SNOWFLAKE_KB_MEM"],
                 "cortex_search_services": [],
                 "semantic_views": [],
@@ -4906,13 +4906,13 @@ class LiveSnowflakeBridge:
                     if self.is_stage_visible_in_context(cand, flow_id=norm_fid):
                         by_fqn[fqn_key] = cand
 
-        storage_integrations: list[str] = ["AWS_S3_INTEGRATION", "GCS_STORAGE_INTEGRATION", "AZURE_STORAGE_INTEGRATION"]
+        storage_integrations: list[str] = []
         int_res = self.execute_sql("SHOW STORAGE INTEGRATIONS")
-        for r in int_res.get("rows") or []:
+        for r in int_res.get("rows") or [] if int_res.get("ok") else []:
             if isinstance(r, dict):
                 int_nm = str(r.get("name") or r.get("NAME") or "").strip()
                 if int_nm and int_nm not in storage_integrations:
-                    storage_integrations.insert(0, int_nm)
+                    storage_integrations.append(int_nm)
 
         ext_vols_res = self.list_external_volumes_for_context(flow_id=norm_fid)
         stages_list = list(by_fqn.values())
@@ -10559,12 +10559,13 @@ def register_snowflake_fastapi_routes(app: Any) -> None:
         )
         return JSONResponse(status_code=200, content=res)
 
-    @sf_router.post("/external-volumes/create", status_code=201)
-    @sf_router.get("/external-volumes/{name}/describe")
-    async def get_describe_external_volume_route(name: str) -> JSONResponse:
+    @sf_router.get("/external-volumes/describe")
+    async def get_describe_external_volume_route(request: Request) -> JSONResponse:
+        name = str(request.query_params.get("name") or "")
         res = await asyncio.to_thread(lambda: LIVE_BRIDGE.describe_external_volume(name))
         return JSONResponse(status_code=int(res.get("status_code") or (200 if res.get("ok") else 502)), content=res)
 
+    @sf_router.post("/external-volumes/create", status_code=201)
     @sf_router.post("/external-volumes", status_code=201)
     async def post_create_external_volume_route(request: Request) -> JSONResponse:
         req_fid = request.query_params.get("flow_id") or request.headers.get("X-Snowflake-Flow-Id")
