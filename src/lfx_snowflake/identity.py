@@ -252,6 +252,10 @@ def submit_with_context(executor: Any, fn: Callable[..., Any], *args: Any, **kwa
     return executor.submit(ctx.run, fn, *args, **kwargs)
 
 
+# Effective mode of the request that scheduled a background job (attribution only, never authority).
+ORIGIN_MODE: ContextVar[str | None] = ContextVar("snowflake_origin_mode", default=None)
+
+
 def _run_as_service(fn: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
     token = CURRENT_REQUEST_MODE.set(MODE_SERVICE)
     try:
@@ -262,8 +266,18 @@ def _run_as_service(fn: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
 
 def submit_background(executor: Any, fn: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
     """Background job: keeps identity/trace context (for origin_user) but always runs in service mode."""
-    ctx = copy_context()
+    if ORIGIN_MODE.get() is None:
+        token = ORIGIN_MODE.set(resolve_mode(current_request_mode()))
+        ctx = copy_context()
+        ORIGIN_MODE.reset(token)
+    else:
+        ctx = copy_context()
     return executor.submit(ctx.run, _run_as_service, fn, *args, **kwargs)
+
+
+def origin_mode() -> str:
+    """Effective mode of the originating request (background jobs) or of the current request."""
+    return ORIGIN_MODE.get() or resolve_mode(current_request_mode())
 
 
 def origin_user() -> str | None:
