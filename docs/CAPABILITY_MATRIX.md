@@ -5,27 +5,30 @@
 
 ---
 
+> [!NOTE]
+> Status values: **Live** (deployed and verified), **In progress** (partially implemented or on a development branch, not deployed), **Planned** (not implemented). W3-R1 Phase 0 changes are on a branch and not deployed.
+
 ## Executive Summary & Visual Capability Map
 
 ```mermaid
 flowchart TB
     subgraph Governance["1. Governance & Per-Flow Context"]
-        Role["❄️ Role Selector\n(CURRENT_ROLE + Session Pool)"]
-        Context["[ ❄️ Context ] Per-Flow Scope\n(Databases ▸ Schemas ▸ Objects + Postgres)"]
+        Role["❄️ Role Selector<br/>(CURRENT_ROLE + Session Pool)"]
+        Context["[ ❄️ Context ] Per-Flow Scope<br/>(Databases ▸ Schemas ▸ Objects + Postgres)"]
     end
 
     subgraph Sidebar["2. Sidebar Categories (36 Total Components — 1 Class = 1 File)"]
-        TRG["Triggers (5)\nSchedule | Table Change | Stage File | Alert | Webhook"]
-        DS["Data Sources (6)\nTables | Views | Iceberg | Postgres | Search | Analyst"]
-        MA["Models & Agents (7)\nLanguage Model | Agent | Cortex Agent | A2A | Embedding | History | Prompt"]
-        LLM["LLM Operations (7 [ ❄️ ] + 5 Native)\nCustom Tool | Decision | AI Redact | AI Complete | AI Function | SQL Statement | Operations"]
-        FK["Files & Knowledge (5)\nFile System | Knowledge | Memory Base | Read File | Write File"]
+        TRG["Triggers (5)<br/>Schedule | Table Change | Stage File | Alert | Webhook"]
+        DS["Data Sources (6)<br/>Tables | Views | Iceberg | Postgres | Search | Analyst"]
+        MA["Models & Agents (7)<br/>Language Model | Agent | Cortex Agent | A2A | Embedding | History | Prompt"]
+        LLM["LLM Operations (7 [ ❄️ ] + 5 Native)<br/>Custom Tool | Decision | AI Redact | AI Complete | AI Function | SQL Statement | Operations"]
+        FK["Files & Knowledge (5)<br/>File System | Knowledge | Memory Base | Read File | Write File"]
     end
 
     subgraph Rail["3. Left Rail Views & Persistence"]
-        Mem["Memories (#1..#5)\n+ ❄️ Snowflake Wizard"]
-        Stages["Stages & Volumes\nInternal & External Buckets"]
-        Traces["Flow Activity Traces\n<DATABASE>.<SCHEMA>.LANGFLOW_FLOW_ACTIVITY"]
+        Mem["Memories (#1..#5)<br/>+ ❄️ Snowflake Wizard"]
+        Stages["Stages & Volumes<br/>Internal & External Buckets"]
+        Traces["Flow Activity Traces<br/><DATABASE>.<SCHEMA>.LANGFLOW_FLOW_ACTIVITY"]
     end
 
     Role --> Context --> TRG & DS & MA & LLM & FK & Mem & Stages & Traces
@@ -33,38 +36,38 @@ flowchart TB
 
 ### Complete Component Inventory by Category
 
-| Sidebar Category | Component Display Name | Class Name | Primary Role in Workflows |
-|---|---|---|---|
-| **Triggers** | `[ ❄️ ] Schedule Trigger` | `SnowflakeScheduleTrigger` | Cron (`USING CRON`) or interval (`Minutes`..`Months`) Snowflake Task trigger |
-| **Triggers** | `[ ❄️ ] Table Change Trigger` | `SnowflakeTableChangeTrigger` | CDC row-change trigger via `STREAM ON TABLE/VIEW` + Triggered Task |
-| **Triggers** | `[ ❄️ ] Stage File Trigger` | `SnowflakeStageFileTrigger` | File-arrival trigger on `@<DATABASE>.<SCHEMA>.<STAGE_NAME>` directory table |
-| **Triggers** | `[ ❄️ ] Condition Alert Trigger` | `SnowflakeAlertTrigger` | Read-only SQL threshold/anomaly trigger via `SNOWFLAKE ALERT` |
-| **Triggers** | `Webhook` | `WebhookComponent` | External HTTP POST trigger (`WEBHOOK_RUN`) |
-| **Data Sources** | `[ ❄️ ] Tables` | `SnowflakeTablesComponent` | Reads `Standard`, `Hybrid`, `Dynamic`, and `Interactive` tables in `[ ❄️ Context ]` |
-| **Data Sources** | `[ ❄️ ] Views` | `SnowflakeViewsComponent` | Reads `Standard`, `Secure`, and `Materialized` views in `[ ❄️ Context ]` |
-| **Data Sources** | `[ ❄️ ] Iceberg Tables` | `SnowflakeIcebergTablesComponent` | Reads Apache Iceberg tables managed in Snowflake |
-| **Data Sources** | `[ ❄️ ] Postgres` | `SnowflakePostgresComponent` | Account-level connection to `<POSTGRES_INSTANCE>` (`:5432`) |
-| **Data Sources** | `[ ❄️ ] Cortex Search` | `SnowflakeCortexSearchComponent` | Queries Cortex Search services (also usable as Agent `StructuredTool`) |
-| **Data Sources** | `[ ❄️ ] Cortex Analyst` | `SnowflakeCortexAnalystComponent` | Natural-language-to-SQL over Semantic Views or `@Stage` YAML models |
-| **Models & Agents** | `Language Model` | `LanguageModelComponent` | Direct LLM calls with 4 Snowflake providers (`Chat`, `Responses`, `Messages`, `Ollama`) |
-| **Models & Agents** | `Agent` | `AgentComponent` | Tool-calling Agent with dynamic `Reasoning Effort` & `Extended Thinking` |
-| **Models & Agents** | `[ ❄️ ] Cortex Agent` | `SnowflakeCortexAgentComponent` | Invokes Snowflake Cortex Agents with 2-level `Threads API` continuity |
-| **Models & Agents** | `A2A Agent` | `SnowflakeA2AAgentComponent` | Internal (`[Langflow Flow]` / `[Cortex Agent]`) and External A2A v0.3.0 bridge |
-| **Models & Agents** | `Embedding Model` | `EmbeddingModelComponent` | Includes `Snowflake Cortex` (`AI_EMBED` 6 models: `768d` & `1024d`) |
-| **Models & Agents** | `[ ❄️ ] Message History` | `SnowflakeMessageHistoryComponent` | Conversation history on Snowflake Tables or `<POSTGRES_INSTANCE>` |
-| **Models & Agents** | `Prompt Template` | `PromptComponent` | Native Langflow prompt templating |
-| **LLM Operations** | **`[ ❄️ ] Custom Tool`** | `SnowflakeCustomTool` | Snowsight-aligned custom tool (`procedure`, `function`, `table_function`) with `DESCRIBE` auto-discovery, manual parameter editor (blocking `OBJECT`), and `tool_spec` + SQL execution |
-| **LLM Operations** | **`[ ❄️ ] Decision`** | `SnowflakeDecision` | Official `AI_COMPLETE` decision models (`snowflake-decision-fast` & `snowflake-decision`) supporting `choice`, `score` (`0..n-1`), and `noul` (`1..32` questions, max `256` options) + confidence routing |
-| **LLM Operations** | **`[ ❄️ ] AI Redact`** | `SnowflakeAIRedact` | Dedicated PII masking & detection (`redact`, `detect`, `detect_with_allowlist`) across the 13 official Snowflake PII categories with 4,096-token auto-chunking |
-| **LLM Operations** | **`[ ❄️ ] AI Complete`** | `SnowflakeAIComplete` | Text, JSON schema, and Internal/External Stage multimodal (`TO_FILE` / `DIRECTORY`) completion (`Images`, `.mp3/Audio`, `Video`, `Documents`) |
-| **LLM Operations** | **`[ ❄️ ] AI Function`** | `SnowflakeAIFunction` | 14 task-specific `AI_*` functions (`AI_CLASSIFY`, `AI_FILTER`, `AI_EXTRACT`, `AI_SENTIMENT`, `AI_SUMMARIZE`, `AI_SUMMARIZE_AGG`, `AI_AGG`, `AI_TRANSLATE`, `AI_SIMILARITY`, `AI_TRANSCRIBE`, `AI_PARSE_DOCUMENT`, `AI_EMBED`, `AI_MULTI_EMBED`, `AI_COUNT_TOKENS`) with Internal & External Stage multimodal support |
-| **LLM Operations** | **`[ ❄️ ] SQL Statement`** | `SnowflakeSQLStatement` | Governed parameterized SQL statement execution under `CURRENT_ROLE()` |
-| **LLM Operations** | **`[ ❄️ ] Operations`** | `SnowflakeLLMNode` | Multi-operation Snowflake Cortex helper node |
-| **Files & Knowledge** | `File System` | `FileSystemTool` | Stage file browsing and governed Internal/External stage management |
-| **Files & Knowledge** | `Knowledge` | `KnowledgeComponent` | Vector knowledge base over Snowflake `VECTOR` tables, Cortex Search, or `pgvector` |
-| **Files & Knowledge** | `Memory Base` | `MemoryBaseComponent` | Canvas adapter for all 5 Snowflake Memory types (`#1..#5`) |
-| **Files & Knowledge** | `Read File` | `FileComponent` | Stage file reader integrated with `AI_PARSE_DOCUMENT` (`LAYOUT` / `OCR`) |
-| **Files & Knowledge** | `Write File` | `SaveToFileComponent` | Safe atomic write/append to `@<DATABASE>.<SCHEMA>.<STAGE_NAME>` |
+| Sidebar Category | Component Display Name | Class Name | Primary Role in Workflows | Status |
+|---|---|---|---|---|
+| **Triggers** | `[ ❄️ ] Schedule Trigger` | `SnowflakeScheduleTrigger` | Cron (`USING CRON`) or interval (`Minutes`..`Months`) Snowflake Task trigger | Live |
+| **Triggers** | `[ ❄️ ] Table Change Trigger` | `SnowflakeTableChangeTrigger` | CDC row-change trigger via `STREAM ON TABLE/VIEW` + Triggered Task | Live |
+| **Triggers** | `[ ❄️ ] Stage File Trigger` | `SnowflakeStageFileTrigger` | File-arrival trigger on `@<DATABASE>.<SCHEMA>.<STAGE_NAME>` directory table | Live |
+| **Triggers** | `[ ❄️ ] Condition Alert Trigger` | `SnowflakeAlertTrigger` | Read-only SQL threshold/anomaly trigger via `SNOWFLAKE ALERT` | Live |
+| **Triggers** | `Webhook` | `WebhookComponent` | External HTTP POST trigger (`WEBHOOK_RUN`) | Live |
+| **Data Sources** | `[ ❄️ ] Tables` | `SnowflakeTablesComponent` | Reads `Standard`, `Hybrid`, `Dynamic`, and `Interactive` tables in `[ ❄️ Context ]` | Live |
+| **Data Sources** | `[ ❄️ ] Views` | `SnowflakeViewsComponent` | Reads `Standard`, `Secure`, and `Materialized` views in `[ ❄️ Context ]` | Live |
+| **Data Sources** | `[ ❄️ ] Iceberg Tables` | `SnowflakeIcebergTablesComponent` | Reads Apache Iceberg tables managed in Snowflake | Live |
+| **Data Sources** | `[ ❄️ ] Postgres` | `SnowflakePostgresComponent` | Account-level connection to `<POSTGRES_INSTANCE>` (`:5432`) | Live |
+| **Data Sources** | `[ ❄️ ] Cortex Search` | `SnowflakeCortexSearchComponent` | Queries Cortex Search services (also usable as Agent `StructuredTool`) | Live |
+| **Data Sources** | `[ ❄️ ] Cortex Analyst` | `SnowflakeCortexAnalystComponent` | Natural-language-to-SQL over Semantic Views or `@Stage` YAML models | Live |
+| **Models & Agents** | `Language Model` | `LanguageModelComponent` | Direct LLM calls with 4 Snowflake providers (`Chat`, `Responses`, `Messages`, `Ollama`) | Live |
+| **Models & Agents** | `Agent` | `AgentComponent` | Tool-calling Agent with dynamic `Reasoning Effort` & `Extended Thinking` | Live |
+| **Models & Agents** | `[ ❄️ ] Cortex Agent` | `SnowflakeCortexAgentComponent` | Invokes Snowflake Cortex Agents with 2-level `Threads API` continuity | Live |
+| **Models & Agents** | `A2A Agent` | `SnowflakeA2AAgentComponent` | Internal (`[Langflow Flow]` / `[Cortex Agent]`) and External A2A v0.3.0 bridge | Live |
+| **Models & Agents** | `Embedding Model` | `EmbeddingModelComponent` | Includes `Snowflake Cortex` (`AI_EMBED` 6 models: `768d` & `1024d`) | Live |
+| **Models & Agents** | `[ ❄️ ] Message History` | `SnowflakeMessageHistoryComponent` | Conversation history; current backend is in-memory per role. Snowflake Tables and `<POSTGRES_INSTANCE>` persistence are not live | In progress |
+| **Models & Agents** | `Prompt Template` | `PromptComponent` | Native Langflow prompt templating | Live |
+| **LLM Operations** | **`[ ❄️ ] Custom Tool`** | `SnowflakeCustomTool` | Snowsight-aligned custom tool (`procedure`, `function`, `table_function`) with `DESCRIBE` auto-discovery, manual parameter editor (blocking `OBJECT`), and `tool_spec` + SQL execution | Live |
+| **LLM Operations** | **`[ ❄️ ] Decision`** | `SnowflakeDecision` | Official `AI_COMPLETE` decision models (`snowflake-decision-fast` & `snowflake-decision`) supporting `choice`, `score` (`0..n-1`), and `noul` (`1..32` questions, max `256` options) + confidence routing | Live |
+| **LLM Operations** | **`[ ❄️ ] AI Redact`** | `SnowflakeAIRedact` | Dedicated PII masking & detection (`redact`, `detect`, `detect_with_allowlist`) across the 13 official Snowflake PII categories with 4,096-token auto-chunking | Live |
+| **LLM Operations** | **`[ ❄️ ] AI Complete`** | `SnowflakeAIComplete` | Text, JSON schema, and Internal/External Stage multimodal (`TO_FILE` / `DIRECTORY`) completion (`Images`, `.mp3/Audio`, `Video`, `Documents`) | Live |
+| **LLM Operations** | **`[ ❄️ ] AI Function`** | `SnowflakeAIFunction` | 14 task-specific `AI_*` functions (`AI_CLASSIFY`, `AI_FILTER`, `AI_EXTRACT`, `AI_SENTIMENT`, `AI_SUMMARIZE`, `AI_SUMMARIZE_AGG`, `AI_AGG`, `AI_TRANSLATE`, `AI_SIMILARITY`, `AI_TRANSCRIBE`, `AI_PARSE_DOCUMENT`, `AI_EMBED`, `AI_MULTI_EMBED`, `AI_COUNT_TOKENS`) with Internal & External Stage multimodal support | Live |
+| **LLM Operations** | **`[ ❄️ ] SQL Statement`** | `SnowflakeSQLStatement` | Governed parameterized SQL statement execution under `CURRENT_ROLE()` | Live |
+| **LLM Operations** | **`[ ❄️ ] Operations`** | `SnowflakeLLMNode` | Multi-operation Snowflake Cortex helper node | Live |
+| **Files & Knowledge** | `File System` | `FileSystemTool` | Stage file browsing and governed Internal/External stage management | In progress |
+| **Files & Knowledge** | `Knowledge` | `KnowledgeComponent` | Vector knowledge base over Snowflake `VECTOR` tables, Cortex Search, or `pgvector` | In progress |
+| **Files & Knowledge** | `Memory Base` | `MemoryBaseComponent` | Canvas adapter for Snowflake memories; under redesign (W3-R1), real Snowflake objects only | Planned |
+| **Files & Knowledge** | `Read File` | `FileComponent` | Stage file reader integrated with `AI_PARSE_DOCUMENT` (`LAYOUT` / `OCR`) | In progress |
+| **Files & Knowledge** | `Write File` | `SaveToFileComponent` | Safe atomic write/append to `@<DATABASE>.<SCHEMA>.<STAGE_NAME>` | In progress |
 
 ---
 
@@ -90,9 +93,9 @@ flowchart TB
 | **REQ-05** | Structured `Data Sources` + `Cortex Analyst` in Unified Session (`[G-A5]`) | `lfx_snowflake/components/data_sources.py` | Separates visibility, `SELECT`, and semantic readiness (`Semantic View` / YAML). No auto Semantic View creation, no Analyst-on-Postgres, no cross-engine implicit joins, bounded SQL results across turns. |
 | **REQ-06** | 3 Native Proxy Standard Protocols + `Ollama` | `lfx_snowflake/providers/registry.py` | `/chat/v1`, `/responses/v1` (`ordered-items`, `store=False`, `include=["reasoning.encrypted_content"]`), `/messages` (inference `/messages/v1/messages`, `thinking.signature`, `redacted_thinking`), `<OLLAMA_BASE_URL>`, `call_0..call_N` deduplication, 0 silent retries. |
 | **REQ-07** | Snowflake `Embedding Model` | `lfx_snowflake/providers/registry.py` | Separate catalog (`/api/v2/cortex/inference:embed` / `AI_EMBED` + verified Ollama embedders) with `(model_id, dimension, space_fingerprint)` guard. |
-| **REQ-08** | `Message History` on Snowflake Postgres & Standard Tables | `lfx_snowflake/components/utilities_a2a.py` | Store/Retrieve (`Messages`/`Table`), separating visible UI messages, signed protocol replay state, and Cortex Agent thread references. |
+| **REQ-08** | `Message History` on Snowflake Postgres & Standard Tables (**Planned** — current backend is in-memory) | `lfx_snowflake/components/utilities_a2a.py` | Store/Retrieve (`Messages`/`Table`), separating visible UI messages, signed protocol replay state, and Cortex Agent thread references. |
 | **REQ-09** | `LLM Operations` + `Custom Tool`, `Decision`, `AI Redact` & `AI Function` (`[G-A2]`, `W2-R9-01..04`) | `lfx_snowflake/components/llm_operations.py`, `lfx_snowflake/components/ai_function.py`, `native_category_components/llm_operations/` | `Batch Run`, `Guardrails`, `Smart Router`, `Smart Transform`, `Structured Output` (`LLM Selector` unchanged) + `[ ❄️ ] Custom Tool` (`procedure`/`function`/`table_function`), `[ ❄️ ] Decision` (`snowflake-decision-fast` / `snowflake-decision`), `[ ❄️ ] AI Redact` (13 official PII categories, 4,096-token limit + auto-chunking), `[ ❄️ ] AI Complete`, and `[ ❄️ ] AI Function` (14 `AI_*` functions with Internal Stage `@<DATABASE>.<SCHEMA>.<STAGE_NAME>` & External Bucket multimodal `TO_FILE` / `DIRECTORY`). |
-| **REQ-10** | `Files & Knowledge` & `Memories / Create Memory` (`[G-A3]`, `[G-A4]`) | `lfx_snowflake/components/files_knowledge.py` | `File System` (stage creation), `Read File`, `Write File` (safe atomic `Append`, internal vs external stages), `Knowledge` & `Create Memory` (optional `LLM Preprocessing`, separated `CREATE` vs use permissions, cross-session isolation) across 4 vector backends. |
+| **REQ-10** | `Files & Knowledge` & `Memories / Create Memory` (`[G-A3]`, `[G-A4]`) (**Under redesign, W3-R1**: real objects only; upload to internal stages only) | `lfx_snowflake/components/files_knowledge.py` | `File System` (stage creation), `Read File`, `Write File` (safe atomic `Append`, internal vs external stages), `Knowledge` & `Create Memory` (optional `LLM Preprocessing`, separated `CREATE` vs use permissions, cross-session isolation) across 4 vector backends. |
 | **REQ-11** | Unchanged Core Categories | `lfx_snowflake/bundle_manifest.py`, `frontend_patches/` | `Input & Output`, `Prompt Template`, `Processing`, `Flow Control` (with `[Beta]` badges on `Listen`, `Notify`, `Run Flow`), `LLM Selector`, `Calculator`, `Current Date` 100% unchanged. |
 | **REQ-12** | `Utilities`: `Python Interpreter` with Snowflake PyPI | `lfx_snowflake/components/utilities_a2a.py` | Uses `snowflake.snowpark.pypi_shared_repository` (`SNOWFLAKE.PYPI_REPOSITORY_USER`) with zero fallback to public PyPI. |
 | **REQ-13** | `ToolGuard / Policies` (ALTK Beta, `[G-A6]`) | `lfx_snowflake/components/utilities_a2a.py` | 3 Proxy protocols + Ollama in `Policies`, fail-closed on error, other `Discover more components` bundles untouched. |
