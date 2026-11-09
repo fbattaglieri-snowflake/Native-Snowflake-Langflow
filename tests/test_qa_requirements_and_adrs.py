@@ -358,14 +358,14 @@ def test_ga5_data_sources_and_cortex_analyst_boundaries() -> None:
     assert bounded["truncated_for_synthesis"] is True
 
 
-def test_ga6_invariant_bundles_profile_menu_and_14_term_denylist() -> None:
-    """Verify [G-A6]: unchanged bundles in Discover more components, LLM Selector/Calculator/Current Date invariant, and 14-term denylist."""
+def test_ga6_invariant_bundles_profile_menu_and_20_term_denylist() -> None:
+    """Verify [G-A6]: unchanged bundles in Discover more components, LLM Selector/Calculator/Current Date invariant, and 20-term denylist."""
     assert LLM_SELECTOR_INVARIANT_SPEC["status"] == "invariant"
     assert LLM_SELECTOR_INVARIANT_SPEC["modified"] is False
     assert set(INVARIANT_UTILITIES_COMPONENTS) == {"Calculator", "Current Date"}
     assert len(UNCHANGED_DISCOVER_MORE_BUNDLES) >= 5
     assert verify_invariant_category_integrity(INVARIANT_CATEGORIES_MANIFEST)["passed"] is True
-    assert len(DENYLIST_TERMS) == 14
+    assert len(DENYLIST_TERMS) == 20
     assert len(REQUIRED_PLACEHOLDERS) == 9
 
     report = scan_repository(REPO_ROOT, require_aws_attestation=True)

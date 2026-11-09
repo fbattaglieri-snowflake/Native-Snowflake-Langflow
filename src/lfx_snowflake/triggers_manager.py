@@ -687,7 +687,7 @@ def build_stage_file_trigger_ddl(
     flow_id: str,
     database: str = "SNOWFLAKE_LANGFLOW",
     schema: str = "CORE",
-    stage_name: str = "SNOWFLAKE_LANGFLOW_STAGE",
+    stage_name: str = "",
     status_mode: str = "Active",
     trigger_on: str = "New Files Only (Upload)",
     file_pattern: str | None = None,
@@ -703,7 +703,7 @@ def build_stage_file_trigger_ddl(
     flow_short_id = sanitize_flow_short_id(safe_flow_id)
     db = _quote_ident(database or "SNOWFLAKE_LANGFLOW", "database")
     sch = _quote_ident(schema or "CORE", "schema")
-    raw_stg = (stage_name or "SNOWFLAKE_LANGFLOW_STAGE").lstrip("@").strip().split(".")[-1]
+    raw_stg = (stage_name or "").lstrip("@").strip().split(".")[-1]
     stg = _quote_ident(raw_stg, "stage_name")
     stage_fqn = f"{db}.{sch}.{stg}"
 
@@ -1616,7 +1616,7 @@ class SnowflakeTriggersManager:
                     flow_id=flow_id,
                     database=db,
                     schema=sch,
-                    stage_name=str(vals.get("stage_name") or "SNOWFLAKE_LANGFLOW_STAGE"),
+                    stage_name=str(vals.get("stage_name") or ""),
                     status_mode=status_mode,
                     trigger_on=str(vals.get("trigger_on") or "New Files Only (Upload)"),
                     file_pattern=vals.get("file_pattern"),
@@ -1969,7 +1969,7 @@ class SnowflakeTriggersManager:
                     flow_id=safe_fid,
                     database=db,
                     schema=sch,
-                    stage_name=str(vals.get("stage_name") or "SNOWFLAKE_LANGFLOW_STAGE"),
+                    stage_name=str(vals.get("stage_name") or ""),
                     status_mode=status_mode,
                     trigger_on=str(vals.get("trigger_on") or "New Files Only (Upload)"),
                     file_pattern=vals.get("file_pattern"),
@@ -2357,8 +2357,7 @@ def get_trigger_stage_objects(
         for s in bridge.get_context_objects(db, sch, "stages", flow_id=eff_fid)
         if str(s).strip() and not str(s).strip().startswith(("+", "["))
     ]
-    if "SNOWFLAKE_LANGFLOW_STAGE" not in stages:
-        stages.insert(0, "SNOWFLAKE_LANGFLOW_STAGE")
+    # Only stages actually returned by SHOW STAGES for the Context schema (W3-R1-03); no default injection.
     return stages
 
 

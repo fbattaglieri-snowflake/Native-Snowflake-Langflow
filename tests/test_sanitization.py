@@ -19,8 +19,8 @@ from scripts.verify_public_repo_sanitization import (
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_denylist_contains_all_14_mandatory_identifiers() -> None:
-    """Verify all 14 required environment and context identifiers are in DENYLIST_TERMS."""
+def test_denylist_contains_all_20_mandatory_identifiers() -> None:
+    """Verify all 20 required environment and context identifiers are in DENYLIST_TERMS."""
     expected = {
         "JK01" + "775",
         "sfsenorth" + "america",
@@ -36,12 +36,18 @@ def test_denylist_contains_all_14_mandatory_identifiers() -> None:
         "20260926_" + "NewLLMProxy",
         "20260921_" + "Langflow",
         "20261016_" + "SnowflakeLangflow_CLI_prompt",
+        "sfsenorth" + "america-" + "fbatt" + "aglieri-" + "aws-fra",
+        "AISQL" + "_HOL",
+        "MFG_" + "SUPPLIER_" + "QUALITY_AI",
+        "RETAIL_" + "SUPPLIER_" + "INTELLIGENCE",
+        "ML_" + "HOL_DB",
+        "RINA" + "SCENTE" + "TEST",
     }
     assert set(DENYLIST_TERMS) == expected
-    assert len(DENYLIST_TERMS) == 14
+    assert len(DENYLIST_TERMS) == 20
 
 
-@pytest.mark.parametrize("term_index", range(14))
+@pytest.mark.parametrize("term_index", range(20))
 def test_scan_text_blocks_each_denylist_term_case_insensitively(term_index: int) -> None:
     """Each denylist term must be detected regardless of letter casing."""
     term = DENYLIST_TERMS[term_index]

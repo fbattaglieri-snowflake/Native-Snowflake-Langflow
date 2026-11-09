@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 import ast
 import sys
 from pathlib import Path
@@ -878,7 +880,9 @@ def test_w2_r2_13_memories_plus_snowflake_3_agent_memory_types_and_workflow_reca
     assert "AGENT_EPISODIC_TURNS" in opts
     adapter = SnowflakeMessageHistoryAdapter(memory_catalog_ref="AGENT_SEMANTIC_VEC")
     recalled = adapter.recall(query="governance")
-    assert recalled["ok"] is True
+    # W3-R1-01: offline recall fails closed (nothing executed) but still resolves the registered memory
+    assert recalled["ok"] is False
+    assert recalled["error_code"] == "NOT_CONFIGURED"
     assert recalled["memory"]["name"] == "AGENT_SEMANTIC_VEC"
     assert recall_memory_from_catalog("AGENT_EPISODIC_TURNS")["memory"]["agent_memory_type"] == "episodic_session"
 
@@ -1091,7 +1095,9 @@ def test_w2_r3_05_06_five_langchain_memory_types_optional_embeddings_and_memorie
             thread_id="thr_01",
             user_id="usr_01",
         )
-        assert recall_res["ok"] is True
+        # W3-R1-01: offline -> not executed, no fake success
+        assert recall_res["ok"] is False
+        assert recall_res["error_code"] == "NOT_CONFIGURED"
         assert recall_res["enable_embedding"] is False
         assert "SELECT " in recall_res["recall_sql"]
 
@@ -1393,7 +1399,9 @@ def test_w2_r4_02_durable_object_removed_from_context_audit_and_empty_collection
     executed_sql_statements: list[str] = []
 
     def _capture_sql(statement: str, **kwargs):
-        executed_sql_statements.append(statement)
+        # W3-R1-14: audit values travel as SQL API bindings; capture both statement and bound values
+        bound = [b.get("value") for b in (kwargs.get("bindings") or {}).values()]
+        executed_sql_statements.append(statement + " || " + json.dumps(bound))
         return {"ok": True, "rows": [], "columns": []}
 
     monkeypatch.setattr(bridge, "execute_sql", _capture_sql)
@@ -1423,7 +1431,9 @@ def test_w2_r4_02_durable_object_removed_from_context_audit_and_empty_collection
     removal_audits = [s for s in executed_sql_statements if "OBJECT_REMOVED_FROM_CONTEXT" in s]
     assert len(removal_audits) == 1
     assert "INVOICES" in removal_audits[0]
-    assert "'flow-audit''test-01'" in removal_audits[0]
+    # The quote is bound as a value, never spliced into SQL text
+    assert json.dumps("flow-audit'test-01") in removal_audits[0]
+    assert "flow-audit'test-01" not in removal_audits[0].split(" || ")[0]
 
     # 2. Deselect the LAST object (empty objects_by_db_schema: {}) and verify empty-collection fix clears it and audits
     executed_sql_statements.clear()

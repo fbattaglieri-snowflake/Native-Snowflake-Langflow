@@ -12,6 +12,8 @@ Covers:
 
 from __future__ import annotations
 
+import pytest
+
 import asyncio
 import inspect
 import json
@@ -583,38 +585,17 @@ def test_w2_r4_05_memory_detail_view_and_rest_routes_and_rbac() -> None:
         "Claude" in detail["configuration_summary"]["llm_preprocessing"]
         or "claude-sonnet-5-5" in detail["configuration_summary"]["llm_preprocessing"]
     )
-    assert len(detail["stored_records"]) >= 1
+    # W3-R1-01: no synthetic stored records on a freshly created memory
+    assert detail["stored_records"] == []
 
-    # POST /api/v1/snowflake/memories/{name}/reload with trivial greeting -> Skipped via NO_INGEST
-    reload_skip_resp = client.post(
-        "/api/v1/snowflake/memories/DETAIL_VIEW_PROFILE_MEM/reload",
-        json={
-            "auto_capture": True,
-            "ingest_turn": {"session_id": "sess_live_99", "text": "ok grazie"},
-        },
-    )
-    assert reload_skip_resp.status_code == 200
-    reload_skip = reload_skip_resp.json()
-    assert reload_skip["reloaded"] is True
-    assert reload_skip["stored_records"][0]["status"] == "Skipped"
-    assert reload_skip["stored_records"][0]["outcome_score"] == "NO_INGEST"
-
-    # POST /api/v1/snowflake/memories/{name}/reload with durable preference -> Ingested
+    # W3-R1-05: reload with ingest_turn must not fake an in-memory ingestion
     reload_ingest_resp = client.post(
         "/api/v1/snowflake/memories/DETAIL_VIEW_PROFILE_MEM/reload",
-        json={
-            "ingest_turn": {
-                "session_id": "sess_live_99",
-                "text": "Imposta valuta EUR e lingua italiano per Q4",
-                "topic": "currency=EUR, lang=it",
-            },
-            "session_filter": "sess_live_99",
-        },
+        json={"ingest_turn": {"session_id": "sess_live_99", "text": "Set currency EUR"}},
     )
-    assert reload_ingest_resp.status_code == 200
-    reload_ingest = reload_ingest_resp.json()
-    assert reload_ingest["stored_records"][0]["status"] == "Ingested"
-    assert all(r["session_id"] == "sess_live_99" for r in reload_ingest["stored_records"])
+    assert reload_ingest_resp.status_code == 501
+    assert reload_ingest_resp.json()["error_code"] == "NOT_CONFIGURED"
+    assert client.get("/api/v1/snowflake/memories/DETAIL_VIEW_PROFILE_MEM").json()["stored_records"] == []
 
     # Switch to PUBLIC role -> physical creation and DELETE must fail closed with 403 AUTHZ_ROLE_DENIED
     client.post("/api/v1/snowflake/role", json={"target_role": "PUBLIC"})
@@ -697,7 +678,8 @@ def test_w2_r4_06_and_06b_dynamic_memory_base_message_history_and_data_sources_p
     assert pg_payload["storage_family"] == "snowflake_postgres"
     assert pg_payload["window_k"] == 8
     assert pg_payload["filter_by_session"] is True
-    assert "LIMIT 8" in pg_payload["recall_sql"]
+    # W3-R1-01: MEM_2_CHAT_WINDOW is no longer seeded, so no recall SQL is fabricated
+    assert pg_payload["recall_sql"] is None
 
     # Verify W2-R4-06B: Data Sources strictly excludes technical memory tables
     mixed_tables = [
@@ -819,10 +801,12 @@ def test_w2_r4_verifier_route_ordering_recall_and_native_build_config_and_router
             "few_shot_k": 3,
         },
     )
-    assert recall_resp.status_code == 200
+    # W3-R1-01: route resolved; offline/unregistered recall fails closed instead of fabricating rows
+    assert recall_resp.status_code == 404
     recall_payload = recall_resp.json()
-    assert recall_payload["ok"] is True
-    assert recall_payload["canonical_memory_type"] == "episodic_memory"
+    assert recall_payload["ok"] is False
+    assert recall_payload["error_code"] in ("NOT_FOUND", "NOT_CONFIGURED")
+    assert recall_payload["rows"] == []
 
     # 2. Verify SnowflakeMemoryBaseNativeComponent.update_build_config toggles type-specific fields across #1..#5
     native_comp = SnowflakeMemoryBaseNativeComponent()
@@ -1151,15 +1135,15 @@ def test_w2_r4_08g_deterministic_uuidv5_and_native_memories_v1_endpoints() -> No
     sess_res = client.get(f"/api/v1/memories/{expected_uuid}/sessions")
     assert sess_res.status_code == 200
     sess_body = sess_res.json()
-    assert sess_body["total"] >= 1
-    assert sess_body["items"][0]["memory_base_id"] == expected_uuid
+    # W3-R1-01/02: empty memory -> empty pages, no synthetic default session or messages
+    assert sess_body["total"] == 0
+    assert sess_body["items"] == []
 
     msgs_res = client.get(f"/api/v1/memories/{expected_uuid}/messages")
     assert msgs_res.status_code == 200
     msgs_body = msgs_res.json()
-    assert msgs_body["total"] >= 1
-    assert "sender" in msgs_body["items"][0]
-    assert "text" in msgs_body["items"][0]
+    assert msgs_body["total"] == 0
+    assert msgs_body["items"] == []
 
     # 5. PATCH /api/v1/memories/{memory_id} updates auto_capture & threshold
     patch_res = client.patch(
@@ -1221,89 +1205,26 @@ def test_w2_r4_09_native_canvas_components_two_node_delegation_and_post_run_auto
     fe_store = hist_node_probe.update_outputs({"outputs": []}, "mode", "Store")
     assert [o["name"] for o in fe_store["outputs"]] == ["stored_message", "table", "replay_state"]
 
-    # 3. Verify 2-node delegation: Memory Base --[orange Memory]--> Message History (Store -> Retrieve)
+    # 3. W3-R1-05 / AC-11: Store through the external Memory adapter must not fake success in RAM
     store_node = SnowflakeMessageHistoryNativeComponent(
         mode="Store",
         memory=adapter,
         session_id="sess_w2_r4_09_two_node",
         message_text=Message(text="Verify Q4 EBITDA reconciliation in EUR", sender="User", sender_name="User"),
     )
-    stored_msg = store_node.store_message()
-    stored_payload = json.loads(stored_msg.text)
-    assert stored_payload["external_memory_connected"] is True
-    assert stored_payload["external_memory_name"] == "MEM_2_CHAT_WINDOW"
-    assert stored_payload["stored_text"] == "Verify Q4 EBITDA reconciliation in EUR"
+    with pytest.raises(RuntimeError, match="NOT_CONFIGURED"):
+        store_node.store_message()
+    assert adapter._local_messages == []
 
-    retrieve_node = SnowflakeMessageHistoryNativeComponent(
-        mode="Retrieve",
-        memory=adapter,
-        session_id="sess_w2_r4_09_two_node",
-        window_k=6,
-    )
-    retrieved_msg = retrieve_node.retrieve_chat_history()
-    retrieved_payload = json.loads(retrieved_msg.text)
-    assert retrieved_payload["external_memory_connected"] is True
-    assert any(
-        (t.get("message_text") or t.get("text")) == "Verify Q4 EBITDA reconciliation in EUR"
-        for t in retrieved_payload["messages"]
-    )
-
-    # 4. Verify post-run Auto-capture across #1..#5 via POST /api/v1/snowflake/memories/auto-capture
+    # 4. W3-R1-05: the unused /memories/auto-capture route is removed
     client = _build_fastapi_test_client()
     client.post("/api/v1/snowflake/role", json={"target_role": "ACCOUNTADMIN"})
-
-    # Trivial turn -> #4 User Profile skipped via NO_INGEST kill phrase while #1, #2, #3 capture
-    ac_skip_res = client.post(
+    ac_res = client.post(
         "/api/v1/snowflake/memories/auto-capture",
-        json={
-            "flow_id": SHOWCASE_FLOW_ID,
-            "session_id": "sess_autocap_09",
-            "user_text": "ok thanks",
-            "ai_text": "You are welcome!",
-            "outcome_score": 0.5,
-        },
+        json={"flow_id": SHOWCASE_FLOW_ID, "session_id": "sess_autocap_09", "user_text": "x", "ai_text": "y"},
     )
-    assert ac_skip_res.status_code == 200
-    ac_skip_body = ac_skip_res.json()
-    assert ac_skip_body["ok"] is True
-    assert ac_skip_body["captured_count"] >= 3
-    assert any(
-        s["canonical_memory_type"] == "user_profile_entity_memory"
-        and s["status"] == "Skipped"
-        and s.get("kill_phrase") == "NO_INGEST"
-        for s in ac_skip_body["captured_memories"]
-    )
-    assert any(
-        s["canonical_memory_type"] == "episodic_memory" and s["status"] == "Skipped"
-        for s in ac_skip_body["captured_memories"]
-    )
-
-    # Substantive high-score turn -> all #1..#5 capture (including #3 summary via AI_SUMMARIZE_AGG/AI_COMPLETE & #5 few-shot)
-    ac_full_res = client.post(
-        "/api/v1/snowflake/memories/auto-capture",
-        json={
-            "flow_id": SHOWCASE_FLOW_ID,
-            "session_id": "sess_autocap_09",
-            "user_text": "Always report consolidated margin variances in EUR with breakdown by region.",
-            "ai_text": "Confirmed: consolidated Q4 margin variance is +4.2% in EUR across EMEA and NA.",
-            "outcome_score": 0.96,
-        },
-    )
-    assert ac_full_res.status_code == 200
-    ac_full_body = ac_full_res.json()
-    assert ac_full_body["ok"] is True
-    captured_non_skipped = {
-        c["canonical_memory_type"]
-        for c in ac_full_body["captured_memories"]
-        if c["status"] in ("Processed", "Ingested")
-    }
-    assert {
-        "graph_state_checkpointer",
-        "buffer_window_memory",
-        "summary_memory",
-        "user_profile_entity_memory",
-        "episodic_memory",
-    }.issubset(captured_non_skipped)
+    assert ac_res.status_code != 200
+    assert not hasattr(LIVE_BRIDGE, "auto_capture_flow_run_memories")
 
 
 def test_w2_r4_verifier_middleware_interception_and_bundle_patch_execution() -> None:

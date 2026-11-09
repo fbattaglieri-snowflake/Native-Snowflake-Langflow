@@ -891,6 +891,7 @@ def test_trg_w2_r8_verifier_schedule_modes_and_delete_triggers_endpoint(
 
     stg_upd_ddl = build_stage_file_trigger_ddl(
         flow_id=flow_id,
+        stage_name="SNOWFLAKE_LANGFLOW_STAGE",
         trigger_on="New & Updated Files",
         file_pattern=None,
     )
@@ -898,6 +899,7 @@ def test_trg_w2_r8_verifier_schedule_modes_and_delete_triggers_endpoint(
 
     stg_all_ddl = build_stage_file_trigger_ddl(
         flow_id=flow_id,
+        stage_name="SNOWFLAKE_LANGFLOW_STAGE",
         trigger_on="All File Events (Upload / Update / Delete)",
         file_pattern=None,
     )

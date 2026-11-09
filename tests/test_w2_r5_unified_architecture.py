@@ -8,6 +8,7 @@ import re
 import sys
 import types
 from pathlib import Path
+import pytest
 from typing import Any
 from urllib.parse import parse_qs, unquote, urlencode, urlsplit
 
@@ -391,18 +392,16 @@ def test_w2_r5_02_unified_memories_native_create_and_snowflake_vector_store_back
             "chunk_overlap": 200,
         },
     )
-    assert resp.status_code in (200, 201)
+    # W3-R1-01/05: without a Snowflake token the CREATE TABLE is not executed -> fail closed, nothing registered
+    assert resp.status_code == 501
     payload = resp.json()
-    assert payload["ok"] is True
-    assert payload["name"] == "W2_R5_NATIVE_CREATED_MEM"
-    assert "snowflake-arctic-embed-m-v1.5" in payload["embedding_model"]
-    assert payload.get("size") == 768 or payload.get("dimension") == 768 or payload.get("memory", {}).get("dimension") == 768
+    assert payload["ok"] is False
+    assert payload["error_code"] == "NOT_CONFIGURED"
 
-    # Verify it appears in GET /api/v1/memories
     list_resp = client.get("/api/v1/memories")
     assert list_resp.status_code == 200
     items = list_resp.json()["items"]
-    assert any(it["name"] == "W2_R5_NATIVE_CREATED_MEM" for it in items)
+    assert not any(it["name"] == "W2_R5_NATIVE_CREATED_MEM" for it in items)
 
 
 def test_w2_r5_03_multi_memory_wiring_on_message_history_and_agent_tools() -> None:
@@ -434,25 +433,13 @@ def test_w2_r5_03_multi_memory_wiring_on_message_history_and_agent_tools() -> No
         sender_name="Analyst",
         message_text="Multi-memory fan-out test message across Buffer and Window.",
     )
-    store_data = mh_store.retrieve_history_table().data
-    assert store_data["external_memory_connected"] is True
-    assert store_data["external_memory_count"] == 2
-    assert "MEM_1_CONVERSATION_BUFFER" in store_data["external_memory_names"]
-    assert "MEM_2_CHAT_WINDOW" in store_data["external_memory_names"]
-    assert "MEM_1_CONVERSATION_BUFFER" in store_data["stored_in_memories"]
-    assert "MEM_2_CHAT_WINDOW" in store_data["stored_in_memories"]
+    # W3-R1-05 / AC-11: fan-out Store must fail closed (no Snowflake write path), not succeed in RAM
+    with pytest.raises(RuntimeError, match="NOT_CONFIGURED"):
+        mh_store.retrieve_history_table()
+    with pytest.raises(RuntimeError, match="NOT_CONFIGURED"):
+        adapter_conv.add_message("Exclusive message.", session_id="multi-mem-sess-001")
 
-    # Add a distinct message only into MEM_1_CONVERSATION_BUFFER to verify merged + deduplicated Retrieve
-    adapter_conv.add_message(
-        "Exclusive message in MEM_1_CONVERSATION_BUFFER.",
-        session_id="multi-mem-sess-001",
-        sender="AI",
-        sender_name="Cortex Agent",
-        user_id="analyst_multi",
-        message_id="msg-exclusive-conv-2",
-    )
-
-    # 2. Retrieve mode with multiple connected External Memories (fan-in merge & deduplication)
+    # 2. Retrieve fan-in still wires both memories and returns no fabricated messages
     mh_retrieve = SnowflakeMessageHistoryNativeComponent(
         mode="Retrieve",
         memory=[adapter_conv, adapter_win],
@@ -463,15 +450,7 @@ def test_w2_r5_03_multi_memory_wiring_on_message_history_and_agent_tools() -> No
     ret_data = mh_retrieve.retrieve_history_table().data
     assert ret_data["external_memory_count"] == 2
     texts = [m.get("text") or m.get("content") for m in ret_data["messages"]]
-    assert "Multi-memory fan-out test message across Buffer and Window." in texts
-    assert "Exclusive message in MEM_1_CONVERSATION_BUFFER." in texts
-    # Shared message must be deduplicated and list both memory sources
-    shared_rows = [
-        m for m in ret_data["messages"]
-        if (m.get("text") or m.get("content")) == "Multi-memory fan-out test message across Buffer and Window."
-    ]
-    assert len(shared_rows) == 1
-    assert set(shared_rows[0]["memory_sources"]) == {"MEM_1_CONVERSATION_BUFFER", "MEM_2_CHAT_WINDOW"}
+    assert "Exclusive message." not in texts
 
     # 3. Multiple Memory Base nodes in Tool Mode connected to Agent.tools have distinct tool names
     mb_vec = SnowflakeMemoryBaseNativeComponent(memory_name="MEM_4_VECTOR_KNOWLEDGE", tool_mode=True)
@@ -556,7 +535,7 @@ def test_w2_r5_05_stages_and_volumes_backend_and_frontend_bucket_tab() -> None:
     assert stg_resp.status_code == 200
     stg_data = stg_resp.json()
     assert stg_data["ok"] is True
-    assert any(s["name"] == "SNOWFLAKE_LANGFLOW_STAGE" for s in stg_data["stages"])
+    assert isinstance(stg_data["stages"], list)
     assert "can_create_stage" in stg_data["role_privileges"]
     assert "can_create_external_volume" in stg_data["role_privileges"]
 
@@ -601,7 +580,7 @@ def test_w2_r5_05_stages_and_volumes_backend_and_frontend_bucket_tab() -> None:
     assert "URL = 's3://enterprise-analytics-bucket/langflow/'" in ext_payload["ddl"]
     assert "STORAGE_INTEGRATION = S3_ENTERPRISE_INT" in ext_payload["ddl"]
 
-    # 3. Upload file to stage, list stage files, refresh stage, and delete file
+    # 3. Upload is rejected honestly (W3-R1-04); list/refresh/delete report the real SQL result
     up_resp = client.post(
         "/api/v1/snowflake/stages/upload",
         json={
@@ -610,31 +589,43 @@ def test_w2_r5_05_stages_and_volumes_backend_and_frontend_bucket_tab() -> None:
             "content": "# Q4 Summary\nRevenue grew 28% YoY.",
         },
     )
-    assert up_resp.status_code in (200, 201)
+    assert up_resp.status_code >= 400
     up_data = up_resp.json()
-    assert up_data["ok"] is True
-    assert "PUT " in up_data["put_sql"]
-    assert "ALTER STAGE SNOWFLAKE_LANGFLOW.CORE.W2_R5_DOCS_INTERNAL_STAGE REFRESH" in (up_data["refresh_sql"] or "")
+    assert up_data["ok"] is False
+    assert "Upload is available after the identity upgrade" in up_data["message"]
 
-    files_resp = client.get("/api/v1/snowflake/stages/SNOWFLAKE_LANGFLOW.CORE.W2_R5_DOCS_INTERNAL_STAGE/files")
-    assert files_resp.status_code == 200
-    files_list = files_resp.json()["files"]
-    assert any("q4_summary.md" in f["name"] for f in files_list)
+    issued: list[str] = []
+    orig_sql = LIVE_BRIDGE.execute_sql
 
-    ref_resp = client.post(
-        "/api/v1/snowflake/stages/refresh",
-        json={"stage_fqn": "@SNOWFLAKE_LANGFLOW.CORE.W2_R5_DOCS_INTERNAL_STAGE"},
-    )
-    assert ref_resp.status_code == 200
-    assert ref_resp.json()["ok"] is True
+    def _fake_sql(statement: str, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        issued.append(statement)
+        if statement.upper().startswith("LIST"):
+            rows = [{"name": "w2_r5_docs_internal_stage/reports/q4_summary.md", "size": 10}]
+            return {"ok": True, "status_code": 200, "rows": rows}
+        return {"ok": True, "status_code": 200, "rows": []}
 
-    del_resp = client.request(
-        "DELETE",
-        "/api/v1/snowflake/stages/SNOWFLAKE_LANGFLOW.CORE.W2_R5_DOCS_INTERNAL_STAGE/files",
-        params={"file_path": "reports/q4_summary.md"},
-    )
-    assert del_resp.status_code == 200
-    assert "REMOVE @SNOWFLAKE_LANGFLOW.CORE.W2_R5_DOCS_INTERNAL_STAGE/reports/q4_summary.md" in del_resp.json()["sql"]
+    LIVE_BRIDGE.execute_sql = _fake_sql  # type: ignore[method-assign]
+    try:
+        files_resp = client.get("/api/v1/snowflake/stages/SNOWFLAKE_LANGFLOW.CORE.W2_R5_DOCS_INTERNAL_STAGE/files")
+        assert files_resp.status_code == 200
+        assert any("q4_summary.md" in f["name"] for f in files_resp.json()["files"])
+
+        ref_resp = client.post(
+            "/api/v1/snowflake/stages/refresh",
+            json={"stage_fqn": "@SNOWFLAKE_LANGFLOW.CORE.W2_R5_DOCS_INTERNAL_STAGE"},
+        )
+        assert ref_resp.status_code == 200
+        assert ref_resp.json()["ok"] is True
+
+        del_resp = client.request(
+            "DELETE",
+            "/api/v1/snowflake/stages/SNOWFLAKE_LANGFLOW.CORE.W2_R5_DOCS_INTERNAL_STAGE/files",
+            params={"file_path": "reports/q4_summary.md"},
+        )
+        assert del_resp.status_code == 200
+        assert "REMOVE '@SNOWFLAKE_LANGFLOW.CORE.W2_R5_DOCS_INTERNAL_STAGE/reports/q4_summary.md'" in del_resp.json()["sql"]
+    finally:
+        LIVE_BRIDGE.execute_sql = orig_sql  # type: ignore[method-assign]
 
     # 4. External Volumes & Role Privilege Check
     prev_role = LIVE_BRIDGE.active_role
@@ -732,7 +723,12 @@ def test_w2_r5_06_files_and_knowledge_exact_5_canonical_components() -> None:
     )
     assert rf_comp.name == "File"
     assert rf_comp.display_name == "Read File"
-    rf_data = rf_comp.read_stage_file_data().data
+    orig_sql = LIVE_BRIDGE.execute_sql
+    LIVE_BRIDGE.execute_sql = lambda *a, **k: {"ok": True, "rows": [{"PARSED_CONTENT": {"content": "x"}}]}  # type: ignore[method-assign]
+    try:
+        rf_data = rf_comp.read_stage_file_data().data
+    finally:
+        LIVE_BRIDGE.execute_sql = orig_sql  # type: ignore[method-assign]
     assert "SNOWFLAKE.CORTEX.AI_PARSE_DOCUMENT" in rf_data["sql"]
 
     wf_comp = SnowflakeWriteFileComponent(
@@ -744,8 +740,8 @@ def test_w2_r5_06_files_and_knowledge_exact_5_canonical_components() -> None:
     )
     assert wf_comp.name == "SaveToFile"
     assert wf_comp.display_name == "Write File"
-    wf_data = wf_comp.save_to_file_data().data
-    assert wf_data["target"] == "@SNOWFLAKE_LANGFLOW.CORE.SNOWFLAKE_LANGFLOW_STAGE/exports/summary.json"
+    with pytest.raises(ValueError, match="Upload is available after the identity upgrade"):
+        wf_comp.save_to_file_data()
 
     hooks_py = (REPO_ROOT / "scripts" / "install_live_hooks_in_container.py").read_text(encoding="utf-8")
     for removed_dup in (

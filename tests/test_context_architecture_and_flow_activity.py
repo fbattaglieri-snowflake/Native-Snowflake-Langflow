@@ -735,7 +735,20 @@ def test_verifier_ddl_auto_register_cortex_search_pipeline_and_preserved_zero_di
         "DDL_AUTO_DB", "PUBLIC", "tables", flow_id=flow_id
     )
 
-    # 3. Verify Cortex Search 1, 2, 3 components auto-register created tables and search service in active flow context
+    # W3-R1-01: offline execute_sql must fail closed and register nothing
+    offline_res = LIVE_BRIDGE.execute_sql("CREATE TABLE DDL_AUTO_DB.PUBLIC.OFFLINE_PHANTOM (ID INT)")
+    assert offline_res["ok"] is False and offline_res["error_code"] == "NOT_CONFIGURED"
+    assert "OFFLINE_PHANTOM" not in LIVE_BRIDGE.get_context_objects(
+        "DDL_AUTO_DB", "PUBLIC", "tables", flow_id=flow_id
+    )
+
+    # 3. Verify Cortex Search 1, 2, 3 components auto-register created tables after a successful Snowflake DDL
+    def _successful_sql(statement: str, *args, **kwargs):
+        LIVE_BRIDGE._auto_register_ddl_object_if_create(statement)
+        return {"ok": True, "rows": [], "columns": []}
+
+    orig_exec = LIVE_BRIDGE.execute_sql
+    LIVE_BRIDGE.execute_sql = _successful_sql
     tok = CURRENT_SNOWFLAKE_FLOW_ID.set(flow_id)
     try:
         c1 = SnowflakeCortexSearchParseDocumentComponent(
@@ -776,4 +789,5 @@ def test_verifier_ddl_auto_register_cortex_search_pipeline_and_preserved_zero_di
         )
     finally:
         CURRENT_SNOWFLAKE_FLOW_ID.reset(tok)
+        LIVE_BRIDGE.execute_sql = orig_exec
 

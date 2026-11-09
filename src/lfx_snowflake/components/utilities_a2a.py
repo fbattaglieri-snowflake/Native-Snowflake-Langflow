@@ -87,7 +87,7 @@ class SnowflakeMessageHistoryAdapter:
     def __init__(
         self,
         *,
-        memory_catalog_ref: str = "SNOWFLAKE_KB_MEM",
+        memory_catalog_ref: str = "None",
         session_id: str = "default",
         query: str = "",
         limit: int = 10,
@@ -121,7 +121,7 @@ class SnowflakeMessageHistoryAdapter:
         session_id: str | None = None,
         limit: int | None = None,
     ) -> dict[str, Any]:
-        target_ref = (memory_catalog_ref if memory_catalog_ref is not None else self.memory_catalog_ref) or "SNOWFLAKE_KB_MEM"
+        target_ref = (memory_catalog_ref if memory_catalog_ref is not None else self.memory_catalog_ref) or "None"
         return recall_memory_from_catalog(
             target_ref,
             query=query if query is not None else self.query,

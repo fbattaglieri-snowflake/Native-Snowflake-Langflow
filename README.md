@@ -1,13 +1,24 @@
-# ❄️ Native Snowflake Langflow
+<div align="center">
 
-**Snowflake-native governance, Cortex AI, and Snowpark Container Services (SPCS) integration for [Langflow](https://github.com/langflow-ai/langflow) (`v1.12.5` baseline, MIT License).**
+# Native Snowflake Langflow
 
-> ### ⚠️ Important Notice (Unofficial Personal Fork — Active Testing)
->
-> - **Personal Development:** This repository ([`fbattaglieri-snowflake/Native-Snowflake-Langflow`](https://github.com/fbattaglieri-snowflake/Native-Snowflake-Langflow)) is an independent personal development project by **Francesco Battaglieri** ([@fbattaglieri-snowflake](https://github.com/fbattaglieri-snowflake)).
-> - **Not Official:** This project is **NOT an official product, release, or repository of Snowflake Inc.**, **nor is it an official project of Langflow / DataStax**. All views, architectural choices, and modifications contained herein belong solely to the author and are not officially supported, endorsed, or warranted by Snowflake Inc. or Langflow.
-> - **Open-Source Fork:** This repository is a **public fork** of the upstream open-source project [langflow-ai/langflow](https://github.com/langflow-ai/langflow) (`v1.12.5` baseline, MIT License), extended with the isolated `lfx_snowflake` package to experiment with native execution in Snowpark Container Services (SPCS) and integration with Snowflake services.
-> - **Under Active Testing:** This solution is **currently under active testing, qualification, and validation (Work in Progress / Experimental Testing)**. APIs, components, SQL schemas, and configurations may change without notice; do not deploy to production environments without independent qualification and security review.
+**Snowflake-native governance, Cortex AI, and SPCS integration for Langflow.**
+
+[![License: MIT](https://img.shields.io/badge/License-MIT-success?style=for-the-badge)](LICENSE)
+[![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?style=for-the-badge&logo=python&logoColor=white)](https://www.python.org/)
+[![Snowflake](https://img.shields.io/badge/Snowflake-SPCS-29B5E8?style=for-the-badge&logo=snowflake&logoColor=white)](https://docs.snowflake.com/)
+[![Langflow](https://img.shields.io/badge/Langflow-v1.12.5_baseline-7E57C2?style=for-the-badge)](https://github.com/langflow-ai/langflow)
+
+</div>
+
+> [!WARNING]
+> **Unofficial personal fork, under active testing.** This repository ([`fbattaglieri-snowflake/Native-Snowflake-Langflow`](https://github.com/fbattaglieri-snowflake/Native-Snowflake-Langflow)) is an independent project by **Francesco Battaglieri** ([@fbattaglieri-snowflake](https://github.com/fbattaglieri-snowflake)). It is **NOT an official product, release, or repository of Snowflake Inc.**, nor is it an official project of Langflow / DataStax, and it is not supported or warranted by either. APIs, components, SQL schemas, and configuration may change without notice. Do not deploy to production without your own qualification and security review.
+
+> [!TIP]
+> This is a public fork of [langflow-ai/langflow](https://github.com/langflow-ai/langflow) (`v1.12.5` baseline) released under the **MIT License**. Snowflake extensions live in the isolated `lfx_snowflake` package.
+
+> [!NOTE]
+> **W3-R1 redesign in progress.** Memories, Knowledge & Files, caller identity, and traceability are being reworked. Phase 0 changes exist only on a development branch and are **not deployed**. See [Status & Roadmap](#status--roadmap).
 
 ---
 
@@ -15,14 +26,27 @@
 
 **Native Snowflake Langflow** keeps 100% of the standard Langflow visual experience while turning every workflow into a **first-class, role-governed Snowflake application** running inside **Snowpark Container Services (SPCS)**.
 
-| Pillar | What It Does | How It Appears in the UI |
+| Pillar | What It Does | Where in the UI | Status |
+|---|---|---|---|
+| **1. Role-scoped Snowflake access** | Queries run through a service session scoped to the role selected in the topbar. True caller's-rights execution (per-user identity) is not live yet. | **`❄️ Role: [ <ROLE> ▾ ]`** in the topbar | In progress (caller's rights: W3-R1 Phase 1) |
+| **2. Per-Flow `[ ❄️ Context ]`** | Each flow defines its own visibility scope (databases, schemas, tables, views, stages, routines, Cortex Agents, Snowflake Postgres). | **`[ ❄️ Context ]`** in the flow editor | Live |
+| **3. Native Cortex AI & Multimodal** | Visual nodes for Cortex Agent, Search, Analyst, Custom Tool, Decision, AI Redact, AI Complete, and 14 `AI_*` functions over stages. | **`[ ❄️ ]`** components in the sidebar | Live |
+| **4. Memories, Knowledge & Files** | Agent memories, knowledge bases, and stage files backed by real Snowflake objects only. Internal and external stages are listed from live Snowflake metadata; uploads go to internal stages only; External Volumes move to a separate configuration panel. | **`Memories`**, **`Stages & Volumes`** | Under redesign (W3-R1) — Planned |
+| **5. Snowflake Triggers** | `TASK`, `STREAM` (table/stage), and `ALERT` triggers that run Langflow flows from Snowflake data changes. | **`Triggers`** sidebar category | Live |
+| **6. SQL Observability** | Flow runs, spans, and audit events are replicated to Snowflake SQL tables. Per-user attribution and query tags are being completed. | **`Flow Activity`**, `<DATABASE>.<SCHEMA>.LANGFLOW_FLOW_ACTIVITY` | Live (attribution: In progress) |
+
+---
+
+## Status & Roadmap
+
+| Area | Status | Notes |
 |---|---|---|
-| **1. Real Snowflake RBAC** | Every SQL query, stage read/write, and Cortex call runs strictly under the user's active Snowflake role (`CURRENT_ROLE()`), never falling back to a service owner role. | **`❄️ Role: [ <ROLE> ▾ ]`** selector in the topbar |
-| **2. Per-Flow `[ ❄️ Context ]` Cone** | Each workflow defines its own isolated visibility scope (Databases, Schemas, Tables, Views, Stages, Routines, Cortex Agents, and Snowflake Postgres instances). | **`[ ❄️ Context ]`** button inside the flow editor |
-| **3. Native Cortex AI & Multimodal** | Direct visual nodes for `Cortex Agent`, `Cortex Search`, `Cortex Analyst`, `Custom Tool`, `Snowflake Decision`, `AI Redact`, `AI Complete`, and 14 `AI_*` functions over Internal & External Stages. | **`[ ❄️ ]` Components** across the 5 sidebar categories |
-| **4. 5 Enterprise Agent Memories** | Built-in support for all 5 LangChain/Langflow memory patterns backed by Snowflake Standard/Hybrid/Iceberg Tables or Snowflake Postgres (`pgvector`). | **`Memories` (`+ ❄️ Snowflake`)** & **`Memory Base`** node |
-| **5. Event-Driven Snowflake Triggers** | Native Snowflake `TASK`, `STREAM` (on Table/Stage), and `ALERT` triggers that invoke Langflow workflows directly from Snowflake data changes. | **`Triggers`** sidebar category (`icon="Zap"`) |
-| **6. Real-Time SQL Observability** | Every flow run, node span, token count, and RBAC audit event is replicated automatically in real time to Snowflake SQL tables. | **`Flow Activity`** & `<DATABASE>.<SCHEMA>.LANGFLOW_FLOW_ACTIVITY` |
+| `[ ❄️ Context ]`, Cortex AI nodes, 5 Triggers | Live | Behaviour unchanged by W3-R1 |
+| Memories pages and Memory Base | Planned | Demo rows and in-memory backends are being removed; only real Snowflake objects will be shown |
+| Stages & Volumes | In progress | Internal and external stages from live metadata; upload to internal stages only; External Volumes in a separate panel |
+| Message History on Snowflake | In progress | Current backend is in-memory per role |
+| Caller's-rights identity | Planned | W3-R1 Phase 1 |
+| Traceability (query tags, audit) | In progress | W3-R1 |
 
 ---
 
@@ -31,22 +55,22 @@
 ```mermaid
 flowchart TB
     subgraph Browser["1. Langflow Visual Studio UI (React + Tailwind)"]
-        Topbar["Topbar Controls\n• ❄️ Role Selector (CURRENT_ROLE)\n• [ ❄️ Context ] Per-Flow Scope"]
-        LeftRail["Left Navigation Rail\n• Flows & Agents\n• Memories (#1..#5)\n• Stages & Volumes (Bucket)\n• Traces (Flow Activity)"]
-        Canvas["Workflow Canvas & Sidebar Categories\n• Input & Output (Invariant)\n• Triggers (5)\n• Data Sources (6)\n• Models & Agents (7)\n• LLM Operations (5 Native + 7 [ ❄️ ])\n• Files & Knowledge (5)"]
+        Topbar["Topbar Controls<br/>• ❄️ Role Selector (CURRENT_ROLE)<br/>• [ ❄️ Context ] Per-Flow Scope"]
+        LeftRail["Left Navigation Rail<br/>• Flows & Agents<br/>• Memories (#1..#5)<br/>• Stages & Volumes (Bucket)<br/>• Traces (Flow Activity)"]
+        Canvas["Workflow Canvas & Sidebar Categories<br/>• Input & Output (Invariant)<br/>• Triggers (5)<br/>• Data Sources (6)<br/>• Models & Agents (7)<br/>• LLM Operations (5 Native + 7 [ ❄️ ])<br/>• Files & Knowledge (5)"]
     end
 
     subgraph SPCS["2. Snowpark Container Services (SPCS Runtime — lfx_snowflake)"]
-        Auth["Zero-Prompt SPCS Auto-Login\n& Per-Role Session Pool"]
-        Guard["Fail-Closed RBAC Guard\nEXPLAIN_PRIVILEGES + Context Cone"]
-        Bridge["LiveSnowflakeBridge\nCatalog Discovery • SQL Execution • Multimodal Stage I/O"]
-        Persistence["Durable Block Volume (/persist)\nSQLite WAL (langflow.db) + Real-Time SQL Replicator"]
+        Auth["Zero-Prompt SPCS Auto-Login<br/>& Per-Role Session Pool"]
+        Guard["Fail-Closed RBAC Guard<br/>EXPLAIN_PRIVILEGES + Context Cone"]
+        Bridge["LiveSnowflakeBridge<br/>Catalog Discovery • SQL Execution • Multimodal Stage I/O"]
+        Persistence["Durable Block Volume (/persist)<br/>SQLite WAL (langflow.db) + Real-Time SQL Replicator"]
     end
 
     subgraph Snowflake["3. Snowflake Data Cloud (<SNOWFLAKE_ACCOUNT> on AWS)"]
-        Cortex["Snowflake Cortex AI\n• Cortex Agents & Threads API\n• Cortex Search & Cortex Analyst\n• AI_COMPLETE (Decision & Multimodal)\n• AI_REDACT & 14 AI_* Functions"]
-        Storage["Governed Storage & Compute\n• Standard / Hybrid / Dynamic / Iceberg Tables\n• Internal Stages (SNOWFLAKE_SSE) & External Buckets (S3/GCS/Azure)\n• Stored Procedures, UDFs & UDTFs\n• Snowflake Postgres (:5432 / pgvector)"]
-        Observability["Unified SQL Telemetry\n• <DATABASE>.<SCHEMA>.LANGFLOW_FLOW_ACTIVITY\n• LANGFLOW_FLOW_RUNS / SPANS / AUDIT_LOG"]
+        Cortex["Snowflake Cortex AI<br/>• Cortex Agents & Threads API<br/>• Cortex Search & Cortex Analyst<br/>• AI_COMPLETE (Decision & Multimodal)<br/>• AI_REDACT & 14 AI_* Functions"]
+        Storage["Governed Storage & Compute<br/>• Standard / Hybrid / Dynamic / Iceberg Tables<br/>• Internal Stages (SNOWFLAKE_SSE) & External Buckets (S3/GCS/Azure)<br/>• Stored Procedures, UDFs & UDTFs<br/>• Snowflake Postgres (:5432 / pgvector)"]
+        Observability["Unified SQL Telemetry<br/>• <DATABASE>.<SCHEMA>.LANGFLOW_FLOW_ACTIVITY<br/>• LANGFLOW_FLOW_RUNS / SPANS / AUDIT_LOG"]
     end
 
     Topbar & LeftRail & Canvas --> Auth --> Guard --> Bridge
@@ -115,19 +139,19 @@ The **`LLM Operations`** category combines the 5 native Langflow operations (`Ba
 ```mermaid
 flowchart LR
     subgraph Context["Active [ ❄️ Context ]"]
-        Routines["Procedures, UDFs & UDTFs\nin <DATABASE>.<SCHEMA>"]
-        Stages["Internal Stages (SNOWFLAKE_SSE)\n& External Buckets (S3 / GCS / Azure)"]
+        Routines["Procedures, UDFs & UDTFs<br/>in <DATABASE>.<SCHEMA>"]
+        Stages["Internal Stages (SNOWFLAKE_SSE)<br/>& External Buckets (S3 / GCS / Azure)"]
         Tables["Snowflake Tables & Views"]
     end
 
     subgraph LLMOps["[ ❄️ ] LLM Operations Nodes"]
-        CT["1. [ ❄️ ] Custom Tool\nReplicates Snowsight 'Add custom tool'\n(procedure | function | table_function)"]
-        DEC["2. [ ❄️ ] Decision\nsnowflake-decision-fast (default)\nsnowflake-decision (high accuracy)\n(choice | score | noul)"]
-        RED["3. [ ❄️ ] AI Redact\n13 Official PII Categories\n(redact | detect | detect_with_allowlist)"]
-        AIC["4. [ ❄️ ] AI Complete\nText, Structured JSON & Multimodal\n(Images, .mp3/Audio, Video, Docs)"]
-        AIF["5. [ ❄️ ] AI Function\n14 Task-Specific AI_* Functions\n(TO_FILE & DIRECTORY(@stage))"]
-        SQL["6. [ ❄️ ] SQL Statement\nParameterized Governed SQL"]
-        OPS["7. [ ❄️ ] Operations\nMulti-Mode Cortex Helper"]
+        CT["1. [ ❄️ ] Custom Tool<br/>Replicates Snowsight 'Add custom tool'<br/>(procedure | function | table_function)"]
+        DEC["2. [ ❄️ ] Decision<br/>snowflake-decision-fast (default)<br/>snowflake-decision (high accuracy)<br/>(choice | score | noul)"]
+        RED["3. [ ❄️ ] AI Redact<br/>13 Official PII Categories<br/>(redact | detect | detect_with_allowlist)"]
+        AIC["4. [ ❄️ ] AI Complete<br/>Text, Structured JSON & Multimodal<br/>(Images, .mp3/Audio, Video, Docs)"]
+        AIF["5. [ ❄️ ] AI Function<br/>14 Task-Specific AI_* Functions<br/>(TO_FILE & DIRECTORY(@stage))"]
+        SQL["6. [ ❄️ ] SQL Statement<br/>Parameterized Governed SQL"]
+        OPS["7. [ ❄️ ] Operations<br/>Multi-Mode Cortex Helper"]
     end
 
     Routines --> CT
@@ -175,12 +199,12 @@ flowchart TB
     end
 
     subgraph Providers["Pre-Configured Snowflake Providers"]
-        PChat["Snowflake Proxy - Chat\n(<LLM_PROXY_BASE_URL>/chat/v1)"]
-        PResp["Snowflake Proxy - Responses\n(<LLM_PROXY_BASE_URL>/responses/v1)"]
-        PMsg["Snowflake Proxy - Messages\n(<LLM_PROXY_BASE_URL>/messages)"]
-        POllama["Snowflake Private - Ollama\n(<OLLAMA_BASE_URL>)"]
-        CAgentAPI["Snowflake Cortex Agent Run API\n+ 2-Level Threads API Continuity"]
-        CEmbed["Snowflake Cortex AI_EMBED\n(6 Official 768d / 1024d Models)"]
+        PChat["Snowflake Proxy - Chat<br/>(<LLM_PROXY_BASE_URL>/chat/v1)"]
+        PResp["Snowflake Proxy - Responses<br/>(<LLM_PROXY_BASE_URL>/responses/v1)"]
+        PMsg["Snowflake Proxy - Messages<br/>(<LLM_PROXY_BASE_URL>/messages)"]
+        POllama["Snowflake Private - Ollama<br/>(<OLLAMA_BASE_URL>)"]
+        CAgentAPI["Snowflake Cortex Agent Run API<br/>+ 2-Level Threads API Continuity"]
+        CEmbed["Snowflake Cortex AI_EMBED<br/>(6 Official 768d / 1024d Models)"]
     end
 
     LM & AG --> PChat & PResp & PMsg & POllama
@@ -201,20 +225,20 @@ The left navigation rail includes dedicated views for **`Memories`** (with the *
 ```mermaid
 flowchart LR
     subgraph Wizard["Memories Page (+ ❄️ Snowflake)"]
-        M1["#1 Graph Checkpointer\n(LangGraph State)"]
-        M2["#2 Buffer Window\n(Short-Term K Turns)"]
-        M3["#3 Summary Memory\n(Rolling Compression)"]
-        M4["#4 User Profile / Entity\n(Cross-Session Facts)"]
-        M5["#5 Episodic Few-Shot\n(Past Successful Runs)"]
+        M1["#1 Graph Checkpointer<br/>(LangGraph State)"]
+        M2["#2 Buffer Window<br/>(Short-Term K Turns)"]
+        M3["#3 Summary Memory<br/>(Rolling Compression)"]
+        M4["#4 User Profile / Entity<br/>(Cross-Session Facts)"]
+        M5["#5 Episodic Few-Shot<br/>(Past Successful Runs)"]
     end
 
     subgraph Storage["Snowflake Storage Backends"]
-        SFTable["Snowflake Tables\n(Standard | Hybrid | Dynamic | Interactive | Iceberg)\nOptional VECTOR(FLOAT, 768|1024) + AI_EMBED"]
-        PG["Snowflake Postgres (:5432)\n(<POSTGRES_INSTANCE> Relational / JSONB / pgvector)"]
+        SFTable["Snowflake Tables<br/>(Standard | Hybrid | Dynamic | Interactive | Iceberg)<br/>Optional VECTOR(FLOAT, 768|1024) + AI_EMBED"]
+        PG["Snowflake Postgres (:5432)<br/>(<POSTGRES_INSTANCE> Relational / JSONB / pgvector)"]
     end
 
     subgraph Canvas["Workflow Canvas"]
-        MB["Memory Base Node\n(Adapts ports to #1..#5)"]
+        MB["Memory Base Node<br/>(Adapts ports to #1..#5)"]
     end
 
     M1 & M2 & M3 & M4 & M5 --> SFTable & PG --> MB

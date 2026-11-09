@@ -51,21 +51,7 @@ def _buffer_window_memory_options(flow_id: str | None = None) -> list[str]:
         nm = str(entry.get("name") or "").strip()
         if nm and nm not in opts:
             opts.append(nm)
-    reg_by_name = {
-        str(m.get("name") or "").strip().upper(): m
-        for m in getattr(LIVE_BRIDGE, "memories_registry", [])
-        if isinstance(m, dict) and m.get("name")
-    }
-    for fallback in ("MEM_2_CHAT_WINDOW", "CHAT_WINDOW_HISTORY", "CHAT_MESSAGE_HISTORY"):
-        if fallback in opts:
-            continue
-        reg_entry = reg_by_name.get(fallback.upper())
-        if reg_entry is not None:
-            if LIVE_BRIDGE.is_memory_visible_in_context(reg_entry, flow_id=flow_id):
-                opts.append(fallback)
-        elif not opts:
-            opts.append(fallback)
-    return opts or ["MEM_2_CHAT_WINDOW"]
+    return opts or ["None"]
 
 
 def _memory_options(flow_id: str | None = None) -> list[str]:
@@ -518,7 +504,7 @@ class SnowflakeMessageHistoryNativeComponent(Component):
             for idx, m in enumerate(ext_memories)
         ]
 
-        mem_ref = str(getattr(self, "memory_base", "MEM_2_CHAT_WINDOW") or "MEM_2_CHAT_WINDOW").split(" (")[0].strip()
+        mem_ref = str(getattr(self, "memory_base", "None") or "None").split(" (")[0].strip()
         storage_family = str(getattr(self, "storage_family", "snowflake_postgres") or "snowflake_postgres")
         sess_id = str(getattr(self, "session_id", "fin-reconcile-session-001") or "fin-reconcile-session-001").strip()
         win_k = int(getattr(self, "window_k", 8) or 8)
