@@ -2680,6 +2680,8 @@ class LiveSnowflakeBridge:
                 else f"No Embedding ({entry.get('needs_embedding_badge', 'Direct SQL')})"
             )
             backend_label = f"Snowflake · {entry.get('vector_database') or 'Hybrid Table'} ({entry.get('table_fqn')})"
+            sf_backend_key = resolve_snowflake_backend_key(entry)
+            native_backend_type = native_kb_backend_type_value(sf_backend_key)
             sql_lookup = str(entry.get("how_to_feed_without_embedding") or "")
             instructions = str(
                 entry.get("preproc_instructions")
@@ -2703,6 +2705,9 @@ class LiveSnowflakeBridge:
                     "table_fqn": entry.get("table_fqn"),
                     "canonical_memory_type": entry.get("canonical_memory_type"),
                     "enable_embedding": is_vec,
+                    "backend_type": sf_backend_key,
+                    "snowflake_backend_type": sf_backend_key,
+                    "snowflake_backend_label": backend_label,
                 }
             )
 
@@ -2714,19 +2719,39 @@ class LiveSnowflakeBridge:
                 kb_name = str(existing_kb["name"])
                 cur.execute(
                     "UPDATE knowledge_base SET model_selection = ?, backend_type = ?, backend_config = ?, updated_at = ? WHERE id = ?",
-                    (model_sel_json, backend_label, backend_cfg_json, now_str, existing_kb["id"]),
+                    (model_sel_json, native_backend_type, backend_cfg_json, now_str, existing_kb["id"]),
                 )
             else:
                 kb_id_hex = uuid.uuid5(uuid.NAMESPACE_DNS, f"snowflake-kb:{mem_name.upper()}").hex
                 kb_name = mem_name
-                cur.execute(
-                    "INSERT OR REPLACE INTO knowledge_base "
-                    "(id, name, user_id, model_selection, chunk_size, chunk_overlap, separator, column_config, "
-                    "backend_type, backend_config, chunks, words, characters, size_bytes, source_types, status, "
-                    "failure_reason, created_at, updated_at) "
-                    "VALUES (?, ?, ?, ?, 1000, 200, NULL, '[]', ?, ?, 0, 0, 0, 0, '[\"snowflake\"]', 'ready', NULL, ?, ?)",
-                    (kb_id_hex, kb_name, user_id_hex, model_sel_json, backend_label, backend_cfg_json, now_str, now_str),
+                upsert_sqlite_row_preserving_columns(
+                    cur,
+                    "knowledge_base",
+                    {
+                        "id": kb_id_hex,
+                        "name": kb_name,
+                        "user_id": user_id_hex,
+                        "model_selection": model_sel_json,
+                        "chunk_size": 1000,
+                        "chunk_overlap": 200,
+                        "separator": None,
+                        "column_config": "[]",
+                        "backend_type": native_backend_type,
+                        "backend_config": backend_cfg_json,
+                        "chunks": 0,
+                        "words": 0,
+                        "characters": 0,
+                        "size_bytes": 0,
+                        "source_types": '["snowflake"]',
+                        "status": "ready",
+                        "failure_reason": None,
+                        "created_at": now_str,
+                        "updated_at": now_str,
+                    },
+                    conflict_column="id",
+                    insert_only_columns=("created_at", "chunks", "words", "characters", "size_bytes", "status", "failure_reason"),
                 )
+
 
             mb_id_hex = det_uuid.hex
             existing_mb = cur.execute(
@@ -11136,6 +11161,81 @@ SNOWFLAKE_VECTOR_STORE_BACKENDS: dict[str, dict[str, Any]] = {
     },
 }
 
+
+def resolve_snowflake_backend_key(entry: dict[str, Any]) -> str:
+    """Map a memory entry to a stable Snowflake backend key (`snowflake_*`), never a display label."""
+    cfg = entry.get("backend_config") if isinstance(entry.get("backend_config"), dict) else {}
+    for cand in (entry.get("backend_type"), cfg.get("snowflake_backend_type"), cfg.get("backend_type")):
+        key = str(cand or "").strip().lower()
+        if key in SNOWFLAKE_VECTOR_STORE_BACKENDS:
+            return key
+    vec_db = str(entry.get("vector_database") or entry.get("storage_backend") or "").strip().lower()
+    for token, key in (
+        ("postgres", "snowflake_postgres"),
+        ("hybrid", "snowflake_hybrid"),
+        ("dynamic", "snowflake_dynamic"),
+        ("interactive", "snowflake_interactive"),
+        ("iceberg", "snowflake_iceberg"),
+    ):
+        if token in vec_db:
+            return key
+    return "snowflake_table"
+
+
+def native_kb_backend_type_value(snowflake_key: str) -> str:
+    """Return a `knowledge_base.backend_type` value that native Langflow can resolve.
+
+    Native `BackendType` is a closed str-Enum (1.13.2: chroma/sqlite/mongodb/astra/postgres/opensearch),
+    so a Snowflake key or label raises `ValueError` in `get_backend_class`. If a future native enum
+    exposes the Snowflake key it is used as-is; otherwise the model default (`sqlite`) is written and the
+    real Snowflake backend lives in `backend_config.snowflake_backend_type` (`mode == "snowflake"`).
+    """
+    try:
+        from lfx.base.knowledge_bases.backends.base import BackendType  # type: ignore[import-not-found]
+    except Exception:  # noqa: BLE001
+        return "sqlite"
+    values = {str(getattr(m, "value", m)) for m in BackendType}
+    if snowflake_key in values:
+        return snowflake_key
+    return "sqlite" if "sqlite" in values else "chroma"
+
+
+def sqlite_table_columns(cur: Any, table: str) -> list[str]:
+    """Column names of `table` via `PRAGMA table_info` (works across 1.12.5 and 1.13.2 schemas)."""
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", table):
+        raise ValueError(f"invalid table name: {table!r}")
+    return [str(r[1]) for r in cur.execute(f'PRAGMA table_info("{table}")').fetchall()]
+
+
+def upsert_sqlite_row_preserving_columns(
+    cur: Any,
+    table: str,
+    values: dict[str, Any],
+    *,
+    conflict_column: str = "id",
+    insert_only_columns: tuple[str, ...] = (),
+) -> None:
+    """Insert or update a row without touching columns this bridge does not own.
+
+    Unlike `INSERT OR REPLACE` (delete + insert), columns absent from `values` (e.g. 1.13.2
+    `storage_generation`/`storage_state`/`active_migration_id`) keep their current value or server default.
+    Columns missing from the live schema are skipped; `insert_only_columns` are not overwritten on conflict.
+    """
+    present = set(sqlite_table_columns(cur, table))
+    if conflict_column not in present:
+        raise ValueError(f"{table}.{conflict_column} not found")
+    cols = [c for c in values if c in present]
+    placeholders = ", ".join("?" for _ in cols)
+    col_sql = ", ".join(f'"{c}"' for c in cols)
+    upd = [c for c in cols if c != conflict_column and c not in insert_only_columns]
+    upd_sql = ", ".join(f'"{c}" = excluded."{c}"' for c in upd)
+    action = f"DO UPDATE SET {upd_sql}" if upd else "DO NOTHING"
+    cur.execute(
+        f'INSERT INTO "{table}" ({col_sql}) VALUES ({placeholders}) ON CONFLICT("{conflict_column}") {action}',
+        [values[c] for c in cols],
+    )
+
+
 OFFICIAL_SNOWFLAKE_CORTEX_AI_EMBED_MODELS: dict[str, int] = {
     "snowflake-arctic-embed-m-v1.5": 768,
     "snowflake-arctic-embed-m": 768,
@@ -11500,10 +11600,11 @@ def register_snowflake_vector_store_backends() -> dict[str, Any]:
             allowed.update(SNOWFLAKE_VECTOR_STORE_BACKENDS.keys())
             registered_in_langflow = True
         elif isinstance(allowed, (list, tuple, frozenset)):
+            merged = set(allowed) | set(SNOWFLAKE_VECTOR_STORE_BACKENDS.keys())
             setattr(
                 lf_kb_schema,
                 "_CREATION_ALLOWED_BACKENDS",
-                set(allowed) | set(SNOWFLAKE_VECTOR_STORE_BACKENDS.keys()),
+                frozenset(merged) if isinstance(allowed, frozenset) else merged,
             )
             registered_in_langflow = True
     except Exception:  # noqa: BLE001
