@@ -5220,7 +5220,7 @@
   let _stagesVolumesState = {
     stages: [],
     external_volumes: [],
-    storage_integrations: ["S3_DOCS_INT", "GCS_DOCS_INT", "AZURE_DOCS_INT"],
+    storage_integrations: [],
     files_by_stage: {},
     last_loaded_flow_id: null,
   };
@@ -5329,14 +5329,15 @@
         stage_fqn: fqn,
         fqn: fqn,
         object_kind: "STAGE",
-        stage_type: String(stgObj.stage_type || stgObj.type || (stgObj.url ? "EXTERNAL" : "INTERNAL")).toUpperCase(),
-        encryption: stgObj.encryption || (stgObj.url ? "AWS_SSE_S3" : "SNOWFLAKE_SSE"),
-        directory_enabled: stgObj.directory_enabled !== undefined ? Boolean(stgObj.directory_enabled) : true,
+        // Only values reported by the backend (SHOW STAGES); unknown stays "UNKNOWN"/empty (W3-R1-03).
+        stage_type: String(stgObj.stage_type || stgObj.type || "UNKNOWN").toUpperCase(),
+        encryption: stgObj.encryption || "",
+        directory_enabled: Boolean(stgObj.directory_enabled),
         auto_refresh: Boolean(stgObj.auto_refresh),
         url: stgObj.url || "",
-        cloud_provider: stgObj.cloud_provider || (stgObj.url ? String(stgObj.url).split("://")[0].toUpperCase() : "SNOWFLAKE_MANAGED"),
+        cloud_provider: stgObj.cloud_provider || "",
         storage_integration: stgObj.storage_integration || "",
-        file_format: stgObj.file_format || "NONE",
+        file_format: stgObj.file_format || "",
         comment: stgObj.comment || "",
       };
       if (!isStageOrVolumeVisibleInActiveContext(normalized, activeCtx)) return;
@@ -5360,7 +5361,7 @@
             name: typeof sName === "string" ? sName : sName.name,
             database: db,
             schema: sch,
-            stage_type: typeof sName === "object" && sName.stage_type ? sName.stage_type : "INTERNAL",
+            stage_type: typeof sName === "object" && sName.stage_type ? sName.stage_type : "UNKNOWN",
             url: typeof sName === "object" ? sName.url : "",
             storage_integration: typeof sName === "object" ? sName.storage_integration : "",
           });
@@ -5368,41 +5369,9 @@
       });
     });
 
-    const visStages = (selCtx.visible_objects && selCtx.visible_objects.stages) || [];
-    visStages.forEach(function (sName) {
-      pushStage({
-        name: sName,
-        database: activeCtx.database || "SNOWFLAKE_LANGFLOW",
-        schema: activeCtx.schema || "CORE",
-      });
-    });
-
-    const seenVols = new Set();
-    const outVolumes = [];
-    (_stagesVolumesState.external_volumes || []).forEach(function (v) {
-      const vName = String((typeof v === "string" ? v : v.name || v.volume_name) || "").trim();
-      if (!vName) return;
-      const vKey = vName.toUpperCase();
-      if (seenVols.has(vKey)) return;
-      const normVol = {
-        key: `VOL:${vName}`,
-        name: vName,
-        volume_name: vName,
-        object_kind: "EXTERNAL_VOLUME",
-        stage_type: "EXTERNAL_VOLUME",
-        is_external_volume: true,
-        allow_writes: typeof v === "object" && v.allow_writes !== undefined ? Boolean(v.allow_writes) : true,
-        storage_provider: (typeof v === "object" && v.storage_provider) || "S3",
-        storage_base_url: (typeof v === "object" && v.storage_base_url) || `s3://snowflake-iceberg-volume/${vName.toLowerCase()}/`,
-        encryption: (typeof v === "object" && v.encryption) || "AWS_SSE_S3",
-        comment: (typeof v === "object" && v.comment) || "Account-level External Volume for Apache Iceberg tables",
-      };
-      if (!isStageOrVolumeVisibleInActiveContext(normVol, activeCtx)) return;
-      seenVols.add(vKey);
-      outVolumes.push(normVol);
-    });
-
-    return { stages: outStages, external_volumes: outVolumes };
+    // D-12 (b): External Volumes are account-level configuration, not file locations; they are shown
+    // only in the separate read-only External Volumes panel (renderExternalVolumesConfigPanel).
+    return { stages: outStages, external_volumes: [] };
   }
 
   async function fetchSnowflakeStagesAndVolumes(flowIdOverride) {
@@ -5744,6 +5713,64 @@
   }
   window.syncStagesVolumesViewWithFlowContext = syncStagesVolumesViewWithFlowContext;
 
+  function escapeExtVolHtml(val) {
+    return String(val === undefined || val === null ? "" : val).replace(/[&<>"']/g, function (ch) {
+      return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[ch];
+    });
+  }
+
+  // D-12 (b): read-only External Volumes configuration panel fed only by SHOW EXTERNAL VOLUMES
+  // (GET /external-volumes) and DESCRIBE EXTERNAL VOLUME (GET /external-volumes/describe?name=).
+  function renderExternalVolumesConfigPanel() {
+    const vols = Array.isArray(_stagesVolumesState.external_volumes) ? _stagesVolumesState.external_volumes : [];
+    const body =
+      vols.length === 0
+        ? `<div style="font-size:11px;color:#64748b;">No external volumes returned by SHOW EXTERNAL VOLUMES.</div>`
+        : vols
+            .map(function (v) {
+              const nm = escapeExtVolHtml(v.name);
+              return `<div data-testid="sflf-ext-vol-row" style="font-size:11px;padding:4px 0;border-top:1px solid #e2e8f0;">
+                <button type="button" data-sflf-ext-vol-describe="${nm}" style="background:none;border:none;padding:0;color:#1d4ed8;cursor:pointer;font-weight:600;">${nm}</button>
+                ${v.comment ? `<div style="color:#475569;">${escapeExtVolHtml(v.comment)}</div>` : ""}
+                <div id="sflf-ext-vol-desc-${nm}" style="color:#334155;"></div>
+              </div>`;
+            })
+            .join("");
+    return `<div id="sflf-external-volumes-config-panel" data-testid="sflf-external-volumes-config-panel" style="margin-top:12px;padding:8px 12px;text-align:left;">
+      <div style="font-weight:600;color:#334155;font-size:12px;margin-bottom:4px;">External Volumes (configuration, read-only)</div>
+      ${body}
+    </div>`;
+  }
+
+  async function describeExternalVolumeInPanel(name) {
+    const target = document.getElementById(`sflf-ext-vol-desc-${name}`);
+    if (!target) return;
+    try {
+      const resp = await fetch(`/api/v1/snowflake/external-volumes/describe?name=${encodeURIComponent(name)}`, {
+        headers: { Accept: "application/json" },
+      });
+      const data = await resp.json();
+      if (!resp.ok || data.ok === false) {
+        target.textContent = data.message || "DESCRIBE EXTERNAL VOLUME failed";
+        return;
+      }
+      const props = Array.isArray(data.properties) ? data.properties : [];
+      target.innerHTML = props.length
+        ? props
+            .map(function (p) {
+              return `<div>${escapeExtVolHtml(p.property || p.parent_property || "")}: ${escapeExtVolHtml(p.property_value || "")}</div>`;
+            })
+            .join("")
+        : "DESCRIBE EXTERNAL VOLUME returned no properties.";
+    } catch (err) {
+      target.textContent = String(err);
+    }
+  }
+  document.addEventListener("click", function (ev) {
+    const btn = ev.target && ev.target.closest ? ev.target.closest("[data-sflf-ext-vol-describe]") : null;
+    if (btn) describeExternalVolumeInPanel(btn.getAttribute("data-sflf-ext-vol-describe"));
+  });
+
   function renderSnowflakeStagesVolumesList() {
     const listContainer = document.getElementById("sflf-stages-list-container");
     const ctxSummary = document.getElementById("sflf-stages-context-summary");
@@ -5783,10 +5810,10 @@
       listContainer.innerHTML = `
         <div style="padding:24px 12px;text-align:center;color:#64748b;font-size:12px;">
           <div style="margin-bottom:8px;color:#94a3b8;">${buildBucketSvgIcon(28)}</div>
-          <div style="font-weight:600;color:#334155;">No stages or volumes in active Context</div>
-          <div style="margin-top:4px;font-size:11px;">Select a schema in Context or click <strong>+ Snowflake</strong> to create a Stage or External Volume.</div>
+          <div style="font-weight:600;color:#334155;">No stages in active Context</div>
+          <div style="margin-top:4px;font-size:11px;">SHOW STAGES returned no stages for the schemas selected in Context.</div>
         </div>
-      `;
+      ` + renderExternalVolumesConfigPanel();
       renderSelectedStageOrVolumeDetail(null);
       return;
     }
@@ -5820,7 +5847,7 @@
           </div>
         `;
       })
-      .join("");
+      .join("") + renderExternalVolumesConfigPanel();
 
     Array.from(listContainer.querySelectorAll(".sflf-stage-list-item")).forEach(function (el) {
       el.onclick = function () {
@@ -6468,7 +6495,7 @@
                 <label style="display:flex;flex-direction:column;gap:4px;font-size:12px;font-weight:600;">
                   <span>Storage Integration</span>
                   <select id="sflf-stage-wiz-storage-integration" style="background:#ffffff;color:#0f172a;border:1px solid #cbd5e1;border-radius:8px;padding:6px 10px;font-size:12px;">
-                    ${(_stagesVolumesState.storage_integrations || ["S3_DOCS_INT", "GCS_DOCS_INT", "AZURE_DOCS_INT"])
+                    ${(_stagesVolumesState.storage_integrations || [])
                       .map(function (si) {
                         return `<option value="${si}">${si}</option>`;
                       })
