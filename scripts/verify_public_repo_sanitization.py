@@ -36,6 +36,12 @@ _DENYLIST_FRAGMENTS: tuple[tuple[str, ...], ...] = (
     ("20260926_", "NewLLM", "Proxy"),
     ("20260921_", "Lang", "flow"),
     ("20261016_", "SnowflakeLangflow_", "CLI_prompt"),
+    ("MFG_SUPPLIER", "_QUALITY_AI"),
+    ("RINASCENTE", "TEST"),
+    ("ML_HOL", "_DB"),
+    ("AISQL", "_HOL"),
+    ("RETAIL_SUPPLIER", "_INTELLIGENCE"),
+    ("sfsenorth", "america-", "fbatt", "aglieri-", "aws-fra"),
 )
 DENYLIST_TERMS: tuple[str, ...] = tuple("".join(parts) for parts in _DENYLIST_FRAGMENTS)
 
@@ -81,7 +87,7 @@ SECRET_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     (
         "CONCRETE_SNOWFLAKE_ACCOUNT_HOST",
         re.compile(
-            r"(?<![>a-z0-9_\-.])(?![<A-Z_]+>)(?!example\.)(?!myaccount\.)(?!registry\.)[a-z0-9][a-z0-9_\-]{4,}\.snowflakecomputing\.com\b",
+            r"(?<![>a-z0-9_\-.])(?![<A-Z_]+>)(?!example\.)(?!myaccount\.)(?!registry\.)[a-z0-9][a-z0-9_\-]{4,}\.(?:snowflakecomputing\.(?:com|app)|postgres\.snowflake\.app)\b",
             re.IGNORECASE,
         ),
     ),
