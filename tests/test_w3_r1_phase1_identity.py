@@ -150,3 +150,210 @@ def test_switch_role_rejects_privileged_role_under_callers_rights(monkeypatch: p
 
     res = LIVE_BRIDGE.switch_role("ACCOUNTADMIN")
     assert res["ok"] is False and res["status_code"] == 403
+
+
+# ---- W3-R1 Phase 1 fix round (10a..10e) -------------------------------------------------------
+
+@pytest.mark.parametrize(
+    "stmt",
+    [
+        "SELECT '/*'; DROP TABLE x; SELECT '*/'",
+        "WITH c AS (SELECT '/*') INSERT INTO t SELECT '*/'",
+        "SELECT 1; SELECT 2",
+        "CALL my_proc()",
+        "EXECUTE IMMEDIATE 'SELECT 1'",
+        "WITH a AS (SELECT 1) UPDATE t SET x = 1",
+        "WITH a AS (SELECT 1) DELETE FROM t",
+        "WITH a AS (SELECT 1) MERGE INTO t USING a ON 1=1 WHEN MATCHED THEN DELETE",
+        "SELECT \"x\"; DROP TABLE y",
+        "SELECT $$ ; $$; DROP TABLE y",
+        "SELECT 'unterminated",
+        "SHOW TABLES; DROP TABLE x",
+        "-- SELECT\nDROP TABLE x",
+    ],
+)
+def test_read_only_guard_rejects_bypasses(stmt: str) -> None:
+    assert idm.is_read_only_statement(stmt) is False
+
+
+@pytest.mark.parametrize(
+    "stmt",
+    ["SELECT 1", "SELECT 'a;b /* c' FROM t;", "SELECT 1 -- ; DROP", "WITH a AS (SELECT 1) SELECT * FROM a", "SHOW ROLES"],
+)
+def test_read_only_guard_accepts_reads(stmt: str) -> None:
+    assert idm.is_read_only_statement(stmt) is True
+
+
+def test_mcp_denials_are_audited_as_authz_role_denied(monkeypatch: pytest.MonkeyPatch) -> None:
+    from lfx_snowflake import fastapi_live_bridge as flb
+
+    seen: list[dict] = []
+    monkeypatch.setattr(flb.LIVE_BRIDGE, "record_audit_event", lambda **kw: seen.append(kw) or "id")
+    flb._emit_mcp_denial("snowflake_query_sql", {"ok": False, "status_code": 403, "error_code": "AUTHZ_ROLE_DENIED"}, None)
+    assert seen and seen[0]["action"] == "AUTHZ_ROLE_DENIED" and seen[0]["outcome"] == "DENIED"
+    src = flb.__file__ and open(flb.__file__).read()
+    assert src.count("_emit_mcp_denial(\"snowflake_") == 2
+
+
+def test_executor_submissions_propagate_identity_and_force_service_for_background() -> None:
+    from concurrent.futures import ThreadPoolExecutor
+
+    ex = ThreadPoolExecutor(max_workers=1)
+    tok = idm.bind_identity(idm.RequestIdentity(sf_user="ALICE"))
+    mtok = idm.bind_request_mode(idm.MODE_CALLER)
+    try:
+        seen = idm.submit_with_context(ex, lambda: (idm.current_identity().sf_user, idm.current_request_mode())).result()
+        bg = idm.submit_background(ex, lambda: (idm.origin_user(), idm.current_request_mode())).result()
+        raw = ex.submit(lambda: idm.current_identity().sf_user).result()
+    finally:
+        idm.reset_request_mode(mtok)
+        idm.reset_identity(tok)
+        ex.shutdown()
+    assert seen == ("ALICE", idm.MODE_CALLER)
+    assert bg == ("ALICE", idm.MODE_SERVICE)
+    assert raw is None  # proves plain submit would have lost the context
+
+
+def test_bridge_never_submits_to_executors_without_context() -> None:
+    from pathlib import Path
+
+    src = Path(__file__).resolve().parents[1].joinpath("src/lfx_snowflake/fastapi_live_bridge.py").read_text()
+    assert "_AUDIT_EXECUTOR.submit(" not in src and "_CATALOG_EXECUTOR.submit(" not in src
+
+
+def test_refresh_roles_does_not_mutate_service_user_or_inject_admin(monkeypatch: pytest.MonkeyPatch) -> None:
+    from lfx_snowflake.fastapi_live_bridge import LIVE_BRIDGE
+
+    prev = (LIVE_BRIDGE._service_user, list(LIVE_BRIDGE.available_roles), LIVE_BRIDGE._roles_discovered)
+    calls: list[dict] = []
+
+    def fake_sql(stmt, **kw):
+        calls.append(kw)
+        return {"ok": True, "rows": [{"USR": "ALICE", "RL": "DEV", "AVAIL": '["DEV","PUBLIC"]'}]}
+
+    monkeypatch.setattr(LIVE_BRIDGE, "execute_sql", fake_sql)
+    try:
+        LIVE_BRIDGE.refresh_roles_from_snowflake(force=True)
+        assert LIVE_BRIDGE._service_user == prev[0]
+        assert "ACCOUNTADMIN" not in LIVE_BRIDGE.available_roles
+        assert calls[0]["mode"] == idm.MODE_SERVICE
+    finally:
+        LIVE_BRIDGE._service_user, LIVE_BRIDGE.available_roles, LIVE_BRIDGE._roles_discovered = prev
+
+
+@pytest.mark.parametrize(
+    ("path", "mode"),
+    [
+        ("/api/v1/snowflake/memories", idm.MODE_CALLER),
+        ("/api/v1/snowflake/memories/recall", idm.MODE_CALLER),
+        ("/api/v1/snowflake/stages/files", idm.MODE_CALLER),
+        ("/api/v1/snowflake/catalog", idm.MODE_CALLER),
+        ("/api/v1/snowflake/context", idm.MODE_CALLER),
+        ("/api/v1/snowflake/cortex-agents/D/S/A/run", idm.MODE_CALLER),
+        ("/api/v1/snowflake/analyst/message", idm.MODE_CALLER),
+        ("/api/v1/flows/abc", idm.MODE_SERVICE),
+        ("/api/v1/snowflake/memoriesx", idm.MODE_SERVICE),
+    ],
+)
+def test_user_facing_routes_request_caller_mode(path: str, mode: str) -> None:
+    assert idm.mode_for_path(path) == mode
+
+
+def _capture_payload(monkeypatch, tmp_path, flb):
+    token_file = tmp_path / "token"
+    token_file.write_text("svc")
+    monkeypatch.setattr(flb, "SPCS_TOKEN_PATH", token_file)
+    monkeypatch.setenv("SNOWFLAKE_HOST", "example.invalid")
+    sent: list[tuple[dict, dict]] = []
+
+    class _Resp:
+        status_code = 200
+        content = b"{}"
+
+        def json(self):
+            return {"data": [], "resultSetMetaData": {"rowType": []}}
+
+    class _Client:
+        def post(self, url, headers=None, json=None, timeout=None):
+            sent.append((headers, json))
+            return _Resp()
+
+    monkeypatch.setattr(flb.LIVE_BRIDGE, "_http_client", _Client())
+    return sent
+
+
+def test_flag_off_user_route_mode_keeps_service_behaviour(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    from lfx_snowflake import fastapi_live_bridge as flb
+
+    monkeypatch.delenv(idm.CALLERS_RIGHTS_ENV, raising=False)
+    sent = _capture_payload(monkeypatch, tmp_path, flb)
+    mtok = idm.bind_request_mode(idm.MODE_CALLER)
+    try:
+        flb.LIVE_BRIDGE.execute_sql("SELECT 1")
+    finally:
+        idm.reset_request_mode(mtok)
+    assert sent[0][0]["Authorization"] == "Bearer svc"
+
+
+def test_flag_on_user_route_uses_caller_token(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    from lfx_snowflake import fastapi_live_bridge as flb
+
+    monkeypatch.setenv(idm.CALLERS_RIGHTS_ENV, "1")
+    sent = _capture_payload(monkeypatch, tmp_path, flb)
+    tok = idm.bind_identity(idm.RequestIdentity(sf_user="ALICE", caller_token="ctok"))
+    mtok = idm.bind_request_mode(idm.MODE_CALLER)
+    try:
+        flb.LIVE_BRIDGE.execute_sql("SELECT 1")
+        flb.LIVE_BRIDGE.execute_sql("SELECT 2", mode=idm.MODE_SERVICE)
+    finally:
+        idm.reset_request_mode(mtok)
+        idm.reset_identity(tok)
+    assert sent[0][0]["Authorization"] == "Bearer svc.ctok"
+    assert sent[1][0]["Authorization"] == "Bearer svc"
+
+
+def test_no_role_sent_when_no_role_configured(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    from lfx_snowflake import fastapi_live_bridge as flb
+
+    monkeypatch.delenv(idm.CALLERS_RIGHTS_ENV, raising=False)
+    monkeypatch.delenv(idm.SERVICE_ROLE_ENV, raising=False)
+    sent = _capture_payload(monkeypatch, tmp_path, flb)
+    monkeypatch.setattr(flb.LIVE_BRIDGE, "active_role", "")
+    flb.LIVE_BRIDGE.execute_sql("SELECT 1", role=flb.LIVE_BRIDGE._service_role(), mode=idm.MODE_SERVICE)
+    assert "role" not in sent[0][1]
+
+
+def test_no_accountadmin_default_or_fallback_in_bridge() -> None:
+    from pathlib import Path
+
+    src = Path(__file__).resolve().parents[1].joinpath("src/lfx_snowflake/fastapi_live_bridge.py").read_text()
+    assert 'or "ACCOUNTADMIN"' not in src
+    assert '"SNOWFLAKE_DEFAULT_ROLE", "ACCOUNTADMIN"' not in src
+
+
+def test_switch_role_is_display_only_under_callers_rights(monkeypatch: pytest.MonkeyPatch) -> None:
+    from lfx_snowflake.fastapi_live_bridge import LIVE_BRIDGE
+
+    monkeypatch.setenv(idm.CALLERS_RIGHTS_ENV, "1")
+    monkeypatch.setattr(LIVE_BRIDGE, "available_roles", ["DEV_ROLE", "PUBLIC"])
+    monkeypatch.setattr(LIVE_BRIDGE, "execute_sql", lambda *a, **k: {"ok": True, "rows": [{}]})
+    before = (LIVE_BRIDGE.active_role, LIVE_BRIDGE.context_epoch)
+    res = LIVE_BRIDGE.switch_role("DEV_ROLE")
+    assert res["ok"] is True and res["display_only"] is True and res["active_role"] == "DEV_ROLE"
+    assert (LIVE_BRIDGE.active_role, LIVE_BRIDGE.context_epoch) == before
+
+
+def test_background_audit_records_origin_user(monkeypatch: pytest.MonkeyPatch) -> None:
+    from lfx_snowflake.fastapi_live_bridge import LIVE_BRIDGE
+
+    captured: list[dict] = []
+    monkeypatch.setattr(LIVE_BRIDGE, "_has_spcs_token", lambda: False)
+    monkeypatch.setattr(LIVE_BRIDGE, "execute_sql", lambda stmt, **kw: captured.append(kw) or {"ok": True})
+    tok = idm.bind_identity(idm.RequestIdentity(sf_user="ALICE"))
+    try:
+        LIVE_BRIDGE.record_audit_event(action="STAGE_DIRECTORY_REFRESH", outcome="SUCCESS", target_object="@S")
+    finally:
+        idm.reset_identity(tok)
+    details_json = captured[0]["bindings"][str(len(captured[0]["bindings"]) - 1)]["value"]
+    assert '"origin_user": "ALICE"' in details_json
+    assert captured[0]["mode"] == idm.MODE_SERVICE

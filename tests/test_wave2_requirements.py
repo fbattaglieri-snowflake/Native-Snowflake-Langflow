@@ -133,6 +133,23 @@ from lfx_snowflake.native_category_components.utilities.snowflake_toolguard impo
 )
 
 
+@pytest.fixture(autouse=True)
+def _legacy_granted_admin_role():
+    """Pre-W3-R1-10e these tests relied on the bridge defaulting to ACCOUNTADMIN (removed: no hard-coded
+    role). They exercise the privileged paths, so the role is now set explicitly, as if Snowflake had
+    reported it as granted, and restored afterwards."""
+    from lfx_snowflake.fastapi_live_bridge import LIVE_BRIDGE
+
+    prev_role, prev_avail = LIVE_BRIDGE.active_role, list(LIVE_BRIDGE.available_roles)
+    LIVE_BRIDGE.active_role = "ACCOUNTADMIN"
+    if "ACCOUNTADMIN" not in LIVE_BRIDGE.available_roles:
+        LIVE_BRIDGE.available_roles = ["ACCOUNTADMIN", *LIVE_BRIDGE.available_roles]
+    try:
+        yield
+    finally:
+        LIVE_BRIDGE.active_role, LIVE_BRIDGE.available_roles = prev_role, prev_avail
+
+
 def test_ui_w2_01_and_hub_w2_01_to_05_frontend_and_installer() -> None:
     """Verify UI-W2-01 (browser tab title, Snowflake SVG favicon, Loading... screen) and HUB-W2-01..05 in JS & installer."""
     ui_js = (REPO_ROOT / "frontend_patches" / "snowflake-ui-integration.js").read_text(encoding="utf-8")
