@@ -1,4 +1,6 @@
-# Native-Snowflake-Langflow (`lfx_snowflake`)
+# ❄️ Native Snowflake Langflow
+
+**Snowflake-native governance, Cortex AI, and Snowpark Container Services (SPCS) integration for [Langflow](https://github.com/langflow-ai/langflow) (`v1.12.5` baseline, MIT License).**
 
 > ### ⚠️ Important Notice (Unofficial Personal Fork — Active Testing)
 >
@@ -7,13 +9,247 @@
 > - **Open-Source Fork:** This repository is a **public fork** of the upstream open-source project [langflow-ai/langflow](https://github.com/langflow-ai/langflow) (`v1.12.5` baseline, MIT License), extended with the isolated `lfx_snowflake` package to experiment with native execution in Snowpark Container Services (SPCS) and integration with Snowflake services.
 > - **Under Active Testing:** This solution is **currently under active testing, qualification, and validation (Work in Progress / Experimental Testing)**. APIs, components, SQL schemas, and configurations may change without notice; do not deploy to production environments without independent qualification and security review.
 
-Snowflake-native extension bundle, governance layer, and Snowpark Container Services (SPCS) runtime integration for [Langflow](https://github.com/langflow-ai/langflow) (`v1.12.5` baseline, MIT License).
+---
 
-SnowflakeLangflow preserves the exact Langflow user interface, component layout, typography, themes, and developer ergonomics while adding native Snowflake authentication, real-time active role switching (`CURRENT_ROLE()`), fail-closed backend authorization (`AUTHZ_ROLE_DENIED`), governed Snowflake object provisioning, synchronized `Flow Activity` SQL trace replication, and multi-protocol LLM execution.
+## At a Glance: Why Native Snowflake Langflow?
+
+**Native Snowflake Langflow** keeps 100% of the standard Langflow visual experience while turning every workflow into a **first-class, role-governed Snowflake application** running inside **Snowpark Container Services (SPCS)**.
+
+| Pillar | What It Does | How It Appears in the UI |
+|---|---|---|
+| **1. Real Snowflake RBAC** | Every SQL query, stage read/write, and Cortex call runs strictly under the user's active Snowflake role (`CURRENT_ROLE()`), never falling back to a service owner role. | **`❄️ Role: [ <ROLE> ▾ ]`** selector in the topbar |
+| **2. Per-Flow `[ ❄️ Context ]` Cone** | Each workflow defines its own isolated visibility scope (Databases, Schemas, Tables, Views, Stages, Routines, Cortex Agents, and Snowflake Postgres instances). | **`[ ❄️ Context ]`** button inside the flow editor |
+| **3. Native Cortex AI & Multimodal** | Direct visual nodes for `Cortex Agent`, `Cortex Search`, `Cortex Analyst`, `Custom Tool`, `Snowflake Decision`, `AI Redact`, `AI Complete`, and 14 `AI_*` functions over Internal & External Stages. | **`[ ❄️ ]` Components** across the 5 sidebar categories |
+| **4. 5 Enterprise Agent Memories** | Built-in support for all 5 LangChain/Langflow memory patterns backed by Snowflake Standard/Hybrid/Iceberg Tables or Snowflake Postgres (`pgvector`). | **`Memories` (`+ ❄️ Snowflake`)** & **`Memory Base`** node |
+| **5. Event-Driven Snowflake Triggers** | Native Snowflake `TASK`, `STREAM` (on Table/Stage), and `ALERT` triggers that invoke Langflow workflows directly from Snowflake data changes. | **`Triggers`** sidebar category (`icon="Zap"`) |
+| **6. Real-Time SQL Observability** | Every flow run, node span, token count, and RBAC audit event is replicated automatically in real time to Snowflake SQL tables. | **`Flow Activity`** & `<DATABASE>.<SCHEMA>.LANGFLOW_FLOW_ACTIVITY` |
 
 ---
 
-## Tested Cloud Environment: AWS — Snowflake on AWS
+## 1. End-to-End Architecture
+
+```mermaid
+flowchart TB
+    subgraph Browser["1. Langflow Visual Studio UI (React + Tailwind)"]
+        Topbar["Topbar Controls\n• ❄️ Role Selector (CURRENT_ROLE)\n• [ ❄️ Context ] Per-Flow Scope"]
+        LeftRail["Left Navigation Rail\n• Flows & Agents\n• Memories (#1..#5)\n• Stages & Volumes (Bucket)\n• Traces (Flow Activity)"]
+        Canvas["Workflow Canvas & Sidebar Categories\n• Input & Output (Invariant)\n• Triggers (5)\n• Data Sources (6)\n• Models & Agents (7)\n• LLM Operations (5 Native + 7 [ ❄️ ])\n• Files & Knowledge (5)"]
+    end
+
+    subgraph SPCS["2. Snowpark Container Services (SPCS Runtime — lfx_snowflake)"]
+        Auth["Zero-Prompt SPCS Auto-Login\n& Per-Role Session Pool"]
+        Guard["Fail-Closed RBAC Guard\nEXPLAIN_PRIVILEGES + Context Cone"]
+        Bridge["LiveSnowflakeBridge\nCatalog Discovery • SQL Execution • Multimodal Stage I/O"]
+        Persistence["Durable Block Volume (/persist)\nSQLite WAL (langflow.db) + Real-Time SQL Replicator"]
+    end
+
+    subgraph Snowflake["3. Snowflake Data Cloud (<SNOWFLAKE_ACCOUNT> on AWS)"]
+        Cortex["Snowflake Cortex AI\n• Cortex Agents & Threads API\n• Cortex Search & Cortex Analyst\n• AI_COMPLETE (Decision & Multimodal)\n• AI_REDACT & 14 AI_* Functions"]
+        Storage["Governed Storage & Compute\n• Standard / Hybrid / Dynamic / Iceberg Tables\n• Internal Stages (SNOWFLAKE_SSE) & External Buckets (S3/GCS/Azure)\n• Stored Procedures, UDFs & UDTFs\n• Snowflake Postgres (:5432 / pgvector)"]
+        Observability["Unified SQL Telemetry\n• <DATABASE>.<SCHEMA>.LANGFLOW_FLOW_ACTIVITY\n• LANGFLOW_FLOW_RUNS / SPANS / AUDIT_LOG"]
+    end
+
+    Topbar & LeftRail & Canvas --> Auth --> Guard --> Bridge
+    Bridge --> Cortex & Storage
+    Bridge --> Persistence --> Observability
+```
+
+---
+
+## 2. How Role Governance & Per-Flow `[ ❄️ Context ]` Work
+
+Every workflow has its own **isolated context cone**. Selecting databases, schemas, or objects in **Flow A** never pollutes **Flow B**, and switching the active role in the topbar dynamically computes the intersection between the flow's context and the role's live privileges.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor User as User in Browser
+    participant UI as Topbar & Canvas Nodes
+    participant Bridge as LiveSnowflakeBridge (SPCS)
+    participant SF as Snowflake (<SNOWFLAKE_ACCOUNT>)
+
+    User->>UI: 1. Select Active Role (❄️ Role)
+    UI->>Bridge: POST /api/v1/snowflake/context (role)
+    Bridge->>SF: USE ROLE <ROLE>; SELECT CURRENT_ROLE();
+    SF-->>Bridge: Active role verified (context_epoch++)
+
+    User->>UI: 2. Open [ ❄️ Context ] inside /flow/<flow_id>
+    UI->>Bridge: Browse Databases ▸ Schemas ▸ Objects + Postgres
+    User->>UI: Check allowed Databases / Schemas / Stages / Routines
+    UI->>Bridge: Save isolated context for <flow_id>
+    Bridge-->>UI: Instantly updates all Canvas Node dropdowns (< 5 ms)
+
+    User->>UI: 3. Run Workflow Node (SQL / AI_* / Custom Tool)
+    UI->>Bridge: Execute node with X-Snowflake-Flow-Id
+    Bridge->>SF: Verify EXPLAIN_PRIVILEGES & execute under CURRENT_ROLE()
+    SF-->>Bridge: Result + Query ID
+    Bridge->>SF: Async MERGE INTO <DATABASE>.<SCHEMA>.LANGFLOW_FLOW_ACTIVITY
+    Bridge-->>UI: Return result to Canvas / Playground
+```
+
+---
+
+## 3. Visual Guide to the Sidebar Categories
+
+All Snowflake components are cleanly integrated into the native Langflow sidebar categories (`1 Component class = 1 Python file`), with zero redundant bottom bundles.
+
+```text
++---------------------------------------------------------------------------------------------------+
+|  LANGFLOW SIDEBAR CATEGORIES                                                                      |
+|                                                                                                   |
+|  1. Input & Output     -> Chat Input, Chat Output, Text Input, Text Output, Webhook (Invariant)   |
+|  2. Triggers           -> [❄️] Schedule | [❄️] Table Change | [❄️] Stage File | [❄️] Alert | Webhook |
+|  3. Data Sources       -> [❄️] Tables | [❄️] Views | [❄️] Iceberg | [❄️] Postgres | Search | Analyst |
+|  4. Models & Agents    -> Language Model | Agent | [❄️] Cortex Agent | A2A | Embedding | History   |
+|  5. LLM Operations     -> [❄️] Custom Tool | [❄️] Decision | [❄️] AI Redact | [❄️] AI Complete | ... |
+|  6. Files & Knowledge  -> File System | Knowledge | Memory Base | Read File | Write File          |
++---------------------------------------------------------------------------------------------------+
+```
+
+---
+
+### 3.1 `LLM Operations` — Cortex AI, Custom Tools & Structured Decisions
+
+The **`LLM Operations`** category combines the 5 native Langflow operations (`Batch Run`, `Guardrails`, `Smart Router`, `Smart Transform`, `Structured Output`) with **7 Snowflake Cortex components**:
+
+```mermaid
+flowchart LR
+    subgraph Context["Active [ ❄️ Context ]"]
+        Routines["Procedures, UDFs & UDTFs\nin <DATABASE>.<SCHEMA>"]
+        Stages["Internal Stages (SNOWFLAKE_SSE)\n& External Buckets (S3 / GCS / Azure)"]
+        Tables["Snowflake Tables & Views"]
+    end
+
+    subgraph LLMOps["[ ❄️ ] LLM Operations Nodes"]
+        CT["1. [ ❄️ ] Custom Tool\nReplicates Snowsight 'Add custom tool'\n(procedure | function | table_function)"]
+        DEC["2. [ ❄️ ] Decision\nsnowflake-decision-fast (default)\nsnowflake-decision (high accuracy)\n(choice | score | noul)"]
+        RED["3. [ ❄️ ] AI Redact\n13 Official PII Categories\n(redact | detect | detect_with_allowlist)"]
+        AIC["4. [ ❄️ ] AI Complete\nText, Structured JSON & Multimodal\n(Images, .mp3/Audio, Video, Docs)"]
+        AIF["5. [ ❄️ ] AI Function\n14 Task-Specific AI_* Functions\n(TO_FILE & DIRECTORY(@stage))"]
+        SQL["6. [ ❄️ ] SQL Statement\nParameterized Governed SQL"]
+        OPS["7. [ ❄️ ] Operations\nMulti-Mode Cortex Helper"]
+    end
+
+    Routines --> CT
+    Stages --> AIC & AIF & RED
+    Tables --> DEC & RED & AIC & AIF & SQL & OPS
+```
+
+| Component (`display_name`) | Class (`name`) | What It Does & Key Capabilities |
+|---|---|---|
+| **`[ ❄️ ] Custom Tool`** | `SnowflakeCustomTool` | Replicates the Snowsight Cortex Agent **"Add custom tool"** dialog 1:1. Supports `procedure`, scalar `function` (`UDF`), and `table_function` (`UDTF`). Auto-populates parameters from `DESCRIBE PROCEDURE/FUNCTION`, supports manual parameter editing (`+ Add parameter` / `Delete`, `Sort by: Latest added \| Alphabetical \| Required first`), blocks unsupported `OBJECT` parameters, supports `User's default` or `Custom` warehouse + `Query timeout (1–600s)`, and outputs both a Cortex Agent `Tool` (`tool_spec` + `tool_resources`) and direct SQL execution (`CALL` / `SELECT` / `TABLE(...)`). |
+| **`[ ❄️ ] Decision`** | `SnowflakeDecision` | Implements official **Snowflake Decision with `AI_COMPLETE`** across the two dedicated models: **`snowflake-decision-fast`** *(Default — low latency, 2–16 `choice` options, 32k token limit)* and **`snowflake-decision`** *(High accuracy, 2–32 `choice` options, 256 KiB JSON limit)*. Supports **1–32 questions per call** (max 256 total options) across **`choice`**, **`score`** (`0..n-1` rubric with weighted average $\sum_{i=0}^{n-1} i \cdot p_i$), and **`noul`** (statement probability in `~0.08–0.92`), normalized confidence $\frac{n \cdot p_{\max} - 1}{n - 1}$, Single-State and Table-Level processing, and **High vs. Low Confidence Routing** outputs. |
+| **`[ ❄️ ] AI Redact`** | `SnowflakeAIRedact` | Dedicated PII detection and masking component (`AI_REDACT`) supporting **`redact`**, **`detect`** (with automatic span masking in traces), and **`detect_with_allowlist`** (selective redaction splicing in reverse index order). Covers all **13 official Snowflake PII categories** (`NAME`, `EMAIL`, `PHONE_NUMBER`, `DATE_OF_BIRTH`, `GENDER`, `AGE`, `ADDRESS`, `NATIONAL_ID`, `PASSPORT`, `TAX_IDENTIFIER`, `PAYMENT_CARD_DATA`, `DRIVERS_LICENSE`, `IP_ADDRESS`), enforces the 4,096-token limit via `AI_COUNT_TOKENS('ai_redact', ...)` with automatic `SPLIT_TEXT_RECURSIVE_CHARACTER` chunking, and supports pre-conversion from stage documents/audio. |
+| **`[ ❄️ ] AI Complete`** | `SnowflakeAIComplete` | Generative `AI_COMPLETE` node supporting text prompts, `model_parameters`, forced JSON schema output (`response_format`), and **direct multimodal inputs (`TO_FILE` & `DIRECTORY(@stage)`)** from Internal Stages and External Buckets (`S3`, `GCS`, `Azure`) for **images**, **`.mp3`/audio**, and **video** (including `gemini-3.1-pro`, `gemini-3.1-flash-lite`, `gemini-3.5-flash`). |
+| **`[ ❄️ ] AI Function`** | `SnowflakeAIFunction` | Unified node for the **14 task-specific Cortex AI Functions**: `AI_CLASSIFY`, `AI_FILTER`, `AI_EXTRACT`, `AI_SENTIMENT`, `AI_SUMMARIZE`, `AI_SUMMARIZE_AGG`, `AI_AGG`, `AI_TRANSLATE`, `AI_SIMILARITY`, `AI_TRANSCRIBE` (with `word`/`speaker` timestamps on `.mp3`/audio/video), `AI_PARSE_DOCUMENT` (`LAYOUT`/`OCR`), `AI_EMBED`, `AI_MULTI_EMBED` (`twelvelabs-marengo-embed-3-0` on image/audio/video), and `AI_COUNT_TOKENS`, reading from both tables and **Internal / External Stages**. |
+| **`[ ❄️ ] SQL Statement`** | `SnowflakeSQLStatement` | Executes governed parameterized SQL (`SELECT`, `CALL`) within `<DATABASE>.<SCHEMA>` under `CURRENT_ROLE()`, returning either a `DataFrame` or structured `JSON` (`OBJECT_CONSTRUCT(*)`). |
+| **`[ ❄️ ] Operations`** | `SnowflakeLLMNode` | Multi-operation Snowflake Cortex and SQL utility node synchronized with the active flow context. |
+
+---
+
+### 3.2 Multimodal Stage & Cloud Bucket Support (`Internal` & `External`)
+
+Both **`[ ❄️ ] AI Function`** and **`[ ❄️ ] AI Complete`** read media files directly from **Internal Stages** (`SNOWFLAKE_SSE` / `SNOWFLAKE_FULL`) and **External Cloud Stages** (`Amazon S3`, `Google Cloud Storage`, `Microsoft Azure`, `S3-Compatible`) enabled in `[ ❄️ Context ]`:
+
+| Media Category | Supported Extensions | Enabled Cortex Functions | Execution Modes |
+|---|---|---|---|
+| **Images** | `.jpg`, `.jpeg`, `.png`, `.webp`, `.gif`, `.bmp` | `AI_COMPLETE`, `AI_CLASSIFY`, `AI_FILTER`, `AI_EXTRACT`, `AI_SUMMARIZE`, `AI_SIMILARITY`, `AI_PARSE_DOCUMENT`, `AI_EMBED`, `AI_MULTI_EMBED` | Single/Multi-file `TO_FILE('@<DATABASE>.<SCHEMA>.<STAGE_NAME>', '<path>')` or Batch `DIRECTORY(@<DATABASE>.<SCHEMA>.<STAGE_NAME>)` |
+| **Audio / `.mp3`** | `.mp3`, `.wav`, `.flac`, `.m4a`, `.ogg`, `.aac`, `.webm`, `.mp4` | `AI_TRANSCRIBE` (`word` / `speaker` timestamps), `AI_COMPLETE` (`gemini-3.1-pro`, `gemini-3.1-flash-lite`, `gemini-3.5-flash`), `AI_MULTI_EMBED` (`twelvelabs-marengo-embed-3-0`) | Single file `TO_FILE(...)` or Batch `DIRECTORY(@...)` |
+| **Video** | `.mp4`, `.mov`, `.webm`, `.mkv`, `.avi`, `.flv`, `.mpeg`, `.mpg`, `.wmv`, `.3gpp`, `.ogv` | `AI_COMPLETE` (scene & audio analysis), `AI_TRANSCRIBE` (audio track extraction), `AI_MULTI_EMBED` (`visual`, `audio`, `transcription` embeddings) | Single file `TO_FILE(...)` or Batch `DIRECTORY(@...)` |
+| **Documents** | `.pdf`, `.docx`, `.pptx`, `.html`, `.txt`, `.md`, `.eml`, `.tiff` | `AI_PARSE_DOCUMENT` (`LAYOUT` / `OCR`, `page_split`), `AI_EXTRACT`, `AI_SUMMARIZE` | Single file `TO_FILE(...)` or Batch `DIRECTORY(@...)` |
+
+---
+
+### 3.3 `Models & Agents` — 4 Snowflake Model Providers, Cortex Agents & A2A
+
+```mermaid
+flowchart TB
+    subgraph Nodes["Models & Agents Sidebar (7 Canonical Components)"]
+        LM["Language Model"]
+        AG["Agent"]
+        CA["[ ❄️ ] Cortex Agent"]
+        A2A["A2A Agent"]
+        EMB["Embedding Model"]
+        MH["[ ❄️ ] Message History"]
+        PT["Prompt Template"]
+    end
+
+    subgraph Providers["Pre-Configured Snowflake Providers"]
+        PChat["Snowflake Proxy - Chat\n(<LLM_PROXY_BASE_URL>/chat/v1)"]
+        PResp["Snowflake Proxy - Responses\n(<LLM_PROXY_BASE_URL>/responses/v1)"]
+        PMsg["Snowflake Proxy - Messages\n(<LLM_PROXY_BASE_URL>/messages)"]
+        POllama["Snowflake Private - Ollama\n(<OLLAMA_BASE_URL>)"]
+        CAgentAPI["Snowflake Cortex Agent Run API\n+ 2-Level Threads API Continuity"]
+        CEmbed["Snowflake Cortex AI_EMBED\n(6 Official 768d / 1024d Models)"]
+    end
+
+    LM & AG --> PChat & PResp & PMsg & POllama
+    CA --> CAgentAPI
+    A2A --> CAgentAPI
+    EMB --> CEmbed
+```
+
+- **Dynamic Reasoning Controls:** Selecting a reasoning-capable model under `Snowflake Proxy - Chat`, `Responses`, or `Messages` automatically reveals `Reasoning Effort` or `Extended Thinking` (`Thinking Budget Tokens`) directly below the model selector while hiding API key fields (handled by SPCS).
+- **2-Level Cortex Agent Threads:** `[ ❄️ ] Cortex Agent` preserves multi-turn conversation state across turns using a local SQLite thread cache (`0 ms` overhead) backed by the Snowflake Cortex `Threads API` (`/api/v2/cortex/threads`).
+
+---
+
+### 3.4 `Files & Knowledge`, `Memories (#1..#5)` & `Stages & Volumes`
+
+The left navigation rail includes dedicated views for **`Memories`** (with the **`[ + ❄️ Snowflake ]`** wizard, which automatically dismisses transient popovers on tab switch, outside click, or `Escape`) and **`Stages & Volumes`** (Bucket icon above `Traces`).
+
+```mermaid
+flowchart LR
+    subgraph Wizard["Memories Page (+ ❄️ Snowflake)"]
+        M1["#1 Graph Checkpointer\n(LangGraph State)"]
+        M2["#2 Buffer Window\n(Short-Term K Turns)"]
+        M3["#3 Summary Memory\n(Rolling Compression)"]
+        M4["#4 User Profile / Entity\n(Cross-Session Facts)"]
+        M5["#5 Episodic Few-Shot\n(Past Successful Runs)"]
+    end
+
+    subgraph Storage["Snowflake Storage Backends"]
+        SFTable["Snowflake Tables\n(Standard | Hybrid | Dynamic | Interactive | Iceberg)\nOptional VECTOR(FLOAT, 768|1024) + AI_EMBED"]
+        PG["Snowflake Postgres (:5432)\n(<POSTGRES_INSTANCE> Relational / JSONB / pgvector)"]
+    end
+
+    subgraph Canvas["Workflow Canvas"]
+        MB["Memory Base Node\n(Adapts ports to #1..#5)"]
+    end
+
+    M1 & M2 & M3 & M4 & M5 --> SFTable & PG --> MB
+```
+
+---
+
+### 3.5 `Triggers` — Event-Driven & Scheduled Snowflake Execution
+
+Positioned immediately after `Input & Output`, the **`Triggers`** category provides **5 specialized components** powered by the SPCS Service Function `<DATABASE>.<SCHEMA>.RUN_LANGFLOW_FLOW(flow_id, trigger_payload)`:
+
+| Trigger Component | Snowflake Primitive | When It Fires |
+|---|---|---|
+| **`[ ❄️ ] Schedule Trigger`** | `CREATE OR ALTER TASK ... SCHEDULE = 'USING CRON ...'` | Time-based cron or interval schedules (`Minutes`, `Hours`, `Days`, `Weeks`, `Months`). |
+| **`[ ❄️ ] Table Change Trigger`** | `CREATE STREAM ON TABLE/VIEW` + Triggered Task `WHEN SYSTEM$STREAM_HAS_DATA(...)` | Row inserts/updates/deletes (CDC) on any table or view in `[ ❄️ Context ]`. |
+| **`[ ❄️ ] Stage File Trigger`** | `DIRECTORY = (ENABLE = TRUE)` + `CREATE STREAM ON STAGE` + Triggered Task | New or updated files arriving on `@<DATABASE>.<SCHEMA>.<STAGE_NAME>`. |
+| **`[ ❄️ ] Condition Alert Trigger`** | `CREATE OR ALTER ALERT ... IF (EXISTS (<sql>))` | SQL threshold or anomaly conditions evaluated periodically or on new data. |
+| **`Webhook`** | Native HTTP Webhook Endpoint | External HTTP POST payloads (`WEBHOOK_RUN`). |
+
+---
+
+### 3.6 `Data Sources` — Governed Business Data & Semantic Models
+
+| Component | Hierarchy in Node | Description |
+|---|---|---|
+| **`[ ❄️ ] Tables`** | `Database -> Schema -> Table Type -> Table` | Reads `Standard`, `Hybrid`, `Dynamic`, and `Interactive` tables in `[ ❄️ Context ]`. |
+| **`[ ❄️ ] Views`** | `Database -> Schema -> View Type -> View` | Reads `Standard`, `Secure`, and `Materialized` views in `[ ❄️ Context ]`. |
+| **`[ ❄️ ] Iceberg Tables`** | `Database -> Schema -> Iceberg Table` | Reads Apache Iceberg tables managed in Snowflake. |
+| **`[ ❄️ ] Postgres`** | `Postgres Instance -> Table / Query` | Account-level connection to `<POSTGRES_INSTANCE>` (`:5432`). |
+| **`[ ❄️ ] Cortex Search`** | `Database -> Schema -> Search Service` | Queries Cortex Search services (also usable as an Agent `StructuredTool`). |
+| **`[ ❄️ ] Cortex Analyst`** | `Database -> Schema -> Semantic View / @Stage YAML` | Natural-language-to-SQL via Cortex Analyst Semantic Views or stage YAML models. |
+
+---
+
+## 4. Tested Cloud Environment & Parametric Placeholders
 
 **Tested Cloud Environment: AWS — Snowflake on AWS**
 
@@ -23,137 +259,7 @@ This solution has been architected, developed, and verified on **Snowflake on AW
 ALTER ACCOUNT SET CORTEX_ENABLED_CROSS_REGION = 'ANY_REGION';
 ```
 
-All configuration files, SQL scripts, and container specifications in this repository are **100% account-agnostic** and parameterized via placeholders (`<SNOWFLAKE_ACCOUNT>`, `<DATABASE>`, `<SCHEMA>`, `<COMPUTE_POOL>`, `<IMAGE_REPOSITORY>`, `<STAGE_NAME>`, `<POSTGRES_INSTANCE>`, `<LLM_PROXY_BASE_URL>`, `<OLLAMA_BASE_URL>`).
-
----
-
-## Key Capabilities (`REQ-01..REQ-17`)
-
-1. **Preserved Langflow UI & Official Snowflake Branding (`REQ-01`)**
-   - Unmodified Langflow React/Tailwind/Radix design system, spacing, themes, and component categories.
-   - Official black Snowflake logo in topbar (home and flow editor), removal of GitHub/Discord/X links, and `Snowflake Documentation` (`https://docs.snowflake.com/`) entry with color Snowflake icon in the profile menu.
-2. **Real Active Role Selector & Universal Fail-Closed Authorization (`REQ-02`, `ADR-003`, `ADR-004`)**
-   - Discovers granted roles via `CURRENT_AVAILABLE_ROLES()`, binds per-role Snowflake sessions verified with `SELECT CURRENT_ROLE()`, increments `context_epoch` on role switch, invalidates caches immediately, and never falls back to service-owner roles or `SECONDARY ROLES ALL`.
-   - Standardized 4-code error taxonomy: `AUTHZ_ROLE_DENIED` (HTTP 403: *"Il ruolo attivo (`<ROLE>`) non consente questa operazione"*), `OBJECT_NOT_FOUND_OR_UNAUTHORIZED`, `UNSUPPORTED_CAPABILITY`, and `TECHNICAL_EXECUTION_ERROR`.
-   - Zero-credit SQL/AI Function privilege pre-checks via `EXPLAIN_PRIVILEGES(..., missing_only => true)`.
-3. **Governed Flow Imports (`REQ-03`)**
-   - `New Flow` supports `Upload from computer` (with automatic secret redaction and no custom code auto-execution), `Add from stage` (`@<DATABASE>.<SCHEMA>.<STAGE_NAME>`), and `Add from Git` (with commit provenance tracking).
-4. **Extended Settings & Memories (`REQ-04`, `REQ-10`)**
-   - `Model Providers`: `Snowflake Proxy - Responses`, `Snowflake Proxy - Messages`, `Snowflake Proxy - Chat`, and `Ollama (Snowflake Hosted)`.
-   - `DB Providers`: `Standard Table (VECTOR)`, `Hybrid Table (VECTOR)`, `Cortex Search`, and `Snowflake Postgres (pgvector)`.
-   - `Messages`: multi-protocol history inspection, editing, and deletion across `Chat`, `Responses`, and `Messages` with cryptographic signature/encrypted reasoning block invalidation handling.
-   - `Global Variables`: read-only backend-bound `SNOWFLAKE_ACTIVE_ROLE` and role-filtered defaults.
-5. **Structured Data Sources & Cortex Analyst in Unified Sessions (`REQ-05`, `[G-A5]`)**
-   - Hierarchical browser (`<DATABASE> -> <SCHEMA> -> <OBJECT>`) for `Standard Table`, `View`, `Hybrid Table`, `Dynamic Table`, `Interactive Table`, and `Iceberg Table`, plus a distinct `Snowflake Postgres` adapter.
-   - Separates catalog visibility, `SELECT` permission, and `Cortex Analyst` semantic readiness (`Semantic View` or validated YAML). Never auto-creates Semantic Views or implicit cross-engine joins.
-6. **Three Native Proxy Standard Protocols + Ollama & Dedicated Embeddings (`REQ-06`, `REQ-07`, `ADR-006`)**
-   - `Snowflake Proxy - Chat` (`<LLM_PROXY_BASE_URL>/chat/v1`), `Snowflake Proxy - Responses` (`<LLM_PROXY_BASE_URL>/responses/v1` with `ordered-items`, `store=False`, `include=["reasoning.encrypted_content"]`), `Snowflake Proxy - Messages` (`<LLM_PROXY_BASE_URL>/messages` base, `/messages/v1/messages` inference, preserving `thinking.signature` and `redacted_thinking`), and `Ollama` (`<OLLAMA_BASE_URL>`).
-   - Separate `Embedding Model` catalog (`/api/v2/cortex/inference:embed` / `AI_EMBED` + verified Ollama embedders) with `(model_id, dimension, space_fingerprint)` compatibility guard.
-7. **LLM Operations, Custom Tool, Decision & Native `AI Redact` / `AI Function` (`REQ-09`, `W2-R9-01..04`, `[G-A2]`)**
-   - Extends `Batch Run`, `Guardrails`, `Smart Router`, `Smart Transform`, and `Structured Output` (`LLM Selector` unchanged).
-   - Provides `[ ❄️ ] Custom Tool` (`SnowflakeCustomTool`), replicating the Snowsight Cortex Agent **"Add custom tool"** dialog for procedures (`procedure`), scalar functions (`function`), and table functions (`table_function`) from `[ ❄️ Context ]` with signature auto-population, manual parameter editing (`+ Add parameter` / `Delete`, blocking `object` types), `User's default` or `Custom` warehouse execution, `Tool Mode` (`tool_spec` + `tool_resources`), and direct SQL invocation.
-   - Provides `[ ❄️ ] Decision` (`SnowflakeDecision`) powered by the official Snowflake `AI_COMPLETE` decision models (`snowflake-decision-fast` default for 2–16 `choice` options and 32k tokens; `snowflake-decision` high-accuracy for 2–32 `choice` options and 256 KiB JSON prompts) across `choice`, `score` (`0..n-1` weighted average), and `noul` (`~0.08–0.92`) question types (`1..32` questions, max `256` total options) with normalized confidence routing ($\text{confidence} = \frac{n \cdot p_{\max} - 1}{n - 1}$).
-   - Separates `[ ❄️ ] AI Redact` (`SnowflakeAIRedact` with `redact`, `detect`, and `detect_with_allowlist` across the 13 official Snowflake PII categories, 4,096-token `AI_COUNT_TOKENS('ai_redact', ...)` limit + `SPLIT_TEXT_RECURSIVE_CHARACTER` auto-chunking, and `AI_SQL_ERROR_HANDLING_USE_FAIL_ON_ERROR = FALSE`), `[ ❄️ ] AI Complete` (`SnowflakeAIComplete`), and `[ ❄️ ] AI Function` (`SnowflakeAIFunction` exposing the 14 task-specific `AI_*` functions), with full **Internal Stage (`@<DATABASE>.<SCHEMA>.<STAGE_NAME>`) & External Bucket (`S3`, `GCS`, `Azure`, `S3-Compatible`) multimodal `TO_FILE(...)` and `DIRECTORY(@...)` support** for images, `.mp3`/audio, video, and documents.
-8. **Files, Knowledge, Vector Memories, Message History, Python Interpreter PyPI, ToolGuard & A2A (`REQ-08..REQ-14`)**
-   - Safe `Write File` `Append` semantics on `@<DATABASE>.<SCHEMA>.<STAGE_NAME>`, `Create Memory` with optional `LLM Preprocessing` and separated `CREATE` vs usage permissions (`[G-A3]`, `[G-A4]`), `Python Interpreter` integrated with `snowflake.snowpark.pypi_shared_repository` (`SNOWFLAKE.PYPI_REPOSITORY_USER`), ALTK `ToolGuard / Policies` fail-closed (`[G-A6]`), and `A2A Agent` client/server + `Cortex Agent Run API` (`thread_id`, `parent_message_id`).
-9. **Synchronized `Flow Activity` SQL Traces & Durable Audit Outbox (`REQ-15`, `ADR-007`, `[G-A1]`)**
-   - Replicates `Flow Activity` runs and spans idempotently into `<DATABASE>.<SCHEMA>.LANGFLOW_FLOW_RUNS` and `<DATABASE>.<SCHEMA>.LANGFLOW_FLOW_SPANS`, and writes governance events/denials to `<DATABASE>.<SCHEMA>.LANGFLOW_AUDIT_LOG`.
-10. **Governed Snowflake Object Provisioning (`REQ-16`, `ADR-005`)**
-    - Creates Snowflake Postgres instances (`<POSTGRES_INSTANCE>`) and internal `pgvector` tables, databases, schemas, `Standard`/`Hybrid`/`Iceberg`/`Interactive`/`Dynamic` tables, and internal/external stages with dry-run DDL preview, explicit user confirmation, active-role ownership, and durable audit logging.
-
----
-
-## Wave 2 UI, Hub & Native Component Enhancements (`UI-W2-01`, `HUB-W2-01..05`, `DS-W2-01`, `PROV-W2-01`, `MA-W2-01`, `LLM-W2-01..06`, `FK-W2-01..04`, `TRG-W2-R8-01..07`, `W2-R9-01..07`)
-
-1. **Browser Tab Branding, Official `#29B5E8` Snowflake Blue & Splash Loading Screen (`UI-W2-01`, `W2-R2-14`, `W2-R3-01..02`)**
-   - Enforces the `"Snowflake Langflow"` browser tab title and Snowflake SVG favicon (`ensureBrowserTabBranding()`), styles the `Loading...` splash screen and `+ Create first flow` CTA button in official Snowflake Blue (`#29B5E8`) via read-only `MutationObserver` and CSS rules while strictly preserving React 18 Fiber tree integrity.
-2. **Snowflake Langflow Hub (`HUB-W2-01..HUB-W2-05`, `W2-R3-03..06`, `W2-R9-05`)**
-   - **Section 0 — Snowsight-Style Hierarchical Expandable Tree & Tri-State Cascading Checkboxes (`HUB-W2-02`, `W2-R3-03`):** Single Snowsight Database Explorer hierarchical tree (`Databases (N) ▸ <DATABASE> ▸ <SCHEMA> ▸ Category (Tables, Views, Iceberg Tables, Stages, Memories, Cortex Search, Cortex Analyst, Cortex Agents, Functions, Procedures, Postgres) ▸ Object`) with real-time search (`data-testid="snowsight-hierarchy-search"`), lazy-loaded `/api/v1/snowflake/schemas` and `/api/v1/snowflake/objects`, and tri-state (`checked`, `indeterminate`, `unchecked`) cascading checkboxes persisted via `POST /api/v1/snowflake/context`.
-   - **Section 1 — Hierarchical Governed Creation & Exclusion of Routines (`HUB-W2-03`, `HUB-W2-04`, `W2-R9-03`):** Enforces `1. Database -> 2. Schema -> 3. Object in Schema` (`Standard`, `Hybrid`, `Iceberg`, `Interactive`, `Dynamic` tables, `Internal`/`External` stages, `Views`, and `<POSTGRES_INSTANCE>`) with active-role privilege grey-out warnings. Strictly excludes `FUNCTION` (`UDF`/`UDTF`), `PROCEDURE`, and `MEMORY` creation from the Object Provisioner (`HTTP 422 UNSUPPORTED_CAPABILITY`), and keeps `SnowflakeObjectProvisioner` exclusively in the Topbar Hub / Settings wizard (`W2-R9-03` removes `Object Provisioner` from workflow node categories).
-   - **Section 2 & Memories Page (`+ Snowflake`) — 5 LangChain/Langflow Memory Types, Optional Embeddings & Transient Overlay Auto-Dismiss (`HUB-W2-05`, `W2-R2-13`, `W2-R3-05..06`, `W2-R9-05`):** Scopes the `+ Snowflake` toolbar button strictly to the `Memories` view (`z-index: 10`, hidden behind open modals), auto-dismisses `#sflf-memory-type-dropdown` and transient overlays on left-rail tab switch, route change, outside click, or `Escape` (`dismissTransientSnowflakeOverlays(reason)`), and opens a light-themed `Create a Snowflake Memory` modal supporting all **5 LangChain/Langflow Memory Types** (`graph_state_checkpointer`, `buffer_window_memory`, `summary_memory`, `user_profile_entity_memory`, `episodic_memory`, plus legacy aliases `episodic_session`, `semantic_vector`, `structured_long_term`) with direct non-embedding SQL lookup by default (`enable_embedding=False`) and optional embeddings via **Snowflake Cortex (`AI_EMBED`)** (`768d`/`1024d`) or external providers (`OpenAI`, `Cohere`, `HuggingFace / Ollama`, `Custom Endpoint`), plus searchable memory cards filtered by `Search memories...`.
-3. **SPCS Runtime Stability & Clean User Flow Persistence (`W2-R3-07`, `W2-R9-06`)**
-   - Configures SQLite Write-Ahead Logging (`PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA busy_timeout=30000; PRAGMA temp_store=MEMORY;`) on `/persist/langflow.db` and SQLAlchemy engine connections to prevent `sqlite3.OperationalError: database is locked`, and sets writable `UV_CACHE_DIR=/tmp/uv-cache` (`XDG_CACHE_HOME=/tmp/.cache`, `SQLITE_TMPDIR=/tmp`) in `Dockerfile` and runtime hooks.
-   - Disables unsolicited startup seeding of `Snowflake_Full_Memory_Enterprise_Agent` unless explicitly opted in via `SNOWFLAKE_SEED_SHOWCASE_FLOW=true` (or explicit API/test call), and purges unsolicited `New Flow (Backup)` rows while preserving 100% of user-created flows across SPCS restarts (`W2-R9-06`).
-4. **Sidebar Category Refactoring & Expansion (`DS-W2-01`, `PROV-W2-01`, `MA-W2-01`, `MA-W2-R6-01..05`, `LLM-W2-01..06`, `FK-W2-01..04`, `W2-R5-01..07`, `TRG-W2-R8-01..07`, `W2-R9-01..04`)**
-   - **`Triggers` (`TRG-W2-R8-01..07`):** Dedicated sidebar category (`triggers`, `icon="Zap"`) positioned immediately after `Input & Output` (which remains 100% invariant) and before `Data Sources`, containing **5 strictly separated components (`1 class = 1 file`)**:
-     - `Schedule Trigger` (`SnowflakeScheduleTrigger`): exclusively time-based scheduling (`Custom (Cron)` 5-field `USING CRON <expr> <tz>` and `Minutes` / `Hours` / `Days` / `Weeks` / `Months` intervals) backed by `CREATE OR ALTER TASK <DATABASE>.<SCHEMA>.LF_SCHED_<FLOW_SHORT_ID>` and `ALTER TASK ... RESUME/SUSPEND`.
-     - `Table Change Trigger` (`SnowflakeTableChangeTrigger`): exclusively row arrival/CDC on `[ ❄️ Context ]` tables, dynamic tables, and views (`CREATE STREAM ... ON TABLE/DYNAMIC TABLE/VIEW` with `APPEND_ONLY = TRUE|FALSE` + pure Triggered Task `WHEN SYSTEM$STREAM_HAS_DATA(...)` and atomic temporary batch table `_LF_STREAM_BATCH_<FLOW_SHORT_ID>` inside `BEGIN ... END;`).
-     - `Stage File Trigger` (`SnowflakeStageFileTrigger`): exclusively file arrival/updates on `[ ❄️ Context ]` stages `@<DATABASE>.<SCHEMA>.<STAGE_NAME>` (`DIRECTORY = (ENABLE = TRUE)` + `CREATE STREAM ... ON STAGE` + pure Triggered Task `WHEN SYSTEM$STREAM_HAS_DATA(...)` with `BUILD_SCOPED_FILE_URL` and optional `file_pattern` filtering).
-     - `Condition Alert Trigger` (`SnowflakeAlertTrigger`): exclusively read-only SQL threshold/anomaly alerting (`CREATE OR ALTER ALERT <DATABASE>.<SCHEMA>.LF_ALRT_<FLOW_SHORT_ID> ... IF (EXISTS (<condition_sql>)) THEN ...` reading matched rows via `TABLE(RESULT_SCAN(SNOWFLAKE.ALERT.GET_CONDITION_QUERY_UUID()))` in both `Periodic Condition Check` and `Alert on New Data (Event-Driven)` modes).
-     - `Webhook` (`lfx.components.input_output.webhook`): exposed in `Triggers` while remaining untouched in `Input & Output`.
-     - Powered by the SPCS Service Function `<DATABASE>.<SCHEMA>.RUN_LANGFLOW_FLOW(flow_id VARCHAR, trigger_payload VARIANT)` (`POST /api/v1/snowflake/service-trigger`), RBAC pre-checks under `CURRENT_ROLE()`, 3-tier observability (`<DATABASE>.<SCHEMA>.LANGFLOW_FLOW_ACTIVITY` with `SCHEDULED_RUN`, `STREAM_TRIGGER_RUN`, `STAGE_FILE_TRIGGER_RUN`, `ALERT_TRIGGER_RUN`, `WEBHOOK_RUN`, plus `TASK_HISTORY` and `ALERT_HISTORY`), and automatic lifecycle cleanup on node/flow deletion.
-   - **`Data Sources` (`DS-W2-01`, `PROV-W2-01`, `MA-W2-R6-03`):** Hierarchical `Engine -> Database -> Schema -> Object Type -> Table / View Name` ordering (`Secure View`, `Materialized View`, `Snowflake Postgres Table`), plus `Cortex Search` (`/api/v2/databases/{db}/schemas/{schema}/cortex-search-services/{service}:query`) and `Cortex Analyst` (`/api/v2/cortex/analyst/message`) returning `langchain_core.tools.StructuredTool` instances with Pydantic schemas in `Tool Mode`.
-   - **`Models & Agents` (`MA-W2-R6-01..05`):** Consolidated to the 7 canonical components (`A2A Agent`, `Agent`, `Cortex Agent`, `Embedding Model`, `Language Model`, `Message History`, `Prompt Template`):
-     - `Language Model` and `Agent` directly integrate the 4 Snowflake providers (`Snowflake Proxy - Chat (/chat/v1)`, `Snowflake Proxy - Responses (/responses/v1)`, `Snowflake Proxy - Messages (/messages)`, `Snowflake Private - Ollama`) with live `/models` discovery (`catalog_with_metadata` with 15s TTL and manual refresh) and dynamic `Reasoning Effort`, `Extended Thinking`, and `Thinking Budget Tokens` controls positioned immediately below `Language Model*`.
-     - `Cortex Agent` (`SnowflakeCortexAgent`) invokes pre-configured Snowflake Cortex Agents (`/api/v2/databases/{db}/schemas/{schema}/agents/{name}:run`) with 2-level `Threads API` continuity (`POST/GET /api/v2/cortex/threads` and `GET /api/v2/cortex/threads/{id}?message_type=conversation&page_size=20`), Playground message sync, `Tool Mode`, and `Response` (`Message`) + `Structured Response` (`Data`) outputs.
-     - `A2A Agent` (`LANGFLOW_A2A_ENABLED=true`) supports `Internal` invocation of both `[Langflow Flow]` (with `max_depth=3` recursion guard) and `[Cortex Agent] <DATABASE>.<SCHEMA>.<AGENT_NAME>`, and `External` invocation via `Quick Fill Endpoint` and the A2A v0.3.0 Server Bridge (`/api/v1/snowflake/a2a/cortex-agents/{database}/{schema}/{agent_name}/.well-known/agent-card.json` and `/jsonrpc`).
-     - `Embedding Model` includes the `"Snowflake Cortex"` provider with the 6 official `SNOWFLAKE.CORTEX.AI_EMBED` models (`snowflake-arctic-embed-m-v1.5`, `snowflake-arctic-embed-m`, `e5-base-v2`, `snowflake-arctic-embed-l-v2.0`, `voyage-multilingual-2`, `nv-embed-qa-4`).
-   - **`LLM Operations` (`LLM-W2-01..06`, `W2-R9-01..04`):** Contains the 5 native Langflow operations (`Batch Run`, `Guardrails`, `Smart Router`, `Smart Transform`, `Structured Output`, with `LLM Selector` invariant) plus **7 governed `[ ❄️ ]` Snowflake LLM Operations components (`1 class = 1 file`)**:
-     - `Custom Tool` (`SnowflakeCustomTool` in `snowflake_custom_tool.py`): replaces `Stored Procedure` and `Function (UDF / UDTF)`, replicating the Snowsight Cortex Agent **"Add custom tool"** dialog (`Resource type`: `procedure`, `function`, `table_function`; `Database & schema`; `Custom tool identifier`; `Name`; `Warehouse`: `User's default` or `Custom`; `Description`; `Parameters` with signature inspection + `+ Add parameter` / `Delete` and `OBJECT` type block; `Tool Mode` + direct SQL execution).
-     - `Decision` (`SnowflakeDecision` in `snowflake_decision.py`): powered by official Snowflake `AI_COMPLETE` decision models (`snowflake-decision-fast` default for 2–16 `choice` options / 32k tokens; `snowflake-decision` high-accuracy for 2–32 `choice` options / 256 KiB JSON prompt) with `choice`, `score` (`0..n-1` weighted average), and `noul` (`~0.08–0.92`) question types (`1..32` questions, max `256` total options), normalized confidence ($\frac{n \cdot p_{\max} - 1}{n - 1}$), and 4 outputs (`decision_object`, `high_confidence_route`, `low_confidence_route`, `table_decisions`).
-     - `AI Redact` (`SnowflakeAIRedact` in `snowflake_ai_redact.py`): dedicated PII redaction & detection component (`redact`, `detect`, `detect_with_allowlist` with reverse-index span splicing) across the 13 official Snowflake PII categories (`NAME`, `EMAIL`, `PHONE_NUMBER`, `DATE_OF_BIRTH`, `GENDER`, `AGE`, `ADDRESS`, `NATIONAL_ID`, `PASSPORT`, `TAX_IDENTIFIER`, `PAYMENT_CARD_DATA`, `DRIVERS_LICENSE`, `IP_ADDRESS`), enforcing the 4,096-token limit (`AI_COUNT_TOKENS('ai_redact', ...)`) with `SPLIT_TEXT_RECURSIVE_CHARACTER` + `LISTAGG` auto-chunking and `AI_SQL_ERROR_HANDLING_USE_FAIL_ON_ERROR = FALSE`.
-     - `AI Complete` (`SnowflakeAIComplete` in `snowflake_ai_complete.py`): dedicated `AI_COMPLETE` component supporting text prompts, structured JSON schemas, and multimodal `TO_FILE('@<DATABASE>.<SCHEMA>.<STAGE_NAME>', '<relative_path>')` inputs (images, `.mp3`/audio, video, documents) from Internal Stages and External Cloud Buckets (`S3`, `GCS`, `Azure`, `S3-Compatible`).
-     - `AI Function` (`SnowflakeAIFunction` in `snowflake_ai_function.py`): exposes the 14 task-specific Snowflake Cortex `AI_*` functions (`AI_CLASSIFY`, `AI_FILTER`, `AI_EXTRACT`, `AI_SENTIMENT`, `AI_SUMMARIZE`, `AI_SUMMARIZE_AGG`, `AI_AGG`, `AI_TRANSLATE`, `AI_SIMILARITY`, `AI_TRANSCRIBE`, `AI_PARSE_DOCUMENT`, `AI_EMBED`, `AI_MULTI_EMBED`, `AI_COUNT_TOKENS`) with full Internal Stage (`SNOWFLAKE_SSE` / `SNOWFLAKE_FULL`) and External Stage (`S3`, `GCS`, `Azure`, `S3-Compatible`) `TO_FILE(...)` and `DIRECTORY(@<DATABASE>.<SCHEMA>.<STAGE_NAME>)` batch processing.
-     - `SQL Statement` (`SnowflakeSQLStatement` in `snowflake_sql_statement.py`): governed SQL statement execution under `CURRENT_ROLE()`.
-     - `Operations` (`SnowflakeLLMNode` in `snowflake_node.py`): multi-mode Snowflake Cortex LLM & SQL helper node.
-   - **`Files & Knowledge` & `Stages & Volumes` (`W2-R5-02..07`):** Preserves the 5 canonical 1-class Langflow components (`File System`, `Knowledge`, `Memory Base`, `Read File` with `AI_PARSE_DOCUMENT`, `Write File`) backed by `SnowflakeVectorStoreBackend` (`VECTOR_COSINE_SIMILARITY` in `SELECT`), and adds the `Stages & Volumes` Bucket rail view above `Traces` for browsing, uploading, and creating `Internal Stage` (`SNOWFLAKE_SSE`/`SNOWFLAKE_FULL`), `External Stage`, and `External Volume` objects.
-
----
-
-## Architecture Overview & Component Schemas
-
-```mermaid
-flowchart TB
-    subgraph UI["Langflow UI (Preserved Design System + Snowflake Topbar & Rail)"]
-        Topbar["Topbar: Role Selector + [ ❄️ Context ] + Snowflake Hub"]
-        Rail["Left Rail: Flows | Agents | Memories | Stages & Volumes | Traces | Settings"]
-        Sidebar["Workflow Sidebar Categories (1 Class = 1 File)"]
-    end
-
-    subgraph Cats["Snowflake-Extended Sidebar Categories"]
-        TRG["Triggers (5): Schedule | Table Change | Stage File | Condition Alert | Webhook"]
-        DS["Data Sources (6): Tables | Views | Iceberg Tables | Postgres | Cortex Search | Cortex Analyst"]
-        MA["Models & Agents (7): Language Model | Agent | Cortex Agent | A2A Agent | Embedding Model | Message History | Prompt Template"]
-        LLM["LLM Operations (5 Native + 7 [ ❄️ ]): Custom Tool | Decision | AI Redact | AI Complete | AI Function | SQL Statement | Operations"]
-        FK["Files & Knowledge (5): File System | Knowledge | Memory Base | Read File | Write File"]
-    end
-
-    subgraph Runtime["SPCS Container Runtime & Governance Layer (lfx_snowflake)"]
-        Bridge["LiveSnowflakeBridge (Per-Role Session Pool + Per-Flow Context Cone)"]
-        Authz["SnowflakeAuthzService (CURRENT_ROLE() + EXPLAIN_PRIVILEGES Fail-Closed)"]
-        Obs["SnowflakeTraceReplicator & AuditOutbox (LANGFLOW_FLOW_ACTIVITY)"]
-    end
-
-    subgraph SF["Snowflake Cloud Services (<SNOWFLAKE_ACCOUNT> on AWS)"]
-        Cortex["Cortex AI: AI_COMPLETE (Decision / Multimodal) | AI_REDACT | 14 AI_* Functions"]
-        Stages["Stages: Internal (@<DATABASE>.<SCHEMA>.<STAGE_NAME>) & External (S3 / GCS / Azure)"]
-        Routines["Custom Tools: Procedures | Scalar UDFs | Table Functions (UDTF)"]
-        Storage["Storage: Standard / Hybrid / Iceberg Tables + <POSTGRES_INSTANCE>"]
-    end
-
-    Topbar --> Bridge
-    Rail --> Bridge
-    Sidebar --> TRG & DS & MA & LLM & FK
-    TRG & DS & MA & LLM & FK --> Authz --> Bridge
-    Bridge --> Cortex & Stages & Routines & Storage
-    Bridge --> Obs --> Storage
-```
-
-### `[ ❄️ ]` LLM Operations Component Reference (`W2-R9-01..04`)
-
-| Component (`display_name`) | Class (`name`) | Module (`llm_operations/`) | Primary Snowflake SQL / REST Contract |
-|---|---|---|---|
-| **Custom Tool** | `SnowflakeCustomTool` | `snowflake_custom_tool.py` | Replicates Snowsight "Add custom tool" (`procedure`, `function`, `table_function`), auto-populates signature via `DESCRIBE`, allows manual parameter edits (rejecting `OBJECT`), emits Cortex Agent `tool_spec` + `tool_resources`, and executes `CALL` / `SELECT` / `TABLE(...)`. |
-| **Decision** | `SnowflakeDecision` | `snowflake_decision.py` | `SELECT AI_COMPLETE(model => '<snowflake-decision-fast\|snowflake-decision>', prompt => TO_JSON({'state': ..., 'questions': ...}), return_error_details => TRUE) AS decision;` supporting `choice`, `score` (`0..n-1`), and `noul` (`1..32` questions, max `256` options). |
-| **AI Redact** | `SnowflakeAIRedact` | `snowflake_ai_redact.py` | `AI_REDACT(input => ..., categories => [...], mode => 'redact'\|'detect')` across 13 official PII categories, `detect_with_allowlist` reverse-index span splicing, 4,096-token limit + `SPLIT_TEXT_RECURSIVE_CHARACTER` auto-chunking. |
-| **AI Complete** | `SnowflakeAIComplete` | `snowflake_ai_complete.py` | `AI_COMPLETE` for text, structured JSON schemas, and multimodal `TO_FILE('@<DATABASE>.<SCHEMA>.<STAGE_NAME>', '<path>')` files (`Image`, `Audio/.mp3`, `Video`, `Document`). |
-| **AI Function** | `SnowflakeAIFunction` | `snowflake_ai_function.py` | 14 task-specific `AI_*` functions (`AI_CLASSIFY`, `AI_FILTER`, `AI_EXTRACT`, `AI_SENTIMENT`, `AI_SUMMARIZE`, `AI_SUMMARIZE_AGG`, `AI_AGG`, `AI_TRANSLATE`, `AI_SIMILARITY`, `AI_TRANSCRIBE`, `AI_PARSE_DOCUMENT`, `AI_EMBED`, `AI_MULTI_EMBED`, `AI_COUNT_TOKENS`) with Internal & External Stage `TO_FILE(...)` and `DIRECTORY(@...)`. |
-| **SQL Statement** | `SnowflakeSQLStatement` | `snowflake_sql_statement.py` | Parameterized SQL execution under `CURRENT_ROLE()` with `OBJECT_CONSTRUCT(*)` / tabular output and `EXPLAIN_PRIVILEGES` pre-check. |
-| **Operations** | `SnowflakeLLMNode` | `snowflake_node.py` | Multi-operation Snowflake Cortex helper node bound to `[ ❄️ Context ]`. |
-
----
-
-## Parametric Placeholders Reference
+All configuration files, SQL scripts, and container specifications in this repository are **100% account-agnostic** and parameterized via the following placeholders:
 
 | Placeholder | Description |
 |---|---|
@@ -169,9 +275,20 @@ flowchart TB
 
 ---
 
-## Upstream Update & Synchronization Rules (`langflow-ai/langflow`)
+## 5. Architecture Decision Records & Documentation Index
 
-Because this repository is a fork of [`langflow-ai/langflow`](https://github.com/langflow-ai/langflow), all updates from upstream must follow the mandatory governance rules documented in [`docs/UPSTREAM_SYNC.md`](docs/UPSTREAM_SYNC.md) and enforced by [`scripts/sync_upstream.sh`](scripts/sync_upstream.sh):
+| Document | Purpose |
+|---|---|
+| [`docs/CAPABILITY_MATRIX.md`](docs/CAPABILITY_MATRIX.md) | Visual capability overview, component inventory, and qualification matrix (`Q1..Q4`, `REQ-01..REQ-17`, Wave 2 enhancements) |
+| [`docs/DEPLOYMENT_SPCS.md`](docs/DEPLOYMENT_SPCS.md) | Step-by-step Snowpark Container Services (SPCS) deployment guide and SQL setup |
+| [`docs/UPSTREAM_SYNC.md`](docs/UPSTREAM_SYNC.md) | Governance rules (`RULE-SYNC-01..07`) for synchronizing with `langflow-ai/langflow` |
+| [`docs/ADR/ADR-001.md`](docs/ADR/ADR-001.md) .. [`ADR-007.md`](docs/ADR/ADR-007.md) | Architecture Decision Records covering UI invariants, active-role RBAC, fail-closed authorization, object provisioning, multi-protocol LLM proxy, and SQL trace replication |
+
+---
+
+## 6. Upstream Update & Synchronization Rules (`langflow-ai/langflow`)
+
+Because this repository is a fork of [`langflow-ai/langflow`](https://github.com/langflow-ai/langflow), all updates from upstream follow the governance rules documented in [`docs/UPSTREAM_SYNC.md`](docs/UPSTREAM_SYNC.md) and enforced by [`scripts/sync_upstream.sh`](scripts/sync_upstream.sh):
 
 1. **`RULE-SYNC-01` — Read-Only Upstream Remote:** `upstream` (`https://github.com/langflow-ai/langflow.git`) is strictly read-only; all fork commits and tags are pushed exclusively to `origin` (`snowflake/main` or scoped `feat/*` / `sync/upstream-*` branches).
 2. **`RULE-SYNC-02` — Stable Release Tag Pinning Only:** Never merge arbitrary untagged commits from upstream `main`. Always synchronize against an explicit upstream release tag (e.g., `v1.12.5` → next stable tag).
@@ -183,7 +300,7 @@ Because this repository is a fork of [`langflow-ai/langflow`](https://github.com
 
 ---
 
-## Verification & Sanitization Gate
+## 7. Verification & Sanitization Gate
 
 Run the automated sanitization gate and test suite before any commit or push:
 
@@ -191,4 +308,3 @@ Run the automated sanitization gate and test suite before any commit or push:
 python3 scripts/verify_public_repo_sanitization.py
 pytest
 ```
-
