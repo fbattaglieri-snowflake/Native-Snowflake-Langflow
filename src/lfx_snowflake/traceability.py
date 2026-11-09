@@ -199,16 +199,15 @@ def build_audit_insert(
     run_id: str | None,
     details: Mapping[str, Any] | None,
 ) -> tuple[str, dict[str, dict[str, Any]]]:
-    """Return (statement, SQL API bindings). Idempotent: MERGE on event_id, so retries do not duplicate."""
+    """Return (statement, SQL API bindings). Idempotent on event_id (NOT EXISTS), so retries do not duplicate."""
     if not _FQN_RE.match(audit_table or ""):
         raise ValueError("invalid audit table identifier")
     details_json = json.dumps(sanitize_details(details), separators=(",", ":"))
     stmt = (
-        f"MERGE INTO {audit_table} t USING (SELECT ? AS event_id) s ON t.event_id = s.event_id "
-        "WHEN NOT MATCHED THEN INSERT (event_id, event_ts, authenticated_user, effective_role, execution_mode, "
+        f"INSERT INTO {audit_table} (event_id, event_ts, authenticated_user, effective_role, execution_mode, "
         "context_epoch, action, outcome, error_code, target_object, project_id, flow_id, run_id, trace_id, "
-        "redacted_details) VALUES (s.event_id, CURRENT_TIMESTAMP(), ?, ?, ?, ?, ?, ?, ?, ?, 'default', ?, ?, ?, "
-        "TRY_PARSE_JSON(?))"
+        "redacted_details) SELECT ?, CURRENT_TIMESTAMP(), ?, ?, ?, ?, ?, ?, ?, ?, 'default', ?, ?, ?, "
+        f"TRY_PARSE_JSON(?) WHERE NOT EXISTS (SELECT 1 FROM {audit_table} WHERE event_id = ?)"
     )
     values: list[tuple[str, Any]] = [
         ("TEXT", event_id),
@@ -224,6 +223,7 @@ def build_audit_insert(
         ("TEXT", run_id),
         ("TEXT", run_id),
         ("TEXT", details_json),
+        ("TEXT", event_id),
     ]
     bindings = {str(i + 1): {"type": t, "value": None if v is None else str(v)} for i, (t, v) in enumerate(values)}
     return stmt, bindings

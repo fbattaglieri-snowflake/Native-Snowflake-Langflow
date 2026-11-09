@@ -64,14 +64,14 @@ def test_tr01_details_never_carry_text():
     assert clean == {"size": 10, "md5": "abc"}
 
 
-def test_tr01_audit_insert_uses_bindings_and_merge():
+def test_tr01_audit_insert_uses_bindings_and_is_idempotent():
     stmt, binds = tr.build_audit_insert(
         "DB.CORE.LANGFLOW_AUDIT_LOG", event_id="aud-1", authenticated_user="U", effective_role="R",
         execution_mode="INTERACTIVE_CALLER", context_epoch=1, action="MEMORY_RECALL", outcome="SUCCESS",
         error_code=None, target_object="o'; DROP TABLE x;--", flow_id="f", run_id="r", details={"top_k": 5},
     )
-    assert "DROP TABLE" not in stmt and stmt.startswith("MERGE INTO DB.CORE.LANGFLOW_AUDIT_LOG")
-    assert stmt.count("?") == len(binds) == 13
+    assert "DROP TABLE" not in stmt and stmt.startswith("INSERT INTO DB.CORE.LANGFLOW_AUDIT_LOG") and "WHERE NOT EXISTS" in stmt
+    assert stmt.count("?") == len(binds) == 14
     with pytest.raises(ValueError):
         tr.build_audit_insert("x; DROP", event_id="e", authenticated_user=None, effective_role=None,
                               execution_mode="m", context_epoch=0, action="a", outcome="o", error_code=None,
@@ -100,3 +100,68 @@ def test_tr06_masking_sql_template_rules():
     assert "PARSE_JSON(v.$8)" not in sql.replace("TRY_PARSE_JSON", "")
     assert "IS_ROLE_IN_SESSION(effective_role_col)" in sql
     assert "DELETE ON TABLE <DATABASE>.<SCHEMA>.LANGFLOW_MESSAGES" not in sql
+
+
+# --- Bridge wiring (TR-01/TR-02) -------------------------------------------------------------
+
+
+@pytest.fixture
+def bridge(monkeypatch, tmp_path):
+    from lfx_snowflake.fastapi_live_bridge import LiveSnowflakeBridge
+
+    monkeypatch.setenv("LANGFLOW_DATABASE_URL", f"sqlite:///{tmp_path / 'lf.db'}")
+    monkeypatch.setenv("LANGFLOW_PERSIST_DIR", str(tmp_path))
+    b = LiveSnowflakeBridge()
+    b.audits = []  # type: ignore[attr-defined]
+    monkeypatch.setattr(b, "record_audit_event", lambda **kw: b.audits.append(kw) or kw.get("event_id"))
+    monkeypatch.setattr(b, "check_write_privilege_or_deny", lambda *a, **k: None)
+    return b
+
+
+class _Resp:
+    status_code = 200
+    content = b"{}"
+
+    def json(self):
+        return {"data": [], "resultSetMetaData": {"rowType": []}, "statementHandle": "qh"}
+
+
+def test_tr02_execute_sql_payload_has_json_query_tag(bridge, monkeypatch):
+    sent = {}
+
+    class _Client:
+        def post(self, url, headers=None, json=None, timeout=None):
+            sent.update(json)
+            return _Resp()
+
+    monkeypatch.setattr(bridge, "_has_spcs_token", lambda: True)
+    monkeypatch.setattr(bridge, "_get_spcs_headers", lambda: {})
+    monkeypatch.setenv("SNOWFLAKE_HOST", "example.invalid")
+    bridge._http_client = _Client()
+    with tr.trace_scope(run_id="run-9", request_id="req-9"):
+        bridge.execute_sql("SELECT 1")
+    tag = json.loads(sent["parameters"]["query_tag"])
+    assert tag["app"] == "snowflake-langflow" and tag["run_id"] == "run-9" and tag["request_id"] == "req-9"
+
+
+def test_tr01_stage_remove_audited_with_real_outcome(bridge, monkeypatch):
+    monkeypatch.setattr(bridge, "execute_sql", lambda *a, **k: {"ok": False, "error_code": "SQL_ERROR"})
+    res = bridge.delete_stage_file("@DB.SCH.ST", "a.txt")
+    assert res["ok"] is False
+    ev = [a for a in bridge.audits if a["action"] == "STAGE_FILE_REMOVE"]
+    assert ev and ev[0]["outcome"] == "FAILURE" and ev[0]["error_code"] == "SQL_ERROR"
+    assert "text" not in ev[0]["details"]
+
+
+def test_tr01_stage_upload_rejection_never_audited_as_success(bridge, monkeypatch):
+    monkeypatch.setattr(bridge, "_stage_type", lambda fqn: "INTERNAL")
+    res = bridge.upload_stage_file(stage_fqn="@DB.SCH.ST", file_name="a.txt", content_text="x")
+    assert res["ok"] is False
+    ev = [a for a in bridge.audits if a["action"] == "STAGE_FILE_UPLOAD"]
+    assert ev and ev[0]["outcome"] == "FAILURE"
+
+
+def test_tr01_no_deprecated_audit_action_written_in_source():
+    src = (ROOT / "src" / "lfx_snowflake" / "fastapi_live_bridge.py").read_text()
+    for name in tr.DEPRECATED_ACTIONS:
+        assert f'action="{name}"' not in src, name

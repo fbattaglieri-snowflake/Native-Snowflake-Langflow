@@ -274,5 +274,5 @@ class TestAC11NoFakeMemorySuccess:
         )
         assert res["ok"] is False
         assert clean_bridge.memories_registry == []
-        create_audits = [a for a in audits if a.get("action") == "MEMORY_CREATE_PHYSICAL"]
-        assert create_audits and all(a["outcome"] != "ALLOWED" for a in create_audits)
+        create_audits = [a for a in audits if a.get("action") == "MEMORY_BASE_CREATE"]  # §7.4 (was MEMORY_CREATE_PHYSICAL)
+        assert create_audits and all(a["outcome"] not in ("ALLOWED", "SUCCESS") for a in create_audits)

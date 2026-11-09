@@ -1895,11 +1895,11 @@ class LiveSnowflakeBridge:
                     f"(SELECT / USAGE) privilege on {fqn}."
                 )
                 self.record_audit_event(
-                    action="MEMORY_USE_EXISTING",
+                    action=AuditAction.AUTHZ_ROLE_DENIED.value,
                     outcome="DENIED",
                     error_code=ErrorCode.AUTHZ_ROLE_DENIED.value,
                     target_object=fqn,
-                    details={"message": msg, "required_privilege": "MEMORY_USE_EXISTING (SELECT / USAGE)"},
+                    details={"object": fqn, "required_privilege": "SELECT / USAGE (bind existing memory)"},
                 )
                 return {
                     "ok": False,
@@ -2423,12 +2423,12 @@ class LiveSnowflakeBridge:
                 exec_res = self.execute_sql(fallback_std_ddl)
             if not exec_res.get("ok"):
                 err_code = str(exec_res.get("error_code") or ("NOT_CONFIGURED" if exec_res.get("mode") == "offline" else "SNOWFLAKE_ERROR"))
-                self.record_audit_event(
-                    action="MEMORY_CREATE_PHYSICAL",
-                    outcome="FAILURE",
-                    error_code=err_code,
+                emit_audit(
+                    self.record_audit_event,
+                    AuditAction.MEMORY_BASE_CREATE,
+                    exec_res,
                     target_object=fqn,
-                    details={"name": name, "query_id": exec_res.get("statement_handle")},
+                    details={"name": name, "table_fqn": fqn},
                     flow_id=norm_fid,
                 )
                 return {
@@ -2585,12 +2585,23 @@ class LiveSnowflakeBridge:
             )
 
         self._persist_memory_in_langflow_sqlite(entry, flow_id=norm_fid)
-        self.record_audit_event(
-            action="MEMORY_CREATE_PHYSICAL" if create_physical else "MEMORY_USE_EXISTING",
-            outcome="ALLOWED",
-            target_object=entry["table_fqn"],
-            details=entry,
-        )
+        # TR-01: MEMORY_BASE_CREATE only for a real outcome: an executed DDL, or a bind of an existing table
+        # (registration persisted above). Dry runs and non-executed branches are not audited as creations.
+        if (not exec_res.get("dry_run") and not exec_res.get("postgres_ddl")) or not create_physical:
+            emit_audit(
+                self.record_audit_event,
+                AuditAction.MEMORY_BASE_CREATE,
+                exec_res if create_physical else {"ok": True},
+                target_object=entry["table_fqn"],
+                details={
+                    "memory_base_id": entry.get("memory_id"),
+                    "name": entry.get("name"),
+                    "table_fqn": entry.get("table_fqn"),
+                    "embedding_model": entry.get("embedding_model"),
+                    "execution_mode": "create" if create_physical else "bind_existing",
+                },
+                flow_id=norm_fid,
+            )
         return {"ok": True, "status_code": 201, "memory": entry, "ddl": ddl}
 
     def _persist_memory_in_langflow_sqlite(self, entry: dict[str, Any], flow_id: str | None = None) -> None:
@@ -3008,11 +3019,12 @@ class LiveSnowflakeBridge:
                 conn.close()
             except Exception:  # noqa: BLE001
                 pass
-        self.record_audit_event(
-            action="MEMORY_DELETE",
-            outcome="ALLOWED",
+        emit_audit(
+            self.record_audit_event,
+            AuditAction.MEMORY_BASE_DELETE,
+            {"ok": True},
             target_object=fqn,
-            details={"deleted_memory": mem_name, "memory_id": mem_uuid_str},
+            details={"name": mem_name, "memory_base_id": mem_uuid_str},
         )
         return {
             "ok": True,
@@ -5286,7 +5298,7 @@ class LiveSnowflakeBridge:
             "active_role": self.active_role,
         }
         if self._stage_type(clean_fqn) == "EXTERNAL":
-            return {
+            rejected = {
                 **base,
                 "status_code": 400,
                 "error_code": "EXTERNAL_STAGE_UPLOAD_UNSUPPORTED",
@@ -5295,12 +5307,22 @@ class LiveSnowflakeBridge:
                     "upload files to the external storage location directly."
                 ),
             }
-        return {
-            **base,
-            "status_code": 501,
-            "error_code": "UPLOAD_NOT_AVAILABLE",
-            "message": self.UPLOAD_DISABLED_MESSAGE,
-        }
+        else:
+            rejected = {
+                **base,
+                "status_code": 501,
+                "error_code": "UPLOAD_NOT_AVAILABLE",
+                "message": self.UPLOAD_DISABLED_MESSAGE,
+            }
+        # The rejection is the real outcome (no PUT ran); it is audited as FAILURE, never as SUCCESS.
+        emit_audit(
+            self.record_audit_event,
+            AuditAction.STAGE_FILE_UPLOAD,
+            rejected,
+            target_object=f"@{clean_fqn}/{rel_path}",
+            details={"stage": f"@{clean_fqn}", "relative_path": rel_path},
+        )
+        return rejected
 
     def delete_stage_file(self, stage_fqn: str, file_path: str) -> dict[str, Any]:
         """Remove a file from a Snowflake Stage (`REMOVE '@<stage>/<file_path>'`); fails closed on SQL errors."""
@@ -5319,6 +5341,13 @@ class LiveSnowflakeBridge:
             return denied
         remove_sql = f"REMOVE '@{clean_fqn}/{clean_rel}';"
         res = self.execute_sql(remove_sql)
+        emit_audit(
+            self.record_audit_event,
+            AuditAction.STAGE_FILE_REMOVE,
+            res,
+            target_object=f"@{clean_fqn}/{clean_rel}",
+            details={"stage": f"@{clean_fqn}", "relative_path": clean_rel},
+        )
         ok = bool(res.get("ok", False))
         out: dict[str, Any] = {
             "ok": ok,
@@ -5344,6 +5373,13 @@ class LiveSnowflakeBridge:
             return self._stage_input_error(exc)
         refresh_sql = f"ALTER STAGE {clean_fqn} REFRESH;"
         res = self.execute_sql(refresh_sql)
+        emit_audit(
+            self.record_audit_event,
+            AuditAction.STAGE_DIRECTORY_REFRESH,
+            res,
+            target_object=f"@{clean_fqn}",
+            details={"stage": f"@{clean_fqn}"},
+        )
         ok = bool(res.get("ok", False))
         out: dict[str, Any] = {
             "ok": ok,
@@ -8161,7 +8197,7 @@ class LiveSnowflakeBridge:
             details=None,
         )
         # Keep the existing redaction path for details (redact_for_sink + 12 KB cap), still bound, never inlined.
-        audit_bindings[str(len(audit_bindings))] = {"type": "TEXT", "value": details_json}
+        audit_bindings[str(len(audit_bindings) - 1)] = {"type": "TEXT", "value": details_json}
         ev_type = (
             "CONTEXT_CHANGE"
             if action in ("UPDATE_CONTEXT", "OBJECT_REMOVED_FROM_CONTEXT", "REGISTER_OBJECT_IN_CONTEXT")
@@ -8499,11 +8535,11 @@ class LiveSnowflakeBridge:
                     f"[Il ruolo attivo ({self.active_role})]."
                 )
             self.record_audit_event(
-                action=action,
+                action=AuditAction.AUTHZ_ROLE_DENIED.value,
                 outcome="DENIED",
                 error_code=ErrorCode.AUTHZ_ROLE_DENIED.value,
                 target_object=target_object,
-                details={"message": msg, "required_privilege": action, "object_fqn": target_object},
+                details={"required_privilege": action, "object": target_object},
             )
             return {
                 "ok": False,
