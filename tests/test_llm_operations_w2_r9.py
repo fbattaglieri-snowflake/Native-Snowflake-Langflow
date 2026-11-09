@@ -428,14 +428,21 @@ def test_w2_r9_live_bridge_custom_tools_stage_files_and_decision_edge_cases() ->
         )
 
     # W2-R9-04: LiveBridge stage files with media_filter & DomainAIFunctionEngine backward compatibility
-    bridge.stage_files_registry["SNOWFLAKE_LANGFLOW.CORE.EXTERNAL_S3_MEDIA_STAGE"] = [
-        {"path": "audio/customer_call_recording.mp3", "size": 1024},
-        {"path": "docs/invoice.pdf", "size": 2048},
-    ]
-    audio_resp = bridge.list_stage_files(
-        "@SNOWFLAKE_LANGFLOW.CORE.EXTERNAL_S3_MEDIA_STAGE",
-        media_filter="audio",
-    )
+    orig_sql = bridge.execute_sql
+    bridge.execute_sql = lambda *a, **k: {  # type: ignore[method-assign]
+        "ok": True,
+        "rows": [
+            {"name": "external_s3_media_stage/audio/customer_call_recording.mp3", "size": 1024},
+            {"name": "external_s3_media_stage/docs/invoice.pdf", "size": 2048},
+        ],
+    }
+    try:
+        audio_resp = bridge.list_stage_files(
+            "@SNOWFLAKE_LANGFLOW.CORE.EXTERNAL_S3_MEDIA_STAGE",
+            media_filter="audio",
+        )
+    finally:
+        bridge.execute_sql = orig_sql  # type: ignore[method-assign]
     assert audio_resp["ok"] is True
     assert len(audio_resp["files"]) == 1
     assert audio_resp["files"][0]["path"].endswith(".mp3")

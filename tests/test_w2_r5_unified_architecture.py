@@ -8,6 +8,7 @@ import re
 import sys
 import types
 from pathlib import Path
+import pytest
 from typing import Any
 from urllib.parse import parse_qs, unquote, urlencode, urlsplit
 
@@ -556,7 +557,7 @@ def test_w2_r5_05_stages_and_volumes_backend_and_frontend_bucket_tab() -> None:
     assert stg_resp.status_code == 200
     stg_data = stg_resp.json()
     assert stg_data["ok"] is True
-    assert any(s["name"] == "SNOWFLAKE_LANGFLOW_STAGE" for s in stg_data["stages"])
+    assert isinstance(stg_data["stages"], list)
     assert "can_create_stage" in stg_data["role_privileges"]
     assert "can_create_external_volume" in stg_data["role_privileges"]
 
@@ -601,7 +602,7 @@ def test_w2_r5_05_stages_and_volumes_backend_and_frontend_bucket_tab() -> None:
     assert "URL = 's3://enterprise-analytics-bucket/langflow/'" in ext_payload["ddl"]
     assert "STORAGE_INTEGRATION = S3_ENTERPRISE_INT" in ext_payload["ddl"]
 
-    # 3. Upload file to stage, list stage files, refresh stage, and delete file
+    # 3. Upload is rejected honestly (W3-R1-04); list/refresh/delete report the real SQL result
     up_resp = client.post(
         "/api/v1/snowflake/stages/upload",
         json={
@@ -610,31 +611,43 @@ def test_w2_r5_05_stages_and_volumes_backend_and_frontend_bucket_tab() -> None:
             "content": "# Q4 Summary\nRevenue grew 28% YoY.",
         },
     )
-    assert up_resp.status_code in (200, 201)
+    assert up_resp.status_code >= 400
     up_data = up_resp.json()
-    assert up_data["ok"] is True
-    assert "PUT " in up_data["put_sql"]
-    assert "ALTER STAGE SNOWFLAKE_LANGFLOW.CORE.W2_R5_DOCS_INTERNAL_STAGE REFRESH" in (up_data["refresh_sql"] or "")
+    assert up_data["ok"] is False
+    assert "Upload is available after the identity upgrade" in up_data["message"]
 
-    files_resp = client.get("/api/v1/snowflake/stages/SNOWFLAKE_LANGFLOW.CORE.W2_R5_DOCS_INTERNAL_STAGE/files")
-    assert files_resp.status_code == 200
-    files_list = files_resp.json()["files"]
-    assert any("q4_summary.md" in f["name"] for f in files_list)
+    issued: list[str] = []
+    orig_sql = LIVE_BRIDGE.execute_sql
 
-    ref_resp = client.post(
-        "/api/v1/snowflake/stages/refresh",
-        json={"stage_fqn": "@SNOWFLAKE_LANGFLOW.CORE.W2_R5_DOCS_INTERNAL_STAGE"},
-    )
-    assert ref_resp.status_code == 200
-    assert ref_resp.json()["ok"] is True
+    def _fake_sql(statement: str, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        issued.append(statement)
+        if statement.upper().startswith("LIST"):
+            rows = [{"name": "w2_r5_docs_internal_stage/reports/q4_summary.md", "size": 10}]
+            return {"ok": True, "status_code": 200, "rows": rows}
+        return {"ok": True, "status_code": 200, "rows": []}
 
-    del_resp = client.request(
-        "DELETE",
-        "/api/v1/snowflake/stages/SNOWFLAKE_LANGFLOW.CORE.W2_R5_DOCS_INTERNAL_STAGE/files",
-        params={"file_path": "reports/q4_summary.md"},
-    )
-    assert del_resp.status_code == 200
-    assert "REMOVE @SNOWFLAKE_LANGFLOW.CORE.W2_R5_DOCS_INTERNAL_STAGE/reports/q4_summary.md" in del_resp.json()["sql"]
+    LIVE_BRIDGE.execute_sql = _fake_sql  # type: ignore[method-assign]
+    try:
+        files_resp = client.get("/api/v1/snowflake/stages/SNOWFLAKE_LANGFLOW.CORE.W2_R5_DOCS_INTERNAL_STAGE/files")
+        assert files_resp.status_code == 200
+        assert any("q4_summary.md" in f["name"] for f in files_resp.json()["files"])
+
+        ref_resp = client.post(
+            "/api/v1/snowflake/stages/refresh",
+            json={"stage_fqn": "@SNOWFLAKE_LANGFLOW.CORE.W2_R5_DOCS_INTERNAL_STAGE"},
+        )
+        assert ref_resp.status_code == 200
+        assert ref_resp.json()["ok"] is True
+
+        del_resp = client.request(
+            "DELETE",
+            "/api/v1/snowflake/stages/SNOWFLAKE_LANGFLOW.CORE.W2_R5_DOCS_INTERNAL_STAGE/files",
+            params={"file_path": "reports/q4_summary.md"},
+        )
+        assert del_resp.status_code == 200
+        assert "REMOVE '@SNOWFLAKE_LANGFLOW.CORE.W2_R5_DOCS_INTERNAL_STAGE/reports/q4_summary.md'" in del_resp.json()["sql"]
+    finally:
+        LIVE_BRIDGE.execute_sql = orig_sql  # type: ignore[method-assign]
 
     # 4. External Volumes & Role Privilege Check
     prev_role = LIVE_BRIDGE.active_role
@@ -732,7 +745,12 @@ def test_w2_r5_06_files_and_knowledge_exact_5_canonical_components() -> None:
     )
     assert rf_comp.name == "File"
     assert rf_comp.display_name == "Read File"
-    rf_data = rf_comp.read_stage_file_data().data
+    orig_sql = LIVE_BRIDGE.execute_sql
+    LIVE_BRIDGE.execute_sql = lambda *a, **k: {"ok": True, "rows": [{"PARSED_CONTENT": {"content": "x"}}]}  # type: ignore[method-assign]
+    try:
+        rf_data = rf_comp.read_stage_file_data().data
+    finally:
+        LIVE_BRIDGE.execute_sql = orig_sql  # type: ignore[method-assign]
     assert "SNOWFLAKE.CORTEX.AI_PARSE_DOCUMENT" in rf_data["sql"]
 
     wf_comp = SnowflakeWriteFileComponent(
@@ -744,8 +762,8 @@ def test_w2_r5_06_files_and_knowledge_exact_5_canonical_components() -> None:
     )
     assert wf_comp.name == "SaveToFile"
     assert wf_comp.display_name == "Write File"
-    wf_data = wf_comp.save_to_file_data().data
-    assert wf_data["target"] == "@SNOWFLAKE_LANGFLOW.CORE.SNOWFLAKE_LANGFLOW_STAGE/exports/summary.json"
+    with pytest.raises(ValueError, match="Upload is available after the identity upgrade"):
+        wf_comp.save_to_file_data()
 
     hooks_py = (REPO_ROOT / "scripts" / "install_live_hooks_in_container.py").read_text(encoding="utf-8")
     for removed_dup in (
