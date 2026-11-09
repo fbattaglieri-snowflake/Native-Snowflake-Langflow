@@ -619,8 +619,8 @@
         tables: ["LANGFLOW_FLOW_RUNS", "LANGFLOW_FLOW_SPANS", "LANGFLOW_AUDIT_LOG"],
         views: [],
         iceberg_tables: [],
-        stages: ["SNOWFLAKE_LANGFLOW_STAGE"],
-        memories: ["SNOWFLAKE_KB_MEM"],
+        stages: [],
+        memories: [],
         cortex_search_services: [],
         semantic_views: [],
         semantic_models: [],
@@ -650,8 +650,8 @@
       tables: ["LANGFLOW_FLOW_RUNS", "LANGFLOW_FLOW_SPANS", "LANGFLOW_AUDIT_LOG"],
       views: [],
       iceberg_tables: [],
-      stages: ["SNOWFLAKE_LANGFLOW_STAGE"],
-      memories: ["SNOWFLAKE_KB_MEM"],
+      stages: [],
+      memories: [],
       cortex_search_services: [],
       semantic_views: [],
       semantic_models: [],
@@ -3120,7 +3120,7 @@
               <div id="sflf-mem-embed-row"><select id="sflf-mem-embed-model">${embedModelOptionsHtml}</select></div>
               <select id="sflf-mem-vector-elem-type"><option value="FLOAT">FLOAT</option></select>
               <input id="sflf-mem-vector-dim" value="768" readonly />
-              <input id="sflf-mem-name" value="SNOWFLAKE_KB_MEM" />
+              <input id="sflf-mem-name" value="" placeholder="Memory name" />
               <button id="sflf-btn-create-mem" type="button">Create Governed Memory</button>
               <div id="sflf-mem-constraint-note"></div>
               <div id="sflf-mem-out" style="${codeBoxStyle}"></div>
@@ -6792,15 +6792,7 @@
         return;
       }
 
-      _stagesVolumesState.external_volumes.push({
-        name: volName,
-        volume_name: volName,
-        allow_writes: allowWrites,
-        storage_provider: provider,
-        storage_base_url: baseUrl,
-        encryption: encType,
-        comment: comment,
-      });
+      // Do not push into local state: the list is re-fetched from SHOW EXTERNAL VOLUMES below.
       _selectedStageOrVolumeKey = `VOL:${volName}`;
       showDenialOrStatusBanner("ok", "EXTERNAL_VOLUME_CREATED", `Created External Volume ${volName}`);
       const modal = document.getElementById("sflf-create-stage-modal");
