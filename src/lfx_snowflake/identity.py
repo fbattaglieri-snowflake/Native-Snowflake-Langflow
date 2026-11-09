@@ -19,8 +19,9 @@ from __future__ import annotations
 
 import os
 import re
-from collections.abc import Mapping
-from contextvars import ContextVar, Token
+from collections.abc import Callable, Mapping
+from contextvars import ContextVar, Token, copy_context
+from typing import Any
 from dataclasses import dataclass, field
 
 CALLERS_RIGHTS_ENV = "SNOWFLAKE_LANGFLOW_CALLERS_RIGHTS"
@@ -115,27 +116,90 @@ def authorization_value(service_token: str, mode: str) -> str:
     return f"Bearer {service_token}"
 
 
-_READ_ONLY_LEAD = re.compile(r"^\s*(SELECT|WITH|SHOW|DESCRIBE|DESC|EXPLAIN|LIST|LS)\b", re.IGNORECASE)
-_COMMENTS = re.compile(r"--[^\n]*|/\*.*?\*/", re.DOTALL)
-_STRINGS = re.compile(r"'(?:[^'\\]|\\.|'')*'|\$\$.*?\$\$", re.DOTALL)
-_WRITE_WORDS = re.compile(
-    r"\b(INSERT|UPDATE|DELETE|MERGE|CREATE|ALTER|DROP|TRUNCATE|GRANT|REVOKE|COPY|PUT|REMOVE|RM|CALL|EXECUTE|USE|UNDROP|SET|UNSET|BEGIN|COMMIT|ROLLBACK)\b",
-    re.IGNORECASE,
+_READ_ONLY_LEADS = frozenset({"SELECT", "WITH", "SHOW", "DESCRIBE", "DESC", "EXPLAIN", "LIST", "LS"})
+_METADATA_LEADS = frozenset({"SHOW", "DESCRIBE", "DESC", "LIST", "LS"})
+_WRITE_WORDS = frozenset(
+    {
+        "INSERT", "UPDATE", "DELETE", "MERGE", "CREATE", "ALTER", "DROP", "TRUNCATE", "GRANT", "REVOKE",
+        "COPY", "PUT", "GET", "REMOVE", "RM", "CALL", "EXECUTE", "IMMEDIATE", "USE", "UNDROP", "SET",
+        "UNSET", "BEGIN", "COMMIT", "ROLLBACK", "DECLARE", "LET",
+    }
 )
+_WORD = re.compile(r"[A-Za-z_][A-Za-z0-9_$]*")
+
+
+class _UnterminatedToken(ValueError):
+    pass
+
+
+def _scrub_sql(statement: str) -> str:
+    """Single left-to-right pass replacing literals, quoted identifiers and comments.
+
+    Whichever construct opens first wins, so ``'/*'`` is a string (not a comment
+    start) and ``-- '`` is a comment (not a string start). Unterminated tokens raise.
+    """
+    out: list[str] = []
+    i, n = 0, len(statement)
+    while i < n:
+        ch = statement[i]
+        two = statement[i : i + 2]
+        if two == "--" or two == "//":
+            j = statement.find("\n", i)
+            i = n if j < 0 else j
+            out.append(" ")
+        elif two == "/*":
+            j = statement.find("*/", i + 2)
+            if j < 0:
+                raise _UnterminatedToken("comment")
+            i = j + 2
+            out.append(" ")
+        elif two == "$$":
+            j = statement.find("$$", i + 2)
+            if j < 0:
+                raise _UnterminatedToken("dollar")
+            i = j + 2
+            out.append(" '' ")
+        elif ch in "'\"":
+            j = i + 1
+            while True:
+                if j >= n:
+                    raise _UnterminatedToken("quote")
+                if ch == "'" and statement[j] == "\\":
+                    j += 2
+                    continue
+                if statement[j] == ch:
+                    if j + 1 < n and statement[j + 1] == ch:
+                        j += 2
+                        continue
+                    break
+                j += 1
+            i = j + 1
+            out.append(" '' " if ch == "'" else " _qid ")
+        else:
+            out.append(ch)
+            i += 1
+    return "".join(out)
 
 
 def is_read_only_statement(statement: str) -> bool:
-    """Conservative single-statement read-only check (fails closed on doubt)."""
-    sql = _COMMENTS.sub(" ", statement or "")
-    scrubbed = _STRINGS.sub("''", sql).strip().rstrip(";").strip()
+    """Conservative single-statement read-only check (fails closed on doubt).
+
+    Rejects multi-statement input, CALL / EXECUTE IMMEDIATE, scripting blocks and
+    any write keyword anywhere outside literals (e.g. ``WITH ... INSERT``).
+    """
+    try:
+        scrubbed = _scrub_sql(statement or "").strip()
+    except _UnterminatedToken:
+        return False
+    scrubbed = scrubbed.rstrip().rstrip(";").strip()
     if not scrubbed or ";" in scrubbed:
         return False
-    if not _READ_ONLY_LEAD.match(scrubbed):
+    words = [w.upper() for w in _WORD.findall(scrubbed)]
+    if not words or words[0] not in _READ_ONLY_LEADS:
         return False
-    lead = scrubbed.split(None, 1)[0].upper()
-    if lead in {"SHOW", "DESCRIBE", "DESC", "LIST", "LS"}:
+    if words[0] in _METADATA_LEADS:
         return True
-    return _WRITE_WORDS.search(scrubbed) is None
+    return not any(w in _WRITE_WORDS for w in words)
 
 
 def is_selectable_role(role: str | None, available: list[str] | None) -> bool:
@@ -143,3 +207,64 @@ def is_selectable_role(role: str | None, available: list[str] | None) -> bool:
     if not clean or clean in PRIVILEGED_ROLES:
         return False
     return clean in {str(r).strip().upper() for r in (available or [])}
+
+
+# W3-R1-10c: execution mode requested for the current request. User-facing routes bind
+# ``caller``; everything else (and every background job) stays ``service``. ``resolve_mode``
+# still downgrades to service when the caller's-rights flag is OFF.
+CURRENT_REQUEST_MODE: ContextVar[str] = ContextVar("snowflake_request_mode", default=MODE_SERVICE)
+
+USER_FACING_PATH_MARKERS: tuple[str, ...] = (
+    "/memories",
+    "/stages",
+    "/catalog",
+    "/context",
+    "/cortex",
+    "/cortex-agents",
+    "/analyst",
+    "/a2a/cortex-agents",
+)
+
+
+def mode_for_path(path: str | None) -> str:
+    clean = str(path or "")
+    for marker in USER_FACING_PATH_MARKERS:
+        if f"{marker}/" in f"{clean}/":
+            return MODE_CALLER
+    return MODE_SERVICE
+
+
+def current_request_mode() -> str:
+    return CURRENT_REQUEST_MODE.get()
+
+
+def bind_request_mode(mode: str) -> Token[str]:
+    return CURRENT_REQUEST_MODE.set(mode if mode in (MODE_CALLER, MODE_SERVICE) else MODE_SERVICE)
+
+
+def reset_request_mode(token: Token[str]) -> None:
+    CURRENT_REQUEST_MODE.reset(token)
+
+
+def submit_with_context(executor: Any, fn: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+    """Submit ``fn`` with a copy of the caller's contextvars (identity, mode, trace ids)."""
+    ctx = copy_context()
+    return executor.submit(ctx.run, fn, *args, **kwargs)
+
+
+def _run_as_service(fn: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+    token = CURRENT_REQUEST_MODE.set(MODE_SERVICE)
+    try:
+        return fn(*args, **kwargs)
+    finally:
+        CURRENT_REQUEST_MODE.reset(token)
+
+
+def submit_background(executor: Any, fn: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+    """Background job: keeps identity/trace context (for origin_user) but always runs in service mode."""
+    ctx = copy_context()
+    return executor.submit(ctx.run, _run_as_service, fn, *args, **kwargs)
+
+
+def origin_user() -> str | None:
+    return current_identity().sf_user
