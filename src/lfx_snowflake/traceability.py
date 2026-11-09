@@ -256,8 +256,13 @@ def build_audit_insert(
     flow_id: str | None,
     run_id: str | None,
     details: Mapping[str, Any] | None,
+    trace_id: str | None = None,
 ) -> tuple[str, dict[str, dict[str, Any]]]:
-    """Return (statement, SQL API bindings). Idempotent on event_id (NOT EXISTS), so retries do not duplicate."""
+    """Return (statement, SQL API bindings). Idempotent on event_id (NOT EXISTS), so retries do not duplicate.
+
+    TRACE_ID links the row to its request: explicit ``trace_id``, else the run id, else the bound request id.
+    """
+    trace_id = trace_id or run_id or CURRENT_REQUEST_ID.get()
     if not _FQN_RE.match(audit_table or ""):
         raise ValueError("invalid audit table identifier")
     details_json = json.dumps(sanitize_details(details), separators=(",", ":"))
@@ -279,7 +284,7 @@ def build_audit_insert(
         ("TEXT", target_object),
         ("TEXT", flow_id),
         ("TEXT", run_id),
-        ("TEXT", run_id),
+        ("TEXT", trace_id),
         ("TEXT", details_json),
         ("TEXT", event_id),
     ]
@@ -383,3 +388,117 @@ def log_event(event: str, **fields: Any) -> None:
     fields.setdefault("component", CURRENT_COMPONENT.get())
     fields["event"] = event
     get_trace_logger().info(event, extra={"sflf": fields})
+
+
+# --- Request id propagation to the client (W3-R1-14 follow-up) -----------------------------------
+
+REQUEST_ID_HEADER = "X-Request-Id"
+# Fallback header: some ingresses (e.g. SPCS public endpoints) drop X-Request-Id from responses.
+REQUEST_ID_FALLBACK_HEADER = "X-Snowflake-Langflow-Request-Id"
+REQUEST_ID_SCOPE_KEY = "sflf_request_id"
+_ERROR_BODY_MAX_BYTES = 256 * 1024
+
+
+def _scope_header(scope: Mapping[str, Any], name: str) -> str | None:
+    target = name.lower().encode("latin-1")
+    for key, value in scope.get("headers") or []:
+        if key.lower() == target:
+            return value.decode("latin-1", errors="ignore")
+    return None
+
+
+def request_id_for_scope(scope: Mapping[str, Any]) -> str:
+    """Request id already assigned to this ASGI scope, else derived from the incoming header."""
+    existing = scope.get(REQUEST_ID_SCOPE_KEY) if isinstance(scope, Mapping) else None
+    return existing or request_id_from_header(_scope_header(scope, REQUEST_ID_HEADER))
+
+
+def _with_request_id_headers(headers: list[Any], request_id: str, *, drop_length: bool = False) -> list[Any]:
+    names = {REQUEST_ID_HEADER.lower().encode(), REQUEST_ID_FALLBACK_HEADER.lower().encode()}
+    if drop_length:
+        names.add(b"content-length")
+    kept = [(k, v) for k, v in headers if k.lower() not in names]
+    rid = request_id.encode("latin-1")
+    return [*kept, (REQUEST_ID_HEADER.lower().encode(), rid), (REQUEST_ID_FALLBACK_HEADER.lower().encode(), rid)]
+
+
+def _inject_request_id(body: bytes, request_id: str) -> bytes:
+    try:
+        payload = json.loads(body or b"null")
+    except (ValueError, UnicodeDecodeError):
+        return body
+    if not isinstance(payload, dict):
+        return body
+    payload.setdefault("request_id", request_id)
+    return json.dumps(payload).encode("utf-8")
+
+
+class RequestIdASGIMiddleware:
+    """Pure ASGI middleware: every HTTP response carries the request id (headers + JSON error body).
+
+    Wraps ``send`` rather than ``call_next`` so streaming, static files, error responses and
+    unhandled exceptions are all covered. Request/response content is never logged.
+    """
+
+    def __init__(self, app: Any) -> None:
+        self.app = app
+
+    async def __call__(self, scope: dict[str, Any], receive: Any, send: Any) -> None:
+        if scope.get("type") != "http":
+            await self.app(scope, receive, send)
+            return
+        request_id = request_id_for_scope(scope)
+        scope[REQUEST_ID_SCOPE_KEY] = request_id
+        state: dict[str, Any] = {"started": False, "start": None, "buffer": None}
+
+        async def _send(message: dict[str, Any]) -> None:
+            if message["type"] == "http.response.start":
+                state["started"] = True
+                status = int(message.get("status", 200))
+                headers = list(message.get("headers") or [])
+                ctype = next((v for k, v in headers if k.lower() == b"content-type"), b"")
+                if status >= 400 and ctype.split(b";")[0].strip() == b"application/json":
+                    # Buffer the (small) JSON error body so request_id can be added to the envelope.
+                    state["start"] = {**message, "headers": headers}
+                    state["buffer"] = bytearray()
+                    return
+                await send({**message, "headers": _with_request_id_headers(headers, request_id)})
+                return
+            if message["type"] == "http.response.body" and state["buffer"] is not None:
+                state["buffer"].extend(message.get("body", b""))
+                more = message.get("more_body", False)
+                if more and len(state["buffer"]) <= _ERROR_BODY_MAX_BYTES:
+                    return
+                body = bytes(state["buffer"])
+                if not more:
+                    body = _inject_request_id(body, request_id)
+                start = state["start"]
+                headers = _with_request_id_headers(start["headers"], request_id, drop_length=True)
+                if not more:
+                    headers.append((b"content-length", str(len(body)).encode()))
+                state["buffer"] = None
+                await send({**start, "headers": headers})
+                await send({"type": "http.response.body", "body": body, "more_body": more})
+                return
+            await send(message)
+
+        try:
+            await self.app(scope, receive, _send)
+        except Exception:
+            if state["started"]:
+                raise
+            log_event("request_unhandled_error", request_id=request_id, error_code="HTTP_500")
+            body = json.dumps({"detail": "Internal Server Error", "request_id": request_id}).encode("utf-8")
+            headers = _with_request_id_headers([(b"content-type", b"application/json")], request_id)
+            headers.append((b"content-length", str(len(body)).encode()))
+            await send({"type": "http.response.start", "status": 500, "headers": headers})
+            await send({"type": "http.response.body", "body": body})
+
+
+EXECUTION_MODE_CALLER = "INTERACTIVE_CALLER"
+EXECUTION_MODE_SERVICE = "SERVICE"
+
+
+def audit_execution_mode(effective_mode: str | None) -> str:
+    """EXECUTION_MODE column value for an *effective* identity mode (``caller``/``service``)."""
+    return EXECUTION_MODE_CALLER if (effective_mode or "").lower() == "caller" else EXECUTION_MODE_SERVICE

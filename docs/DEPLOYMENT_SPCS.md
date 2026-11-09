@@ -54,6 +54,22 @@ Execute the parametric SQL scripts in `sql/` to provision:
 - `<DATABASE>.<SCHEMA>.LANGFLOW_FLOW_SPANS` — Granular node/component execution spans with `snowflake_query_ids`, `proxy_request_ids`, `cortex_thread_id`, `cortex_parent_message_id`, and `a2a_task_id`.
 - `<DATABASE>.<SCHEMA>.LANGFLOW_AUDIT_LOG` — Durable append-only governance audit log recording every object creation, role change, A2A publication/revocation, and `AUTHZ_ROLE_DENIED` event.
 
+### Request correlation and audit attribution
+
+- Every HTTP response (JSON, streaming, static assets, errors, unhandled exceptions) carries the request id in
+  both `X-Request-Id` and `X-Snowflake-Langflow-Request-Id`. Some ingress layers strip `X-Request-Id` from
+  responses; clients should read either header. JSON error bodies (status >= 400) also include a
+  `request_id` field, which survives any header filtering. An incoming `X-Request-Id` is reused only if it
+  is a valid UUID.
+- `LANGFLOW_AUDIT_LOG.EXECUTION_MODE` records the *effective* mode: `INTERACTIVE_CALLER` only when
+  `SNOWFLAKE_LANGFLOW_CALLERS_RIGHTS` is ON and the request ran with caller's rights, otherwise `SERVICE`.
+  Background writes keep the mode of the request that scheduled them.
+- `EFFECTIVE_ROLE` is the role sent to the SQL API. When no role is sent in service mode, the service
+  token's default role is resolved once with `SELECT CURRENT_ROLE()` and cached. In caller mode without an
+  explicit role it is `NULL` (unknown, never guessed).
+- `TRACE_ID` is the flow `run_id` when one exists, otherwise the request id, so an audit row can be joined
+  to container logs, `QUERY_TAG` (`request_id`/`run_id` keys) and `LANGFLOW_FLOW_RUNS`.
+
 ---
 
 ## 4. Building & Pushing the `linux/amd64` Container Image

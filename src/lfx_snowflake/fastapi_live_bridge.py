@@ -8008,6 +8008,35 @@ class LiveSnowflakeBridge:
         """Role for background/service writes (W3-R1-10e): configured service role, never a hard-coded admin."""
         return _sf_identity.service_role() or self.active_role
 
+    def _service_default_role(self) -> str | None:
+        """Default role of the service token, resolved once via CURRENT_ROLE() and cached (never invented)."""
+        cached = getattr(self, "_service_default_role_cache", None)
+        if cached:
+            return cached
+        if time.monotonic() < getattr(self, "_service_default_role_retry_at", 0.0):
+            return None
+        try:
+            # No role is sent here (active_role is empty), so CURRENT_ROLE() is the token's default role.
+            res = self.execute_sql("SELECT CURRENT_ROLE() AS RL", timeout=10, mode=_sf_identity.MODE_SERVICE)
+        except Exception:  # noqa: BLE001
+            res = {}
+        rows = res.get("rows") if isinstance(res, dict) and res.get("ok") else None
+        role = str((rows[0] or {}).get("RL") or "").strip() if rows else ""
+        if role:
+            self._service_default_role_cache = role
+            return role
+        self._service_default_role_retry_at = time.monotonic() + 60.0
+        return None
+
+    def _effective_role_for_audit(self, mode: str, explicit_role: str | None = None) -> str | None:
+        """Role actually used for the audited action: the role sent to the SQL API, else the token default."""
+        if explicit_role and explicit_role.strip():
+            return explicit_role.strip()
+        if mode == _sf_identity.MODE_CALLER:
+            # Caller mode sends no role unless explicit; the caller's default role is not resolved here.
+            return None
+        return (self.active_role or "").strip() or self._service_default_role()
+
     def _get_spcs_headers(self, mode: str = _sf_identity.MODE_SERVICE) -> dict[str, str]:
         token = SPCS_TOKEN_PATH.read_text(encoding="utf-8").strip()
         return {
@@ -8273,6 +8302,7 @@ class LiveSnowflakeBridge:
         flow_id: str | None = None,
         run_id: str | None = None,
         event_id: str | None = None,
+        effective_role: str | None = None,
     ) -> str:
         if action in DEPRECATED_AUDIT_ACTIONS:
             raise ValueError(f"deprecated audit action: {action}")
@@ -8286,7 +8316,9 @@ class LiveSnowflakeBridge:
         # TR-06: background writes run as the service; record who originated them (attribution only).
         if _sf_identity.origin_user() and "origin_user" not in details:
             details["origin_user"] = _sf_identity.origin_user()
-        details.setdefault("execution_mode", _sf_identity.resolve_mode(_sf_identity.current_request_mode()))
+        # Effective mode of the originating request (service whenever the caller's-rights flag is OFF).
+        eff_mode = _sf_identity.origin_mode()
+        details.setdefault("execution_mode", eff_mode)
         # TR-01: enforce the metadata allowlist for every caller (no content can reach the audit row).
         details = sanitize_details(details)
         redacted = redact_for_sink(details)
@@ -8298,8 +8330,8 @@ class LiveSnowflakeBridge:
             self.audit_table,
             event_id=event_id,
             authenticated_user=self.authenticated_user,
-            effective_role=self.active_role,
-            execution_mode=ExecutionMode.INTERACTIVE_CALLER.value,
+            effective_role=self._effective_role_for_audit(eff_mode, effective_role),
+            execution_mode=_trace.audit_execution_mode(eff_mode),
             context_epoch=int(self.context_epoch or 0),
             action=action,
             outcome=outcome,
@@ -8308,6 +8340,7 @@ class LiveSnowflakeBridge:
             flow_id=eff_fid,
             run_id=run_id,
             details=None,
+            trace_id=run_id or CURRENT_REQUEST_ID.get(),
         )
         # Keep the existing redaction path for details (redact_for_sink + 12 KB cap), still bound, never inlined.
         audit_bindings[str(len(audit_bindings) - 1)] = {"type": "TEXT", "value": details_json}
@@ -8918,7 +8951,7 @@ class LiveSnowflakeBridge:
                             f"redacted_inputs, redacted_outputs) VALUES "
                             f"('evt-{tx_id[:16]}', '{tx_id}', 'run-{flow_id[:16]}', 'trc-{flow_id[:16]}', "
                             f"'default', '{flow_id}', '{vertex_id}', '{vertex_id}', "
-                            f"'{self.authenticated_user}', '{self.active_role}', 'INTERACTIVE_CALLER', "
+                            f"'{self.authenticated_user}', '{self.active_role}', '{_trace.audit_execution_mode(_sf_identity.origin_mode())}', "
                             f"CURRENT_TIMESTAMP(), CURRENT_TIMESTAMP(), '{status_val}', "
                             f"PARSE_JSON('{inputs_redacted}'), PARSE_JSON('{outputs_redacted}'))"
                         )
@@ -8932,7 +8965,7 @@ class LiveSnowflakeBridge:
                             f"(event_id, run_id, trace_id, project_id, flow_id, authenticated_user, effective_role, "
                             f"execution_mode, start_ts, end_ts, status, input_payload, output_payload) VALUES "
                             f"('evr-{tx_id[:16]}', 'run-{tx_id[:16]}', 'trc-{flow_id[:16]}', 'default', '{flow_id}', "
-                            f"'{self.authenticated_user}', '{self.active_role}', 'INTERACTIVE_CALLER', "
+                            f"'{self.authenticated_user}', '{self.active_role}', '{_trace.audit_execution_mode(_sf_identity.origin_mode())}', "
                             f"CURRENT_TIMESTAMP(), CURRENT_TIMESTAMP(), '{status_val}', "
                             f"PARSE_JSON('{inputs_redacted}'), PARSE_JSON('{outputs_redacted}'))"
                         )
@@ -9010,7 +9043,7 @@ class LiveSnowflakeBridge:
                             f"redacted_inputs, redacted_outputs) VALUES "
                             f"('evb-{vb_id[:16]}', 'vb-{vb_id}', 'run-{flow_id[:16]}', 'trc-{flow_id[:16]}', "
                             f"'default', '{flow_id}', '{vertex_id}', '{vertex_id}', "
-                            f"'{self.authenticated_user}', '{self.active_role}', 'INTERACTIVE_CALLER', "
+                            f"'{self.authenticated_user}', '{self.active_role}', '{_trace.audit_execution_mode(_sf_identity.origin_mode())}', "
                             f"CURRENT_TIMESTAMP(), CURRENT_TIMESTAMP(), '{status_val}', "
                             f"PARSE_JSON('{params_redacted}'), PARSE_JSON('{data_redacted}'))"
                         )
@@ -9655,7 +9688,10 @@ def register_snowflake_fastapi_routes(app: Any) -> None:
             mode_token = _sf_identity.bind_request_mode(_sf_identity.mode_for_path(request.url.path))
             # W3-R1-14a/14d: per-request correlation ids + allowlisted lifecycle logs (no content).
             req_path = str(getattr(request.url, "path", "") or "")
-            request_id = _trace.request_id_from_header(request.headers.get("X-Request-Id"))
+            # Reuse the id assigned by RequestIdASGIMiddleware (outermost) so headers and logs agree.
+            request_id = (getattr(request, "scope", None) or {}).get(_trace.REQUEST_ID_SCOPE_KEY) or _trace.request_id_from_header(
+                request.headers.get(_trace.REQUEST_ID_HEADER)
+            )
             run_id = _trace.run_id_for_request(req_path, request.headers.get("X-Run-Id"))
             started = time.monotonic()
             outcome = "FAILURE"
@@ -9670,7 +9706,8 @@ def register_snowflake_fastapi_routes(app: Any) -> None:
                         status_code = int(getattr(response, "status_code", 200) or 200)
                         outcome = "SUCCESS" if status_code < 400 else "FAILURE"
                         try:
-                            response.headers["X-Request-Id"] = request_id
+                            response.headers[_trace.REQUEST_ID_HEADER] = request_id
+                            response.headers[_trace.REQUEST_ID_FALLBACK_HEADER] = request_id
                         except Exception:  # noqa: BLE001
                             pass
                         return response
@@ -9689,6 +9726,11 @@ def register_snowflake_fastapi_routes(app: Any) -> None:
             finally:
                 _sf_identity.reset_request_mode(mode_token)
                 _sf_identity.reset_identity(ident_token)
+
+        # Added last = outermost: every response (streaming, static, errors, unhandled exceptions)
+        # carries the request id in both headers and in JSON error envelopes.
+        if hasattr(app, "add_middleware"):
+            app.add_middleware(_trace.RequestIdASGIMiddleware)
 
     @sf_router.get("/persistence")
     async def get_persistence_status() -> JSONResponse:
