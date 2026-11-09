@@ -33,7 +33,7 @@ def test_cleanup_without_table_is_noop():
 
 
 def test_snowflake_names_detection():
-    assert bridge.snowflake_kb_names_in_native_table(_db(ROWS)) == {"SF_MEM"}
+    assert bridge.snowflake_kb_names_in_native_table(_db(ROWS)) == {"SF_MEM", "1"}
 
 
 def test_native_kb_target_names_routes():
@@ -60,6 +60,34 @@ def test_guard_wired_fail_closed_with_409():
     g = src.split("async def _guard_native_kb_request", 1)[1].split("\n        async def ", 1)[0]
     assert "status_code=409" in g and "SNOWFLAKE_KB_NOT_NATIVE" in g and "request_id" in g
     assert 'outcome="DENIED"' in g
-    # lookup failure (None) blocks every targeted name -> fail closed
-    assert "sf_names is None or" in g
-    assert 'path.startswith("/api/v1/knowledge_bases")' in src
+    assert "native_kb_guard_decision(" in g
+    assert '"/api/v1/knowledge-base-storage"))' in src
+
+
+def test_guard_decision_behaviour():
+    d = bridge.native_kb_guard_decision
+    sf = {"SF_MEM", "ABCDEF01"}
+    assert d("/api/v1/knowledge_bases/SF_MEM/ingest", "POST", None, sf) == "SF_MEM"
+    assert d("/api/v1/knowledge_bases/sf_mem/chunks", "GET", None, sf) == "sf_mem"
+    assert d("/api/v1/knowledge_bases/LOCAL_KB/ingest", "POST", None, sf) is None
+    assert d("/api/v1/knowledge_bases", "DELETE", b'{"kb_names":["LOCAL","SF_MEM"]}', sf) == "SF_MEM"
+    assert d("/api/v1/knowledge_bases", "DELETE", b'{"kb_names":["LOCAL"]}', sf) is None
+    assert d("/api/v1/knowledge_bases", "GET", None, sf) is None
+    # fail closed when the lookup failed
+    assert d("/api/v1/knowledge_bases/LOCAL_KB", "DELETE", None, None) == "LOCAL_KB"
+    assert d("/api/v1/flows/x", "GET", None, None) is None
+
+
+def test_kb_storage_routes_guarded():
+    d = bridge.native_kb_guard_decision
+    sf = {"ABCDEF01"}
+    assert d("/api/v1/knowledge-base-storage/pending-cleanup/abcd-ef01/retry", "POST", None, sf) == "abcdef01"
+    assert d("/api/v1/knowledge-base-storage/attention/ABCDEF01/detach", "POST", None, sf) == "ABCDEF01"
+    assert d("/api/v1/knowledge-base-storage/attention/OTHER/detach", "POST", None, sf) is None
+    for p in ("/status", "/inventory", "/pending-cleanup", "/migrations", "/migrations/m1/retry"):
+        assert d("/api/v1/knowledge-base-storage" + p, "GET", None, None) is None
+
+
+def test_memory_delete_never_deletes_knowledge_base_by_name():
+    src = Path(bridge.__file__).read_text()
+    assert "DELETE FROM knowledge_base WHERE name" not in src

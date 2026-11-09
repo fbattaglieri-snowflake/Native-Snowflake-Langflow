@@ -3021,7 +3021,8 @@ class LiveSnowflakeBridge:
                     "DELETE FROM memory_base WHERE name = ? OR id = ? OR id = ?",
                     (mem_name, mem_uuid_str, mem_hex_str),
                 )
-                cur.execute("DELETE FROM knowledge_base WHERE name = ?", (mem_name,))
+                # Never delete native knowledge_base rows by name; only snowflake-mode rows are purged.
+                purge_snowflake_rows_from_native_knowledge_base(conn)
                 conn.commit()
                 conn.close()
             except Exception:  # noqa: BLE001
@@ -9313,8 +9314,7 @@ def register_snowflake_fastapi_routes(app: Any) -> None:
         async def _guard_native_kb_request(request: Request, path: str, method: str) -> Any:
             """Fail closed (409) when a native KB route targets a Snowflake-mode knowledge_base row."""
             body = await request.body() if method == "DELETE" else None
-            names = native_kb_target_names(path, method, body)
-            if not names:
+            if not native_kb_target_names(path, method, body):
                 return None
             request_id = (getattr(request, "scope", None) or {}).get(_trace.REQUEST_ID_SCOPE_KEY) or _trace.request_id_from_header(
                 request.headers.get(_trace.REQUEST_ID_HEADER)
@@ -9333,11 +9333,9 @@ def register_snowflake_fastapi_routes(app: Any) -> None:
                 except Exception:  # noqa: BLE001
                     return None
 
-            sf_names = await asyncio.to_thread(_lookup)
-            hits = [n for n in names if sf_names is None or n.upper() in sf_names]
-            if not hits:
+            target = native_kb_guard_decision(path, method, body, await asyncio.to_thread(_lookup))
+            if target is None:
                 return None
-            target = hits[0]
             try:
                 LIVE_BRIDGE.record_audit_event(
                     action=AuditAction.AUTHZ_ROLE_DENIED.value,
@@ -9362,7 +9360,7 @@ def register_snowflake_fastapi_routes(app: Any) -> None:
         async def _snowflake_flow_context_and_trace(request: Request, call_next: Any) -> Any:
             path = str(getattr(request.url, "path", "") or "")
             method = str(getattr(request, "method", "GET") or "GET").upper()
-            if path.startswith("/api/v1/knowledge_bases"):
+            if path.startswith(("/api/v1/knowledge_bases", "/api/v1/knowledge-base-storage")):
                 blocked = await _guard_native_kb_request(request, path, method)
                 if blocked is not None:
                     return blocked
@@ -11256,15 +11254,16 @@ def _is_snowflake_backend_config(raw: Any) -> bool:
 
 
 def snowflake_kb_names_in_native_table(conn: Any) -> set[str]:
-    """Names of native `knowledge_base` rows whose backend_config.mode == 'snowflake' (upper-cased)."""
+    """Upper-cased names and dashless ids of native `knowledge_base` rows whose backend_config.mode == 'snowflake' (upper-cased)."""
     cur = conn.cursor()
     if not cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='knowledge_base'").fetchone():
         return set()
-    return {
-        str(name).upper()
-        for name, cfg in cur.execute("SELECT name, backend_config FROM knowledge_base").fetchall()
-        if _is_snowflake_backend_config(cfg)
-    }
+    out: set[str] = set()
+    for row_id, name, cfg in cur.execute("SELECT id, name, backend_config FROM knowledge_base").fetchall():
+        if _is_snowflake_backend_config(cfg):
+            out.add(str(name).upper())
+            out.add(str(row_id).replace("-", "").upper())
+    return out
 
 
 def purge_snowflake_rows_from_native_knowledge_base(conn: Any) -> int:
@@ -11285,8 +11284,14 @@ def purge_snowflake_rows_from_native_knowledge_base(conn: Any) -> int:
     return len(ids)
 
 
+_NATIVE_KB_STORAGE_ID_RE = re.compile(r"^/api/v1/knowledge-base-storage/(?:pending-cleanup|attention)/(?P<kb_id>[^/]+)/")
+
+
 def native_kb_target_names(path: str, method: str, body: bytes | None) -> list[str] | None:
-    """KB names targeted by a native /api/v1/knowledge_bases* request, or None if not a native KB route."""
+    """KB names/ids targeted by a native KB request, or None if not a native KB route."""
+    if (path or "").startswith("/api/v1/knowledge-base-storage"):
+        sm = _NATIVE_KB_STORAGE_ID_RE.match(path)
+        return [sm.group("kb_id").replace("-", "")] if sm else []
     m = _NATIVE_KB_PATH_RE.match(path or "")
     if not m:
         return None
@@ -11303,6 +11308,17 @@ def native_kb_target_names(path: str, method: str, body: bytes | None) -> list[s
         names = payload.get("kb_names") if isinstance(payload, dict) else None
         return [str(n) for n in names] if isinstance(names, list) else []
     return []
+
+
+def native_kb_guard_decision(
+    path: str, method: str, body: bytes | None, snowflake_ids: set[str] | None
+) -> str | None:
+    """Return the blocked target if the request hits a Snowflake-mode KB (fail closed if lookup failed)."""
+    names = native_kb_target_names(path, method, body)
+    if not names:
+        return None
+    hits = [n for n in names if snowflake_ids is None or n.upper() in snowflake_ids]
+    return hits[0] if hits else None
 
 
 def native_kb_backend_type_value(snowflake_key: str) -> str:
