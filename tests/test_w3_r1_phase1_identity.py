@@ -90,3 +90,11 @@ def test_selectable_role_blocks_privileged() -> None:
     assert not idm.is_selectable_role("ACCOUNTADMIN", ["ACCOUNTADMIN", "PUBLIC"])
     assert idm.is_selectable_role("public", ["PUBLIC"])
     assert not idm.is_selectable_role("X", ["PUBLIC"])
+
+
+def test_mcp_tools_have_no_admin_default_and_guard_writes() -> None:
+    from pathlib import Path
+
+    src = Path(__file__).resolve().parents[1].joinpath("src/lfx_snowflake/fastapi_live_bridge.py").read_text()
+    assert 'args.get("target_role") or "ACCOUNTADMIN"' not in src
+    assert "_sf_identity.is_read_only_statement(mcp_statement)" in src

@@ -108,6 +108,7 @@ from .governance.models import (
     SnowflakeErrorCode as ErrorCode,
 )
 from .observability.redaction import redact_payload_for_sink as redact_for_sink
+from . import identity as _sf_identity
 from .providers.registry import SnowflakeProviderError
 
 SPCS_TOKEN_PATH = Path("/snowflake/session/token")
@@ -10687,13 +10688,27 @@ def register_snowflake_fastapi_routes(app: Any) -> None:
                     },
                 }
             elif tool_name == "snowflake_switch_role":
-                payload = await asyncio.to_thread(
-                    LIVE_BRIDGE.switch_role, str(args.get("target_role") or "ACCOUNTADMIN")
-                )
+                requested_role = str(args.get("target_role") or "").strip()
+                if not _sf_identity.is_selectable_role(requested_role, LIVE_BRIDGE.available_roles):
+                    payload = {
+                        "ok": False,
+                        "status_code": 403,
+                        "error_code": ErrorCode.AUTHZ_ROLE_DENIED.value,
+                        "message": "target_role is required and must be a granted, non-privileged role.",
+                    }
+                else:
+                    payload = await asyncio.to_thread(LIVE_BRIDGE.switch_role, requested_role)
             elif tool_name == "snowflake_query_sql":
-                payload = await asyncio.to_thread(
-                    LIVE_BRIDGE.execute_sql, str(args.get("statement") or "SELECT CURRENT_ROLE()")
-                )
+                mcp_statement = str(args.get("statement") or "SELECT CURRENT_ROLE()")
+                if not _sf_identity.is_read_only_statement(mcp_statement):
+                    payload = {
+                        "ok": False,
+                        "status_code": 403,
+                        "error_code": ErrorCode.AUTHZ_ROLE_DENIED.value,
+                        "message": "snowflake_query_sql accepts a single read-only statement only; nothing was executed.",
+                    }
+                else:
+                    payload = await asyncio.to_thread(LIVE_BRIDGE.execute_sql, mcp_statement)
             elif tool_name == "snowflake_sync_traces":
                 payload = await asyncio.to_thread(
                     LIVE_BRIDGE.sync_langflow_traces_to_snowflake, limit=int(args.get("limit") or 20)
