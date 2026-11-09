@@ -27,6 +27,17 @@ os.environ.setdefault("LANGFLOW_A2A_ENABLED", "true")
 
 CURRENT_SNOWFLAKE_FLOW_ID: ContextVar[str | None] = ContextVar("current_snowflake_flow_id", default=None)
 
+from lfx_snowflake.traceability import (  # noqa: E402
+    CURRENT_REQUEST_ID,
+    CURRENT_RUN_ID,
+    DEPRECATED_ACTIONS as DEPRECATED_AUDIT_ACTIONS,
+    AuditAction,
+    build_audit_insert,
+    build_query_tag,
+    deterministic_event_id,
+    emit as emit_audit,
+)
+
 CANONICAL_TECHNICAL_MEMORY_TABLES: frozenset[str] = frozenset(
     {
         "MEM_GRAPH_STATE_CHECKPOINTS",
@@ -7905,6 +7916,7 @@ class LiveSnowflakeBridge:
         role: str | None = None,
         bindings: dict[str, Any] | None = None,
         timeout: int = 60,
+        query_tag: str | None = None,
     ) -> dict[str, Any]:
         """Execute a SQL statement via Snowflake SQL REST API (`/api/v2/statements`) using SPCS OAuth."""
         effective_role = (role or self.active_role).strip()
@@ -7935,6 +7947,8 @@ class LiveSnowflakeBridge:
             payload["warehouse"] = self.warehouse
         if bindings:
             payload["bindings"] = bindings
+        # TR-02: every SQL API call carries the JSON query tag (callers on worker threads pass it explicitly).
+        payload["parameters"] = {"query_tag": query_tag or build_query_tag()}
 
         try:
             if self._http_client is None and httpx is not None:
@@ -8116,37 +8130,38 @@ class LiveSnowflakeBridge:
         details: dict[str, Any] | None = None,
         flow_id: str | None = None,
         run_id: str | None = None,
+        event_id: str | None = None,
     ) -> str:
-        event_id = f"aud-{uuid.uuid4().hex[:16]}"
+        if action in DEPRECATED_AUDIT_ACTIONS:
+            raise ValueError(f"deprecated audit action: {action}")
+        run_id = run_id if run_id is not None else CURRENT_RUN_ID.get()
+        # TR-01: idempotent id, so a retried write cannot duplicate the event.
+        event_id = event_id or deterministic_event_id(
+            action, target_object, run_id, CURRENT_REQUEST_ID.get(), json.dumps(details or {}, sort_keys=True, default=str)
+        )
+        audit_query_tag = build_query_tag(flow_id=flow_id, run_id=run_id, component="audit")
         redacted = redact_for_sink(details or {})
         details_json = json.dumps(redacted)
         if len(details_json) > 12000:
             details_json = json.dumps({"summary": "truncated_large_audit_payload", "keys": list(redacted.keys())})
         eff_fid = flow_id or CURRENT_SNOWFLAKE_FLOW_ID.get()
-        stmt = (
-            f"INSERT INTO {self.audit_table} "
-            f"(event_id, event_ts, authenticated_user, effective_role, execution_mode, context_epoch, "
-            f"action, outcome, error_code, target_object, project_id, flow_id, run_id, trace_id, redacted_details) "
-            f"SELECT ?, CURRENT_TIMESTAMP(), ?, ?, ?, ?, ?, ?, ?, ?, 'default', ?, ?, ?, TRY_PARSE_JSON(?)"
+        stmt, audit_bindings = build_audit_insert(
+            self.audit_table,
+            event_id=event_id,
+            authenticated_user=self.authenticated_user,
+            effective_role=self.active_role,
+            execution_mode=ExecutionMode.INTERACTIVE_CALLER.value,
+            context_epoch=int(self.context_epoch or 0),
+            action=action,
+            outcome=outcome,
+            error_code=error_code,
+            target_object=target_object,
+            flow_id=eff_fid,
+            run_id=run_id,
+            details=None,
         )
-        audit_values: list[tuple[str, Any]] = [
-            ("TEXT", event_id),
-            ("TEXT", self.authenticated_user),
-            ("TEXT", self.active_role),
-            ("TEXT", ExecutionMode.INTERACTIVE_CALLER.value),
-            ("FIXED", int(self.context_epoch or 0)),
-            ("TEXT", action),
-            ("TEXT", outcome),
-            ("TEXT", error_code),
-            ("TEXT", target_object),
-            ("TEXT", eff_fid),
-            ("TEXT", run_id),
-            ("TEXT", run_id),
-            ("TEXT", details_json),
-        ]
-        audit_bindings = {
-            str(i + 1): {"type": t, "value": None if v is None else str(v)} for i, (t, v) in enumerate(audit_values)
-        }
+        # Keep the existing redaction path for details (redact_for_sink + 12 KB cap), still bound, never inlined.
+        audit_bindings[str(len(audit_bindings))] = {"type": "TEXT", "value": details_json}
         ev_type = (
             "CONTEXT_CHANGE"
             if action in ("UPDATE_CONTEXT", "OBJECT_REMOVED_FROM_CONTEXT", "REGISTER_OBJECT_IN_CONTEXT")
@@ -8195,9 +8210,11 @@ class LiveSnowflakeBridge:
 
         # In live SPCS mode, dispatch audit INSERT and LANGFLOW_FLOW_ACTIVITY MERGE asynchronously so UI requests never block on Snowflake DML
         if self._has_spcs_token() and not self._is_execute_sql_mocked():
-            _AUDIT_EXECUTOR.submit(self.execute_sql, stmt, role="ACCOUNTADMIN", bindings=audit_bindings, timeout=15)
+            _AUDIT_EXECUTOR.submit(
+                self.execute_sql, stmt, role="ACCOUNTADMIN", bindings=audit_bindings, timeout=15, query_tag=audit_query_tag
+            )
             act_merge = self._build_activity_merge_sql(act_record)
-            _AUDIT_EXECUTOR.submit(self.execute_sql, act_merge, role="ACCOUNTADMIN", timeout=15)
+            _AUDIT_EXECUTOR.submit(self.execute_sql, act_merge, role="ACCOUNTADMIN", timeout=15, query_tag=audit_query_tag)
             self._synced_activity_ids.add(event_id)
         else:
             self.execute_sql(stmt, role="ACCOUNTADMIN", bindings=audit_bindings)
@@ -9112,8 +9129,7 @@ def register_snowflake_fastapi_routes(app: Any) -> None:
         return JSONResponse(status_code=200, content=res)
 
     if hasattr(app, "middleware"):
-        @app.middleware("http")
-        async def snowflake_flow_context_and_trace_middleware(request: Request, call_next: Any) -> Any:
+        async def _snowflake_flow_context_and_trace(request: Request, call_next: Any) -> Any:
             path = str(getattr(request.url, "path", "") or "")
             method = str(getattr(request, "method", "GET") or "GET").upper()
             if not getattr(LIVE_BRIDGE, "_sqlite_uuid_healed_at_request", False) and path.startswith("/api/"):
@@ -9448,13 +9464,12 @@ def register_snowflake_fastapi_routes(app: Any) -> None:
                 )
             return response
 
-        # Registered last so it is the outermost middleware and wraps every other handler.
         @app.middleware("http")
-        async def snowflake_request_identity_middleware(request: Request, call_next: Any) -> Any:
+        async def snowflake_flow_context_and_trace_middleware(request: Request, call_next: Any) -> Any:
             # W3-R1-10b: identity is bound per request from ingress headers, never stored globally.
             ident_token = _sf_identity.bind_identity(_sf_identity.identity_from_headers(request.headers))
             try:
-                return await call_next(request)
+                return await _snowflake_flow_context_and_trace(request, call_next)
             finally:
                 _sf_identity.reset_identity(ident_token)
 

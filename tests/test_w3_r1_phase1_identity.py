@@ -117,4 +117,4 @@ def test_bridge_never_writes_header_user_globally() -> None:
 
     src = Path(__file__).resolve().parents[1].joinpath("src/lfx_snowflake/fastapi_live_bridge.py").read_text()
     assert "LIVE_BRIDGE.authenticated_user =" not in src
-    assert "snowflake_request_identity_middleware" in src
+    assert "_sf_identity.bind_identity(_sf_identity.identity_from_headers(request.headers))" in src
