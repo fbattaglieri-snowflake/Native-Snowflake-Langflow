@@ -46,7 +46,13 @@ ENV PYTHONPATH="/opt/snowflake-langflow/src" \
     SQLITE_TMPDIR=/tmp \
     LANGFLOW_PERSIST_DIR=/persist
 
-# Same runtime user, workdir and command as upstream.
-USER user
+# The core Langflow DB and config must live on the /persist block volume, or every restart
+# starts from an empty database. The entrypoint chowns the root-owned mount, drops to uid 1000
+# and points LANGFLOW_CONFIG_DIR / LANGFLOW_DATABASE_URL at the volume.
+COPY --chmod=0755 scripts/langflow-persist-entrypoint.sh /usr/local/bin/langflow-persist-entrypoint
+
+# Starts as root only to prepare the mount; Langflow itself runs as uid 1000.
+USER root
 WORKDIR /app
-CMD ["langflow", "run"]
+ENTRYPOINT ["/usr/local/bin/langflow-persist-entrypoint"]
+CMD []

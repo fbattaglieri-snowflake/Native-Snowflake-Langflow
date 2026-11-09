@@ -10,7 +10,22 @@ def test_dockerfile_release_pins_base_and_runs_installer() -> None:
     assert "ARG LANGFLOW_BASE=langflowai/langflow:1.13.1@sha256:643d78228cd148be70e52a860dd3456c834a070c98c81b354f713908d40949f8" in text
     assert "FROM --platform=linux/amd64 ${LANGFLOW_BASE}" in text
     assert "scripts/install_live_hooks_in_container.py" in text
-    assert text.rstrip().splitlines()[-3:] == ["USER user", "WORKDIR /app", 'CMD ["langflow", "run"]']
+    assert text.rstrip().splitlines()[-4:] == [
+        "USER root",
+        "WORKDIR /app",
+        'ENTRYPOINT ["/usr/local/bin/langflow-persist-entrypoint"]',
+        "CMD []",
+    ]
+
+
+def test_release_image_keeps_core_db_on_persist_volume() -> None:
+    text = (ROOT / "Dockerfile.release").read_text()
+    assert "COPY --chmod=0755 scripts/langflow-persist-entrypoint.sh /usr/local/bin/langflow-persist-entrypoint" in text
+    entry = (ROOT / "scripts" / "langflow-persist-entrypoint.sh").read_text()
+    assert 'export LANGFLOW_CONFIG_DIR="$DATA_DIR/config"' in entry
+    assert 'LANGFLOW_DATABASE_URL="${LANGFLOW_DATABASE_URL:-sqlite:///$DATA_DIR/langflow.db}"' in entry
+    assert "exec setpriv --reuid=1000 --regid=0 --init-groups" in entry
+    assert entry.rstrip().endswith('exec langflow run "$@"')
 
 
 def test_dockerignore_excludes_private_material() -> None:
