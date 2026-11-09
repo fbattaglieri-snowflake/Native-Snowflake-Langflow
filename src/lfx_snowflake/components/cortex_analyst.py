@@ -11,6 +11,7 @@ from ..providers.registry import (
     ERROR_UNSUPPORTED_CAPABILITY,
     SnowflakeProviderError,
 )
+from ..traceability import build_query_tag
 from .data_sources import SnowflakeDataSourcesComponent
 
 
@@ -255,14 +256,8 @@ class CortexAnalystService:
         exec_meta = {
             "timeout_seconds": self.policy.max_rows_execution and self.policy.query_timeout_seconds,
             "max_rows": self.policy.max_rows_execution,
-            "query_tag": json.dumps(
-                {
-                    "app": "snowflake-langflow",
-                    "component": "cortex_analyst",
-                    "run_id": run_id,
-                    "role": self.data_sources.active_role,
-                }
-            ),
+            # TR-02: the shared §7.2 JSON tag (7 keys, request_id/flow_id from the request context).
+            "query_tag": build_query_tag(component="cortex_analyst", run_id=run_id),
         }
 
         if self._sql_executor is not None:

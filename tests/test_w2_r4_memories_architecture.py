@@ -74,6 +74,23 @@ from lfx_snowflake.showcase_full_memory_agent import (  # noqa: E402
 )
 
 
+@pytest.fixture(autouse=True)
+def _legacy_granted_admin_role():
+    """Pre-W3-R1-10e these tests relied on the bridge defaulting to ACCOUNTADMIN (removed: no hard-coded
+    role). They exercise the privileged paths, so the role is now set explicitly, as if Snowflake had
+    reported it as granted, and restored afterwards."""
+    from lfx_snowflake.fastapi_live_bridge import LIVE_BRIDGE
+
+    prev_role, prev_avail = LIVE_BRIDGE.active_role, list(LIVE_BRIDGE.available_roles)
+    LIVE_BRIDGE.active_role = "ACCOUNTADMIN"
+    if "ACCOUNTADMIN" not in LIVE_BRIDGE.available_roles:
+        LIVE_BRIDGE.available_roles = ["ACCOUNTADMIN", *LIVE_BRIDGE.available_roles]
+    try:
+        yield
+    finally:
+        LIVE_BRIDGE.active_role, LIVE_BRIDGE.available_roles = prev_role, prev_avail
+
+
 def _build_fastapi_test_client() -> Any:
     """Build a TestClient for `register_snowflake_fastapi_routes(app)` with fallback shim when FastAPI is absent on host."""
     try:

@@ -27,6 +27,19 @@ os.environ.setdefault("LANGFLOW_A2A_ENABLED", "true")
 
 CURRENT_SNOWFLAKE_FLOW_ID: ContextVar[str | None] = ContextVar("current_snowflake_flow_id", default=None)
 
+from lfx_snowflake import traceability as _trace  # noqa: E402
+from lfx_snowflake.traceability import (  # noqa: E402
+    CURRENT_REQUEST_ID,
+    CURRENT_RUN_ID,
+    DEPRECATED_ACTIONS as DEPRECATED_AUDIT_ACTIONS,
+    AuditAction,
+    build_audit_insert,
+    build_query_tag,
+    deterministic_event_id,
+    emit as emit_audit,
+    sanitize_details,
+)
+
 CANONICAL_TECHNICAL_MEMORY_TABLES: frozenset[str] = frozenset(
     {
         "MEM_GRAPH_STATE_CHECKPOINTS",
@@ -108,6 +121,7 @@ from .governance.models import (
     SnowflakeErrorCode as ErrorCode,
 )
 from .observability.redaction import redact_payload_for_sink as redact_for_sink
+from . import identity as _sf_identity
 from .providers.registry import SnowflakeProviderError
 
 SPCS_TOKEN_PATH = Path("/snowflake/session/token")
@@ -984,15 +998,15 @@ class LiveSnowflakeBridge:
         self.audit_table = os.getenv(
             "LANGFLOW_AUDIT_LOG_TABLE", f"{self.database}.{self.schema}.LANGFLOW_AUDIT_LOG"
         )
-        self.active_role: str = os.getenv("SNOWFLAKE_DEFAULT_ROLE", "ACCOUNTADMIN")
+        # W3-R1-10e: no hard-coded role. Empty means "omit role" so the token's default role applies.
+        self.active_role: str = (os.getenv("SNOWFLAKE_DEFAULT_ROLE") or "").strip().upper()
         self.available_roles: list[str] = [
-            "ACCOUNTADMIN",
             "SNOWFLAKE_LANGFLOW_ADMIN_ROLE",
             "SNOWFLAKE_LANGFLOW_DEV_ROLE",
             "SNOWFLAKE_LANGFLOW_VIEWER_ROLE",
             "PUBLIC",
         ]
-        self.authenticated_user: str = os.getenv("SNOWFLAKE_USER", "SPCS_CALLER")
+        self._service_user: str = os.getenv("SNOWFLAKE_USER", "SPCS_CALLER")
         self.context_epoch: int = 1
         self.secondary_roles_mode: str = "NONE"
         self.memories_registry: list[dict[str, Any]] = []
@@ -1806,6 +1820,21 @@ class LiveSnowflakeBridge:
         if not ok:
             out["error_code"] = res.get("error_code") or ("NOT_CONFIGURED" if res.get("mode") == "offline" else "SNOWFLAKE_ERROR")
             out["message"] = res.get("message") or "Snowflake did not execute the recall query."
+        # TR-01: audit the recall only now, with the real SQL outcome (metadata only, never rows or query text).
+        emit_audit(
+            self.record_audit_event,
+            AuditAction.MEMORY_RECALL,
+            res,
+            target_object=fqn,
+            details={
+                "memory_base_id": matched.get("memory_id"),
+                "name": matched.get("name"),
+                "table_fqn": fqn,
+                "top_k": bounded_limit,
+                "n_results": len(out["rows"]),
+            },
+            flow_id=matched.get("flow_id"),
+        )
         return out
 
     def create_or_register_memory(self, body: dict[str, Any]) -> dict[str, Any]:
@@ -1883,11 +1912,11 @@ class LiveSnowflakeBridge:
                     f"(SELECT / USAGE) privilege on {fqn}."
                 )
                 self.record_audit_event(
-                    action="MEMORY_USE_EXISTING",
+                    action=AuditAction.AUTHZ_ROLE_DENIED.value,
                     outcome="DENIED",
                     error_code=ErrorCode.AUTHZ_ROLE_DENIED.value,
                     target_object=fqn,
-                    details={"message": msg, "required_privilege": "MEMORY_USE_EXISTING (SELECT / USAGE)"},
+                    details={"object": fqn, "required_privilege": "SELECT / USAGE (bind existing memory)"},
                 )
                 return {
                     "ok": False,
@@ -2411,12 +2440,12 @@ class LiveSnowflakeBridge:
                 exec_res = self.execute_sql(fallback_std_ddl)
             if not exec_res.get("ok"):
                 err_code = str(exec_res.get("error_code") or ("NOT_CONFIGURED" if exec_res.get("mode") == "offline" else "SNOWFLAKE_ERROR"))
-                self.record_audit_event(
-                    action="MEMORY_CREATE_PHYSICAL",
-                    outcome="FAILURE",
-                    error_code=err_code,
+                emit_audit(
+                    self.record_audit_event,
+                    AuditAction.MEMORY_BASE_CREATE,
+                    exec_res,
                     target_object=fqn,
-                    details={"name": name, "query_id": exec_res.get("statement_handle")},
+                    details={"name": name, "table_fqn": fqn},
                     flow_id=norm_fid,
                 )
                 return {
@@ -2573,12 +2602,23 @@ class LiveSnowflakeBridge:
             )
 
         self._persist_memory_in_langflow_sqlite(entry, flow_id=norm_fid)
-        self.record_audit_event(
-            action="MEMORY_CREATE_PHYSICAL" if create_physical else "MEMORY_USE_EXISTING",
-            outcome="ALLOWED",
-            target_object=entry["table_fqn"],
-            details=entry,
-        )
+        # TR-01: MEMORY_BASE_CREATE only for a real outcome: an executed DDL, or a bind of an existing table
+        # (registration persisted above). Dry runs and non-executed branches are not audited as creations.
+        if (not exec_res.get("dry_run") and not exec_res.get("postgres_ddl")) or not create_physical:
+            emit_audit(
+                self.record_audit_event,
+                AuditAction.MEMORY_BASE_CREATE,
+                exec_res if create_physical else {"ok": True},
+                target_object=entry["table_fqn"],
+                details={
+                    "memory_base_id": entry.get("memory_id"),
+                    "name": entry.get("name"),
+                    "table_fqn": entry.get("table_fqn"),
+                    "embedding_model": entry.get("embedding_model"),
+                    "execution_mode": "create" if create_physical else "bind_existing",
+                },
+                flow_id=norm_fid,
+            )
         return {"ok": True, "status_code": 201, "memory": entry, "ddl": ddl}
 
     def _persist_memory_in_langflow_sqlite(self, entry: dict[str, Any], flow_id: str | None = None) -> None:
@@ -2996,11 +3036,12 @@ class LiveSnowflakeBridge:
                 conn.close()
             except Exception:  # noqa: BLE001
                 pass
-        self.record_audit_event(
-            action="MEMORY_DELETE",
-            outcome="ALLOWED",
+        emit_audit(
+            self.record_audit_event,
+            AuditAction.MEMORY_BASE_DELETE,
+            {"ok": True},
             target_object=fqn,
-            details={"deleted_memory": mem_name, "memory_id": mem_uuid_str},
+            details={"name": mem_name, "memory_base_id": mem_uuid_str},
         )
         return {
             "ok": True,
@@ -3479,7 +3520,34 @@ class LiveSnowflakeBridge:
         if llm_pre:
             entry["llm_preprocessing"] = llm_pre
 
-        self._persist_memory_in_langflow_sqlite(entry, flow_id=entry.get("flow_id"))
+        audit_details = {
+            "memory_base_id": entry.get("memory_id"),
+            "name": entry.get("name"),
+            "table_fqn": fqn,
+            "threshold": entry.get("threshold"),
+        }
+        try:
+            self._persist_memory_in_langflow_sqlite(entry, flow_id=entry.get("flow_id"))
+        except Exception:  # noqa: BLE001 - fail closed: report and audit the real failure
+            failure = {"ok": False, "status_code": 500, "error_code": "PERSISTENCE_ERROR"}
+            emit_audit(
+                self.record_audit_event,
+                AuditAction.MEMORY_BASE_UPDATE,
+                failure,
+                target_object=fqn,
+                details=audit_details,
+                flow_id=entry.get("flow_id"),
+            )
+            return {**failure, "message": f"Snowflake Memory '{memory_id}' could not be updated."}
+        # TR-01: the update is the local persistence above; audit only after it succeeded.
+        emit_audit(
+            self.record_audit_event,
+            AuditAction.MEMORY_BASE_UPDATE,
+            {"ok": True},
+            target_object=fqn,
+            details=audit_details,
+            flow_id=entry.get("flow_id"),
+        )
         updated = self._to_langflow_memory_base_read(entry)
         updated["ok"] = True
         updated["status_code"] = 200
@@ -3671,7 +3739,7 @@ class LiveSnowflakeBridge:
         """Compute non-destructive intersection between a flow's stored context and the active role's accessible catalog (`CTX-ARCH-07` #1)."""
         norm_fid = self._normalize_flow_id(flow_id or CURRENT_SNOWFLAKE_FLOW_ID.get())
         stored_ctx = copy.deepcopy(self.get_flow_context(norm_fid) if norm_fid else self.selected_context)
-        target_role = str(role or self.active_role or "ACCOUNTADMIN").strip().upper()
+        target_role = str(role or self.active_role or "").strip().upper()
 
         role_cat = self.role_accessible_catalog.get(target_role)
         is_restricted_public = target_role == "PUBLIC" and role_cat is None
@@ -5274,7 +5342,7 @@ class LiveSnowflakeBridge:
             "active_role": self.active_role,
         }
         if self._stage_type(clean_fqn) == "EXTERNAL":
-            return {
+            rejected = {
                 **base,
                 "status_code": 400,
                 "error_code": "EXTERNAL_STAGE_UPLOAD_UNSUPPORTED",
@@ -5283,12 +5351,22 @@ class LiveSnowflakeBridge:
                     "upload files to the external storage location directly."
                 ),
             }
-        return {
-            **base,
-            "status_code": 501,
-            "error_code": "UPLOAD_NOT_AVAILABLE",
-            "message": self.UPLOAD_DISABLED_MESSAGE,
-        }
+        else:
+            rejected = {
+                **base,
+                "status_code": 501,
+                "error_code": "UPLOAD_NOT_AVAILABLE",
+                "message": self.UPLOAD_DISABLED_MESSAGE,
+            }
+        # The rejection is the real outcome (no PUT ran); it is audited as FAILURE, never as SUCCESS.
+        emit_audit(
+            self.record_audit_event,
+            AuditAction.STAGE_FILE_UPLOAD,
+            rejected,
+            target_object=f"@{clean_fqn}/{rel_path}",
+            details={"stage": f"@{clean_fqn}", "relative_path": rel_path},
+        )
+        return rejected
 
     def delete_stage_file(self, stage_fqn: str, file_path: str) -> dict[str, Any]:
         """Remove a file from a Snowflake Stage (`REMOVE '@<stage>/<file_path>'`); fails closed on SQL errors."""
@@ -5307,6 +5385,13 @@ class LiveSnowflakeBridge:
             return denied
         remove_sql = f"REMOVE '@{clean_fqn}/{clean_rel}';"
         res = self.execute_sql(remove_sql)
+        emit_audit(
+            self.record_audit_event,
+            AuditAction.STAGE_FILE_REMOVE,
+            res,
+            target_object=f"@{clean_fqn}/{clean_rel}",
+            details={"stage": f"@{clean_fqn}", "relative_path": clean_rel},
+        )
         ok = bool(res.get("ok", False))
         out: dict[str, Any] = {
             "ok": ok,
@@ -5332,6 +5417,13 @@ class LiveSnowflakeBridge:
             return self._stage_input_error(exc)
         refresh_sql = f"ALTER STAGE {clean_fqn} REFRESH;"
         res = self.execute_sql(refresh_sql)
+        emit_audit(
+            self.record_audit_event,
+            AuditAction.STAGE_DIRECTORY_REFRESH,
+            res,
+            target_object=f"@{clean_fqn}",
+            details={"stage": f"@{clean_fqn}"},
+        )
         ok = bool(res.get("ok", False))
         out: dict[str, Any] = {
             "ok": ok,
@@ -5876,8 +5968,8 @@ class LiveSnowflakeBridge:
             discovered_databases = list(dbs_cache_entry[1])
             postgres_instances = list(dbs_cache_entry[2])
         elif self._has_spcs_token() and not self._is_execute_sql_mocked():
-            fut_dbs = _CATALOG_EXECUTOR.submit(self.execute_sql, "SHOW DATABASES", timeout=12)
-            fut_pg = _CATALOG_EXECUTOR.submit(self.execute_sql, "SHOW POSTGRES INSTANCES", timeout=12)
+            fut_dbs = _sf_identity.submit_with_context(_CATALOG_EXECUTOR, self.execute_sql, "SHOW DATABASES", timeout=12)
+            fut_pg = _sf_identity.submit_with_context(_CATALOG_EXECUTOR, self.execute_sql, "SHOW POSTGRES INSTANCES", timeout=12)
             dbs_res = fut_dbs.result()
             pg_res = fut_pg.result()
             discovered_databases = _extract_names(dbs_res.get("rows", [])) or list(
@@ -5974,7 +6066,7 @@ class LiveSnowflakeBridge:
                         f"SHOW CORTEX AGENTS IN SCHEMA {pair_key}",
                     ]
                     if self._has_spcs_token() and not self._is_execute_sql_mocked():
-                        futs = [_CATALOG_EXECUTOR.submit(self.execute_sql, q, timeout=10) for q in show_queries]
+                        futs = [_sf_identity.submit_with_context(_CATALOG_EXECUTOR, self.execute_sql, q, timeout=10) for q in show_queries]
                         (
                             objects_res,
                             iceberg_res,
@@ -6212,7 +6304,7 @@ class LiveSnowflakeBridge:
             url = f"https://{host}{rest_endpoint}"
             try:
                 with httpx.Client(timeout=60.0, verify=True) as client:
-                    resp = client.post(url, headers=self._get_spcs_headers(), json=request_payload)
+                    resp = client.post(url, headers=self._get_spcs_headers(_sf_identity.current_request_mode()), json=request_payload)
                     if resp.status_code < 400 and resp.content:
                         body = resp.json()
                         msg_obj = body.get("message") or {}
@@ -6350,7 +6442,7 @@ class LiveSnowflakeBridge:
         norm_fid = self._normalize_flow_id(flow_id) or str(flow_id or "default").strip() or "default"
         norm_sid = str(session_id or norm_fid or "default").strip() or "default"
         norm_fqn = str(agent_fqn or "").strip().upper()
-        norm_role = str(active_role or self.active_role or "ACCOUNTADMIN").strip().upper()
+        norm_role = str(active_role or self.active_role or "").strip().upper()
         tid = int(thread_id)
         now_iso = datetime.now(timezone.utc).isoformat()
         short_agent = norm_fqn.split(".")[-1] if norm_fqn else "AGENT"
@@ -6409,7 +6501,7 @@ class LiveSnowflakeBridge:
         norm_fid = self._normalize_flow_id(flow_id) or str(flow_id or "default").strip() or "default"
         norm_sid = str(session_id or norm_fid or "default").strip() or "default"
         norm_fqn = str(agent_fqn or "").strip().upper()
-        norm_role = str(active_role or self.active_role or "ACCOUNTADMIN").strip().upper()
+        norm_role = str(active_role or self.active_role or "").strip().upper()
 
         try:
             db_path = self._resolve_writable_sqlite_db_path()
@@ -6509,7 +6601,7 @@ class LiveSnowflakeBridge:
                 with httpx.Client(timeout=30.0, verify=True) as client:
                     resp = client.post(
                         f"https://{host}/api/v2/cortex/threads",
-                        headers=self._get_spcs_headers(),
+                        headers=self._get_spcs_headers(_sf_identity.current_request_mode()),
                         json={"origin_application": origin_app},
                     )
                     if resp.status_code < 400 and resp.content:
@@ -6521,7 +6613,7 @@ class LiveSnowflakeBridge:
                     if created_tid is not None:
                         client.post(
                             f"https://{host}/api/v2/cortex/threads/{created_tid}",
-                            headers=self._get_spcs_headers(),
+                            headers=self._get_spcs_headers(_sf_identity.current_request_mode()),
                             json={"thread_name": thread_name},
                         )
             except Exception:  # noqa: BLE001
@@ -6591,7 +6683,7 @@ class LiveSnowflakeBridge:
                     resp = client.get(
                         f"https://{host}/api/v2/cortex/threads",
                         params={"origin_application": origin_app},
-                        headers=self._get_spcs_headers(),
+                        headers=self._get_spcs_headers(_sf_identity.current_request_mode()),
                     )
                     if resp.status_code < 400 and resp.content:
                         body = resp.json()
@@ -6679,7 +6771,7 @@ class LiveSnowflakeBridge:
                     resp = client.get(
                         f"https://{host}/api/v2/cortex/threads/{tid}",
                         params=params,
-                        headers=self._get_spcs_headers(),
+                        headers=self._get_spcs_headers(_sf_identity.current_request_mode()),
                     )
                     if resp.status_code < 400 and resp.content:
                         body = resp.json()
@@ -7034,7 +7126,7 @@ class LiveSnowflakeBridge:
         role: str | None = None,
     ) -> dict[str, Any]:
         """Invoke a Snowflake Cortex Agent via `POST /api/v2/databases/{db}/schemas/{schema}/agents/{name}:run` with 2-level Threads API continuity (`MA-W2-R6-01`)."""
-        effective_role = (role or self.active_role or "ACCOUNTADMIN").strip().upper()
+        effective_role = (role or self.active_role or "").strip().upper()
         db = (database or self.database or "SNOWFLAKE_LANGFLOW").strip().upper()
         sch = (schema or self.schema or "CORE").strip().upper()
         raw_agent = (agent_name or "EXAMPLE_AGENT").strip()
@@ -7230,7 +7322,7 @@ class LiveSnowflakeBridge:
         elif self._has_spcs_token() and httpx is not None:
             host = os.environ["SNOWFLAKE_HOST"]
             url = f"https://{host}{rest_endpoint}"
-            headers = self._get_spcs_headers()
+            headers = self._get_spcs_headers(_sf_identity.current_request_mode())
             headers["Accept"] = "text/event-stream, application/json"
             try:
                 with httpx.Client(timeout=90.0, verify=True) as client:
@@ -7412,7 +7504,7 @@ class LiveSnowflakeBridge:
         role: str | None = None,
     ) -> dict[str, Any]:
         """Generate A2A v0.3.0 Agent Card for a Snowflake Cortex Agent via `DESCRIBE AGENT <DB>.<SCHEMA>.<NAME>` (`MA-W2-R6-05`)."""
-        effective_role = (role or self.active_role or "ACCOUNTADMIN").strip().upper()
+        effective_role = (role or self.active_role or "").strip().upper()
         db = (database or self.database or "SNOWFLAKE_LANGFLOW").strip().upper()
         sch = (schema or self.schema or "CORE").strip().upper()
         short_agent = (agent_name or "EXAMPLE_AGENT").strip().split(".")[-1].upper()
@@ -7486,7 +7578,7 @@ class LiveSnowflakeBridge:
         role: str | None = None,
     ) -> dict[str, Any]:
         """Handle A2A v0.3.0 JSON-RPC (`message/send`, `tasks/get`, `tasks/cancel`) for a Snowflake Cortex Agent (`MA-W2-R6-05`)."""
-        effective_role = (role or self.active_role or "ACCOUNTADMIN").strip().upper()
+        effective_role = (role or self.active_role or "").strip().upper()
         db = (database or self.database or "SNOWFLAKE_LANGFLOW").strip().upper()
         sch = (schema or self.schema or "CORE").strip().upper()
         short_agent = (agent_name or "EXAMPLE_AGENT").strip().split(".")[-1].upper()
@@ -7874,13 +7966,57 @@ class LiveSnowflakeBridge:
                 "volume_type": "SPCS Persistent Block Volume (10Gi, SNOWFLAKE_SSE, survives Compute Pool SUSPEND/RESUME)",
             }
 
+    @property
+    def authenticated_user(self) -> str:
+        """Per-request Snowflake user (ContextVar); falls back to the service user. Display/attribution only."""
+        return _sf_identity.current_identity().sf_user or self._service_user
+
+    @authenticated_user.setter
+    def authenticated_user(self, value: str) -> None:
+        # Only the service-session user may be stored on the shared bridge instance.
+        self._service_user = value
+
     def _has_spcs_token(self) -> bool:
         return SPCS_TOKEN_PATH.exists() and bool(os.getenv("SNOWFLAKE_HOST"))
 
-    def _get_spcs_headers(self) -> dict[str, str]:
+    def _service_role(self) -> str:
+        """Role for background/service writes (W3-R1-10e): configured service role, never a hard-coded admin."""
+        return _sf_identity.service_role() or self.active_role
+
+    def _service_default_role(self) -> str | None:
+        """Default role of the service token, resolved once via CURRENT_ROLE() and cached (never invented)."""
+        cached = getattr(self, "_service_default_role_cache", None)
+        if cached:
+            return cached
+        if time.monotonic() < getattr(self, "_service_default_role_retry_at", 0.0):
+            return None
+        try:
+            # No role is sent here (active_role is empty), so CURRENT_ROLE() is the token's default role.
+            res = self.execute_sql("SELECT CURRENT_ROLE() AS RL", timeout=10, mode=_sf_identity.MODE_SERVICE)
+        except Exception:  # noqa: BLE001
+            res = {}
+        rows = res.get("rows") if isinstance(res, dict) and res.get("ok") else None
+        role = str((rows[0] or {}).get("RL") or "").strip() if rows else ""
+        if role:
+            self._service_default_role_cache = role
+            return role
+        self._service_default_role_retry_at = time.monotonic() + 60.0
+        return None
+
+    def _effective_role_for_audit(self, mode: str, explicit_role: str | None = None) -> str | None:
+        """Role actually used for the audited action: the role sent to the SQL API, else the token default."""
+        if explicit_role and explicit_role.strip():
+            return explicit_role.strip()
+        if mode == _sf_identity.MODE_CALLER:
+            # Caller mode sends no role unless explicit; the caller's default role is not resolved here.
+            return None
+        return (self.active_role or "").strip() or self._service_default_role()
+
+    def _get_spcs_headers(self, mode: str = _sf_identity.MODE_SERVICE) -> dict[str, str]:
         token = SPCS_TOKEN_PATH.read_text(encoding="utf-8").strip()
         return {
-            "Authorization": f"Bearer {token}",
+            # Raises CallerIdentityMissing in caller mode without a caller token (fail closed).
+            "Authorization": _sf_identity.authorization_value(token, mode),
             "X-Snowflake-Authorization-Token-Type": "OAUTH",
             "Content-Type": "application/json",
             "Accept": "application/json",
@@ -7894,9 +8030,20 @@ class LiveSnowflakeBridge:
         role: str | None = None,
         bindings: dict[str, Any] | None = None,
         timeout: int = 60,
+        query_tag: str | None = None,
+        mode: str | None = None,
     ) -> dict[str, Any]:
-        """Execute a SQL statement via Snowflake SQL REST API (`/api/v2/statements`) using SPCS OAuth."""
-        effective_role = (role or self.active_role).strip()
+        """Execute a SQL statement via Snowflake SQL REST API (`/api/v2/statements`) using SPCS OAuth.
+
+        ``mode="caller"`` runs with restricted caller's rights when SNOWFLAKE_LANGFLOW_CALLERS_RIGHTS=1;
+        the UI role selector is then display-only and only an explicit ``role`` is sent.
+        """
+        # Default: the mode bound for this request (caller on user-facing routes, service elsewhere).
+        exec_mode = _sf_identity.resolve_mode(mode or _sf_identity.current_request_mode())
+        if exec_mode == _sf_identity.MODE_CALLER:
+            effective_role = (role or "").strip()
+        else:
+            effective_role = (role or self.active_role).strip()
         if not self._has_spcs_token():
             # Fail closed: nothing was executed, so nothing may be registered locally.
             return {
@@ -7918,12 +8065,34 @@ class LiveSnowflakeBridge:
             "timeout": timeout,
             "database": self.database,
             "schema": self.schema,
-            "role": effective_role,
         }
+        if effective_role:
+            payload["role"] = effective_role
         if self.warehouse:
             payload["warehouse"] = self.warehouse
         if bindings:
             payload["bindings"] = bindings
+        # TR-02: every SQL API call carries the JSON query tag (callers on worker threads pass it explicitly).
+        payload["parameters"] = {"query_tag": query_tag or build_query_tag()}
+
+        try:
+            request_headers = (
+                self._get_spcs_headers(exec_mode)
+                if exec_mode == _sf_identity.MODE_CALLER
+                else self._get_spcs_headers()
+            )
+        except _sf_identity.CallerIdentityMissing as exc:
+            return {
+                "ok": False,
+                "mode": exec_mode,
+                "status_code": 401,
+                "error_code": exc.error_code,
+                "message": str(exc),
+                "effective_role": effective_role,
+                "rows": [],
+                "columns": [],
+                "statement_handle": None,
+            }
 
         try:
             if self._http_client is None and httpx is not None:
@@ -7935,7 +8104,7 @@ class LiveSnowflakeBridge:
             client = self._http_client
             resp = client.post(
                 url,
-                headers=self._get_spcs_headers(),
+                headers=request_headers,
                 json=payload,
                 timeout=float(min(max(timeout, 5), 60) + 5),
             )
@@ -8001,13 +8170,15 @@ class LiveSnowflakeBridge:
             and (now - self._roles_last_refreshed_ts) < 60.0
         ):
             return
+        # Shared bridge state is service-scoped: never let one caller's roles leak into the global selector.
         res = self.execute_sql(
             "SELECT CURRENT_USER() AS USR, CURRENT_ROLE() AS RL, CURRENT_AVAILABLE_ROLES() AS AVAIL",
             timeout=10,
+            mode=_sf_identity.MODE_SERVICE,
         )
         if res.get("ok") and res.get("rows"):
             row = res["rows"][0]
-            self.authenticated_user = row.get("USR") or self.authenticated_user
+            # W3-R1-10b: the per-request user comes from the ContextVar; _service_user is never overwritten here.
             current_rl = row.get("RL")
             if current_rl and not self._roles_discovered:
                 self.active_role = current_rl
@@ -8016,8 +8187,8 @@ class LiveSnowflakeBridge:
                 try:
                     parsed = json.loads(raw_avail) if isinstance(raw_avail, str) else raw_avail
                     if isinstance(parsed, list) and parsed:
+                        # ACCOUNTADMIN is never injected: it is listed only if Snowflake reports it as granted.
                         for mandatory in (
-                            "ACCOUNTADMIN",
                             "SNOWFLAKE_LANGFLOW_ADMIN_ROLE",
                             "SNOWFLAKE_LANGFLOW_DEV_ROLE",
                             "SNOWFLAKE_LANGFLOW_VIEWER_ROLE",
@@ -8105,37 +8276,49 @@ class LiveSnowflakeBridge:
         details: dict[str, Any] | None = None,
         flow_id: str | None = None,
         run_id: str | None = None,
+        event_id: str | None = None,
+        effective_role: str | None = None,
     ) -> str:
-        event_id = f"aud-{uuid.uuid4().hex[:16]}"
-        redacted = redact_for_sink(details or {})
+        if action in DEPRECATED_AUDIT_ACTIONS:
+            raise ValueError(f"deprecated audit action: {action}")
+        run_id = run_id if run_id is not None else CURRENT_RUN_ID.get()
+        # TR-01: idempotent id, so a retried write cannot duplicate the event.
+        event_id = event_id or deterministic_event_id(
+            action, target_object, run_id, CURRENT_REQUEST_ID.get(), json.dumps(details or {}, sort_keys=True, default=str)
+        )
+        audit_query_tag = build_query_tag(flow_id=flow_id, run_id=run_id, component="audit")
+        details = dict(details or {})
+        # TR-06: background writes run as the service; record who originated them (attribution only).
+        if _sf_identity.origin_user() and "origin_user" not in details:
+            details["origin_user"] = _sf_identity.origin_user()
+        # Effective mode of the originating request (service whenever the caller's-rights flag is OFF).
+        eff_mode = _sf_identity.origin_mode()
+        details.setdefault("execution_mode", eff_mode)
+        # TR-01: enforce the metadata allowlist for every caller (no content can reach the audit row).
+        details = sanitize_details(details)
+        redacted = redact_for_sink(details)
         details_json = json.dumps(redacted)
         if len(details_json) > 12000:
             details_json = json.dumps({"summary": "truncated_large_audit_payload", "keys": list(redacted.keys())})
         eff_fid = flow_id or CURRENT_SNOWFLAKE_FLOW_ID.get()
-        stmt = (
-            f"INSERT INTO {self.audit_table} "
-            f"(event_id, event_ts, authenticated_user, effective_role, execution_mode, context_epoch, "
-            f"action, outcome, error_code, target_object, project_id, flow_id, run_id, trace_id, redacted_details) "
-            f"SELECT ?, CURRENT_TIMESTAMP(), ?, ?, ?, ?, ?, ?, ?, ?, 'default', ?, ?, ?, TRY_PARSE_JSON(?)"
+        stmt, audit_bindings = build_audit_insert(
+            self.audit_table,
+            event_id=event_id,
+            authenticated_user=self.authenticated_user,
+            effective_role=self._effective_role_for_audit(eff_mode, effective_role),
+            execution_mode=_trace.audit_execution_mode(eff_mode),
+            context_epoch=int(self.context_epoch or 0),
+            action=action,
+            outcome=outcome,
+            error_code=error_code,
+            target_object=target_object,
+            flow_id=eff_fid,
+            run_id=run_id,
+            details=None,
+            trace_id=run_id or CURRENT_REQUEST_ID.get(),
         )
-        audit_values: list[tuple[str, Any]] = [
-            ("TEXT", event_id),
-            ("TEXT", self.authenticated_user),
-            ("TEXT", self.active_role),
-            ("TEXT", ExecutionMode.INTERACTIVE_CALLER.value),
-            ("FIXED", int(self.context_epoch or 0)),
-            ("TEXT", action),
-            ("TEXT", outcome),
-            ("TEXT", error_code),
-            ("TEXT", target_object),
-            ("TEXT", eff_fid),
-            ("TEXT", run_id),
-            ("TEXT", run_id),
-            ("TEXT", details_json),
-        ]
-        audit_bindings = {
-            str(i + 1): {"type": t, "value": None if v is None else str(v)} for i, (t, v) in enumerate(audit_values)
-        }
+        # Keep the existing redaction path for details (redact_for_sink + 12 KB cap), still bound, never inlined.
+        audit_bindings[str(len(audit_bindings) - 1)] = {"type": "TEXT", "value": details_json}
         ev_type = (
             "CONTEXT_CHANGE"
             if action in ("UPDATE_CONTEXT", "OBJECT_REMOVED_FROM_CONTEXT", "REGISTER_OBJECT_IN_CONTEXT")
@@ -8184,12 +8367,14 @@ class LiveSnowflakeBridge:
 
         # In live SPCS mode, dispatch audit INSERT and LANGFLOW_FLOW_ACTIVITY MERGE asynchronously so UI requests never block on Snowflake DML
         if self._has_spcs_token() and not self._is_execute_sql_mocked():
-            _AUDIT_EXECUTOR.submit(self.execute_sql, stmt, role="ACCOUNTADMIN", bindings=audit_bindings, timeout=15)
+            _sf_identity.submit_background(_AUDIT_EXECUTOR, 
+                self.execute_sql, stmt, role=self._service_role(), mode=_sf_identity.MODE_SERVICE, bindings=audit_bindings, timeout=15, query_tag=audit_query_tag
+            )
             act_merge = self._build_activity_merge_sql(act_record)
-            _AUDIT_EXECUTOR.submit(self.execute_sql, act_merge, role="ACCOUNTADMIN", timeout=15)
+            _sf_identity.submit_background(_AUDIT_EXECUTOR, self.execute_sql, act_merge, role=self._service_role(), mode=_sf_identity.MODE_SERVICE, timeout=15, query_tag=audit_query_tag)
             self._synced_activity_ids.add(event_id)
         else:
-            self.execute_sql(stmt, role="ACCOUNTADMIN", bindings=audit_bindings)
+            self.execute_sql(stmt, role=self._service_role(), mode=_sf_identity.MODE_SERVICE, bindings=audit_bindings)
         return event_id
 
     def record_trigger_execution_telemetry(
@@ -8297,13 +8482,13 @@ class LiveSnowflakeBridge:
         )
 
         if self._has_spcs_token() and not self._is_execute_sql_mocked():
-            _AUDIT_EXECUTOR.submit(self.execute_sql, act_sql, role="ACCOUNTADMIN", timeout=15)
-            _AUDIT_EXECUTOR.submit(self.execute_sql, merge_run, role="ACCOUNTADMIN", timeout=15)
-            _AUDIT_EXECUTOR.submit(self.execute_sql, merge_span, role="ACCOUNTADMIN", timeout=15)
+            _sf_identity.submit_background(_AUDIT_EXECUTOR, self.execute_sql, act_sql, role=self._service_role(), mode=_sf_identity.MODE_SERVICE, timeout=15)
+            _sf_identity.submit_background(_AUDIT_EXECUTOR, self.execute_sql, merge_run, role=self._service_role(), mode=_sf_identity.MODE_SERVICE, timeout=15)
+            _sf_identity.submit_background(_AUDIT_EXECUTOR, self.execute_sql, merge_span, role=self._service_role(), mode=_sf_identity.MODE_SERVICE, timeout=15)
         else:
-            self.execute_sql(act_sql, role="ACCOUNTADMIN")
-            self.execute_sql(merge_run, role="ACCOUNTADMIN")
-            self.execute_sql(merge_span, role="ACCOUNTADMIN")
+            self.execute_sql(act_sql, role=self._service_role(), mode=_sf_identity.MODE_SERVICE)
+            self.execute_sql(merge_run, role=self._service_role(), mode=_sf_identity.MODE_SERVICE)
+            self.execute_sql(merge_span, role=self._service_role(), mode=_sf_identity.MODE_SERVICE)
 
         self.record_audit_event(
             action=f"TRIGGER_{ev_type}",
@@ -8362,7 +8547,12 @@ class LiveSnowflakeBridge:
 
     def switch_role(self, target_role: str, flow_id: str | None = None) -> dict[str, Any]:
         clean = (target_role or "").strip().upper()
-        if not clean or clean not in [r.upper() for r in self.available_roles]:
+        # W3-R1-10d: under caller's rights the selector is display-only and privileged roles are never selectable.
+        if _sf_identity.callers_rights_enabled():
+            role_allowed = _sf_identity.is_selectable_role(clean, self.available_roles)
+        else:
+            role_allowed = bool(clean) and clean in [r.upper() for r in self.available_roles]
+        if not role_allowed:
             self.record_audit_event(
                 action="ROLE_SWITCH",
                 outcome="DENIED",
@@ -8395,6 +8585,17 @@ class LiveSnowflakeBridge:
                 "error_code": ErrorCode.AUTHZ_ROLE_DENIED.value,
                 "message": f"Il ruolo attivo ({self.active_role}) non consente questa operazione: impossibile attivare {clean}.",
                 "active_role": self.active_role,
+                "context_epoch": self.context_epoch,
+            }
+
+        if _sf_identity.callers_rights_enabled():
+            # W3-R1-10d: display-only. Under caller's rights the shared bridge role is never mutated, so one
+            # user's selection cannot change what other users run as; Snowflake enforces the caller's grants.
+            return {
+                "ok": True,
+                "display_only": True,
+                "active_role": clean,
+                "service_role": self.active_role,
                 "context_epoch": self.context_epoch,
             }
 
@@ -8471,11 +8672,11 @@ class LiveSnowflakeBridge:
                     f"[Il ruolo attivo ({self.active_role})]."
                 )
             self.record_audit_event(
-                action=action,
+                action=AuditAction.AUTHZ_ROLE_DENIED.value,
                 outcome="DENIED",
                 error_code=ErrorCode.AUTHZ_ROLE_DENIED.value,
                 target_object=target_object,
-                details={"message": msg, "required_privilege": action, "object_fqn": target_object},
+                details={"required_privilege": action, "object": target_object},
             )
             return {
                 "ok": False,
@@ -8555,7 +8756,7 @@ class LiveSnowflakeBridge:
                 f"AND DELETED_IN_UI_AT IS NULL"
             )
             for stmt in (upd_act, upd_runs, upd_spans):
-                self.execute_sql(stmt, role="ACCOUNTADMIN", timeout=12)
+                self.execute_sql(stmt, role=self._service_role(), mode=_sf_identity.MODE_SERVICE, timeout=12)
                 executed_updates.append(stmt)
         elif norm_fid:
             safe_fid = norm_fid.replace("'", "''")
@@ -8564,7 +8765,7 @@ class LiveSnowflakeBridge:
                 f"SET DELETED_IN_UI_AT = CURRENT_TIMESTAMP() "
                 f"WHERE FLOW_ID = '{safe_fid}' AND DELETED_IN_UI_AT IS NULL"
             )
-            self.execute_sql(upd_act, role="ACCOUNTADMIN", timeout=12)
+            self.execute_sql(upd_act, role=self._service_role(), mode=_sf_identity.MODE_SERVICE, timeout=12)
             executed_updates.append(upd_act)
 
         return {
@@ -8725,11 +8926,11 @@ class LiveSnowflakeBridge:
                             f"redacted_inputs, redacted_outputs) VALUES "
                             f"('evt-{tx_id[:16]}', '{tx_id}', 'run-{flow_id[:16]}', 'trc-{flow_id[:16]}', "
                             f"'default', '{flow_id}', '{vertex_id}', '{vertex_id}', "
-                            f"'{self.authenticated_user}', '{self.active_role}', 'INTERACTIVE_CALLER', "
+                            f"'{self.authenticated_user}', '{self.active_role}', '{_trace.audit_execution_mode(_sf_identity.origin_mode())}', "
                             f"CURRENT_TIMESTAMP(), CURRENT_TIMESTAMP(), '{status_val}', "
                             f"PARSE_JSON('{inputs_redacted}'), PARSE_JSON('{outputs_redacted}'))"
                         )
-                        self.execute_sql(merge_span, role="ACCOUNTADMIN", timeout=12)
+                        self.execute_sql(merge_span, role=self._service_role(), mode=_sf_identity.MODE_SERVICE, timeout=12)
                         replicated_spans += 1
 
                         merge_run = (
@@ -8739,11 +8940,11 @@ class LiveSnowflakeBridge:
                             f"(event_id, run_id, trace_id, project_id, flow_id, authenticated_user, effective_role, "
                             f"execution_mode, start_ts, end_ts, status, input_payload, output_payload) VALUES "
                             f"('evr-{tx_id[:16]}', 'run-{tx_id[:16]}', 'trc-{flow_id[:16]}', 'default', '{flow_id}', "
-                            f"'{self.authenticated_user}', '{self.active_role}', 'INTERACTIVE_CALLER', "
+                            f"'{self.authenticated_user}', '{self.active_role}', '{_trace.audit_execution_mode(_sf_identity.origin_mode())}', "
                             f"CURRENT_TIMESTAMP(), CURRENT_TIMESTAMP(), '{status_val}', "
                             f"PARSE_JSON('{inputs_redacted}'), PARSE_JSON('{outputs_redacted}'))"
                         )
-                        self.execute_sql(merge_run, role="ACCOUNTADMIN", timeout=12)
+                        self.execute_sql(merge_run, role=self._service_role(), mode=_sf_identity.MODE_SERVICE, timeout=12)
                         replicated_runs += 1
 
                         act_id = f"act-tx-{tx_id[:24]}"
@@ -8786,7 +8987,7 @@ class LiveSnowflakeBridge:
                                 "deleted_in_ui_at": None if act_id not in self._soft_deleted_activity_ids else datetime.now(timezone.utc).isoformat(),
                             }
                             self._recent_activity_events.insert(0, act_rec)
-                            self.execute_sql(self._build_activity_merge_sql(act_rec), role="ACCOUNTADMIN", timeout=12)
+                            self.execute_sql(self._build_activity_merge_sql(act_rec), role=self._service_role(), mode=_sf_identity.MODE_SERVICE, timeout=12)
                             self._synced_activity_ids.add(act_id)
                             replicated_activities += 1
 
@@ -8817,11 +9018,11 @@ class LiveSnowflakeBridge:
                             f"redacted_inputs, redacted_outputs) VALUES "
                             f"('evb-{vb_id[:16]}', 'vb-{vb_id}', 'run-{flow_id[:16]}', 'trc-{flow_id[:16]}', "
                             f"'default', '{flow_id}', '{vertex_id}', '{vertex_id}', "
-                            f"'{self.authenticated_user}', '{self.active_role}', 'INTERACTIVE_CALLER', "
+                            f"'{self.authenticated_user}', '{self.active_role}', '{_trace.audit_execution_mode(_sf_identity.origin_mode())}', "
                             f"CURRENT_TIMESTAMP(), CURRENT_TIMESTAMP(), '{status_val}', "
                             f"PARSE_JSON('{params_redacted}'), PARSE_JSON('{data_redacted}'))"
                         )
-                        self.execute_sql(merge_vb_span, role="ACCOUNTADMIN", timeout=12)
+                        self.execute_sql(merge_vb_span, role=self._service_role(), mode=_sf_identity.MODE_SERVICE, timeout=12)
                         replicated_spans += 1
 
                         act_vb_id = f"act-vb-{vb_id[:24]}"
@@ -8864,7 +9065,7 @@ class LiveSnowflakeBridge:
                                 "deleted_in_ui_at": None if act_vb_id not in self._soft_deleted_activity_ids else datetime.now(timezone.utc).isoformat(),
                             }
                             self._recent_activity_events.insert(0, act_vb_rec)
-                            self.execute_sql(self._build_activity_merge_sql(act_vb_rec), role="ACCOUNTADMIN", timeout=12)
+                            self.execute_sql(self._build_activity_merge_sql(act_vb_rec), role=self._service_role(), mode=_sf_identity.MODE_SERVICE, timeout=12)
                             self._synced_activity_ids.add(act_vb_id)
                             replicated_activities += 1
 
@@ -8896,19 +9097,19 @@ class LiveSnowflakeBridge:
             f"FROM {self.audit_table} ORDER BY event_ts DESC LIMIT {int(limit)}"
         )
         if self._has_spcs_token() and not self._is_execute_sql_mocked():
-            f_act = _CATALOG_EXECUTOR.submit(self.execute_sql, q_activity, role="ACCOUNTADMIN", timeout=12)
-            f_runs = _CATALOG_EXECUTOR.submit(self.execute_sql, q_runs, role="ACCOUNTADMIN", timeout=12)
-            f_spans = _CATALOG_EXECUTOR.submit(self.execute_sql, q_spans, role="ACCOUNTADMIN", timeout=12)
-            f_audit = _CATALOG_EXECUTOR.submit(self.execute_sql, q_audit, role="ACCOUNTADMIN", timeout=12)
+            f_act = _sf_identity.submit_with_context(_CATALOG_EXECUTOR, self.execute_sql, q_activity, role=self._service_role(), mode=_sf_identity.MODE_SERVICE, timeout=12)
+            f_runs = _sf_identity.submit_with_context(_CATALOG_EXECUTOR, self.execute_sql, q_runs, role=self._service_role(), mode=_sf_identity.MODE_SERVICE, timeout=12)
+            f_spans = _sf_identity.submit_with_context(_CATALOG_EXECUTOR, self.execute_sql, q_spans, role=self._service_role(), mode=_sf_identity.MODE_SERVICE, timeout=12)
+            f_audit = _sf_identity.submit_with_context(_CATALOG_EXECUTOR, self.execute_sql, q_audit, role=self._service_role(), mode=_sf_identity.MODE_SERVICE, timeout=12)
             act_res = f_act.result()
             runs_res = f_runs.result()
             spans_res = f_spans.result()
             audit_res = f_audit.result()
         else:
-            act_res = self.execute_sql(q_activity, role="ACCOUNTADMIN")
-            runs_res = self.execute_sql(q_runs, role="ACCOUNTADMIN")
-            spans_res = self.execute_sql(q_spans, role="ACCOUNTADMIN")
-            audit_res = self.execute_sql(q_audit, role="ACCOUNTADMIN")
+            act_res = self.execute_sql(q_activity, role=self._service_role(), mode=_sf_identity.MODE_SERVICE)
+            runs_res = self.execute_sql(q_runs, role=self._service_role(), mode=_sf_identity.MODE_SERVICE)
+            spans_res = self.execute_sql(q_spans, role=self._service_role(), mode=_sf_identity.MODE_SERVICE)
+            audit_res = self.execute_sql(q_audit, role=self._service_role(), mode=_sf_identity.MODE_SERVICE)
 
         active_mem_events = [
             ev
@@ -8969,8 +9170,26 @@ class LiveSnowflakeBridge:
 LIVE_BRIDGE = LiveSnowflakeBridge()
 
 
+def _emit_mcp_denial(tool_name: str, result: dict[str, Any], target_object: str | None) -> None:
+    """W3-R1-10a: every MCP 403 denial is audited as AUTHZ_ROLE_DENIED (nothing was executed)."""
+    try:
+        emit_audit(
+            LIVE_BRIDGE.record_audit_event,
+            AuditAction.AUTHZ_ROLE_DENIED,
+            result,
+            target_object=target_object or tool_name,
+            details={"object": tool_name, "status_code": result.get("status_code")},
+            discriminator=f"mcp:{tool_name}:{uuid.uuid4().hex}",
+        )
+    except Exception:  # noqa: BLE001 - auditing must never turn a denial into a success
+        pass
+
+
 def register_snowflake_fastapi_routes(app: Any) -> None:
     """Mount `/api/v1/snowflake/*` endpoints and automatic Flow Activity replication middleware onto Langflow's FastAPI app."""
+    # W3-R1-14d: structured JSON container logs (allowlisted fields only) from startup.
+    _trace.get_trace_logger()
+    _trace.log_event("bridge_startup")
     from fastapi import APIRouter, Request
     from fastapi.responses import JSONResponse
 
@@ -9101,8 +9320,7 @@ def register_snowflake_fastapi_routes(app: Any) -> None:
         return JSONResponse(status_code=200, content=res)
 
     if hasattr(app, "middleware"):
-        @app.middleware("http")
-        async def snowflake_flow_context_and_trace_middleware(request: Request, call_next: Any) -> Any:
+        async def _snowflake_flow_context_and_trace(request: Request, call_next: Any) -> Any:
             path = str(getattr(request.url, "path", "") or "")
             method = str(getattr(request, "method", "GET") or "GET").upper()
             if not getattr(LIVE_BRIDGE, "_sqlite_uuid_healed_at_request", False) and path.startswith("/api/"):
@@ -9390,7 +9608,7 @@ def register_snowflake_fastapi_routes(app: Any) -> None:
                     LIVE_BRIDGE.cleanup_flow_triggers,
                     str(norm_fid or matched_fid),
                 )
-                _AUDIT_EXECUTOR.submit(
+                _sf_identity.submit_background(_AUDIT_EXECUTOR, 
                     LIVE_BRIDGE.record_audit_event,
                     action="FLOW_DELETED_IN_UI",
                     outcome="ALLOWED",
@@ -9412,11 +9630,11 @@ def register_snowflake_fastapi_routes(app: Any) -> None:
                     except Exception:  # noqa: BLE001
                         pass
             elif method == "POST" and path.rstrip("/") in ("/api/v1/flows", "/api/v1/flows/upload"):
-                _AUDIT_EXECUTOR.submit(LIVE_BRIDGE._load_flow_contexts_sqlite)
+                _sf_identity.submit_background(_AUDIT_EXECUTOR, LIVE_BRIDGE._load_flow_contexts_sqlite)
             elif any(seg in path for seg in ("/api/v1/build/", "/api/v1/run/", "/api/v1/webhook/")):
                 if "/api/v1/webhook/" in path:
                     wh_fid = str(norm_fid or matched_fid or "webhook-flow")
-                    wh_run_id = f"wh_run_{uuid.uuid4().hex[:16]}"
+                    wh_run_id = CURRENT_RUN_ID.get() or f"wh_run_{uuid.uuid4().hex[:16]}"
                     wh_status = "SUCCEEDED" if getattr(response, "status_code", 200) < 400 else "FAILED"
                     await asyncio.to_thread(
                         lambda: LIVE_BRIDGE.record_trigger_execution_telemetry(
@@ -9430,12 +9648,64 @@ def register_snowflake_fastapi_routes(app: Any) -> None:
                             result_payload={"status": wh_status, "run_id": wh_run_id},
                         )
                     )
-                _AUDIT_EXECUTOR.submit(
+                _sf_identity.submit_background(_AUDIT_EXECUTOR, 
                     LIVE_BRIDGE.sync_langflow_traces_to_snowflake,
                     25,
                     replicate_sqlite=True,
                 )
             return response
+
+        @app.middleware("http")
+        async def snowflake_flow_context_and_trace_middleware(request: Request, call_next: Any) -> Any:
+            # W3-R1-10b: identity is bound per request from ingress headers, never stored globally.
+            ident_token = _sf_identity.bind_identity(_sf_identity.identity_from_headers(request.headers))
+            # W3-R1-10c: user-facing routes request caller mode (effective only when the flag is ON).
+            mode_token = _sf_identity.bind_request_mode(_sf_identity.mode_for_path(request.url.path))
+            # W3-R1-14a/14d: per-request correlation ids + allowlisted lifecycle logs (no content).
+            req_path = str(getattr(request.url, "path", "") or "")
+            # Reuse the id assigned by RequestIdASGIMiddleware (outermost) so headers and logs agree.
+            request_id = (getattr(request, "scope", None) or {}).get(_trace.REQUEST_ID_SCOPE_KEY) or _trace.request_id_from_header(
+                request.headers.get(_trace.REQUEST_ID_HEADER)
+            )
+            run_id = _trace.run_id_for_request(req_path, request.headers.get("X-Run-Id"))
+            started = time.monotonic()
+            outcome = "FAILURE"
+            status_code = 500
+            try:
+                with _trace.trace_scope(request_id=request_id, run_id=run_id):
+                    _trace.log_event("request_start")
+                    if run_id:
+                        _trace.log_event("flow_run_start")
+                    try:
+                        response = await _snowflake_flow_context_and_trace(request, call_next)
+                        status_code = int(getattr(response, "status_code", 200) or 200)
+                        outcome = "SUCCESS" if status_code < 400 else "FAILURE"
+                        try:
+                            response.headers[_trace.REQUEST_ID_HEADER] = request_id
+                            response.headers[_trace.REQUEST_ID_FALLBACK_HEADER] = request_id
+                        except Exception:  # noqa: BLE001
+                            pass
+                        return response
+                    finally:
+                        duration_ms = int((time.monotonic() - started) * 1000)
+                        err = None if outcome == "SUCCESS" else f"HTTP_{status_code}"
+                        _trace.log_event("request_end", outcome=outcome, duration_ms=duration_ms, error_code=err)
+                        if run_id:
+                            _trace.log_event(
+                                "flow_run_end",
+                                flow_id=CURRENT_SNOWFLAKE_FLOW_ID.get() or LIVE_BRIDGE.active_flow_id,
+                                outcome=outcome,
+                                duration_ms=duration_ms,
+                                error_code=err,
+                            )
+            finally:
+                _sf_identity.reset_request_mode(mode_token)
+                _sf_identity.reset_identity(ident_token)
+
+        # Added last = outermost: every response (streaming, static, errors, unhandled exceptions)
+        # carries the request id in both headers and in JSON error envelopes.
+        if hasattr(app, "add_middleware"):
+            app.add_middleware(_trace.RequestIdASGIMiddleware)
 
     @sf_router.get("/persistence")
     async def get_persistence_status() -> JSONResponse:
@@ -9446,9 +9716,6 @@ def register_snowflake_fastapi_routes(app: Any) -> None:
     async def get_snowflake_context(request: Request, flow_id: str | None = None) -> JSONResponse:
         await asyncio.to_thread(LIVE_BRIDGE.sync_superuser_credentials)
         await asyncio.to_thread(LIVE_BRIDGE.refresh_roles_from_snowflake)
-        sf_header_user = request.headers.get("Sf-Context-Current-User")
-        if sf_header_user:
-            LIVE_BRIDGE.authenticated_user = sf_header_user
         req_flow_id = LIVE_BRIDGE._normalize_flow_id(
             flow_id or request.query_params.get("flow_id") or request.headers.get("X-Snowflake-Flow-Id")
         )
@@ -10687,13 +10954,29 @@ def register_snowflake_fastapi_routes(app: Any) -> None:
                     },
                 }
             elif tool_name == "snowflake_switch_role":
-                payload = await asyncio.to_thread(
-                    LIVE_BRIDGE.switch_role, str(args.get("target_role") or "ACCOUNTADMIN")
-                )
+                requested_role = str(args.get("target_role") or "").strip()
+                if not _sf_identity.is_selectable_role(requested_role, LIVE_BRIDGE.available_roles):
+                    payload = {
+                        "ok": False,
+                        "status_code": 403,
+                        "error_code": ErrorCode.AUTHZ_ROLE_DENIED.value,
+                        "message": "target_role is required and must be a granted, non-privileged role.",
+                    }
+                    _emit_mcp_denial("snowflake_switch_role", payload, requested_role.upper() or None)
+                else:
+                    payload = await asyncio.to_thread(LIVE_BRIDGE.switch_role, requested_role)
             elif tool_name == "snowflake_query_sql":
-                payload = await asyncio.to_thread(
-                    LIVE_BRIDGE.execute_sql, str(args.get("statement") or "SELECT CURRENT_ROLE()")
-                )
+                mcp_statement = str(args.get("statement") or "SELECT CURRENT_ROLE()")
+                if not _sf_identity.is_read_only_statement(mcp_statement):
+                    payload = {
+                        "ok": False,
+                        "status_code": 403,
+                        "error_code": ErrorCode.AUTHZ_ROLE_DENIED.value,
+                        "message": "snowflake_query_sql accepts a single read-only statement only; nothing was executed.",
+                    }
+                    _emit_mcp_denial("snowflake_query_sql", payload, None)
+                else:
+                    payload = await asyncio.to_thread(LIVE_BRIDGE.execute_sql, mcp_statement)
             elif tool_name == "snowflake_sync_traces":
                 payload = await asyncio.to_thread(
                     LIVE_BRIDGE.sync_langflow_traces_to_snowflake, limit=int(args.get("limit") or 20)
@@ -10732,9 +11015,6 @@ def register_snowflake_fastapi_routes(app: Any) -> None:
     @sf_router.post("/service-trigger")
     async def post_snowflake_service_trigger(request: Request) -> JSONResponse:
         """SPCS Service Function batch endpoint (`SNOWFLAKE_LANGFLOW.CORE.RUN_LANGFLOW_FLOW`)."""
-        sf_header_user = request.headers.get("Sf-Context-Current-User")
-        if sf_header_user:
-            LIVE_BRIDGE.authenticated_user = sf_header_user
         try:
             body = await request.json()
         except Exception as exc:  # noqa: BLE001
