@@ -1,10 +1,14 @@
 # Upstream Synchronization & Fork Maintenance Guide (`ADR-001`)
 
-> **Disclaimer & Ownership:** This repository is a personal, independent fork developed by **Francesco Battaglieri** ([@fbattaglieri-snowflake](https://github.com/fbattaglieri-snowflake)) based on the upstream open-source project [langflow-ai/langflow](https://github.com/langflow-ai/langflow) (`v1.12.5`, MIT License). **It is NOT an official project or product of Snowflake Inc. nor of Langflow / DataStax**, and it is **currently under active testing and validation (Work in Progress / Experimental Testing)**.
+> **Disclaimer & Ownership:** This repository is a personal, independent fork developed by **Francesco Battaglieri** ([@fbattaglieri-snowflake](https://github.com/fbattaglieri-snowflake)) of the upstream open-source project [langflow-ai/langflow](https://github.com/langflow-ai/langflow) (MIT License). **It is NOT an official project or product of Snowflake Inc. nor of Langflow / DataStax**, and it is **currently under active testing and validation (Work in Progress / Experimental Testing)**.
 
-**Upstream Repository:** `https://github.com/langflow-ai/langflow.git` (Read-Only Remote `upstream`)  
-**Baseline Tag:** `v1.12.5` (MIT License)  
+**Upstream:** `https://github.com/langflow-ai/langflow` and the official `langflowai/langflow` images (read-only)  
+**Current Base Image:** `langflowai/langflow:1.13.1@sha256:643d78228cd148be70e52a860dd3456c834a070c98c81b354f713908d40949f8`  
 **Protected Primary Branch:** `snowflake/main`
+
+## Sync Model: Pinned Base-Image Bump (not a git merge)
+
+This repository contains only the Snowflake extension code (`src/lfx_snowflake/`, `frontend_patches/`, `scripts/`, `sql/`, `docs/`). It does **not** contain the upstream Langflow source, so there is nothing to merge. `Dockerfile.release` starts from the official image named in `LANGFLOW_BASE` and runs the installer once against its site-packages. Upgrading Langflow means changing that one pinned reference and proving that the installer, the tests, and the database migration still work.
 
 ---
 
@@ -12,13 +16,13 @@
 
 | Rule ID | Rule Name | Enforcement |
 |---|---|---|
-| `RULE-SYNC-01` | **Read-Only Upstream Remote** | `upstream` (`https://github.com/langflow-ai/langflow.git`) is read-only. Never push branches or tags to `upstream`. |
-| `RULE-SYNC-02` | **Stable Release Tag Pinning** | Synchronize only against official release tags (e.g., `v1.12.5`), never untagged `main` commits. |
-| `RULE-SYNC-03` | **Dedicated Staging Branch** | Run every upstream merge on `sync/upstream-<version>` before merging into `snowflake/main`. |
-| `RULE-SYNC-04` | **Bundle Isolation & 6 Hook Points** | Keep Snowflake code inside `src/lfx_snowflake/` and the 6 tracked core hooks; keep invariant categories untouched. |
-| `RULE-SYNC-05` | **Blocking Sanitization Gate** | `python3 scripts/verify_public_repo_sanitization.py` must report 0 secrets and 0 denylist matches before commit/merge. |
+| `RULE-SYNC-01` | **Read-Only Upstream** | Upstream repository and images are consumed read-only. Push branches and tags only to `origin`. |
+| `RULE-SYNC-02` | **Stable Release Pinning** | Use only published releases (no `rc`, no untagged `main`), pinned as `langflowai/langflow:<version>@sha256:<DIGEST>`. |
+| `RULE-SYNC-03` | **Dedicated Upgrade Branch** | Stage each bump on `feat/langflow-<version>`; merge into `snowflake/main` only after all gates below pass. |
+| `RULE-SYNC-04` | **Bundle Isolation & 6 Hook Points** | Keep Snowflake code inside `src/lfx_snowflake/` and the 6 tracked hooks. `install_live_hooks_in_container.py --report` must show every hook matched exactly as expected; invariant categories stay untouched. |
+| `RULE-SYNC-05` | **Blocking Sanitization Gate** | `python3 scripts/verify_public_repo_sanitization.py` must report 0 secrets and 0 denylist matches before commit. |
 | `RULE-SYNC-06` | **Full Test & Protocol Qualification** | `pytest` must pass 100% across all governance, observability, 3 Proxy protocols (`Chat`, `Responses`, `Messages`), Ollama, and component tests. |
-| `RULE-SYNC-07` | **Quiesced Backup & Atomic Rollback** | Run `python3 scripts/backup_restore_lifecycle.py` (or `<POSTGRES_INSTANCE>` point-in-time fork) before promoting to `<COMPUTE_POOL>`. |
+| `RULE-SYNC-07` | **Snapshot Before Migration & Rollback** | Upstream migrations are irreversible. Snapshot the `/persist` block volume (and back up `<POSTGRES_INSTANCE>` if used) before `ALTER SERVICE`. Rollback = previous image + snapshot restore. |
 
 ---
 
@@ -28,13 +32,15 @@
 |---|---|
 | `snowflake/main` | Protected main branch containing verified SnowflakeLangflow releases |
 | `feat/<area>` | Scoped feature branches (e.g., `feat/governance-r0`, `feat/proxy-adapters-r1`) |
-| `sync/upstream-<version>` | Dedicated staging branch for merging a new upstream Langflow tag (e.g., `sync/upstream-v1.12.5`) |
+| `feat/langflow-<version>` | Base-image bump for a new upstream release (e.g., `feat/langflow-1.13.1`) |
+
+The former `sync/upstream-<version>` merge branches are obsolete because the repository no longer carries upstream history.
 
 ---
 
 ## 2. Strict Isolation: `lfx_snowflake` Bundle vs Tracked Core Patches
 
-To minimize merge conflicts across upstream upgrades, 95%+ of Snowflake-specific logic resides inside the self-contained package `src/lfx_snowflake/`:
+To keep base-image upgrades mechanical, 95%+ of Snowflake-specific logic resides inside the self-contained package `src/lfx_snowflake/`:
 
 - `src/lfx_snowflake/governance/` — `SnowflakeAuthzService`, `SnowflakeObjectProvisioner`, role-bound session pool, 4-code error taxonomy, and `EXPLAIN_PRIVILEGES` pre-checks.
 - `src/lfx_snowflake/observability/` — `SnowflakeTraceReplicator` (`<DATABASE>.<SCHEMA>.LANGFLOW_FLOW_RUNS`, `<DATABASE>.<SCHEMA>.LANGFLOW_FLOW_SPANS`), `SnowflakeAuditOutbox` (`<DATABASE>.<SCHEMA>.LANGFLOW_AUDIT_LOG`), deterministic pre-sink secret/PII redactor.
@@ -45,7 +51,7 @@ To minimize merge conflicts across upstream upgrades, 95%+ of Snowflake-specific
 
 ### Tracked Core Patch Registry (`frontend_patches/`)
 
-Only six narrow hook points touch core Langflow files:
+Only six narrow hook points touch core Langflow files. They are applied at image build time by `scripts/install_live_hooks_in_container.py`, which fails closed when a hook anchor is missing or matches more than expected:
 
 1. **Topbar & Profile Menu Branding (`REQ-01`, `[G-A6]`):** Official black Snowflake logo in topbar (home + flow), removal of GitHub/Discord/X links, addition of `Snowflake Documentation` (`https://docs.snowflake.com/`) with color Snowflake logo.
 2. **Active Role Selector & Backend Authz Middleware (`REQ-02`):** Topbar role switcher and FastAPI middleware enforcing active role permissions and `context_epoch`.
@@ -58,36 +64,48 @@ Unchanged upstream categories (`Input & Output`, `Prompt Template`, `Processing`
 
 ---
 
-## 3. Step-by-Step Upgrade Procedure (`scripts/sync_upstream.sh`)
+## 3. Step-by-Step Upgrade Procedure
 
-1. **Run Dry-Run Verification:**
+1. **Pick the release and pin its digest.** Use a published release only.
    ```bash
-   DRY_RUN=true bash scripts/sync_upstream.sh v1.12.5
+   docker pull --platform linux/amd64 langflowai/langflow:<VERSION>
+   docker inspect --format '{{index .RepoDigests 0}}' langflowai/langflow:<VERSION>
    ```
-2. **Execute Upstream Merge on `sync/upstream-<version>`:**
+   Update `ARG LANGFLOW_BASE=langflowai/langflow:<VERSION>@sha256:<DIGEST>` in `Dockerfile.release` on `feat/langflow-<VERSION>`.
+2. **Run the installer report on the extracted bundle.** Copy the image site-packages (including `langflow/frontend`) to a local directory and dry-run the installer. Nothing is written; every hook must match its expected count.
    ```bash
-   DRY_RUN=false bash scripts/sync_upstream.sh v1.12.5
+   python3 scripts/install_live_hooks_in_container.py --report \
+     --site-packages <EXTRACTED_SITE_PACKAGES> --langflow-version <VERSION>
    ```
-3. **Verify Non-Regression & Sanitization Gate:**
+   Adjust patches until the report is clean. Never relax an expected count to make it pass.
+3. **Run the gates.**
    ```bash
-   pytest
+   PYTHONPATH=src python3 -m pytest -q tests
    python3 scripts/verify_public_repo_sanitization.py
    ```
-4. **Database & Code Rollback Plan:**
-   Before promoting a synchronized release to `<COMPUTE_POOL>`, execute `python3 scripts/backup_restore_lifecycle.py` to create a verified quiesced backup (or Snowflake Postgres point-in-time fork of `<POSTGRES_INSTANCE>`) so both container image and ORM database can be rolled back atomically if post-upgrade checks fail.
+4. **Rehearse the migration locally.** Build the image, then start it against a **copy** of the production `/persist` directory (core database `langflow.db` and config). Confirm the alembic migrations complete, users and flows are intact, and a flow saved after start survives a container restart.
+5. **Snapshot the block volume.** Take a snapshot of the service `/persist` block volume (and back up `<POSTGRES_INSTANCE>` if used). `python3 scripts/backup_restore_lifecycle.py` can add a quiesced file-level backup to `@<DATABASE>.<SCHEMA>.<STAGE_NAME>/backups/`.
+6. **Push and roll out.** Push the image to `<IMAGE_REPOSITORY>` and run `ALTER SERVICE <SERVICE_NAME> FROM SPECIFICATION ...` with the new image digest.
+7. **Verify.** Check `SHOW SERVICE CONTAINERS IN SERVICE <SERVICE_NAME>` (running, expected image digest), the container log (migrations finished, no installer error), login, flow count, and Snowflake components. If a check fails, roll back by restoring the snapshot and redeploying the previous image digest; the old image alone cannot read a migrated database.
+
+### Legacy `scripts/sync_upstream.sh`
+
+`scripts/sync_upstream.sh` implements the old merge-based flow (`upstream` remote, `sync/upstream-<tag>` branch, `git merge`). It is **obsolete** for this repository and is kept only for reference; its `DRY_RUN=true` mode still runs the sanitization gate. Do not use it to upgrade Langflow.
 
 ---
 
-## 4. Bundle Isolation Architecture Schema
+## 4. Upgrade Flow Schema
 
 ```mermaid
 flowchart TB
-    Upstream["langflow-ai/langflow (Read-Only Remote 'upstream', v1.12.5)"]
-    Staging["sync/upstream-<version> Staging Branch"]
-    Gate["Verification Gates: pytest + verify_public_repo_sanitization.py"]
-    Main["snowflake/main Protected Branch"]
-    Bundle["src/lfx_snowflake/ + frontend_patches/ + scripts/install_live_hooks_in_container.py"]
+    Release["Official image langflowai/langflow:&lt;version&gt;@sha256 (read-only)"]
+    Branch["feat/langflow-&lt;version&gt;: bump LANGFLOW_BASE"]
+    Report["install_live_hooks_in_container.py --report (fail closed)"]
+    Gate["Gates: pytest + verify_public_repo_sanitization.py"]
+    Rehearsal["Local rehearsal on a copy of /persist"]
+    Snapshot["Snapshot /persist block volume"]
+    Deploy["ALTER SERVICE + verify"]
+    Main["snowflake/main"]
 
-    Upstream --> Staging --> Gate --> Main
-    Bundle --> Gate
+    Release --> Branch --> Report --> Gate --> Rehearsal --> Main --> Snapshot --> Deploy
 ```

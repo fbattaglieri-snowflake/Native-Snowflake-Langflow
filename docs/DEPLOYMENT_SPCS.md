@@ -92,11 +92,11 @@ recorded only in the `LANGFLOW_BASE` build argument. Do not stack a release on a
 
 ```bash
 # Resolve and pin the upstream digest (recommended for releases)
-docker pull --platform linux/amd64 langflowai/langflow:1.13.2
-docker inspect --format '{{index .RepoDigests 0}}' langflowai/langflow:1.13.2
+docker pull --platform linux/amd64 langflowai/langflow:1.13.1
+docker inspect --format '{{index .RepoDigests 0}}' langflowai/langflow:1.13.1
 
 docker build --platform linux/amd64 -f Dockerfile.release \
-  --build-arg LANGFLOW_BASE=langflowai/langflow:1.13.2@sha256:<DIGEST> \
+  --build-arg LANGFLOW_BASE=langflowai/langflow:1.13.1@sha256:643d78228cd148be70e52a860dd3456c834a070c98c81b354f713908d40949f8 \
   -t <SNOWFLAKE_ACCOUNT>.registry.snowflakecomputing.com/<DATABASE>/<SCHEMA>/<IMAGE_REPOSITORY>/snowflake-langflow:<VERSION> .
 
 docker push <SNOWFLAKE_ACCOUNT>.registry.snowflakecomputing.com/<DATABASE>/<SCHEMA>/<IMAGE_REPOSITORY>/snowflake-langflow:<VERSION>
@@ -105,7 +105,9 @@ docker push <SNOWFLAKE_ACCOUNT>.registry.snowflakecomputing.com/<DATABASE>/<SCHE
 - The build fails if the installer or the import smoke check fails.
 - `.dockerignore` keeps `.git`, caches, tests, Markdown notes, local databases and key files out of the build context.
 - Runtime user, workdir and command match upstream (`user`, `/app`, `langflow run`).
-- Upgrading the base runs the upstream alembic migrations on the persisted SQLite database on first start, and they cannot be undone. Back up `/persist/langflow.db` and test on a canary service before you switch traffic.
+- Before building, check that the installer still matches the new base: extract the image site-packages and run `python3 scripts/install_live_hooks_in_container.py --report` against it. The report lists every hook point; any missing or ambiguous match fails the build (fail closed).
+- The image entrypoint is `scripts/langflow-persist-entrypoint.sh`. It points the core Langflow database and config at the `/persist` block volume before starting `langflow run`, so flows and users survive restarts and image upgrades. Without it the core database lands on ephemeral container storage.
+- Upgrading the base runs the upstream alembic migrations on the persisted SQLite database on first start, and they cannot be undone. Rehearse the migration locally on a copy of `/persist/langflow.db`, snapshot the `/persist` block volume, and test on a canary service before you switch traffic. Rollback means restoring the snapshot together with the previous image. See [`UPSTREAM_SYNC.md`](UPSTREAM_SYNC.md).
 
 ---
 

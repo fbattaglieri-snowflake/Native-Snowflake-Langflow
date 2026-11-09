@@ -1,7 +1,7 @@
 # ❄️ Native Snowflake Langflow — Capability & Component Matrix
 
 **Tested Cloud Environment: AWS — Snowflake on AWS**  
-**Upstream Baseline:** `langflow-ai/langflow` `v1.12.5` (MIT License)
+**Upstream Baseline:** official image `langflowai/langflow:1.13.1@sha256:643d78228cd148be70e52a860dd3456c834a070c98c81b354f713908d40949f8` (MIT License; extension code only, no upstream source in this repository)
 
 ---
 
