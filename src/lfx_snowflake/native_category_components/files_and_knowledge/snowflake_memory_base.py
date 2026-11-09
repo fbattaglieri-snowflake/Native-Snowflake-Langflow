@@ -19,29 +19,7 @@ from lfx_snowflake.fastapi_live_bridge import LIVE_BRIDGE, resolve_canonical_mem
 
 
 def _memory_base_options(flow_id: str | None = None) -> list[str]:
-    opts = list(LIVE_BRIDGE.get_memory_catalog_options(include_none=False, flow_id=flow_id))
-    defaults = [
-        "MEM_1_GRAPH_CHECKPOINTER",
-        "MEM_2_CHAT_WINDOW",
-        "MEM_3_SESSION_SUMMARY",
-        "MEM_4_USER_ENTITY_PROFILE",
-        "MEM_5_EPISODIC_FEWSHOT",
-    ]
-    reg_by_name = {
-        str(m.get("name") or "").strip().upper(): m
-        for m in getattr(LIVE_BRIDGE, "memories_registry", [])
-        if isinstance(m, dict) and m.get("name")
-    }
-    for d in defaults:
-        if d in opts:
-            continue
-        reg_entry = reg_by_name.get(d.upper())
-        if reg_entry is not None:
-            if LIVE_BRIDGE.is_memory_visible_in_context(reg_entry, flow_id=flow_id):
-                opts.append(d)
-        elif not reg_by_name:
-            opts.append(d)
-    return opts or ["SNOWFLAKE_KB_MEM"]
+    return list(LIVE_BRIDGE.get_memory_catalog_options(include_none=False, flow_id=flow_id)) or ["None"]
 
 
 def _memory_options(flow_id: str | None = None) -> list[str]:
@@ -493,11 +471,11 @@ class SnowflakeMemoryBaseNativeComponent(Component):
 
     @property
     def memory_name(self) -> str:
-        return str(getattr(self, "memory_base", "SNOWFLAKE_KB_MEM") or "SNOWFLAKE_KB_MEM").split(" (")[0].strip()
+        return str(getattr(self, "memory_base", "None") or "None").split(" (")[0].strip()
 
     @memory_name.setter
     def memory_name(self, value: str) -> None:
-        self.memory_base = str(value or "SNOWFLAKE_KB_MEM").strip()
+        self.memory_base = str(value or "None").strip()
 
     def build_memory(self) -> SnowflakeChatMessageHistoryAdapter:
         """Return an External Memory adapter (`Memory` / `BaseChatMessageHistory`) for 2-node or 1-node canvas wiring (`W2-R4-09`)."""
@@ -511,7 +489,7 @@ class SnowflakeMemoryBaseNativeComponent(Component):
         mem_name = (
             memory_name_override
             or getattr(self, "memory_base", None)
-            or "SNOWFLAKE_KB_MEM"
+            or "None"
         )
         short_name = str(mem_name).split(" (")[0].strip()
         raw_type = getattr(self, "canonical_memory_type", None)
@@ -645,11 +623,6 @@ class SnowflakeMemoryBaseNativeComponent(Component):
         summary_text = ""
         if rows and isinstance(rows[0], dict):
             summary_text = str(rows[0].get("running_summary") or rows[0].get("RUNNING_SUMMARY") or "")
-        if not summary_text:
-            summary_text = (
-                f"[Summary Memory ({payload.get('memory_ref')}) — Session {getattr(self, 'session_id', 'default')}]: "
-                f"Prior turns summarized via {getattr(self, 'summarizer_model', 'openai-gpt-6-luna')}."
-            )
         return Message(text=summary_text)
 
     def get_profile_context(self) -> Data:

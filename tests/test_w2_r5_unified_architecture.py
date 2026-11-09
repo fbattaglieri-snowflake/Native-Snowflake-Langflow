@@ -392,18 +392,16 @@ def test_w2_r5_02_unified_memories_native_create_and_snowflake_vector_store_back
             "chunk_overlap": 200,
         },
     )
-    assert resp.status_code in (200, 201)
+    # W3-R1-01/05: without a Snowflake token the CREATE TABLE is not executed -> fail closed, nothing registered
+    assert resp.status_code == 501
     payload = resp.json()
-    assert payload["ok"] is True
-    assert payload["name"] == "W2_R5_NATIVE_CREATED_MEM"
-    assert "snowflake-arctic-embed-m-v1.5" in payload["embedding_model"]
-    assert payload.get("size") == 768 or payload.get("dimension") == 768 or payload.get("memory", {}).get("dimension") == 768
+    assert payload["ok"] is False
+    assert payload["error_code"] == "NOT_CONFIGURED"
 
-    # Verify it appears in GET /api/v1/memories
     list_resp = client.get("/api/v1/memories")
     assert list_resp.status_code == 200
     items = list_resp.json()["items"]
-    assert any(it["name"] == "W2_R5_NATIVE_CREATED_MEM" for it in items)
+    assert not any(it["name"] == "W2_R5_NATIVE_CREATED_MEM" for it in items)
 
 
 def test_w2_r5_03_multi_memory_wiring_on_message_history_and_agent_tools() -> None:

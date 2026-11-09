@@ -1494,7 +1494,7 @@ class SnowflakeMemoryBaseComponent:
     def __init__(
         self,
         engine: InMemoryVectorStoreEngine | None = None,
-        memory_name: str = "SNOWFLAKE_KB_MEM",
+        memory_name: str = "None",
         *,
         filter_by_session: bool | None = None,
         tool_mode: bool | None = None,
@@ -1512,7 +1512,7 @@ class SnowflakeMemoryBaseComponent:
         outcome_score_threshold: float = 0.7,
         few_shot_k: int = 3,
     ) -> None:
-        if isinstance(engine, str) and memory_name == "SNOWFLAKE_KB_MEM":
+        if isinstance(engine, str) and memory_name == "None":
             memory_name = engine
             engine = None
         self.engine = engine
@@ -1742,22 +1742,16 @@ class SnowflakeMemoryBaseComponent:
                 project_id=project_id,
                 session_id=session_id,
             )
-        ingest_fn = getattr(LIVE_BRIDGE, "ingest_memory_record", None)
-        if callable(ingest_fn):
-            return ingest_fn(
-                self.memory_name,
-                content=content,
-                user_id=user_id,
-                project_id=project_id,
-                session_id=session_id,
-                metadata=metadata or {},
-            )
+        # W3-R1-05: no Snowflake ingestion path exists yet; never report a write that did not happen
         return {
-            "ok": True,
+            "ok": False,
+            "error_code": "NOT_CONFIGURED",
+            "message": "Storing into Snowflake memories is not available in this release; nothing was stored.",
             "store_name": self.memory_name,
             "canonical_memory_type": self.canonical_memory_type,
             "table_fqn": self.table_fqn,
-            "ingested_count": 1,
+            "ingested_count": 0,
+            "query_id": None,
             "effective_role": LIVE_BRIDGE.active_role,
         }
 
