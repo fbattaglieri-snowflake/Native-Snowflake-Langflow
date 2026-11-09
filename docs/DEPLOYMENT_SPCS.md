@@ -67,6 +67,30 @@ docker build --platform linux/amd64 \
 docker push <SNOWFLAKE_ACCOUNT>.registry.snowflakecomputing.com/<DATABASE>/<SCHEMA>/<IMAGE_REPOSITORY>/snowflake-langflow:0.1.0
 ```
 
+
+### 4.1 Release build on the upstream Langflow image (`Dockerfile.release`)
+
+`Dockerfile.release` is the release image. It starts from the official Langflow image and runs
+`scripts/install_live_hooks_in_container.py` once against its site-packages. The Langflow version is
+recorded only in the `LANGFLOW_BASE` build argument. Do not stack a release on a previous release digest.
+
+```bash
+# Resolve and pin the upstream digest (recommended for releases)
+docker pull --platform linux/amd64 langflowai/langflow:1.13.2
+docker inspect --format '{{index .RepoDigests 0}}' langflowai/langflow:1.13.2
+
+docker build --platform linux/amd64 -f Dockerfile.release \
+  --build-arg LANGFLOW_BASE=langflowai/langflow:1.13.2@sha256:<DIGEST> \
+  -t <SNOWFLAKE_ACCOUNT>.registry.snowflakecomputing.com/<DATABASE>/<SCHEMA>/<IMAGE_REPOSITORY>/snowflake-langflow:<VERSION> .
+
+docker push <SNOWFLAKE_ACCOUNT>.registry.snowflakecomputing.com/<DATABASE>/<SCHEMA>/<IMAGE_REPOSITORY>/snowflake-langflow:<VERSION>
+```
+
+- The build fails if the installer or the import smoke check fails.
+- `.dockerignore` keeps `.git`, caches, tests, Markdown notes, local databases and key files out of the build context.
+- Runtime user, workdir and command match upstream (`user`, `/app`, `langflow run`).
+- Upgrading the base runs the upstream alembic migrations on the persisted SQLite database on first start, and they cannot be undone. Back up `/persist/langflow.db` and test on a canary service before you switch traffic.
+
 ---
 
 ## 5. Creating the SPCS Service (`sql/03_spcs_service_template.sql`)
