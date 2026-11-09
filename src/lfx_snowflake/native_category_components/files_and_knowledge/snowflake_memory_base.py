@@ -157,16 +157,20 @@ def _register_chat_message_history_adapter():
                 "active_role": LIVE_BRIDGE.active_role,
                 **(metadata or {}),
             }
-            self._local_messages.append(record)
-
-            self.helper.store_memory(
+            store_res = self.helper.store_memory(
                 raw_text,
                 user_id=eff_user,
                 project_id=eff_project,
                 session_id=eff_session,
                 metadata=record,
             )
-
+            if not isinstance(store_res, dict) or store_res.get("ok") is False:
+                code = (store_res or {}).get("error_code") if isinstance(store_res, dict) else None
+                raise RuntimeError(
+                    f"{code or 'NOT_CONFIGURED'}: message was not stored in Snowflake memory '{self.memory_name}'."
+                )
+            # Mirror locally only after the backing store accepted the write.
+            self._local_messages.append(record)
             entry = self._find_bridge_entry()
             if entry is not None:
                 stored_list = list(entry.get("stored_records") or [])

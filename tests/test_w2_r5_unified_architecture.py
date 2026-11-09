@@ -433,25 +433,13 @@ def test_w2_r5_03_multi_memory_wiring_on_message_history_and_agent_tools() -> No
         sender_name="Analyst",
         message_text="Multi-memory fan-out test message across Buffer and Window.",
     )
-    store_data = mh_store.retrieve_history_table().data
-    assert store_data["external_memory_connected"] is True
-    assert store_data["external_memory_count"] == 2
-    assert "MEM_1_CONVERSATION_BUFFER" in store_data["external_memory_names"]
-    assert "MEM_2_CHAT_WINDOW" in store_data["external_memory_names"]
-    assert "MEM_1_CONVERSATION_BUFFER" in store_data["stored_in_memories"]
-    assert "MEM_2_CHAT_WINDOW" in store_data["stored_in_memories"]
+    # W3-R1-05 / AC-11: fan-out Store must fail closed (no Snowflake write path), not succeed in RAM
+    with pytest.raises(RuntimeError, match="NOT_CONFIGURED"):
+        mh_store.retrieve_history_table()
+    with pytest.raises(RuntimeError, match="NOT_CONFIGURED"):
+        adapter_conv.add_message("Exclusive message.", session_id="multi-mem-sess-001")
 
-    # Add a distinct message only into MEM_1_CONVERSATION_BUFFER to verify merged + deduplicated Retrieve
-    adapter_conv.add_message(
-        "Exclusive message in MEM_1_CONVERSATION_BUFFER.",
-        session_id="multi-mem-sess-001",
-        sender="AI",
-        sender_name="Cortex Agent",
-        user_id="analyst_multi",
-        message_id="msg-exclusive-conv-2",
-    )
-
-    # 2. Retrieve mode with multiple connected External Memories (fan-in merge & deduplication)
+    # 2. Retrieve fan-in still wires both memories and returns no fabricated messages
     mh_retrieve = SnowflakeMessageHistoryNativeComponent(
         mode="Retrieve",
         memory=[adapter_conv, adapter_win],
@@ -462,15 +450,7 @@ def test_w2_r5_03_multi_memory_wiring_on_message_history_and_agent_tools() -> No
     ret_data = mh_retrieve.retrieve_history_table().data
     assert ret_data["external_memory_count"] == 2
     texts = [m.get("text") or m.get("content") for m in ret_data["messages"]]
-    assert "Multi-memory fan-out test message across Buffer and Window." in texts
-    assert "Exclusive message in MEM_1_CONVERSATION_BUFFER." in texts
-    # Shared message must be deduplicated and list both memory sources
-    shared_rows = [
-        m for m in ret_data["messages"]
-        if (m.get("text") or m.get("content")) == "Multi-memory fan-out test message across Buffer and Window."
-    ]
-    assert len(shared_rows) == 1
-    assert set(shared_rows[0]["memory_sources"]) == {"MEM_1_CONVERSATION_BUFFER", "MEM_2_CHAT_WINDOW"}
+    assert "Exclusive message." not in texts
 
     # 3. Multiple Memory Base nodes in Tool Mode connected to Agent.tools have distinct tool names
     mb_vec = SnowflakeMemoryBaseNativeComponent(memory_name="MEM_4_VECTOR_KNOWLEDGE", tool_mode=True)

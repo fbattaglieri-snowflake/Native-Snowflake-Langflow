@@ -12,6 +12,8 @@ Covers:
 
 from __future__ import annotations
 
+import pytest
+
 import asyncio
 import inspect
 import json
@@ -1203,32 +1205,16 @@ def test_w2_r4_09_native_canvas_components_two_node_delegation_and_post_run_auto
     fe_store = hist_node_probe.update_outputs({"outputs": []}, "mode", "Store")
     assert [o["name"] for o in fe_store["outputs"]] == ["stored_message", "table", "replay_state"]
 
-    # 3. Verify 2-node delegation: Memory Base --[orange Memory]--> Message History (Store -> Retrieve)
+    # 3. W3-R1-05 / AC-11: Store through the external Memory adapter must not fake success in RAM
     store_node = SnowflakeMessageHistoryNativeComponent(
         mode="Store",
         memory=adapter,
         session_id="sess_w2_r4_09_two_node",
         message_text=Message(text="Verify Q4 EBITDA reconciliation in EUR", sender="User", sender_name="User"),
     )
-    stored_msg = store_node.store_message()
-    stored_payload = json.loads(stored_msg.text)
-    assert stored_payload["external_memory_connected"] is True
-    assert stored_payload["external_memory_name"] == "MEM_2_CHAT_WINDOW"
-    assert stored_payload["stored_text"] == "Verify Q4 EBITDA reconciliation in EUR"
-
-    retrieve_node = SnowflakeMessageHistoryNativeComponent(
-        mode="Retrieve",
-        memory=adapter,
-        session_id="sess_w2_r4_09_two_node",
-        window_k=6,
-    )
-    retrieved_msg = retrieve_node.retrieve_chat_history()
-    retrieved_payload = json.loads(retrieved_msg.text)
-    assert retrieved_payload["external_memory_connected"] is True
-    assert any(
-        (t.get("message_text") or t.get("text")) == "Verify Q4 EBITDA reconciliation in EUR"
-        for t in retrieved_payload["messages"]
-    )
+    with pytest.raises(RuntimeError, match="NOT_CONFIGURED"):
+        store_node.store_message()
+    assert adapter._local_messages == []
 
     # 4. W3-R1-05: the unused /memories/auto-capture route is removed
     client = _build_fastapi_test_client()
