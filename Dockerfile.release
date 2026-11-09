@@ -1,0 +1,52 @@
+# syntax=docker/dockerfile:1.7
+# SnowflakeLangflow release image: upstream Langflow base + Snowflake bundle and live hooks.
+# The Langflow version is pinned here and only here. Pin by digest for reproducible releases:
+#   --build-arg LANGFLOW_BASE=langflowai/langflow:<version>@sha256:<digest>
+ARG LANGFLOW_BASE=langflowai/langflow:1.13.1@sha256:643d78228cd148be70e52a860dd3456c834a070c98c81b354f713908d40949f8
+FROM --platform=linux/amd64 ${LANGFLOW_BASE}
+
+ARG LANGFLOW_BASE
+LABEL org.opencontainers.image.title="snowflake-langflow" \
+      org.opencontainers.image.base.name="${LANGFLOW_BASE}"
+
+USER root
+
+# Clean source tree consumed by scripts/install_live_hooks_in_container.py (SOURCE_ROOT).
+COPY src/ /opt/snowflake-langflow/src/
+COPY frontend_patches/ /opt/snowflake-langflow/frontend_patches/
+COPY scripts/ /opt/snowflake-langflow/scripts/
+COPY sql/ /opt/snowflake-langflow/sql/
+COPY starter_projects/ /opt/snowflake-langflow/starter_projects/
+COPY pyproject.toml /opt/snowflake-langflow/pyproject.toml
+
+# Patch the upstream site-packages in place. The installer must fail the build on any error.
+# The installer imports create_app(), which writes a secret_key and SQLite DB. Point all state
+# at a throwaway dir and delete it in this same layer: no secrets or state in any image layer.
+RUN set -eu \
+    && BUILD_STATE="$(mktemp -d)" \
+    && XDG_CACHE_HOME="$BUILD_STATE/cache" \
+       LANGFLOW_CONFIG_DIR="$BUILD_STATE/config" \
+       LANGFLOW_SAVE_DB_IN_CONFIG_DIR=true \
+       LANGFLOW_DATABASE_URL="sqlite:///$BUILD_STATE/langflow.db" \
+       LANGFLOW_PERSIST_DIR="$BUILD_STATE/persist" \
+       /app/.venv/bin/python /opt/snowflake-langflow/scripts/install_live_hooks_in_container.py \
+    && XDG_CACHE_HOME="$BUILD_STATE/cache" LANGFLOW_CONFIG_DIR="$BUILD_STATE/config" \
+       /app/.venv/bin/python -c "import lfx_snowflake, langflow.main" \
+    && rm -rf "$BUILD_STATE" /tmp/.cache /root/.cache/langflow \
+    && find / -xdev \( -name secret_key -o -name 'langflow.db' -o -name 'langflow.db-wal' -o -name 'langflow.db-shm' \) \
+         -not -path '/proc/*' -exec rm -f {} + \
+    && if find / -xdev \( -name secret_key -o -name 'langflow.db*' \) -not -path '/proc/*' | grep -q .; then \
+         echo "build state leaked into image" >&2; exit 1; fi \
+    && mkdir -p /persist /tmp/uv-cache /tmp/.cache \
+    && chown -R user /persist /tmp/uv-cache /tmp/.cache /opt/snowflake-langflow
+
+ENV PYTHONPATH="/opt/snowflake-langflow/src" \
+    UV_CACHE_DIR=/tmp/uv-cache \
+    XDG_CACHE_HOME=/tmp/.cache \
+    SQLITE_TMPDIR=/tmp \
+    LANGFLOW_PERSIST_DIR=/persist
+
+# Same runtime user, workdir and command as upstream.
+USER user
+WORKDIR /app
+CMD ["langflow", "run"]
