@@ -12,10 +12,10 @@
 </div>
 
 > [!WARNING]
-> **Unofficial personal fork, under active testing.** This repository ([`fbattaglieri-snowflake/Native-Snowflake-Langflow`](https://github.com/fbattaglieri-snowflake/Native-Snowflake-Langflow)) is an independent project by **Francesco Battaglieri** ([@fbattaglieri-snowflake](https://github.com/fbattaglieri-snowflake)). It is **not** an official product of Snowflake Inc. or of Langflow / DataStax, and it is not supported or warranted by either. APIs, components, SQL schemas, and configuration may change without notice. Do not deploy to production without your own qualification and security review.
+> **Unofficial personal fork, under active testing.** This repository ([`fbattaglieri-snowflake/Native-Snowflake-Langflow`](https://github.com/fbattaglieri-snowflake/Native-Snowflake-Langflow)) is an independent project by **Francesco Battaglieri** ([@fbattaglieri-snowflake](https://github.com/fbattaglieri-snowflake)). It is **NOT an official product, release, or repository of Snowflake Inc.**, nor is it an official project of Langflow / DataStax, and it is not supported or warranted by either. APIs, components, SQL schemas, and configuration may change without notice. Do not deploy to production without your own qualification and security review.
 
 > [!TIP]
-> Public fork of [langflow-ai/langflow](https://github.com/langflow-ai/langflow) (`v1.12.5` baseline) released under the **MIT License**. Snowflake extensions live in the isolated `lfx_snowflake` package.
+> This is a public fork of [langflow-ai/langflow](https://github.com/langflow-ai/langflow) (`v1.12.5` baseline) released under the **MIT License**. Snowflake extensions live in the isolated `lfx_snowflake` package.
 
 > [!NOTE]
 > **W3-R1 redesign in progress.** Memories, Knowledge & Files, caller identity, and traceability are being reworked. Phase 0 changes exist only on a development branch and are **not deployed**. See [Status & Roadmap](#status--roadmap).
