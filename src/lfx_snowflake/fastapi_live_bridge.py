@@ -11221,6 +11221,21 @@ SNOWFLAKE_KB_NOT_NATIVE = "SNOWFLAKE_KB_NOT_NATIVE"
 _NATIVE_KB_PATH_RE = re.compile(r"^/api/v1/knowledge_bases(?:/(?P<name>[^/]+))?(?:/.*)?/?$")
 _NATIVE_KB_NON_NAME_SEGMENTS = frozenset({"connectors", "preview-chunks", "test-connection"})
 
+_LEGACY_SNOWFLAKE_SEED_MEMORY_NAMES: frozenset[str] = frozenset(
+    {
+        "AGENT_MEMORY_STORE",
+        "MEM_1_GRAPH_CHECKPOINTER",
+        "MEM_2_CHAT_WINDOW",
+        "MEM_2_BUFFER_WINDOW",
+        "MEM_3_SESSION_SUMMARY",
+        "MEM_3_RUNNING_SUMMARY",
+        "MEM_4_USER_ENTITY_PROFILE",
+        "MEM_4_USER_PROFILE",
+        "MEM_5_EPISODIC_FEWSHOT",
+        "MEM_5_EPISODIC_FEW_SHOT",
+    }
+)
+
 
 def _is_snowflake_backend_config(raw: Any) -> bool:
     try:
@@ -11230,34 +11245,152 @@ def _is_snowflake_backend_config(raw: Any) -> bool:
     return isinstance(cfg, dict) and str(cfg.get("mode") or "").lower() == "snowflake"
 
 
+def _collect_snowflake_memory_kb_links(cur: Any, tables: set[str]) -> tuple[list[Any], set[str], set[str]]:
+    """Return `(seed_mb_ids, linked_kb_names_upper, linked_kb_norm_ids)` from `memory_base`.
+
+    Legacy Wave 2 seed memories (`AGENT_MEMORY_STORE`, `MEM_1..5`) created via native 1.12
+    `POST /api/v1/memories` also created an underlying `knowledge_base` row with `backend_type='chroma'`
+    and `backend_config=NULL` linked via `memory_base.kb_name == knowledge_base.name`. On 1.13.1
+    Alembic fences those empty Chroma rows into `storage_state='needs_attention'` (`legacy_source_missing`).
+    """
+    if "memory_base" not in tables:
+        return [], set(), set()
+    mb_cols = set(sqlite_table_columns(cur, "memory_base"))
+    if not {"id", "name"}.issubset(mb_cols):
+        return [], set(), set()
+    select_cols = [
+        c
+        for c in ("id", "name", "kb_name", "storage_kb_id", "preproc_model", "preproc_instructions", "embedding_model")
+        if c in mb_cols
+    ]
+    seed_mb_ids: list[Any] = []
+    linked_kb_names_upper: set[str] = set()
+    linked_kb_norm_ids: set[str] = set()
+    for row in cur.execute(f"SELECT {', '.join(select_cols)} FROM memory_base").fetchall():
+        row_map = dict(zip(select_cols, row))
+        mb_id = row_map.get("id")
+        mb_name_upper = str(row_map.get("name") or "").strip().upper()
+        kb_name_upper = str(row_map.get("kb_name") or "").strip().upper()
+        storage_kb_norm = str(row_map.get("storage_kb_id") or "").replace("-", "").strip().lower()
+        preproc_model = str(row_map.get("preproc_model") or "").strip().lower()
+        preproc_instr = str(row_map.get("preproc_instructions") or "")
+        emb_model = str(row_map.get("embedding_model") or "")
+        is_seed = mb_name_upper in _LEGACY_SNOWFLAKE_SEED_MEMORY_NAMES
+        is_sf_mem = (
+            is_seed
+            or preproc_model == "snowflake-sql"
+            or "Store: " in preproc_instr
+            or "snowflake" in emb_model.lower()
+            or emb_model.startswith("No Embedding")
+        )
+        if is_seed and mb_id is not None:
+            seed_mb_ids.append(mb_id)
+        if is_sf_mem:
+            if mb_name_upper:
+                linked_kb_names_upper.add(mb_name_upper)
+            if kb_name_upper:
+                linked_kb_names_upper.add(kb_name_upper)
+            if storage_kb_norm:
+                linked_kb_norm_ids.add(storage_kb_norm)
+    return seed_mb_ids, linked_kb_names_upper, linked_kb_norm_ids
+
+
 def snowflake_kb_names_in_native_table(conn: Any) -> set[str]:
-    """Upper-cased names and dashless ids of native `knowledge_base` rows whose backend_config.mode == 'snowflake' (upper-cased)."""
+    """Upper-cased names and dashless ids of native `knowledge_base` rows owned by Snowflake or legacy seeds."""
     cur = conn.cursor()
-    if not cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='knowledge_base'").fetchone():
+    tables = {r[0] for r in cur.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+    if "knowledge_base" not in tables:
         return set()
+    _, linked_kb_names_upper, linked_kb_norm_ids = _collect_snowflake_memory_kb_links(cur, tables)
+    kb_cols = set(sqlite_table_columns(cur, "knowledge_base"))
+    select_cols = [c for c in ("id", "name", "backend_config", "backend_type", "source_types") if c in kb_cols]
     out: set[str] = set()
-    for row_id, name, cfg in cur.execute("SELECT id, name, backend_config FROM knowledge_base").fetchall():
-        if _is_snowflake_backend_config(cfg):
-            out.add(str(name).upper())
-            out.add(str(row_id).replace("-", "").upper())
+    for row in cur.execute(f"SELECT {', '.join(select_cols)} FROM knowledge_base").fetchall():
+        rm = dict(zip(select_cols, row))
+        row_id = rm.get("id")
+        name_upper = str(rm.get("name") or "").strip().upper()
+        norm_id = str(row_id or "").replace("-", "").strip().lower()
+        btype = str(rm.get("backend_type") or "").strip().lower()
+        stypes = str(rm.get("source_types") or "").strip().lower()
+        if (
+            _is_snowflake_backend_config(rm.get("backend_config"))
+            or name_upper in _LEGACY_SNOWFLAKE_SEED_MEMORY_NAMES
+            or name_upper in linked_kb_names_upper
+            or norm_id in linked_kb_norm_ids
+            or btype.startswith("snowflake")
+            or '"snowflake"' in stypes
+        ):
+            if name_upper:
+                out.add(name_upper)
+            if norm_id:
+                out.add(norm_id.upper())
     return out
 
 
 def purge_snowflake_rows_from_native_knowledge_base(conn: Any) -> int:
-    """Idempotently delete ONLY native `knowledge_base` rows with backend_config.mode == 'snowflake'."""
+    """Idempotently delete Snowflake/seed rows from native `knowledge_base`, `memory_base`, and `knowledge_base_storage_migration`."""
     cur = conn.cursor()
-    if not cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='knowledge_base'").fetchone():
+    tables = {r[0] for r in cur.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+    if "knowledge_base" not in tables:
         return 0
-    ids = [
-        row_id
-        for row_id, cfg in cur.execute("SELECT id, backend_config FROM knowledge_base").fetchall()
-        if _is_snowflake_backend_config(cfg)
-    ]
+    seed_mb_ids, linked_kb_names_upper, linked_kb_norm_ids = _collect_snowflake_memory_kb_links(cur, tables)
+    kb_cols = set(sqlite_table_columns(cur, "knowledge_base"))
+    select_cols = [c for c in ("id", "name", "backend_config", "backend_type", "source_types") if c in kb_cols]
+    ids: list[Any] = []
+    purged_norm_ids: set[str] = set()
+    for row in cur.execute(f"SELECT {', '.join(select_cols)} FROM knowledge_base").fetchall():
+        rm = dict(zip(select_cols, row))
+        row_id = rm.get("id")
+        name_upper = str(rm.get("name") or "").strip().upper()
+        norm_id = str(row_id or "").replace("-", "").strip().lower()
+        btype = str(rm.get("backend_type") or "").strip().lower()
+        stypes = str(rm.get("source_types") or "").strip().lower()
+        if (
+            _is_snowflake_backend_config(rm.get("backend_config"))
+            or name_upper in _LEGACY_SNOWFLAKE_SEED_MEMORY_NAMES
+            or name_upper in linked_kb_names_upper
+            or norm_id in linked_kb_norm_ids
+            or btype.startswith("snowflake")
+            or '"snowflake"' in stypes
+        ):
+            ids.append(row_id)
+            if norm_id:
+                purged_norm_ids.add(norm_id)
+
     for row_id in ids:
         cur.execute("DELETE FROM knowledge_base WHERE id = ?", (row_id,))
-    if ids:
+
+    mig_deleted = 0
+    if "knowledge_base_storage_migration" in tables:
+        remaining_norm_ids = {
+            str(r[0] or "").replace("-", "").strip().lower()
+            for r in cur.execute("SELECT id FROM knowledge_base").fetchall()
+        }
+        mig_ids = [
+            mig_id
+            for mig_id, mig_kb_id in cur.execute("SELECT id, kb_id FROM knowledge_base_storage_migration").fetchall()
+            if str(mig_kb_id or "").replace("-", "").strip().lower() in purged_norm_ids
+            or str(mig_kb_id or "").replace("-", "").strip().lower() not in remaining_norm_ids
+        ]
+        for mig_id in mig_ids:
+            cur.execute("DELETE FROM knowledge_base_storage_migration WHERE id = ?", (mig_id,))
+            mig_deleted += 1
+
+    if seed_mb_ids and "memory_base" in tables:
+        if "memory_base_session" in tables:
+            for mb_id in seed_mb_ids:
+                cur.execute("DELETE FROM memory_base_session WHERE memory_base_id = ?", (mb_id,))
+        for mb_id in seed_mb_ids:
+            cur.execute("DELETE FROM memory_base WHERE id = ?", (mb_id,))
+
+    if ids or mig_deleted or seed_mb_ids:
         conn.commit()
-        logging.getLogger(__name__).info("purged %d snowflake-mode rows from native knowledge_base", len(ids))
+        logging.getLogger(__name__).info(
+            "purged %d snowflake/seed rows from native knowledge_base (%d migrations, %d seed memory_base rows)",
+            len(ids),
+            mig_deleted,
+            len(seed_mb_ids),
+        )
     return len(ids)
 
 
