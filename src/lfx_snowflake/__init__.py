@@ -2,8 +2,20 @@
 
 from __future__ import annotations
 
+import sys as _sys
+
 from . import _lfx_compat as _lfx_compat  # noqa: F401
+from . import context_helpers as _context_helpers
 from .api_routes import SnowflakeAPIResponse, SnowflakeAPIRouter, redact_secrets_in_obj
+
+_sys.modules.setdefault(
+    "lfx_snowflake.native_category_components.llm_operations.snowflake_object_provisioner",
+    _context_helpers,
+)
+_sys.modules.setdefault(
+    "lfx_snowflake.native_category_components.data_source.snowflake_object_provisioner",
+    _context_helpers,
+)
 from .bundle_manifest import (
     BUNDLE_ID,
     BUNDLE_PACKAGE,

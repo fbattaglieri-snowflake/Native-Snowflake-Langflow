@@ -743,7 +743,7 @@ def _patch_upstream_models_and_agents_files() -> None:
     async def _populate_internal_agents(self, build_config: dotdict) -> None:
         """Fill the Internal dropdown with both published Langflow A2A flows and [ ❄️ Context ] Snowflake Cortex Agents (`MA-W2-R6-05`)."""
         from lfx_snowflake.fastapi_live_bridge import LIVE_BRIDGE
-        from lfx_snowflake.native_category_components.llm_operations.snowflake_object_provisioner import _resolve_flow_id
+        from lfx_snowflake.context_helpers import _resolve_flow_id
 
         flow_id = _resolve_flow_id(self, build_config)
         options: list[str] = []
@@ -772,7 +772,7 @@ def _patch_upstream_models_and_agents_files() -> None:
 
     def _populate_quick_fill_endpoints(self, build_config: dotdict) -> dict[str, str]:
         from lfx_snowflake.fastapi_live_bridge import LIVE_BRIDGE
-        from lfx_snowflake.native_category_components.llm_operations.snowflake_object_provisioner import _resolve_flow_id
+        from lfx_snowflake.context_helpers import _resolve_flow_id
 
         flow_id = _resolve_flow_id(self, build_config)
         sf_targets = LIVE_BRIDGE.list_internal_and_external_a2a_targets(flow_id=flow_id)
@@ -818,7 +818,7 @@ def _patch_upstream_models_and_agents_files() -> None:
         import json as _json
         import re as _re
         from lfx_snowflake.fastapi_live_bridge import LIVE_BRIDGE
-        from lfx_snowflake.native_category_components.llm_operations.snowflake_object_provisioner import _resolve_flow_id
+        from lfx_snowflake.context_helpers import _resolve_flow_id
 
         agent_name = (self.agent_name_selected or "").strip()
         if not agent_name:
@@ -875,7 +875,7 @@ def _patch_upstream_models_and_agents_files() -> None:
         import json as _json
         import re as _re
         from lfx_snowflake.fastapi_live_bridge import LIVE_BRIDGE
-        from lfx_snowflake.native_category_components.llm_operations.snowflake_object_provisioner import _resolve_flow_id
+        from lfx_snowflake.context_helpers import _resolve_flow_id
 
         raw_url = str(self.agent_url or "").strip()
         if "->" in raw_url:
@@ -1074,6 +1074,53 @@ def patch_runtime_sources() -> None:
         applied="SFLF_NATIVE_TRIGGER_DISPATCHER",
         expect={"1.12": 0, "1.13": 1},
         reason="Langflow 1.12 has no native trigger dispatcher",
+    )
+
+    # 4c. Offload synchronous build_custom_component_template in custom_component_update to a worker thread
+    # so concurrent component template refreshes never block the Uvicorn event loop (which would starve /health
+    # and cause SPCS ingress to return HTTP 503 ERROR_SERVICE_UNAVAILABLE -> "Error while updating the Component").
+    text_patch(
+        SITE_PACKAGES / "langflow" / "api" / "v1" / "endpoints.py",
+        "endpoints.custom_component_update_async_thread_113",
+        "        component_node, cc_instance = build_custom_component_template(\n"
+        "            component,\n"
+        "            user_id=user.id,\n"
+        "            class_name=code_request.get_class_name(),\n"
+        "        )\n",
+        "        component_node, cc_instance = await asyncio.to_thread(\n"
+        "            build_custom_component_template,\n"
+        "            component,\n"
+        "            user_id=user.id,\n"
+        "            class_name=code_request.get_class_name(),\n"
+        "        )\n",
+        applied="await asyncio.to_thread(\n            build_custom_component_template,",
+        expect={"1.12": 0, "1.13": (0, 1)},
+        reason="1.12 or 1.13.2 custom_component_update signature variant",
+    )
+    text_patch(
+        SITE_PACKAGES / "langflow" / "api" / "v1" / "endpoints.py",
+        "endpoints.custom_component_update_async_thread_113_v2",
+        "        built_frontend_node, component_instance = build_custom_component_template(\n"
+        "            component, user_id=user.id, class_name=raw_code.get_class_name()\n"
+        "        )\n",
+        "        built_frontend_node, component_instance = await asyncio.to_thread(\n"
+        "            build_custom_component_template,\n"
+        "            component,\n"
+        "            user_id=user.id,\n"
+        "            class_name=raw_code.get_class_name(),\n"
+        "        )\n",
+        applied="built_frontend_node, component_instance = await asyncio.to_thread(",
+        expect={"1.12": 0, "1.13": (0, 1)},
+        reason="1.13.1 custom_component_update signature variant",
+    )
+    text_patch(
+        SITE_PACKAGES / "langflow" / "api" / "v1" / "endpoints.py",
+        "endpoints.custom_component_update_async_thread_112",
+        "        built_frontend_node, component_instance = build_custom_component_template(component, user_id=user.id)\n",
+        "        built_frontend_node, component_instance = await asyncio.to_thread(build_custom_component_template, component, user_id=user.id)\n",
+        applied="await asyncio.to_thread(build_custom_component_template, component, user_id=user.id)",
+        expect={"1.12": (0, 1), "1.13": 0},
+        reason="Langflow 1.13 passes class_name to build_custom_component_template",
     )
 
     # 5. Patch compiled React bundle in langflow/frontend/assets/*.js (100% React Virtual-DOM safe!)
@@ -1611,6 +1658,13 @@ def patch_runtime_sources() -> None:
         BundlePatch("model_providers.snowflake_default_enabled", 'if(t){const z=t[x]??t[E];if(z&&z[O.name]!==!0)continue}', 'if(t){const z=t[x]??t[E],_isSf=typeof x==="string"&&x.startsWith("Snowflake ");if(z&&(_isSf?z[O.name]===!1:z[O.name]!==!0))continue}'),
         BundlePatch("model_providers.snowflake_default_enabled_2", 'if(t&&n)for(const O of n){const x=O.provider,E=ej(x);if(p.has(E))continue;const z=t[x]??t[E];if(z)for(const T of O.models??[]){const k=T.model_name;if(z[k]!==!0)continue;', 'if(t&&n)for(const O of n){const x=O.provider,E=ej(x),_isSf=typeof x==="string"&&x.startsWith("Snowflake ");if(p.has(E))continue;const z=t[x]??t[E];if(z||_isSf)for(const T of O.models??[]){const k=T.model_name;if(_isSf?z?.[k]===!1:z?.[k]!==!0)continue;'),
         BundlePatch("model_providers.normalize_snowflake_models", gqn_orig, gqn_new, symbols={"ej": "PROVIDER_ALIAS"}, fresh=("r", "p", "sp")),
+        BundlePatch(
+            "nodes.skip_snowflake_mount_apikey_prefill",
+            'i==="model"&&e.template?.api_key!=null&&!e.template?.api_key?.value',
+            'i==="model"&&e.template?.api_key!=null&&e.template?.api_key?.show!==!1&&!e.template?.api_key?.value',
+            expect={"1.12": (0, 1), "1.13": 1},
+            reason="1.12 may not have needApiKeyPrefill",
+        ),
     ]
     apply_bundle_patches(LANGFLOW_FRONTEND / "assets", bundle_patches, prepend_index=dom_guard_banner)
     if not REPORT_ONLY:

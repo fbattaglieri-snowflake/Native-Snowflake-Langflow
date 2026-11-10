@@ -146,3 +146,59 @@ def test_patched_js_assets_are_always_revalidated(tmp_path, monkeypatch):
     resp = client.get("/assets/index-LazyRoute.js")
     assert resp.headers.get("cache-control") == "no-cache"
     assert resp.headers.get("etag")
+
+
+def test_empty_wildcard_category_does_not_rediscover_catalog_on_every_call(tmp_path, monkeypatch):
+    from lfx_snowflake.fastapi_live_bridge import LiveSnowflakeBridge
+
+    monkeypatch.setenv("LANGFLOW_PERSIST_DIR", str(tmp_path))
+    bridge = LiveSnowflakeBridge()
+    fid = "eb2a60b9-5de1-450d-b1e7-d941f5ac45d4"
+    bridge.update_selected_context(
+        {
+            "database": "SNOWFLAKE_LANGFLOW",
+            "schema": "CORE",
+            "databases": ["SNOWFLAKE_LANGFLOW"],
+            "schemas_by_db": {"SNOWFLAKE_LANGFLOW": ["CORE"]},
+            "full_schemas": ["SNOWFLAKE_LANGFLOW.CORE"],
+            "objects_by_db_schema": {
+                "SNOWFLAKE_LANGFLOW.CORE": {
+                    "tables": ["LANGFLOW_FLOW_RUNS"],
+                    "views": [],
+                }
+            },
+        },
+        flow_id=fid,
+    )
+    calls = 0
+
+    def _boom(*_a, **_kw):
+        nonlocal calls
+        calls += 1
+        return {"objects_by_db_schema": {"SNOWFLAKE_LANGFLOW.CORE": {"tables": ["LANGFLOW_FLOW_RUNS"], "views": []}}}
+
+    monkeypatch.setattr(bridge, "discover_catalog", _boom)
+    assert bridge.get_context_objects("SNOWFLAKE_LANGFLOW", "CORE", "views", flow_id=fid) == []
+    assert bridge.get_context_objects("SNOWFLAKE_LANGFLOW", "CORE", "views", flow_id=fid) == []
+    assert calls == 0
+
+
+def test_legacy_provisioner_import_shim_and_a2a_patch_use_context_helpers():
+    import lfx_snowflake  # noqa: F401
+    from lfx_snowflake.context_helpers import _resolve_flow_id as canonical_resolve
+    from lfx_snowflake.native_category_components.llm_operations.snowflake_object_provisioner import (
+        _resolve_flow_id as shimmed_resolve,
+    )
+
+    assert shimmed_resolve is canonical_resolve
+    hooks = INSTALLER.read_text(encoding="utf-8")
+    assert "from lfx_snowflake.native_category_components.llm_operations.snowflake_object_provisioner import _resolve_flow_id" not in hooks
+    assert "from lfx_snowflake.context_helpers import _resolve_flow_id" in hooks
+
+
+def test_sync_canvas_nodes_only_unsynced_and_guarded_input_events():
+    ui_js = (REPO_ROOT / "frontend_patches" / "snowflake-ui-integration.js").read_text(encoding="utf-8")
+    assert "syncCanvasNodesWithSnowflakeContext(sfState, { onlyUnsynced: true })" in ui_js
+    assert "document.activeElement === inp" in ui_js
+    assert 'fieldObj.value = "";' not in ui_js.split("function _syncReactFiberNodeTemplate")[1].split("function syncCanvasNodesWithSnowflakeContext")[0]
+

@@ -628,7 +628,11 @@ def update_snowflake_language_model_build_config(
 ) -> dict[str, Any]:
     """Apply Snowflake provider catalog refresh and Table 3.2 dynamic visibility rules on `build_config` (`MA-W2-R6-02`)."""
     _ensure_dynamic_fields_in_build_config(build_config)
-    should_force_refresh = force_refresh if force_refresh is not None else (field_name in (None, model_field_name))
+    should_force_refresh = (
+        force_refresh
+        if force_refresh is not None
+        else bool(build_config.get("is_refresh"))
+    )
 
     # Preserve prior selection before refreshing options so expired/removed models are never silently replaced
     selected_entry = _extract_selected_model_entry(
@@ -1082,6 +1086,49 @@ def register_snowflake_language_model_providers() -> dict[str, Any]:
             except Exception:  # noqa: BLE001
                 pass
 
+        try:
+            from lfx.base.models import model_utils as _mu
+
+            orig_get_ollama_models = getattr(_mu, "get_ollama_models", None)
+            if callable(orig_get_ollama_models) and not getattr(orig_get_ollama_models, "__sflf_ollama_wrapped__", False):
+                import asyncio as _asyncio
+
+                async def _wrapped_get_ollama_models(
+                    base_url_value: str,
+                    desired_capability: str,
+                    json_models_key: str,
+                    json_name_key: str,
+                    json_capabilities_key: str,
+                ) -> list[str]:
+                    cache_key = (base_url_value, desired_capability)
+                    if hasattr(_mu, "_ollama_cache_get"):
+                        cached = _mu._ollama_cache_get(cache_key)
+                        if cached is not None:
+                            return cached
+                    try:
+                        return await _asyncio.wait_for(
+                            orig_get_ollama_models(
+                                base_url_value=base_url_value,
+                                desired_capability=desired_capability,
+                                json_models_key=json_models_key,
+                                json_name_key=json_name_key,
+                                json_capabilities_key=json_capabilities_key,
+                            ),
+                            timeout=1.5,
+                        )
+                    except Exception:  # noqa: BLE001
+                        if hasattr(_mu, "_ollama_cache_set"):
+                            try:
+                                _mu._ollama_cache_set(cache_key, [])
+                            except Exception:  # noqa: BLE001
+                                pass
+                        return []
+
+                setattr(_wrapped_get_ollama_models, "__sflf_ollama_wrapped__", True)
+                setattr(_mu, "get_ollama_models", _wrapped_get_ollama_models)
+        except Exception:  # noqa: BLE001
+            pass
+
         orig_handle_update = getattr(_um, "handle_model_input_update", None)
         if callable(orig_handle_update) and not getattr(orig_handle_update, "__sflf_lm_wrapped__", False):
 
@@ -1093,6 +1140,16 @@ def register_snowflake_language_model_providers() -> dict[str, Any]:
                 **kwargs: Any,
             ) -> dict[str, Any]:
                 model_field_name = kwargs.get("model_field_name", "model")
+                cache_prefix = str(kwargs.get("cache_key_prefix") or "").lower()
+                opts_func_name = str(getattr(kwargs.get("get_options_func"), "__name__", "") or "").lower()
+                comp_name = str(getattr(component, "name", "") or type(component).__name__).lower()
+                field_model_type = str((build_config.get(model_field_name) or {}).get("model_type") or "").lower()
+                is_embedding_update = (
+                    "embedding" in cache_prefix
+                    or "embedding" in opts_func_name
+                    or "embedding" in comp_name
+                    or field_model_type == "embeddings"
+                )
                 prior_entry = _extract_selected_model_entry(
                     build_config,
                     field_value=field_value,
@@ -1100,6 +1157,23 @@ def register_snowflake_language_model_providers() -> dict[str, Any]:
                     model_field_name=model_field_name,
                 )
                 updated = orig_handle_update(component, build_config, field_value, field_name, **kwargs)
+                if is_embedding_update:
+                    # Keep embedding components strictly limited to embedding options (never inject LLM options)
+                    if model_field_name in updated and isinstance(updated[model_field_name], dict):
+                        updated[model_field_name]["options"] = [
+                            opt
+                            for opt in (updated[model_field_name].get("options") or [])
+                            if not (isinstance(opt, dict) and opt.get("provider") in SNOWFLAKE_PROVIDER_TO_PROTOCOL)
+                        ]
+                        raw_cand = field_value if (field_name == model_field_name and field_value) else build_config.get(model_field_name, {}).get("value")
+                        cand_entry = raw_cand[0] if isinstance(raw_cand, list) and raw_cand and isinstance(raw_cand[0], dict) else (raw_cand if isinstance(raw_cand, dict) else None)
+                        if isinstance(cand_entry, dict) and cand_entry.get("provider") == "Snowflake Cortex":
+                            updated[model_field_name]["value"] = [dict(cand_entry)]
+                            if "api_key" in updated and isinstance(updated["api_key"], dict):
+                                updated["api_key"]["show"] = False
+                                updated["api_key"]["required"] = False
+                                updated["api_key"]["value"] = ""
+                    return updated
                 if prior_entry and prior_entry.get("provider") in SNOWFLAKE_PROVIDER_TO_PROTOCOL:
                     # Restore prior Snowflake selection before applying Snowflake build_config rules
                     if model_field_name in updated and isinstance(updated[model_field_name], dict):

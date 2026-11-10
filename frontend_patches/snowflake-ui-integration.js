@@ -1226,8 +1226,6 @@
           fieldObj.options = resolved.options.slice();
           if (resolved.options.length > 0 && resolved.options.indexOf(fieldObj.value) === -1) {
             fieldObj.value = resolved.fallbackValue;
-          } else if (resolved.options.length === 0) {
-            fieldObj.value = "";
           }
           mutatedFields += 1;
         }
@@ -1237,11 +1235,13 @@
     return mutatedFields;
   }
 
-  function syncCanvasNodesWithSnowflakeContext(ctx) {
+  function syncCanvasNodesWithSnowflakeContext(ctx, opts) {
     const activeCtx = ctx || sfState;
     if (!activeCtx || typeof document === "undefined") return { syncedNodes: 0 };
+    const onlyUnsynced = Boolean(opts && opts.onlyUnsynced);
 
     const activeFlowId = activeCtx.flow_id || getActiveWorkflowFlowId() || "global";
+    const targetEpochStr = String(activeCtx.context_epoch || 1);
     const selCtx = activeCtx.selected_context || {};
     const dbs =
       Array.isArray(selCtx.databases) && selCtx.databases.length > 0
@@ -1270,7 +1270,14 @@
     let syncedCount = 0;
 
     nodeEls.forEach(function (nodeEl) {
-      nodeEl.setAttribute("data-snowflake-context-epoch", String(activeCtx.context_epoch || 1));
+      if (
+        onlyUnsynced &&
+        nodeEl.getAttribute("data-snowflake-flow-id") === String(activeFlowId) &&
+        nodeEl.getAttribute("data-snowflake-context-epoch") === targetEpochStr
+      ) {
+        return;
+      }
+      nodeEl.setAttribute("data-snowflake-context-epoch", targetEpochStr);
       nodeEl.setAttribute("data-snowflake-active-role", String(activeCtx.active_role || "ACCOUNTADMIN"));
       nodeEl.setAttribute("data-snowflake-database", primaryDb);
       nodeEl.setAttribute("data-snowflake-schema", primarySchema);
@@ -1307,8 +1314,9 @@
           activeCtx
         );
         if (resolved) {
+          const prevSelVal = sel.value;
           populateSelectOptions(sel, resolved.options, resolved.fallbackValue);
-          if (resolved.isDb || resolved.isSchema) {
+          if ((resolved.isDb || resolved.isSchema) && sel.value !== prevSelVal) {
             sel.dispatchEvent(new Event("change", { bubbles: true }));
           }
         }
@@ -1343,33 +1351,29 @@
         if (!resolved) return;
         cbBtn.setAttribute("data-snowflake-options", JSON.stringify(resolved.options));
         cbBtn.setAttribute("data-snowflake-value", String(resolved.fallbackValue || ""));
-        const labelSpan = cbBtn.querySelector("span") || cbBtn;
-        const curText = (labelSpan.textContent || "").trim();
-        if (
-          resolved.options.length > 0 &&
-          resolved.options.indexOf(curText) === -1 &&
-          resolved.fallbackValue
-        ) {
-          labelSpan.textContent = resolved.fallbackValue;
-        }
       });
 
       const inputs = nodeEl.querySelectorAll('input[type="text"], input:not([type])');
       inputs.forEach(function (inp) {
+        if (typeof document !== "undefined" && document.activeElement === inp) return;
         const key = (inp.getAttribute("name") || inp.getAttribute("data-testid") || inp.id || "").toLowerCase();
         const nativeSetter =
           Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value") &&
           Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set;
         if (key === "database" || key.endsWith("_database") || key.includes("input-database")) {
-          if (nativeSetter) nativeSetter.call(inp, primaryDb);
-          else inp.value = primaryDb;
-          inp.dispatchEvent(new Event("input", { bubbles: true }));
-          inp.dispatchEvent(new Event("change", { bubbles: true }));
+          if (inp.value !== primaryDb && (!inp.value || dbs.indexOf(inp.value) === -1)) {
+            if (nativeSetter) nativeSetter.call(inp, primaryDb);
+            else inp.value = primaryDb;
+            inp.dispatchEvent(new Event("input", { bubbles: true }));
+            inp.dispatchEvent(new Event("change", { bubbles: true }));
+          }
         } else if (key === "schema_name" || key === "schema" || key.includes("input-schema")) {
-          if (nativeSetter) nativeSetter.call(inp, primarySchema);
-          else inp.value = primarySchema;
-          inp.dispatchEvent(new Event("input", { bubbles: true }));
-          inp.dispatchEvent(new Event("change", { bubbles: true }));
+          if (inp.value !== primarySchema && (!inp.value || schemasForDb.indexOf(inp.value) === -1)) {
+            if (nativeSetter) nativeSetter.call(inp, primarySchema);
+            else inp.value = primarySchema;
+            inp.dispatchEvent(new Event("input", { bubbles: true }));
+            inp.dispatchEvent(new Event("change", { bubbles: true }));
+          }
         }
       });
 
@@ -1537,7 +1541,7 @@
         `.react-flow__node:not([data-snowflake-flow-id="${currentFlowId}"]), [data-testid^="rf__node-"]:not([data-snowflake-flow-id="${currentFlowId}"])`
       );
       if (unsyncedNode) {
-        syncCanvasNodesWithSnowflakeContext(sfState);
+        syncCanvasNodesWithSnowflakeContext(sfState, { onlyUnsynced: true });
       }
     }
   }

@@ -886,7 +886,7 @@ def heal_sqlite_invalid_uuid_rows(conn: Any) -> int:
                         tuple(t_vals),
                     )
                     repaired += 1
-        if repaired > 0:
+        if repaired > 0 or getattr(conn, "in_transaction", False):
             conn.commit()
     except Exception:  # noqa: BLE001
         pass
@@ -904,10 +904,19 @@ def ensure_sqlite_wal_and_uv_cache() -> dict[str, Any]:
     import sys
 
     try:
+        from lfx_snowflake import context_helpers as _ctx_hlp
         from lfx_snowflake import standard_langflow as _std_lf
 
         sys.modules["standard_langflow"] = _std_lf
         setattr(builtins, "standard_langflow", _std_lf)
+        sys.modules.setdefault(
+            "lfx_snowflake.native_category_components.llm_operations.snowflake_object_provisioner",
+            _ctx_hlp,
+        )
+        sys.modules.setdefault(
+            "lfx_snowflake.native_category_components.data_source.snowflake_object_provisioner",
+            _ctx_hlp,
+        )
     except Exception:  # noqa: BLE001
         pass
 
@@ -1279,23 +1288,24 @@ class LiveSnowflakeBridge:
                 if p_str in seen_paths or not db_path.exists():
                     continue
                 seen_paths.add(p_str)
-                conn = _open_sqlite_conn(db_path, readonly=False, timeout=30.0)
-                conn.row_factory = sqlite3.Row
-                cur = conn.cursor()
-                tables = {r[0] for r in cur.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
-                if "flow" not in tables:
+                conn = _open_sqlite_conn(db_path, readonly=True, timeout=15.0)
+                try:
+                    conn.row_factory = sqlite3.Row
+                    cur = conn.cursor()
+                    tables = {r[0] for r in cur.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+                    if "flow" not in tables:
+                        continue
+                    hex_fid = norm_fid.replace("-", "")
+                    row = cur.execute(
+                        "SELECT id, data FROM flow WHERE id = ? OR id = ?",
+                        (norm_fid, hex_fid),
+                    ).fetchone()
+                    if not row:
+                        continue
+                    row_id = row["id"]
+                    raw_data = row["data"]
+                finally:
                     conn.close()
-                    continue
-                hex_fid = norm_fid.replace("-", "")
-                row = cur.execute(
-                    "SELECT id, data FROM flow WHERE id = ? OR id = ?",
-                    (norm_fid, hex_fid),
-                ).fetchone()
-                if not row:
-                    conn.close()
-                    continue
-                row_id = row["id"]
-                raw_data = row["data"]
                 try:
                     flow_data = json.loads(raw_data) if isinstance(raw_data, str) else (dict(raw_data) if isinstance(raw_data, dict) else {})
                 except Exception:  # noqa: BLE001
@@ -1401,9 +1411,14 @@ class LiveSnowflakeBridge:
                         if node_id and node_changes:
                             updated_templates[node_id] = node_changes
 
-                cur.execute("UPDATE flow SET data = ? WHERE id = ?", (json.dumps(flow_data), row_id))
-                conn.commit()
-                conn.close()
+                new_json = json.dumps(flow_data)
+                if new_json != raw_data:
+                    wconn = _open_sqlite_conn(db_path, readonly=False, timeout=30.0)
+                    try:
+                        wconn.execute("UPDATE flow SET data = ? WHERE id = ?", (new_json, row_id))
+                        wconn.commit()
+                    finally:
+                        wconn.close()
         except Exception:  # noqa: BLE001
             pass
         return updated_templates
@@ -1444,24 +1459,26 @@ class LiveSnowflakeBridge:
             )
             now_iso = datetime.now(timezone.utc).isoformat()
             conn = _open_sqlite_conn(db_path, readonly=False, timeout=30.0)
-            conn.execute(
-                """
-                INSERT OR REPLACE INTO snowflake_flow_contexts
-                (flow_id, active_role, database_name, schema_name, context_epoch, selected_context_json, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    norm_fid,
-                    self.active_role,
-                    db_name,
-                    sch_name,
-                    int(self.context_epoch),
-                    json.dumps(ctx),
-                    now_iso,
-                ),
-            )
-            conn.commit()
-            conn.close()
+            try:
+                conn.execute(
+                    """
+                    INSERT OR REPLACE INTO snowflake_flow_contexts
+                    (flow_id, active_role, database_name, schema_name, context_epoch, selected_context_json, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        norm_fid,
+                        self.active_role,
+                        db_name,
+                        sch_name,
+                        int(self.context_epoch),
+                        json.dumps(ctx),
+                        now_iso,
+                    ),
+                )
+                conn.commit()
+            finally:
+                conn.close()
             if norm_fid != "__global__":
                 self.sync_flow_node_templates_sqlite(norm_fid, ctx)
             return True
@@ -3992,7 +4009,7 @@ class LiveSnowflakeBridge:
         objs_by_pair = target_ctx.get("objects_by_db_schema") or {}
         pair_bucket = objs_by_pair.get(db_sch_key) if isinstance(objs_by_pair, dict) else None
 
-        if is_wildcard and (not isinstance(pair_bucket, dict) or not pair_bucket.get(cat)):
+        if is_wildcard and (not isinstance(pair_bucket, dict) or cat not in pair_bucket):
             disc = self.discover_catalog(
                 database=db,
                 schema=sch,
@@ -4001,7 +4018,12 @@ class LiveSnowflakeBridge:
             )
             disc_pair = (disc.get("objects_by_db_schema") or {}).get(db_sch_key)
             if isinstance(disc_pair, dict):
-                target_ctx.setdefault("objects_by_db_schema", {})[db_sch_key] = copy.deepcopy(disc_pair)
+                merged_pair = copy.deepcopy(pair_bucket) if isinstance(pair_bucket, dict) else {}
+                for k_cat, v_list in disc_pair.items():
+                    if k_cat not in merged_pair or not merged_pair[k_cat]:
+                        merged_pair[k_cat] = copy.deepcopy(v_list)
+                merged_pair.setdefault(cat, [])
+                target_ctx.setdefault("objects_by_db_schema", {})[db_sch_key] = merged_pair
                 pair_bucket = target_ctx["objects_by_db_schema"][db_sch_key]
 
         vis = target_ctx.get("visible_objects") or {}
@@ -9375,7 +9397,7 @@ def register_snowflake_fastapi_routes(app: Any) -> None:
             matched_fid = header_fid
             if not matched_fid:
                 m_flow = re.search(
-                    r"/api/v1/(?:flows|build|run|monitor/builds|monitor/messages|custom_component|webhook)/(?!upload\b)([A-Za-z0-9_-]{3,128})",
+                    r"/api/v1/(?:flows|build|run|monitor/builds|monitor/messages|webhook)/(?!(?:upload|download|basic_examples|batch|public_flow|c|sessions)\b)([A-Za-z0-9_-]{3,128})",
                     path,
                 )
                 if m_flow:
@@ -9383,7 +9405,7 @@ def register_snowflake_fastapi_routes(app: Any) -> None:
 
             norm_fid = LIVE_BRIDGE._normalize_flow_id(matched_fid) if matched_fid else None
             if norm_fid and norm_fid != LIVE_BRIDGE.active_flow_id:
-                LIVE_BRIDGE.set_active_flow(norm_fid)
+                await asyncio.to_thread(LIVE_BRIDGE.set_active_flow, norm_fid)
 
             # Intercept UI trace deletion requests so they perform soft-delete (DELETED_IN_UI_AT) instead of physical deletion on Snowflake
             if method == "DELETE" and any(
@@ -9602,7 +9624,10 @@ def register_snowflake_fastapi_routes(app: Any) -> None:
 
             # Bundle patches rewrite JS chunks in place without renaming them, so a content-hashed
             # name is not proof of freshness: browsers must revalidate (ETag) after every release.
-            if method == "GET" and clean_path.startswith("/assets/") and clean_path.endswith(".js"):
+            if method == "GET" and (
+                (clean_path.startswith("/assets/") and clean_path.endswith(".js"))
+                or clean_path in ("/snowflake-ui-integration.js", "/preserved_provisioning_and_memories_concept.js")
+            ):
                 response.headers["Cache-Control"] = "no-cache"
 
             if auto_login_enabled and clean_path == "/api/v1/auto_login" and getattr(response, "status_code", 200) == 200:
