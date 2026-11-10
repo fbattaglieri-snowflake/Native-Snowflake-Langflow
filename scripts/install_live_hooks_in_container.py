@@ -464,6 +464,12 @@ def text_patch(path: Path, pid: str, old: str, new: str, *, applied: str | None 
 
 # index.html Snowflake block: also consumes earlier notranslate meta + DOM-guard script copies,
 # which older release layers stacked once per build.
+# Lazy chunks import the entry as `./index-<hash>.js`; a query string on the <script> URL makes the
+# browser evaluate the entry twice (two module records, two React roots on #root). Freshness comes
+# from the bridge sending `Cache-Control: no-cache` on /assets/*.js instead.
+ENTRY_SCRIPT_RE = r'src="(\./assets/index-[^"?]+\.js)(?:\?[^"]*)?"'
+ENTRY_SCRIPT_REPL = r'src="\1"'
+
 INJECT_BLOCK_REFRESH_RE = (
     r"[ \t]*(?:<meta name=\"google\" content=\"notranslate\" />\s*(?:<script>[\s\S]*?</script>\s*)?)*"
     r"<style(?:\s+id=\"sflf-brand-blue-style\")?>[\s\S]*?</style>\s*(?:<script defer src=\"\./preserved_provisioning_and_memories_concept\.js[^\"]*\"></script>\s*)?<script defer src=\"\./snowflake-ui-integration\.js[^\"]*\"></script>\s*</head>"
@@ -1631,14 +1637,8 @@ def patch_runtime_sources() -> None:
         expect=(0, 1),
         count=1,
     )
-    # Bump cache-bust query param from ?v=sflf046 to ?v=sflf047; exactly one module entry script is expected.
-    html_text = _html_sub(
-        html_text,
-        "html.entry_cache_bust",
-        r'src="(\./assets/index-[^"?]+\.js)(?:\?[^"]*)?"',
-        r'src="\1?v=sflf047"',
-        None,
-    )
+    # Exactly one module entry script is expected; it must keep the plain URL (see ENTRY_SCRIPT_RE).
+    html_text = _html_sub(html_text, "html.entry_single_module_url", ENTRY_SCRIPT_RE, ENTRY_SCRIPT_REPL, None)
     inject_block = (
         '    <meta name="google" content="notranslate" />\n'
         f"    <script>{dom_guard_banner.strip()}</script>\n"
@@ -1679,8 +1679,8 @@ def patch_runtime_sources() -> None:
         '        color: #ffffff !important;\n'
         "      }\n"
         "    </style>\n"
-        '    <script defer src="./preserved_provisioning_and_memories_concept.js?v=sflf047"></script>\n'
-        '    <script defer src="./snowflake-ui-integration.js?v=sflf047&r=2"></script>\n'
+        '    <script defer src="./preserved_provisioning_and_memories_concept.js?v=sflf048"></script>\n'
+        '    <script defer src="./snowflake-ui-integration.js?v=sflf048"></script>\n'
         "  </head>"
     )
     if "snowflake-ui-integration.js" not in html_text:
@@ -1696,7 +1696,7 @@ def patch_runtime_sources() -> None:
     if REPORT_ONLY:
         return
     index_html.write_text(html_text, encoding="utf-8")
-    print("[install_live_hooks] Updated index.html with Snowflake SVG favicon, title, and snowflake-ui-integration.js?v=sflf047")
+    print("[install_live_hooks] Updated index.html with Snowflake SVG favicon, title, and snowflake-ui-integration.js?v=sflf048")
 
 
 

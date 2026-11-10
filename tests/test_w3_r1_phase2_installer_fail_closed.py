@@ -169,7 +169,7 @@ def test_index_html_refresh_collapses_stacked_inject_blocks():
     block = (
         '    <meta name="google" content="notranslate" />\n    <script>guard()</script>\n'
         '    <style id="sflf-brand-blue-style">a{}</style>\n'
-        '    <script defer src="./snowflake-ui-integration.js?v=sflf047&r=2"></script>\n  </head>'
+        '    <script defer src="./snowflake-ui-integration.js?v=sflf048"></script>\n  </head>'
     )
     stacked = "<head>\n" + '    <meta name="google" content="notranslate" />\n    <script>guard()</script>\n' * 3 + block[block.index("    <style"):]
     pattern = mod.INJECT_BLOCK_REFRESH_RE

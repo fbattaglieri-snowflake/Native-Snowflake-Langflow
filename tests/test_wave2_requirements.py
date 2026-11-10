@@ -920,7 +920,7 @@ def test_w2_r2_14_official_snowflake_blue_29b5e8_and_loading_screen_fix() -> Non
     assert "#29B5E8" in topbar_tsx
     assert "#29B5E8" in hooks_py
     assert 'data-testid="snowflake-official-logo-blue"' in topbar_tsx
-    assert "?v=sflf042" in hooks_py or "?v=sflf043" in hooks_py or "?v=sflf046" in hooks_py
+    assert "?v=sflf048" in hooks_py
 
     # Verify s4_loading_new in install_live_hooks_in_container.py does NOT contain c6e (3-layer stacked icon)
     s4_idx = hooks_py.index("s4_loading_new = (")
@@ -1545,7 +1545,7 @@ def test_w2_r4_04_context_only_hub_ui_preserved_concept_module_and_in_place_tree
     assert "syncCanvasNodesWithSnowflakeContext(sfState)" in ui_js
 
     hooks_py = (REPO_ROOT / "scripts" / "install_live_hooks_in_container.py").read_text(encoding="utf-8")
-    assert "?v=sflf046" in hooks_py
+    assert "?v=sflf048" in hooks_py
     assert "preserved_provisioning_and_memories_concept.js" in hooks_py
 
 
