@@ -84,9 +84,16 @@ Unchanged upstream categories (`Input & Output`, `Prompt Template`, `Processing`
    python3 scripts/verify_public_repo_sanitization.py
    ```
 4. **Rehearse the migration locally.** Build the image, then start it against a **copy** of the production `/persist` directory (core database `langflow.db` and config). Confirm the alembic migrations complete, users and flows are intact, and a flow saved after start survives a container restart.
+   Then open the UI in a browser with DevTools, not only the API: the home page and a flow canvas must render, `#root` must hold a single React root, the console must show no React errors, and every sidebar category (including **Triggers**) must list its Snowflake components. A clean installer report and green API checks do not prove the frontend works.
 5. **Snapshot the block volume.** Take a snapshot of the service `/persist` block volume (and back up `<POSTGRES_INSTANCE>` if used). `python3 scripts/backup_restore_lifecycle.py` can add a quiesced file-level backup to `@<DATABASE>.<SCHEMA>.<STAGE_NAME>/backups/`.
 6. **Push and roll out.** Push the image to `<IMAGE_REPOSITORY>` and run `ALTER SERVICE <SERVICE_NAME> FROM SPECIFICATION ...` with the new image digest.
-7. **Verify.** Check `SHOW SERVICE CONTAINERS IN SERVICE <SERVICE_NAME>` (running, expected image digest), the container log (migrations finished, no installer error), login, flow count, and Snowflake components. If a check fails, roll back by restoring the snapshot and redeploying the previous image digest; the old image alone cannot read a migrated database.
+7. **Verify.** Check `SHOW SERVICE CONTAINERS IN SERVICE <SERVICE_NAME>` (running, expected image digest), the container log (migrations finished, no installer error), login, flow count, the browser checks of step 4 on the service endpoint, and Snowflake components. If a check fails, roll back by restoring the snapshot and redeploying the previous image digest; the old image alone cannot read a migrated database.
+
+### Frontend asset rules
+
+- Bundle patches are applied on disk by the installer, never rewritten per request. Serve `/assets/*` verbatim: Vite names lazy route chunks `index-<hash>.js` too, so treating any `index-*.js` as the entry bundle breaks the app.
+- Load the entry module in `index.html` with its plain URL (no query string). Lazy chunks import it as `./index-<hash>.js`; a different URL makes the browser evaluate the entry twice.
+- Patched chunks keep their content-hashed names, so the bridge sends `Cache-Control: no-cache` on `/assets/*.js` and browsers revalidate them after each release. The two injected scripts use a `?v=` token that must be bumped when they change.
 
 ### Legacy `scripts/sync_upstream.sh`
 
