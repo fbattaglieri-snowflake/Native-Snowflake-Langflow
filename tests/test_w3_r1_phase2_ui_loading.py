@@ -6,6 +6,9 @@ Root cause (reproduced in a headless browser against the release image):
   createRoot on #root) and React.lazy resolved to undefined (React error #306).
 - index.html loaded the entry as `index-<hash>.js?v=...` while the lazy chunks import
   `./index-<hash>.js`: two module URLs, so the entry ran twice even on the home page.
+
+Found in the same session: Langflow 1.13 builds with ENABLE_TRIGGERS=false and drops the whole
+`triggers` sidebar category, so the Snowflake triggers were no longer listed.
 """
 
 from __future__ import annotations
@@ -55,6 +58,58 @@ def test_entry_script_rewrite_is_idempotent_on_clean_url():
     html = '<script type="module" crossorigin src="./assets/index-Entry.js"></script>'
     out = mod._html_sub(html, "html.entry_single_module_url", mod.ENTRY_SCRIPT_RE, mod.ENTRY_SCRIPT_REPL, None)
     assert out == html
+
+
+# Langflow 1.13.1 sidebar filter, verbatim except for renamed minified identifiers.
+SIDEBAR_FILTER_1131 = (
+    'const Qxo="triggers";function Zxo(e){return typeof e?.metadata?.trigger_kind=="string"}'
+    "function Wxo(e){let t=!1;const n=[];for(const[i,s]of Object.entries(e)){if(i===Qxo){t=!0;continue}"
+    "const a=Object.entries(s).filter(([,l])=>!Zxo(l));if(a.length===Object.keys(s).length){n.push([i,s]);continue}"
+    "t=!0,a.length>0&&n.push([i,Object.fromEntries(a)])}return t?Object.fromEntries(n):e}"
+)
+SIDEBAR_CATEGORIES_1131 = (
+    '{display_name:"sidebar.category.inputOutput",name:"input_output",icon:"Cable"},'
+    '{display_name:"sidebar.category.triggers",name:"triggers",icon:"Zap"},'
+    '{display_name:"sidebar.category.flowControl",name:"flow_controls",icon:"ArrowRightLeft"},'
+    '{display_name:"sidebar.category.triggers",name:"triggers",icon:"Clock"},'
+    '{display_name:"sidebar.category.utilities",name:"utilities",icon:"Wand2"}'
+)
+
+
+def _patch_bundle(tmp_path: Path, mod, chunk: str) -> str:
+    assets = tmp_path / "frontend" / "assets"
+    assets.mkdir(parents=True)
+    (assets / "index-Entry.js").write_text(chunk, encoding="utf-8")
+    mod.apply_bundle_patches(
+        assets,
+        [
+            mod.BundlePatch("triggers.keep_sidebar_category", mod.TRIGGERS_KEEP_CATEGORY_ORIG, mod.TRIGGERS_KEEP_CATEGORY_NEW),
+            mod.BundlePatch("triggers.drop_native_sidebar_entry", mod.TRIGGERS_NATIVE_ENTRY_ORIG, mod.TRIGGERS_NATIVE_ENTRY_NEW),
+        ],
+    )
+    assert [r["status"] for r in mod.PATCH_LEDGER[-2:]] == ["OK", "OK"]
+    return (assets / "index-Entry.js").read_text(encoding="utf-8")
+
+
+def test_triggers_category_survives_disabled_native_triggers(tmp_path):
+    out = _patch_bundle(tmp_path, _load_installer(), SIDEBAR_FILTER_1131 + ";" + SIDEBAR_CATEGORIES_1131)
+    assert "if(i===Qxo){t=!0;continue}" not in out
+    assert "if(!1){t=!0;continue}" in out
+    # The upstream per-component filter for native triggers (metadata.trigger_kind) stays in place.
+    assert "filter(([,l])=>!Zxo(l))" in out
+    assert out.count('name:"triggers"') == 1
+    assert '{display_name:"sidebar.category.triggers",name:"triggers",icon:"Zap"}' in out
+
+
+def test_triggers_sidebar_patches_are_idempotent(tmp_path):
+    mod = _load_installer()
+    first = _patch_bundle(tmp_path, mod, SIDEBAR_FILTER_1131 + ";" + SIDEBAR_CATEGORIES_1131)
+    mod.apply_bundle_patches(
+        tmp_path / "frontend" / "assets",
+        [mod.BundlePatch("triggers.keep_sidebar_category", mod.TRIGGERS_KEEP_CATEGORY_ORIG, mod.TRIGGERS_KEEP_CATEGORY_NEW)],
+    )
+    assert mod.PATCH_LEDGER[-1]["status"] == "ALREADY"
+    assert (tmp_path / "frontend" / "assets" / "index-Entry.js").read_text(encoding="utf-8") == first
 
 
 def _app_with_assets(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):

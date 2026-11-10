@@ -470,6 +470,22 @@ def text_patch(path: Path, pid: str, old: str, new: str, *, applied: str | None 
 ENTRY_SCRIPT_RE = r'src="(\./assets/index-[^"?]+\.js)(?:\?[^"]*)?"'
 ENTRY_SCRIPT_REPL = r'src="\1"'
 
+# Langflow 1.13 builds with ENABLE_TRIGGERS=false and then drops the whole `triggers` sidebar category,
+# which hides the Snowflake triggers too. Keep the upstream per-component filter (components with
+# metadata.trigger_kind, i.e. the native 1.13 triggers whose dispatcher is disabled) and stop dropping
+# the category. The native category entry is removed so Triggers is listed once, after Input & Output.
+TRIGGERS_KEEP_CATEGORY_ORIG = "function kfo(e){let t=!1;const n=[];for(const[i,s]of Object.entries(e)){if(i===Rfo){t=!0;continue}"
+TRIGGERS_KEEP_CATEGORY_NEW = "function kfo(e){let t=!1;const n=[];for(const[i,s]of Object.entries(e)){if(!1){t=!0;continue}"
+TRIGGERS_NATIVE_ENTRY_ORIG = (
+    '{display_name:"sidebar.category.flowControl",name:"flow_controls",icon:"ArrowRightLeft"},'
+    '{display_name:"sidebar.category.triggers",name:"triggers",icon:"Clock"},'
+    '{display_name:"sidebar.category.utilities"'
+)
+TRIGGERS_NATIVE_ENTRY_NEW = (
+    '{display_name:"sidebar.category.flowControl",name:"flow_controls",icon:"ArrowRightLeft"},'
+    '{display_name:"sidebar.category.utilities"'
+)
+
 INJECT_BLOCK_REFRESH_RE = (
     r"[ \t]*(?:<meta name=\"google\" content=\"notranslate\" />\s*(?:<script>[\s\S]*?</script>\s*)?)*"
     r"<style(?:\s+id=\"sflf-brand-blue-style\")?>[\s\S]*?</style>\s*(?:<script defer src=\"\./preserved_provisioning_and_memories_concept\.js[^\"]*\"></script>\s*)?<script defer src=\"\./snowflake-ui-integration\.js[^\"]*\"></script>\s*</head>"
@@ -1520,6 +1536,8 @@ def patch_runtime_sources() -> None:
         BundlePatch("triggers.category_icon_map", 'kei={saved_components:"Save",input_output:"Cable",', 'kei={saved_components:"Save",input_output:"Cable",triggers:"Zap",'),
         BundlePatch("triggers.category_icon_map_2", 'F5n={input_output:"Cable",', 'F5n={input_output:"Cable",triggers:"Zap",'),
         BundlePatch("triggers.category_color", 'Ex={inputs:"#10B981",', 'Ex={triggers:"#29B5E8",inputs:"#10B981",'),
+        BundlePatch("triggers.keep_sidebar_category", TRIGGERS_KEEP_CATEGORY_ORIG, TRIGGERS_KEEP_CATEGORY_NEW, expect={"1.12": 0, "1.13": 1}, reason="1.12 has no ENABLE_TRIGGERS sidebar filter"),
+        BundlePatch("triggers.drop_native_sidebar_entry", TRIGGERS_NATIVE_ENTRY_ORIG, TRIGGERS_NATIVE_ENTRY_NEW, expect={"1.12": (0, 1), "1.13": 1}, reason="1.12 has no native triggers category (its layout already matches)"),
         BundlePatch("stages.rail_item", '{id:"memories",icon:"BrainCog",label:"memory.sidebarTitle",tooltip:"memory.sidebarTitle"},{id:"traces",icon:"Activity",label:"sidebar.nav.traces",tooltip:"sidebar.nav.traces"}],dzn=new Set(["agent","memories","traces"])', '{id:"memories",icon:"BrainCog",label:"memory.sidebarTitle",tooltip:"memory.sidebarTitle"},{id:"stages",icon:"Database",label:"Stages & Volumes",tooltip:"Stages & Volumes"},{id:"traces",icon:"Activity",label:"sidebar.nav.traces",tooltip:"sidebar.nav.traces"}],dzn=new Set(["agent","memories","stages","traces"])'),
         BundlePatch("stages.rail_icon", 'children:[v.jsx(qe,{name:m.icon,className:"h-5 w-5"}),v.jsx("span",{className:"sr-only",children:t(m.label)})]', 'children:[m.id==="stages"?' + bucket_svg_inline + ':v.jsx(qe,{name:m.icon,className:"h-5 w-5"}),v.jsx("span",{className:"sr-only",children:t(m.label)})]'),
         BundlePatch("stages.rail_panel_flag", 'br=p==="traces"||p==="memories"||p==="agent"', 'br=p==="traces"||p==="memories"||p==="stages"||p==="agent"'),
