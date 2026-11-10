@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 from dataclasses import dataclass
 from typing import Any, Callable
 
@@ -12,6 +13,8 @@ from .registry import (
     SnowflakeProviderError,
     SnowflakeProviderRegistry,
 )
+
+_logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -549,51 +552,68 @@ def register_snowflake_cortex_embedding_provider() -> dict[str, Any]:
     except Exception:  # noqa: BLE001
         pass
 
-    # 1. Call provider_registry.register_provider FIRST (before manual fallback dict mutations)
+    embedding_class_import = ("lfx_snowflake.providers.embeddings", "SnowflakeCortexEmbeddings", None)
+
+    # 1. Register through provider_registry. Langflow 1.13 only lists providers that are in the
+    #    registry (with their catalog_loader), so a manual class_registry entry is not enough, and
+    #    register_provider() rejects a name whose embedding params already exist. An earlier failed
+    #    attempt (e.g. during the circular import of unified_models) leaves exactly those mappings
+    #    behind, so remove ours (never anyone else's) before registering.
+    registry_available = False
     try:
         from lfx.base.models import provider_registry as _pr
 
         if hasattr(_pr, "ProviderDescriptor") and hasattr(_pr, "register_provider"):
-            descriptor = _pr.ProviderDescriptor(
-                name="Snowflake Cortex",
-                metadata={
-                    "icon": "Snowflake",
-                    "variables": [],
-                    "mapping": {"model_class": "ChatOpenAI"},
-                },
-                embedding_class_name="SnowflakeCortexEmbeddings",
-                embedding_class=(
-                    "lfx_snowflake.providers.embeddings",
-                    "SnowflakeCortexEmbeddings",
-                    None,
-                ),
-                embedding_param_mapping=dict(param_mapping),
-                api_key_required=False,
-                catalog_loader="lfx_snowflake.providers.embeddings:get_snowflake_cortex_embedding_catalog",
-            )
-            try:
+            registry_available = True
+            if hasattr(_pr, "is_registered") and _pr.is_registered("Snowflake Cortex"):
+                status["provider_registry_registered"] = True
+            else:
+                try:
+                    from lfx.base.models.unified_models import class_registry as _cr_stale
+
+                    if _cr_stale.EMBEDDING_PARAM_MAPPINGS.get("Snowflake Cortex") == param_mapping:
+                        del _cr_stale.EMBEDDING_PARAM_MAPPINGS["Snowflake Cortex"]
+                    if _cr_stale.EMBEDDING_PROVIDER_CLASS_MAPPING.get("Snowflake Cortex") == "SnowflakeCortexEmbeddings":
+                        del _cr_stale.EMBEDDING_PROVIDER_CLASS_MAPPING["Snowflake Cortex"]
+                    if _cr_stale._EMBEDDING_CLASS_IMPORTS.get("SnowflakeCortexEmbeddings") == embedding_class_import:
+                        del _cr_stale._EMBEDDING_CLASS_IMPORTS["SnowflakeCortexEmbeddings"]
+                except Exception:  # noqa: BLE001
+                    pass
+                descriptor = _pr.ProviderDescriptor(
+                    name="Snowflake Cortex",
+                    metadata={
+                        "icon": "Snowflake",
+                        "variables": [],
+                        "mapping": {"model_class": "ChatOpenAI"},
+                    },
+                    embedding_class_name="SnowflakeCortexEmbeddings",
+                    embedding_class=embedding_class_import,
+                    embedding_param_mapping=dict(param_mapping),
+                    api_key_required=False,
+                    catalog_loader="lfx_snowflake.providers.embeddings:get_snowflake_cortex_embedding_catalog",
+                )
                 _pr.register_provider(descriptor)
-            except ValueError:
-                pass
-            status["provider_registry_registered"] = True
-    except Exception:  # noqa: BLE001
-        pass
+                status["provider_registry_registered"] = bool(
+                    not hasattr(_pr, "is_registered") or _pr.is_registered("Snowflake Cortex")
+                )
+    except Exception as exc:  # noqa: BLE001
+        status["provider_registry_error"] = f"{type(exc).__name__}: {exc}"
+        _logger.warning("Snowflake Cortex embedding provider registration failed: %s", status["provider_registry_error"])
 
-    # 2. Ensure class_registry mappings are populated
-    try:
-        from lfx.base.models.unified_models import class_registry as _cr
+    # 2. Older Langflow versions have no provider_registry: populate class_registry directly.
+    #    With a registry this is only done once the provider is registered, so a failed attempt
+    #    never leaves conflicting mappings behind.
+    if not registry_available or status["provider_registry_registered"]:
+        try:
+            from lfx.base.models.unified_models import class_registry as _cr
 
-        _cr._EMBEDDING_CLASS_IMPORTS["SnowflakeCortexEmbeddings"] = (
-            "lfx_snowflake.providers.embeddings",
-            "SnowflakeCortexEmbeddings",
-            None,
-        )
-        _cr.EMBEDDING_PROVIDER_CLASS_MAPPING["Snowflake Cortex"] = "SnowflakeCortexEmbeddings"
-        _cr.EMBEDDING_PARAM_MAPPINGS["Snowflake Cortex"] = dict(param_mapping)
-        _cr._embedding_class_cache["SnowflakeCortexEmbeddings"] = SnowflakeCortexEmbeddings
-        status["class_registry_registered"] = True
-    except Exception:  # noqa: BLE001
-        pass
+            _cr._EMBEDDING_CLASS_IMPORTS.setdefault("SnowflakeCortexEmbeddings", embedding_class_import)
+            _cr.EMBEDDING_PROVIDER_CLASS_MAPPING["Snowflake Cortex"] = "SnowflakeCortexEmbeddings"
+            _cr.EMBEDDING_PARAM_MAPPINGS["Snowflake Cortex"] = dict(param_mapping)
+            _cr._embedding_class_cache["SnowflakeCortexEmbeddings"] = SnowflakeCortexEmbeddings
+            status["class_registry_registered"] = True
+        except Exception:  # noqa: BLE001
+            pass
 
     # 3. Register model prefix pattern in langflow.services.memory_base.embedding_helpers
     try:
