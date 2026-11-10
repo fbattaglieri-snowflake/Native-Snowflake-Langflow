@@ -216,6 +216,8 @@ flowchart TB
 ```
 
 - **Dynamic Reasoning Controls:** Selecting a reasoning-capable model under `Snowflake Proxy - Chat`, `Responses`, or `Messages` automatically reveals `Reasoning Effort` or `Extended Thinking` (`Thinking Budget Tokens`) directly below the model selector while hiding API key fields (handled by SPCS).
+- **Proxy Models Without a Release:** The model lists come from the proxy `GET /<protocol>/v1/models` endpoints (15 s server cache, 30 s browser refresh). A model the proxy promotes appears in `Language Model`, `Agent` and the `Create Memory` preprocessing engines within about a minute, already enabled; a revoked model disappears the same way. If the proxy is briefly unreachable, the last list it returned is kept (one warning per outage in the logs); the built-in static list is only used on a cold start.
+- **Snowflake Cortex Embeddings:** The 6 `AI_EMBED` models are registered as the `Snowflake Cortex` provider in Langflow's provider registry, so `Embedding Model` lists them and saved selections never show as "Not available".
 - **2-Level Cortex Agent Threads:** `[ ❄️ ] Cortex Agent` preserves multi-turn conversation state across turns using a local SQLite thread cache (`0 ms` overhead) backed by the Snowflake Cortex `Threads API` (`/api/v2/cortex/threads`).
 
 ---
