@@ -887,7 +887,7 @@ def test_ma_w2_r6_05_fastapi_a2a_v030_server_bridge_and_threads_routes(
 
 
 # ---------------------------------------------------------------------------
-# MA-W2-R6-06 (v0.5.2-20261027): 11 Proxy Models across 3 Categories + Ollama,
+# MA-W2-R6-06 (v0.5.2-20261027, catalog updated 2026-11-10): 12 Proxy Models across 3 Categories + Ollama,
 # Catalog Loaders / Live Discovery, Reasoning Inputs Right After Model, and
 # Legacy Bare Model Name Resolution (e.g. glm-5.3)
 # ---------------------------------------------------------------------------
@@ -896,7 +896,7 @@ def test_ma_w2_r6_05_fastapi_a2a_v030_server_bridge_and_threads_routes(
 def test_ma_w2_r6_06_eleven_proxy_models_catalog_loaders_and_reasoning_input_order(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Verify all 11 Proxy models (6 Chat + 2 Responses + 3 Messages) + 1 Ollama model, catalog_loader/live_discovery, reasoning input placement after model, and bare glm-5.3 resolution."""
+    """Verify all 12 Proxy models (6 Chat + 3 Responses + 3 Messages) + 1 Ollama model, catalog_loader/live_discovery, reasoning input placement after model, and bare glm-5.3 resolution."""
     standard_langflow.clear_catalog_cache()
     monkeypatch.setattr(standard_langflow, "discovery_transport", None)
 
@@ -911,6 +911,7 @@ def test_ma_w2_r6_06_eleven_proxy_models_catalog_loaders_and_reasoning_input_ord
     expected_responses = [
         "openai-gpt-6-astra",
         "openai-gpt-6.1-sol",
+        "openai-gpt-6.1-terra",
     ]
     expected_messages = [
         "claude-haiku-5-5",
@@ -957,7 +958,8 @@ def test_ma_w2_r6_06_eleven_proxy_models_catalog_loaders_and_reasoning_input_ord
     assert resolve_snowflake_provider_for_model("openai-gpt-6-astra") == PROVIDER_PROXY_RESPONSES
     assert resolve_snowflake_provider_for_model("claude-sonnet-5-5") == PROVIDER_PROXY_MESSAGES
     assert resolve_snowflake_provider_for_model("llama3.1:8b") == PROVIDER_PRIVATE_OLLAMA
-    assert len(MODEL_NAME_TO_SNOWFLAKE_PROVIDER) == 12
+    assert resolve_snowflake_provider_for_model("openai-gpt-6.1-terra") == PROVIDER_PROXY_RESPONSES
+    assert len(MODEL_NAME_TO_SNOWFLAKE_PROVIDER) == 13
 
     bare_cfg: dict[str, Any] = {
         "model": {
@@ -987,7 +989,7 @@ def test_ma_w2_r6_06_eleven_proxy_models_catalog_loaders_and_reasoning_input_ord
         "extended_thinking",
         "thinking_budget_tokens",
     ]
-    assert len(sample_inputs[0].options) == 12
+    assert len(sample_inputs[0].options) == 13
     assert sample_inputs[0].value[0]["name"] == "openai-gpt-6-luna"
     assert sample_inputs[0].value[0]["provider"] == PROVIDER_PROXY_CHAT
     assert sample_inputs[1].name == "reasoning_effort"

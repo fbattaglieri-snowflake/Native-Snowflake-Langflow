@@ -340,6 +340,45 @@ LLM_PREPROCESSING_ENGINES: tuple[dict[str, Any], ...] = (
 
 EMBEDDING_PROVIDERS_CATALOG: tuple[dict[str, Any], ...] = tuple(EXTERNAL_EMBEDDING_PROVIDERS.values())
 
+_PREPROCESSING_ENGINE_PROTOCOLS: dict[str, str] = {
+    "proxy_chat": "chat",
+    "proxy_responses": "responses",
+    "proxy_messages": "messages",
+    "spcs_ollama": "ollama",
+}
+
+
+def get_llm_preprocessing_engines() -> list[dict[str, Any]]:
+    """Return the preprocessing engines with proxy/Ollama models taken from the live proxy catalog.
+
+    The static model lists in `LLM_PREPROCESSING_ENGINES` are only kept for the case where the
+    catalog cannot be read, so a model promoted by the proxy is offered here without a release.
+    """
+    try:
+        from lfx_snowflake.providers.language_models import get_snowflake_live_language_model_catalog
+
+        live_options = get_snowflake_live_language_model_catalog(
+            protocols=tuple(_PREPROCESSING_ENGINE_PROTOCOLS.values())
+        )
+    except Exception:  # noqa: BLE001
+        live_options = []
+    models_by_protocol: dict[str, list[str]] = {}
+    for option in live_options:
+        protocol = str((option.get("metadata") or {}).get("protocol") or option.get("protocol") or "")
+        name = str(option.get("name") or option.get("model_name") or "")
+        if protocol and name and name not in models_by_protocol.setdefault(protocol, []):
+            models_by_protocol[protocol].append(name)
+    engines: list[dict[str, Any]] = []
+    for engine in LLM_PREPROCESSING_ENGINES:
+        entry = dict(engine)
+        live_models = models_by_protocol.get(_PREPROCESSING_ENGINE_PROTOCOLS.get(str(entry.get("id")), ""))
+        if live_models:
+            entry["models"] = list(live_models)
+            if entry.get("default_model") not in live_models:
+                entry["default_model"] = live_models[0]
+        engines.append(entry)
+    return engines
+
 
 def compute_deterministic_memory_uuid(name: str | None) -> str:
     """Compute a deterministic UUIDv5 (`snowflake-memory:<NAME>`) so memory IDs stay stable across restarts and match between SQLite and `memories_registry` (`W2-R4-08G`)."""
@@ -10270,7 +10309,7 @@ def register_snowflake_fastapi_routes(app: Any) -> None:
                 "dropdown_memory_types": list(DROPDOWN_MEMORY_TYPES),
                 "legacy_memory_type_aliases": dict(LEGACY_MEMORY_TYPE_ALIASES),
                 "snowflake_embedding_sources": list(SNOWFLAKE_EMBEDDING_SOURCES),
-                "llm_preprocessing_engines": list(LLM_PREPROCESSING_ENGINES),
+                "llm_preprocessing_engines": get_llm_preprocessing_engines(),
                 "external_embedding_providers": EXTERNAL_EMBEDDING_PROVIDERS,
                 "embedding_providers_catalog": list(EMBEDDING_PROVIDERS_CATALOG),
                 "supported_backends": [

@@ -14,6 +14,7 @@ for multi-tool `Agent` orchestration with `Cortex Analyst`, `Cortex Search`, and
 from __future__ import annotations
 
 import importlib.util
+import logging
 import re
 import sys
 import types
@@ -23,6 +24,14 @@ from pydantic import BaseModel, Field
 
 from lfx_snowflake import standard_langflow
 from lfx_snowflake._lfx_compat import Tool as _CompatTool
+
+_logger = logging.getLogger(__name__)
+
+# Last catalog successfully returned by the proxy, per protocol. Used instead of the static
+# offline catalog when the proxy is briefly unreachable, so promoted models do not disappear.
+_LAST_LIVE_CATALOG: dict[str, dict[str, dict[str, Any]]] = {}
+# Protocols whose discovery is currently failing (used to log each outage once).
+_DISCOVERY_FAILING: set[str] = set()
 
 PROVIDER_PROXY_CHAT = "Snowflake Proxy - Chat (/chat/v1)"
 PROVIDER_PROXY_RESPONSES = "Snowflake Proxy - Responses (/responses/v1)"
@@ -62,7 +71,8 @@ PROTOCOL_TO_SNOWFLAKE_PROVIDER: dict[str, str] = {
     "ollama": PROVIDER_PRIVATE_OLLAMA,
 }
 
-# Offline fallback catalog matching the 11 promoted Snowflake Proxy models + Private Ollama
+# Offline fallback catalog matching the 12 promoted Snowflake Proxy models + Private Ollama.
+# Only used on a cold start when the proxy is unreachable; see get_snowflake_live_language_model_catalog.
 FALLBACK_OFFLINE_CATALOG: dict[str, dict[str, dict[str, Any]]] = {
     "chat": {
         "glm-5.3": {
@@ -117,6 +127,13 @@ FALLBACK_OFFLINE_CATALOG: dict[str, dict[str, dict[str, Any]]] = {
             "response_stream": "ordered-items",
             "reasoning": {"supported": True, "required": True},
         },
+        "openai-gpt-6.1-terra": {
+            "release_status": "qualified",
+            "expires_at": "2099-12-31T23:59:59Z",
+            "capabilities": ["responses", "streaming", "tool_calling", "reasoning"],
+            "response_stream": "ordered-items",
+            "reasoning": {"supported": True, "required": True},
+        },
     },
     "messages": {
         "claude-haiku-5-5": {
@@ -155,6 +172,7 @@ MODEL_NAME_TO_SNOWFLAKE_PROVIDER: dict[str, str] = {
     "openai-gpt-6-sol": PROVIDER_PROXY_CHAT,
     "openai-gpt-6-astra": PROVIDER_PROXY_RESPONSES,
     "openai-gpt-6.1-sol": PROVIDER_PROXY_RESPONSES,
+    "openai-gpt-6.1-terra": PROVIDER_PROXY_RESPONSES,
     "claude-haiku-5-5": PROVIDER_PROXY_MESSAGES,
     "claude-opus-5-5": PROVIDER_PROXY_MESSAGES,
     "claude-sonnet-5-5": PROVIDER_PROXY_MESSAGES,
@@ -425,16 +443,36 @@ def get_snowflake_live_language_model_catalog(
     protocols: tuple[str, ...] = ("chat", "responses", "messages", "ollama"),
     strict_live: bool = False,
 ) -> list[dict[str, Any]]:
-    """Return live model option dicts across the 4 Snowflake providers (`MA-W2-R6-02`)."""
+    """Return live model option dicts across the 4 Snowflake providers (`MA-W2-R6-02`).
+
+    The proxy `/models` endpoints are the source of truth, so a model released by the proxy shows
+    up here without a Langflow release. When the proxy cannot be reached, the last catalog it
+    returned is used; the static offline catalog is only a last resort for a cold start, because it
+    goes stale as soon as the proxy promotes or revokes a model.
+    """
     options: list[dict[str, Any]] = []
     for protocol in protocols:
         live_map: dict[str, dict[str, Any]] = {}
         try:
             live_map = standard_langflow.catalog_with_metadata(protocol, force_refresh=force_refresh)
-        except Exception:  # noqa: BLE001
+            if live_map:
+                _LAST_LIVE_CATALOG[protocol] = {k: dict(v) for k, v in live_map.items()}
+            _DISCOVERY_FAILING.discard(protocol)
+        except Exception as exc:  # noqa: BLE001
             if strict_live:
                 raise
-            live_map = dict(FALLBACK_OFFLINE_CATALOG.get(protocol, {}))
+            last_live = _LAST_LIVE_CATALOG.get(protocol)
+            if protocol not in _DISCOVERY_FAILING:
+                # Log once per outage, not on every catalog read.
+                _DISCOVERY_FAILING.add(protocol)
+                _logger.warning(
+                    "Proxy model discovery failed for %s (%s: %s); using the %s",
+                    protocol,
+                    type(exc).__name__,
+                    exc,
+                    "last live catalog" if last_live else "static offline catalog",
+                )
+            live_map = {k: dict(v) for k, v in last_live.items()} if last_live else dict(FALLBACK_OFFLINE_CATALOG.get(protocol, {}))
 
         if not live_map and not strict_live:
             live_map = dict(FALLBACK_OFFLINE_CATALOG.get(protocol, {}))
