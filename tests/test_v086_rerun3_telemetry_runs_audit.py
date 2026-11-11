@@ -99,7 +99,12 @@ def _ok_rows(bridge, table: str) -> list[dict[str, Any]]:
     out = []
     for sql, binds, res in bridge._rr3_executed:
         if res["ok"] and sql.startswith(f"MERGE INTO {table} "):
-            out.append({"sql": sql, "binds": [b["value"] for b in (binds or {}).values()]})
+            vals = [b["value"] for b in (binds or {}).values()]
+            # Rerun-4: span MERGEs are multi-row (``SELECT ... UNION ALL SELECT ...``): one entry per source row.
+            for seg in sql.split(" ON t.")[0].split(" UNION ALL "):
+                n = seg.count("?")
+                out.append({"sql": sql, "binds": vals[:n]})
+                vals = vals[n:]
     return out
 
 

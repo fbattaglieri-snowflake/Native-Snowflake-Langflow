@@ -100,6 +100,10 @@ class LfMemError(RuntimeError):
         self.http_status = http_status
 
 
+# Mirrors LANGFLOW_MEMORY_RAP (sql/04_memories_and_files.sql) and the CURRENT_USER() default used on insert.
+OWNER_MATCH_SQL = "TRIM(UPPER(owner_user)) = TRIM(UPPER(CURRENT_USER()))"
+
+
 def validate_memory_name(name: Any) -> str:
     raw = str(name or "").strip()
     if not _NAME_RE.fullmatch(raw):
@@ -115,14 +119,32 @@ def lf_mem_table_name(name: Any) -> str:
     return clean if clean.startswith(LF_MEM_PREFIX) else f"{LF_MEM_PREFIX}{clean}"
 
 
+_KILL_STRIP_CHARS = " \t\r\n'\"`\u201c\u201d\u2018\u2019*_~#>.,;:!?()[]{}<>-"
+_FENCE_RE = re.compile(r"^```[A-Za-z0-9_-]*[ \t]*\n|\s*```$")
+
+
+def _normalize_kill_token(text: Any) -> str:
+    """Strip whitespace, quotes (' " ` “ ” ‘ ’), code fences, markdown emphasis and punctuation; casefold."""
+    raw = str(text or "").strip()
+    prev = None
+    while prev != raw:
+        prev = raw
+        raw = _FENCE_RE.sub("", raw).strip().strip(_KILL_STRIP_CHARS)
+    return raw.casefold()
+
+
 def is_kill_phrase(response: str, kill_phrase: str = DEFAULT_KILL_PHRASE) -> bool:
-    """Exact token, case-insensitive, whole line (same rule as Langflow ``preprocessing.is_kill_phrase``)."""
-    target = str(kill_phrase or "").strip().casefold()
+    """True when the reply's only meaningful token is the kill phrase (whole reply or any whole line).
+
+    Tolerates the model wrapping it in quotes, backticks/code fences, markdown or trailing punctuation
+    (`" NO_INGEST"`, ``NO_INGEST.``, a ```` ``` ```` block). A sentence merely containing the word is not a kill.
+    """
+    target = _normalize_kill_token(kill_phrase)
     if not target or not response:
         return False
-    if str(response).strip().casefold() == target:
+    if _normalize_kill_token(response) == target:
         return True
-    return any(line.strip().casefold() == target for line in str(response).splitlines())
+    return any(_normalize_kill_token(line) == target for line in str(response).splitlines())
 
 
 def threshold_reached(pending_count: int, threshold: int) -> bool:
@@ -413,10 +435,8 @@ class LfMemSpec:
         """Per-session ``pending_count``: governed LANGFLOW_MESSAGES newer than that session's ingestion cursor."""
         msg_fqn = sql_safety.quote_fqn(messages_fqn, "LANGFLOW_MESSAGES_TABLE", min_parts=3, max_parts=3)
         owner_pred, mem_values = self._owner_scope(flow_id, owner_user)
-        msg_owner_pred = " AND m.owner_user = ?" if owner_user else ""
+        msg_owner_pred = " AND " + OWNER_MATCH_SQL.replace("owner_user", "m.owner_user", 1)
         values: list[tuple[str, Any]] = [("TEXT", str(flow_id))]
-        if owner_user:
-            values.append(("TEXT", str(owner_user)))
         values += mem_values
         sql = (
             "SELECT m.session_id, COUNT(*) AS pending_count FROM ("
@@ -496,10 +516,10 @@ class LfMemSpec:
         if not fid:
             raise LfMemError("flow_id is required for Memory Base statistics.", error_code="MISSING_FLOW_ID")
         values: list[tuple[str, Any]] = [("TEXT", self.memory_base_id), ("TEXT", fid)]
-        if owner_user:
-            values.append(("TEXT", str(owner_user)))
-            return " AND owner_user = ?", values
-        return "", values
+        # Same identity as the writer: rows are inserted with owner_user = CURRENT_USER() in the caller session
+        # and LANGFLOW_MEMORY_RAP compares TRIM(UPPER(..)). A case-sensitive bind of the ingress header user never
+        # matched CURRENT_USER() (stats returned 0). ``owner_user`` is kept for API compatibility only.
+        return f" AND {OWNER_MATCH_SQL}", values
 
 
 def aggregate_memory_stats(session_rows: list[Any], pending_rows: list[Any]) -> dict[str, Any]:

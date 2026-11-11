@@ -193,9 +193,10 @@ def test_kb_name_marker_roundtrip():
 def test_stats_requests_bind_flow_and_owner_and_aggregate():
     spec = _spec()
     sql, b = spec.build_session_stats_request(flow_id="flow-1", owner_user="ALICE")
-    assert _vals(b) == [MB_ID, "flow-1", "ALICE"] and "AND owner_user = ?" in sql and "ALICE" not in sql
+    assert _vals(b) == [MB_ID, "flow-1"] and "TRIM(UPPER(owner_user)) = TRIM(UPPER(CURRENT_USER()))" in sql
+    assert "ALICE" not in sql and "owner_user = ?" not in sql
     psql, pb = spec.build_pending_request("SNOWFLAKE_LANGFLOW.CORE.LANGFLOW_MESSAGES", flow_id="flow-1", owner_user="ALICE")
-    assert _vals(pb) == ["flow-1", "ALICE", MB_ID, "flow-1", "ALICE"] and psql.count("?") == 5
+    assert _vals(pb) == ["flow-1", MB_ID, "flow-1"] and psql.count("?") == 3
     agg = aggregate_memory_stats(
         [{"SESSION_ID": "s1", "TOTAL_PROCESSED": 4, "LAST_SYNC_AT": "2026-11-10 10:00", "LAST_JOB_ID": "j9"}],
         [{"SESSION_ID": "s1", "PENDING_COUNT": 2}, {"SESSION_ID": "s2", "PENDING_COUNT": 3}],

@@ -9353,6 +9353,18 @@ class LiveSnowflakeBridge:
         """
         b = _sql_safety.BindingBuilder()
         key_ph = b.add(str(key_value), "TEXT")
+        values = LiveSnowflakeBridge._merge_value_exprs(b, columns)
+        sql = (
+            f"MERGE INTO {table} t "
+            f"USING (SELECT {key_ph} AS {key_col}) s ON t.{key_col} = s.{key_col} "
+            f"WHEN NOT MATCHED THEN INSERT "
+            f"({', '.join(c for c, _, _ in columns)}) VALUES ({', '.join(values)})"
+        )
+        return sql, b.bindings or {}
+
+    @staticmethod
+    def _merge_value_exprs(b: Any, columns: list[tuple[str, Any, str]]) -> list[str]:
+        """SQL value expressions of ``columns`` (every non-NULL value a binding added to ``b``)."""
         values: list[str] = []
         # Rerun-3: a NULL value is the SQL literal NULL, never a ``{"value": null}`` binding. Bridge statements
         # are multi-statement requests (``USE SECONDARY ROLES ...;`` prefix) and there the SQL API treats a null
@@ -9377,11 +9389,42 @@ class LiveSnowflakeBridge:
                 values.append(f"PARSE_JSON({b.add(val, 'TEXT')})")
             else:
                 values.append(b.add(str(val) if kind == "TEXT" else val, kind))
+        return values
+
+    @staticmethod
+    def _merge_insert_batch_request(
+        table: str, key_col: str, rows: list[tuple[Any, list[tuple[str, Any, str]]]]
+    ) -> tuple[str, dict[str, Any]]:
+        """Rerun-4: one idempotent multi-row ``MERGE ... WHEN NOT MATCHED THEN INSERT`` for ``rows``.
+
+        ``rows`` items are ``(key_value, columns)`` with the same column list/order as ``_merge_insert_request``.
+        The source is ``SELECT <exprs> UNION ALL ...`` (not ``FROM VALUES``, which rejects ``PARSE_JSON(?)``);
+        every value stays a binding, NULLs stay the literal NULL (typed by the target column on insert).
+        Duplicate keys inside one batch are dropped (first wins) so a key is never inserted twice.
+        """
+        if not rows:
+            raise ValueError("empty merge batch")
+        cols = [c for c, _, _ in rows[0][1]]
+        b = _sql_safety.BindingBuilder()
+        selects: list[str] = []
+        seen: set[str] = set()
+        for key_value, columns in rows:
+            k = str(key_value)
+            if k in seen:
+                continue
+            seen.add(k)
+            if [c for c, _, _ in columns] != cols:
+                raise ValueError("merge batch rows must share one column list")
+            key_ph = b.add(k, "TEXT")
+            exprs = LiveSnowflakeBridge._merge_value_exprs(b, columns)
+            selects.append(
+                f"SELECT {key_ph} AS _k, " + ", ".join(f"{e} AS {c}" for e, c in zip(exprs, cols))
+            )
         sql = (
             f"MERGE INTO {table} t "
-            f"USING (SELECT {key_ph} AS {key_col}) s ON t.{key_col} = s.{key_col} "
+            f"USING ({' UNION ALL '.join(selects)}) s ON t.{key_col} = s._k "
             f"WHEN NOT MATCHED THEN INSERT "
-            f"({', '.join(c for c, _, _ in columns)}) VALUES ({', '.join(values)})"
+            f"({', '.join(cols)}) VALUES ({', '.join('s.' + c for c in cols)})"
         )
         return sql, b.bindings or {}
 
@@ -9394,6 +9437,11 @@ class LiveSnowflakeBridge:
 
     def _build_activity_merge_request(self, record: dict[str, Any]) -> tuple[str, dict[str, Any]]:
         """Idempotent `MERGE INTO <activity_table>` preserving `deleted_in_ui_at` (`CTX-ARCH-06`); values bound."""
+        act_id, cols = self._activity_merge_row(record)
+        return self._merge_insert_request(self.activity_table, "activity_id", act_id, cols)
+
+    def _activity_merge_row(self, record: dict[str, Any]) -> tuple[str, list[tuple[str, Any, str]]]:
+        """``(activity_id, columns)`` of an activity MERGE (shared by the single and batched forms)."""
         act_id = str(record.get("activity_id") or record.get("id") or uuid.uuid4().hex)
         flw_id = str(record.get("flow_id") or "unknown-flow")
         err_msg = record.get("error_message")
@@ -9428,11 +9476,45 @@ class LiveSnowflakeBridge:
             ("node_spans_json", self._safe_json_text(record.get("node_spans_json") or [], max_chars=8000, default_empty="[]"), "JSON"),
             ("snowflake_query_ids", self._safe_json_text(list(record.get("snowflake_query_ids") or []), max_chars=2000, default_empty="[]"), "JSON"),
         ]
-        return self._merge_insert_request(self.activity_table, "activity_id", act_id, cols)
+        return act_id, cols
 
     def _build_activity_merge_sql(self, record: dict[str, Any]) -> str:
         """SQL text of ``_build_activity_merge_request`` (``?`` placeholders; execute with its bindings)."""
         return self._build_activity_merge_request(record)[0]
+
+    SPAN_MERGE_BATCH_ROWS = 50
+
+    def _flush_merge_batch(
+        self, table: str, key_col: str, batch: list[tuple[str, list[tuple[str, Any, str]], tuple[str, str]]]
+    ) -> int:
+        """Rerun-4: write queued rows as multi-row MERGEs of ``SPAN_MERGE_BATCH_ROWS``; returns rows accepted.
+
+        A row is marked synced (``_synced_tx_ids`` / ``_synced_vertex_build_ids`` / ``_synced_activity_ids``) only
+        when its chunk was accepted, so a rejected chunk is re-read and retried on the next sync (never dropped).
+        """
+        marks = {
+            "tx": self._synced_tx_ids,
+            "vb": self._synced_vertex_build_ids,
+            "act": self._synced_activity_ids,
+        }
+        written = 0
+        size = max(1, int(self.SPAN_MERGE_BATCH_ROWS))
+        for i in range(0, len(batch), size):
+            chunk = batch[i : i + size]
+            res = self._execute_bound(
+                self._merge_insert_batch_request(table, key_col, [(k, cols) for k, cols, _ in chunk]), timeout=30
+            )
+            if isinstance(res, dict) and res.get("ok") is False:
+                # Rejected chunk: re-read by id on the next sync even if it left the newest-N window.
+                pend: dict[str, float] = self.__dict__.setdefault("_telemetry_pending_since", {})
+                for _k, _cols, (kind, rid) in chunk:
+                    if kind in ("tx", "vb"):
+                        pend.setdefault(f"{kind}:{rid}", time.monotonic())
+                continue
+            for _k, _cols, (kind, rid) in chunk:
+                marks[kind].add(rid)
+            written += len(chunk)
+        return written
 
     def _telemetry_row_pending(self, key: str, ts: Any) -> bool:
         """T10: an ambiguous span row waits at most one match grace window, then is written with NULL run_id.
@@ -10157,8 +10239,73 @@ class LiveSnowflakeBridge:
             "activity_table": self.activity_table,
         }
 
-    def sync_langflow_traces_to_snowflake(self, limit: int = 25, *, replicate_sqlite: bool = True) -> dict[str, Any]:
-        """Replicate Langflow SQLite `transaction`, `vertex_build`, and `message` rows into Snowflake `LANGFLOW_FLOW_ACTIVITY`, `LANGFLOW_FLOW_RUNS`, & `LANGFLOW_FLOW_SPANS` (`CTX-ARCH-06`)."""
+    def sync_langflow_traces_to_snowflake(
+        self, limit: int = 25, *, replicate_sqlite: bool = True, flow_ids: Any = None
+    ) -> dict[str, Any]:
+        """Replicate Langflow SQLite `transaction`, `vertex_build`, and `message` rows into Snowflake `LANGFLOW_FLOW_ACTIVITY`, `LANGFLOW_FLOW_RUNS`, & `LANGFLOW_FLOW_SPANS` (`CTX-ARCH-06`).
+
+        Rerun-4: serialized (daemon, close trigger and the UI endpoint never write the same rows twice);
+        ``flow_ids`` plus every flow whose RUN closed since the last sync are read in full.
+        """
+        with self.__dict__.setdefault("_trace_sync_lock", threading.Lock()):
+            closed: set[str] = self.__dict__.setdefault("_close_sync_flows", set())
+            targets = {str(f) for f in (flow_ids or []) if f} | closed
+            closed.clear()
+            hint = int(self.__dict__.get("_span_backlog_hint", 0))
+            self._span_backlog_hint = 0
+            return self._sync_langflow_traces_locked(
+                limit, replicate_sqlite=replicate_sqlite, target_flows=targets, backlog_hint=hint
+            )
+
+    @staticmethod
+    def _sqlite_flow_id_variants(flow_id: Any) -> set[str]:
+        """Langflow stores ``flow_id`` as 32-hex or dashed UUID depending on the writer: match both."""
+        raw = str(flow_id or "").strip()
+        if not raw:
+            return set()
+        hexed = raw.replace("-", "").lower()
+        out = {raw, hexed}
+        if len(hexed) == 32:
+            out.add(str(uuid.UUID(hexed)))
+        return out
+
+    CLOSE_SYNC_DEBOUNCE_S = 3.0
+
+    def trigger_close_span_sync(self, flow_id: Any, *, delay_s: float | None = None) -> None:
+        """Rerun-4: a RUN record closed -> replicate that execution's spans now, not on the next 15 s tick.
+
+        Calls coalesce: every close within the debounce window joins one targeted sync (25 concurrent closes ->
+        1-2 syncs, each writing chunked multi-row MERGEs). ``delay_s=0`` syncs inline (tests / callers that
+        already run off the request path). Rows still ambiguous keep their pending grace semantics.
+        """
+        if flow_id:
+            self.__dict__.setdefault("_close_sync_flows", set()).add(str(flow_id))
+        self._span_backlog_hint = int(self.__dict__.get("_span_backlog_hint", 0)) + 50
+        delay = self.CLOSE_SYNC_DEBOUNCE_S if delay_s is None else max(0.0, float(delay_s))
+        if delay == 0:
+            self.sync_langflow_traces_to_snowflake(limit=25, replicate_sqlite=True)
+            return
+        guard = self.__dict__.setdefault("_close_sync_guard", threading.Lock())
+        with guard:
+            if self.__dict__.get("_close_sync_timer_armed"):
+                return
+            self._close_sync_timer_armed = True
+
+        def _fire() -> None:
+            with guard:
+                self._close_sync_timer_armed = False
+            try:
+                self.sync_langflow_traces_to_snowflake(limit=25, replicate_sqlite=True)
+            except Exception:  # noqa: BLE001
+                pass
+
+        timer = threading.Timer(delay, _fire)
+        timer.daemon = True
+        timer.start()
+
+    def _sync_langflow_traces_locked(
+        self, limit: int, *, replicate_sqlite: bool, target_flows: set[str], backlog_hint: int
+    ) -> dict[str, Any]:
         persist_dir = Path(os.getenv("LANGFLOW_PERSIST_DIR", "/persist"))
         candidate_db_paths = [persist_dir / "langflow.db"]
         writable_db = self._resolve_writable_sqlite_db_path()
@@ -10213,7 +10360,8 @@ class LiveSnowflakeBridge:
 
                     # T10: raw Langflow rows are read from the local SQLite (cheap; already-synced ids are skipped in
                     # memory), wider than the UI ``limit`` so concurrent runs cannot push unsynced rows out of view.
-                    raw_bound = max(bounded_tx, 200)
+                    # Rerun-4: the window widens with the closed-run backlog (load) instead of a fixed 200 rows.
+                    raw_bound = max(bounded_tx, 200, min(5000, int(backlog_hint)))
                     tx_rows = (
                         cur.execute(
                             'SELECT * FROM "transaction" ORDER BY timestamp DESC LIMIT ?', (raw_bound,)
@@ -10228,6 +10376,22 @@ class LiveSnowflakeBridge:
                         if "vertex_build" in tables
                         else []
                     )
+                    # Rerun-4: flows whose RUN just closed are always read in full (bound per flow), so other
+                    # flows' traffic cannot push a finished execution's rows out of the newest-N window.
+                    flow_keys = sorted({v for f in target_flows for v in self._sqlite_flow_id_variants(f)})
+                    for tbl, pk, rows in (("transaction", "id", tx_rows), ("vertex_build", "build_id", vb_rows)):
+                        if not flow_keys or tbl not in tables:
+                            continue
+                        seen_t = {str(dict(r).get(pk) or "") for r in rows}
+                        for i in range(0, len(flow_keys), 50):
+                            fk = flow_keys[i : i + 50]
+                            for r in cur.execute(
+                                f'SELECT * FROM "{tbl}" WHERE flow_id IN ({",".join("?" * len(fk))}) '
+                                "ORDER BY timestamp DESC LIMIT 2000",
+                                tuple(fk),
+                            ).fetchall():
+                                if str(dict(r).get(pk) or "") not in seen_t:
+                                    rows.append(r)
                     # Pending (ambiguous) rows are always re-read by primary key until written.
                     for tbl, pk, prefix, rows in (
                         ("transaction", "id", "tx:", tx_rows),
@@ -10247,6 +10411,10 @@ class LiveSnowflakeBridge:
                     conn.close()
 
                     _telemetry.install_langflow_row_stamping()
+                    # Rerun-4: span/activity rows are queued and written as chunked multi-row MERGEs after the scan
+                    # (was 2 sequential single-row MERGEs per row: ~500 round-trips for 25 runs x 5 turns).
+                    span_batch: list[tuple[str, list[tuple[str, Any, str]], tuple[str, str]]] = []
+                    act_batch: list[tuple[str, list[tuple[str, Any, str]], tuple[str, str]]] = []
                     spans_by_flow: dict[str, list[dict[str, Any]]] = {}
                     # T10: (flow, vertex, ts) -> job_id of the vertex_build sibling of a transaction row.
                     vb_job_by_vertex: dict[str, str] = {}
@@ -10315,33 +10483,30 @@ class LiveSnowflakeBridge:
                         outputs_redacted = self._safe_json_text(raw_out, max_chars=4000, default_empty="{}")
                         exec_mode_v = _trace.audit_execution_mode(_sf_identity.origin_mode())
 
-                        self._execute_bound(
-                            self._merge_insert_request(
-                                self.spans_table,
-                                "span_id",
+                        span_batch.append(
+                            (
                                 tx_id,
                                 [
-                                    ("event_id", f"evt-{tx_id[:16]}", "TEXT"),
-                                    ("span_id", tx_id, "TEXT"),
-                                    ("run_id", rid, "TEXT"),
-                                    ("trace_id", tid, "TEXT"),
-                                    ("project_id", "default", "TEXT"),
-                                    ("flow_id", flow_id, "TEXT"),
-                                    ("component_id", vertex_id, "TEXT"),
-                                    ("component_name", vertex_id, "TEXT"),
-                                    ("authenticated_user", self.authenticated_user, "TEXT"),
-                                    ("effective_role", self.active_role, "TEXT"),
-                                    ("execution_mode", exec_mode_v, "TEXT"),
-                                    ("start_ts", _telemetry.utc_iso_clamped(tx_ts), "TS"),
-                                    ("end_ts", _telemetry.utc_iso_clamped(tx_ts), "TS"),
-                                    ("status", status_val, "TEXT"),
-                                    ("redacted_inputs", inputs_redacted, "JSON"),
-                                    ("redacted_outputs", outputs_redacted, "JSON"),
+                                ("event_id", f"evt-{tx_id[:16]}", "TEXT"),
+                                ("span_id", tx_id, "TEXT"),
+                                ("run_id", rid, "TEXT"),
+                                ("trace_id", tid, "TEXT"),
+                                ("project_id", "default", "TEXT"),
+                                ("flow_id", flow_id, "TEXT"),
+                                ("component_id", vertex_id, "TEXT"),
+                                ("component_name", vertex_id, "TEXT"),
+                                ("authenticated_user", self.authenticated_user, "TEXT"),
+                                ("effective_role", self.active_role, "TEXT"),
+                                ("execution_mode", exec_mode_v, "TEXT"),
+                                ("start_ts", _telemetry.utc_iso_clamped(tx_ts), "TS"),
+                                ("end_ts", _telemetry.utc_iso_clamped(tx_ts), "TS"),
+                                ("status", status_val, "TEXT"),
+                                ("redacted_inputs", inputs_redacted, "JSON"),
+                                ("redacted_outputs", outputs_redacted, "JSON"),
                                 ],
-                            ),
-                            timeout=12,
+                                ("tx", tx_id),
+                            )
                         )
-                        replicated_spans += 1
 
                         if run_rec is None and rid is not None and rid not in self._synced_derived_run_ids:
                             # Executions without a live run record (e.g. before a restart): one derived run row.
@@ -10413,11 +10578,8 @@ class LiveSnowflakeBridge:
                                 "deleted_in_ui_at": None if act_id not in self._soft_deleted_activity_ids else datetime.now(timezone.utc).isoformat(),
                             }
                             self._recent_activity_events.insert(0, act_rec)
-                            self._execute_bound(self._build_activity_merge_request(act_rec), timeout=12)
-                            self._synced_activity_ids.add(act_id)
-                            replicated_activities += 1
+                            act_batch.append((*self._activity_merge_row(act_rec), ("act", act_rec["activity_id"])))
 
-                        self._synced_tx_ids.add(tx_id)
 
                     for vb in vb_rows:
                         vb_dict = dict(vb)
@@ -10455,33 +10617,30 @@ class LiveSnowflakeBridge:
                         params_redacted = self._safe_json_text(raw_params, max_chars=4000, default_empty="{}")
                         data_redacted = self._safe_json_text(raw_data, max_chars=4000, default_empty="{}")
 
-                        self._execute_bound(
-                            self._merge_insert_request(
-                                self.spans_table,
-                                "span_id",
+                        span_batch.append(
+                            (
                                 f"vb-{vb_id}",
                                 [
                                     ("event_id", f"evb-{vb_id[:16]}", "TEXT"),
-                                    ("span_id", f"vb-{vb_id}", "TEXT"),
-                                    ("run_id", vb_rid, "TEXT"),
-                                    ("trace_id", vb_tid, "TEXT"),
-                                    ("project_id", "default", "TEXT"),
-                                    ("flow_id", flow_id, "TEXT"),
-                                    ("component_id", vertex_id, "TEXT"),
-                                    ("component_name", vertex_id, "TEXT"),
-                                    ("authenticated_user", self.authenticated_user, "TEXT"),
-                                    ("effective_role", self.active_role, "TEXT"),
-                                    ("execution_mode", _trace.audit_execution_mode(_sf_identity.origin_mode()), "TEXT"),
-                                    ("start_ts", _telemetry.utc_iso_clamped(vb_ts), "TS"),
-                                    ("end_ts", _telemetry.utc_iso_clamped(vb_ts), "TS"),
-                                    ("status", status_val, "TEXT"),
-                                    ("redacted_inputs", params_redacted, "JSON"),
-                                    ("redacted_outputs", data_redacted, "JSON"),
+                                ("span_id", f"vb-{vb_id}", "TEXT"),
+                                ("run_id", vb_rid, "TEXT"),
+                                ("trace_id", vb_tid, "TEXT"),
+                                ("project_id", "default", "TEXT"),
+                                ("flow_id", flow_id, "TEXT"),
+                                ("component_id", vertex_id, "TEXT"),
+                                ("component_name", vertex_id, "TEXT"),
+                                ("authenticated_user", self.authenticated_user, "TEXT"),
+                                ("effective_role", self.active_role, "TEXT"),
+                                ("execution_mode", _trace.audit_execution_mode(_sf_identity.origin_mode()), "TEXT"),
+                                ("start_ts", _telemetry.utc_iso_clamped(vb_ts), "TS"),
+                                ("end_ts", _telemetry.utc_iso_clamped(vb_ts), "TS"),
+                                ("status", status_val, "TEXT"),
+                                ("redacted_inputs", params_redacted, "JSON"),
+                                ("redacted_outputs", data_redacted, "JSON"),
                                 ],
-                            ),
-                            timeout=12,
+                                ("vb", vb_id),
+                            )
                         )
-                        replicated_spans += 1
 
                         act_vb_id = f"act-vb-{vb_id[:24]}"
                         if act_vb_id not in self._synced_activity_ids:
@@ -10523,11 +10682,10 @@ class LiveSnowflakeBridge:
                                 "deleted_in_ui_at": None if act_vb_id not in self._soft_deleted_activity_ids else datetime.now(timezone.utc).isoformat(),
                             }
                             self._recent_activity_events.insert(0, act_vb_rec)
-                            self._execute_bound(self._build_activity_merge_request(act_vb_rec), timeout=12)
-                            self._synced_activity_ids.add(act_vb_id)
-                            replicated_activities += 1
+                            act_batch.append((*self._activity_merge_row(act_vb_rec), ("act", act_vb_rec["activity_id"])))
 
-                        self._synced_vertex_build_ids.add(vb_id)
+                    replicated_spans += self._flush_merge_batch(self.spans_table, "span_id", span_batch)
+                    replicated_activities += self._flush_merge_batch(self.activity_table, "activity_id", act_batch)
                 except Exception:  # noqa: BLE001
                     pass
 
@@ -11543,6 +11701,8 @@ def register_snowflake_fastapi_routes(app: Any) -> None:
                 if run_rec is not None:
                     try:
                         LIVE_BRIDGE.record_flow_run(_telemetry.RUNS.end(run_rec.run_id, outcome))
+                        if LIVE_BRIDGE.auto_sync_enabled:
+                            LIVE_BRIDGE.trigger_close_span_sync(run_rec.flow_id)  # rerun-4: spans within seconds
                     except Exception:  # noqa: BLE001
                         pass
                 _sf_identity.reset_request_mode(mode_token)

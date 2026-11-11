@@ -256,7 +256,7 @@ def test_bridge_recall_lf_mem_returns_score(monkeypatch):
 
 def test_pending_count_uses_ingestion_cursor():
     sql, b = _spec().build_pending_request(MSG, flow_id="f", owner_user="ALICE")
-    assert "metadata:source_last_created_at" in sql and _vals(b) == ["f", "ALICE", MB_ID, "f", "ALICE"]
+    assert "metadata:source_last_created_at" in sql and _vals(b) == ["f", MB_ID, "f"]
     assert aggregate_memory_stats([], [{"SESSION_ID": "s", "PENDING_COUNT": 2}])["pending_count"] == 2
 
 

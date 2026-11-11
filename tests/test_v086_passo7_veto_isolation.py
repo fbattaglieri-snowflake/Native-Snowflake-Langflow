@@ -118,7 +118,7 @@ def test_item2_messages_read_governed_table_bound_by_flow_owner_session(world, m
     spec = LfMemSpec(**entry["lf_mem"])
     assert mode == "caller" and spec.quoted_fqn in sql and "?" in sql
     vals = [b["value"] for b in bindings.values()]
-    assert ra["id"] in vals and w.bridge._normalize_flow_id(w.a1) in vals and "ALICE_SF" in vals and "s1" in vals
+    assert ra["id"] in vals and w.bridge._normalize_flow_id(w.a1) in vals and "s1" in vals and "TRIM(UPPER(CURRENT_USER()))" in sql  # rr4: owner = writer identity
     assert "governed" not in sql and "ALICE_SF" not in sql            # values bound, never inlined
     # another user / no caller identity: fail closed, no SQL
     seen.clear()

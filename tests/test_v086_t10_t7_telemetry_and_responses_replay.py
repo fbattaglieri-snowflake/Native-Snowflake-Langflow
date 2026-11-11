@@ -94,6 +94,13 @@ def test_five_concurrent_runs_every_span_joins_exactly_one_run(tmp_path, monkeyp
 
     monkeypatch.setenv("LANGFLOW_PERSIST_DIR", str(tmp_path))
     monkeypatch.setattr(LIVE_BRIDGE, "_merge_insert_request", capture)
+    orig_batch = LIVE_BRIDGE._merge_insert_batch_request
+
+    def capture_batch(table, key_col, rows):
+        written.extend((table, {c: v for c, v, _ in cols}) for _k, cols in rows)
+        return orig_batch(table, key_col, rows)
+
+    monkeypatch.setattr(LIVE_BRIDGE, "_merge_insert_batch_request", capture_batch)
     monkeypatch.setattr(LIVE_BRIDGE, "execute_sql", lambda sql, **kw: {"ok": True, "data": []})
     monkeypatch.setattr(LIVE_BRIDGE, "_synced_tx_ids", set())
     monkeypatch.setattr(LIVE_BRIDGE, "_synced_vertex_build_ids", set())
