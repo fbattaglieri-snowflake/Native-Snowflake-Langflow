@@ -2406,7 +2406,12 @@ def install_all() -> None:
         for p in _um_check.get_unified_models_detailed(model_type="embeddings")
     }
     assert "Snowflake Cortex" in emb_detailed, "Missing Snowflake Cortex in get_unified_models_detailed(model_type='embeddings')!"
-    assert len(emb_detailed["Snowflake Cortex"]["models"]) == 6
+    from lfx_snowflake.sql_safety import AI_EMBED_TEXT_MODEL_DIMENSIONS as _ai_embed_models
+
+    sf_emb_models = emb_detailed["Snowflake Cortex"]["models"]
+    assert len(sf_emb_models) == len(_ai_embed_models), (
+        f"Expected {len(_ai_embed_models)} AI_EMBED text models for Snowflake Cortex, got {len(sf_emb_models)}"
+    )
     assert all(m["metadata"].get("default") is True for m in emb_detailed["Snowflake Cortex"]["models"])
 
     for llm_comp in (
