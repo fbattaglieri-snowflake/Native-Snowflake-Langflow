@@ -30,19 +30,62 @@ from typing import Any
 
 APP_NAME = "snowflake-langflow"
 QUERY_TAG_MAX_LEN = 2000  # Snowflake QUERY_TAG limit
-QUERY_TAG_KEYS = ("app", "v", "flow_id", "run_id", "component", "memory_base_id", "request_id")
+QUERY_TAG_KEYS = (
+    "app", "v", "flow_id", "run_id", "trace_id", "session_id", "component", "memory_base_id", "request_id",
+)
+DEFAULT_COMPONENT = "bridge"
 
 CURRENT_RUN_ID: ContextVar[str | None] = ContextVar("sflf_current_run_id", default=None)
 CURRENT_REQUEST_ID: ContextVar[str | None] = ContextVar("sflf_current_request_id", default=None)
 CURRENT_COMPONENT: ContextVar[str | None] = ContextVar("sflf_current_component", default=None)
 CURRENT_MEMORY_BASE_ID: ContextVar[str | None] = ContextVar("sflf_current_memory_base_id", default=None)
+CURRENT_TRACE_ID: ContextVar[str | None] = ContextVar("sflf_current_trace_id", default=None)
+CURRENT_SESSION_ID: ContextVar[str | None] = ContextVar("sflf_current_session_id", default=None)
 
 _CORRELATION_VARS: dict[str, ContextVar[str | None]] = {
     "run_id": CURRENT_RUN_ID,
     "request_id": CURRENT_REQUEST_ID,
     "component": CURRENT_COMPONENT,
     "memory_base_id": CURRENT_MEMORY_BASE_ID,
+    "trace_id": CURRENT_TRACE_ID,
+    "session_id": CURRENT_SESSION_ID,
 }
+
+
+_HEX32_RE = re.compile(r"^[0-9a-fA-F]{32}$")
+_UUID_RE = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
+
+
+def canonical_flow_id(value: Any) -> str | None:
+    """BUG-MCP-02: hyphenated lower-case UUID (8-4-4-4-12) for UUID-like flow ids; other keys unchanged."""
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text or text.lower() in {"null", "none", "undefined"}:
+        return None
+    if _HEX32_RE.match(text) or _UUID_RE.match(text):
+        return str(uuid.UUID(text))
+    return text
+
+
+def _component_from_stack(max_depth: int = 40) -> str | None:
+    """Name of the nearest Langflow component on the call stack (``display_name``/``name``), if any."""
+    import sys  # noqa: PLC0415
+
+    frame = sys._getframe(2)
+    for _ in range(max_depth):
+        if frame is None:
+            return None
+        obj = frame.f_locals.get("self")
+        if obj is not None and not isinstance(obj, type):
+            cls = type(obj)
+            mod = getattr(cls, "__module__", "") or ""
+            if ("components" in mod or "component" in cls.__name__.lower()) and "fastapi_live_bridge" not in mod:
+                name = getattr(obj, "display_name", None) or getattr(cls, "display_name", None) or cls.__name__
+                if isinstance(name, str) and name:
+                    return name
+        frame = frame.f_back
+    return None
 
 
 def _version() -> str:
@@ -129,12 +172,28 @@ def build_query_tag(
             flow_id = CURRENT_SNOWFLAKE_FLOW_ID.get()
         except Exception:  # noqa: BLE001
             flow_id = None
+    eff_run_id = run_id if run_id is not None else CURRENT_RUN_ID.get()
+    run_rec = None
+    try:
+        from lfx_snowflake.telemetry import CURRENT_RUN_RECORD, RUNS  # noqa: PLC0415
+
+        run_rec = CURRENT_RUN_RECORD.get() or RUNS.get(eff_run_id)
+    except Exception:  # noqa: BLE001
+        run_rec = None
+    if flow_id is None and run_rec is not None:
+        flow_id = run_rec.flow_id
+    # BUG-UI-TRC-01: a component name is always present (explicit > bound > nearest component > "bridge").
+    eff_component = component if component is not None else CURRENT_COMPONENT.get()
+    if not eff_component:
+        eff_component = _component_from_stack() or DEFAULT_COMPONENT
     tag = {
         "app": APP_NAME,
         "v": _version(),
-        "flow_id": _clip(flow_id),
-        "run_id": _clip(run_id if run_id is not None else CURRENT_RUN_ID.get()),
-        "component": _clip(component if component is not None else CURRENT_COMPONENT.get(), 128),
+        "flow_id": _clip(canonical_flow_id(flow_id)),
+        "run_id": _clip(eff_run_id),
+        "trace_id": _clip(CURRENT_TRACE_ID.get() or (run_rec.trace_id if run_rec is not None else None)),
+        "session_id": _clip(CURRENT_SESSION_ID.get() or (run_rec.session_id if run_rec is not None else None)),
+        "component": _clip(eff_component, 128),
         "memory_base_id": _clip(memory_base_id if memory_base_id is not None else CURRENT_MEMORY_BASE_ID.get()),
         "request_id": _clip(request_id if request_id is not None else CURRENT_REQUEST_ID.get()),
     }
@@ -190,7 +249,9 @@ _DETAIL_ALLOWLIST: frozenset[str] = frozenset(
         "flow_id", "database", "schema", "databases", "schemas_by_db", "full_databases", "full_schemas",
         "postgres_instances", "selected_pairs_count", "added_objects", "removed_objects", "removed_databases",
         "removed_schemas", "context_epoch", "previous_role", "new_role", "requested_role", "available_roles",
-        "role", "agent_fqn", "retained_objects_count", "hidden_by_role_count", "trigger_type", "path", "method",
+        "role", "agent_fqn",
+        # BUG-UI-TRC-01 correlation ids (no content).
+        "request_id", "session_id", "trace_id", "cortex_thread_id", "a2a_task_id", "retained_objects_count", "hidden_by_role_count", "trigger_type", "path", "method",
         "durable_snowflake_audit_preserved", "source", "object_kind", "hierarchy_path",
     }
 )
@@ -257,15 +318,22 @@ def build_audit_insert(
     run_id: str | None,
     details: Mapping[str, Any] | None,
     trace_id: str | None = None,
+    request_id: str | None = None,
 ) -> tuple[str, dict[str, dict[str, Any]]]:
     """Return (statement, SQL API bindings). Idempotent on event_id (NOT EXISTS), so retries do not duplicate.
 
     TRACE_ID links the row to its request: explicit ``trace_id``, else the run id, else the bound request id.
     """
-    trace_id = trace_id or run_id or CURRENT_REQUEST_ID.get()
+    trace_id = trace_id or CURRENT_TRACE_ID.get() or run_id or CURRENT_REQUEST_ID.get()
+    flow_id = canonical_flow_id(flow_id)
     if not _FQN_RE.match(audit_table or ""):
         raise ValueError("invalid audit table identifier")
-    details_json = json.dumps(sanitize_details(details), separators=(",", ":"))
+    clean_details = sanitize_details(details)
+    # BUG-UI-TRC-01: the audit table has no REQUEST_ID column; request_id travels in REDACTED_DETAILS.
+    req_id = request_id or CURRENT_REQUEST_ID.get()
+    if req_id:
+        clean_details.setdefault("request_id", str(req_id)[:64])
+    details_json = json.dumps(clean_details, separators=(",", ":"))
     stmt = (
         f"INSERT INTO {audit_table} (event_id, event_ts, authenticated_user, effective_role, execution_mode, "
         "context_epoch, action, outcome, error_code, target_object, project_id, flow_id, run_id, trace_id, "

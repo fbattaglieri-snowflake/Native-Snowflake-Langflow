@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+from lfx_snowflake import sql_safety as _sql_safety
+
 import ast
 import json
+import re
 from typing import Any, Callable
 
 from ..providers.ollama_provider import SnowflakeOllamaAdapter
@@ -30,6 +33,22 @@ LLM_SELECTOR_INVARIANT_SPEC: dict[str, Any] = {
     "modified": False,
     "status": "invariant",
 }
+
+
+
+def _resolve_caller_role(explicit: str | None) -> str:
+    """Explicit caller role, else the resolved per-session bridge role; never a hard-coded admin role."""
+    from lfx_snowflake import identity as _sf_identity  # noqa: PLC0415
+
+    bridge_role = None
+    if not explicit:
+        try:
+            from lfx_snowflake.fastapi_live_bridge import LIVE_BRIDGE  # noqa: PLC0415
+
+            bridge_role = LIVE_BRIDGE.active_role
+        except Exception:  # noqa: BLE001
+            bridge_role = None
+    return _sf_identity.resolve_reported_role(explicit, bridge_role)
 
 
 class _BaseSnowflakeLLMOperation:
@@ -730,6 +749,63 @@ class SnowflakeSQLStatementEngine:
     """Domain engine for `SnowflakeSQLStatementComponent` (`LLM-W2-03`)."""
 
     @staticmethod
+    def _trim_statement(sql: str) -> tuple[str, str]:
+        """``(body, first_keyword)``: ``sql`` without leading/trailing comments and trailing ``;``.
+
+        Strings, quoted identifiers, ``$$`` bodies and ``--`` / ``//`` / ``/* */`` comments are skipped the
+        same way as the PASSO 3 lexer (``flow_context_guard._lex``, which also validates the statement); a
+        ``;`` followed by more SQL is a second statement and is rejected."""
+        from lfx_snowflake.flow_context_guard import _lex  # noqa: PLC0415 - fail closed on unterminated input
+
+        _lex(sql)
+        i, n = 0, len(sql)
+        start = end = -1
+        semis: list[int] = []
+        first = ""
+        while i < n:
+            ch = sql[i]
+            if ch.isspace():
+                i += 1
+            elif sql.startswith(("--", "//"), i):
+                j = sql.find("\n", i)
+                i = n if j == -1 else j + 1
+            elif sql.startswith("/*", i):
+                i = sql.find("*/", i + 2) + 2
+            elif ch == ";":
+                semis.append(i)
+                i += 1
+            else:
+                if sql.startswith("$$", i):
+                    j = sql.find("$$", i + 2) + 2
+                elif ch in ("'", '"'):
+                    j = i + 1
+                    while j < n:
+                        if ch == "'" and sql[j] == "\\":
+                            j += 2
+                            continue
+                        if sql[j] == ch:
+                            if j + 1 < n and sql[j + 1] == ch:
+                                j += 2
+                                continue
+                            break
+                        j += 1
+                    j += 1
+                else:
+                    m = re.match(r"[A-Za-z_][A-Za-z0-9_$]*", sql[i:])
+                    j = i + (m.end() if m else 1)
+                    if m and not first:
+                        first = m.group(0).upper()
+                if start < 0:
+                    start = i
+                if semis and semis[-1] >= end:
+                    raise ValueError("SQL Statement must contain a single statement.")
+                end = j
+                i = j
+        if start < 0:
+            raise ValueError("SQL Statement is empty.")
+        return sql[start:end], first
+
+    @staticmethod
     def build_sql(
         *,
         database: str,
@@ -738,12 +814,17 @@ class SnowflakeSQLStatementEngine:
         output_format: str = "DataFrame",
         max_rows: int = 100,
     ) -> str:
-        stmt = (sql_statement or "SELECT CURRENT_ROLE() AS ACTIVE_ROLE, CURRENT_DATABASE() AS DB").strip().rstrip(";")
+        stmt = (sql_statement or "SELECT CURRENT_ROLE() AS ACTIVE_ROLE, CURRENT_DATABASE() AS DB").strip()
         stmt = stmt.replace("<DB>", database.strip()).replace("<SCHEMA>", schema.strip())
-        if output_format == "JSON Object (OBJECT_CONSTRUCT)" and stmt.upper().startswith("SELECT "):
-            return f"SELECT OBJECT_CONSTRUCT(*) AS JSON_ROW FROM ({stmt}) LIMIT {max(1, int(max_rows or 100))}"
-        if stmt.upper().startswith("SELECT ") and " LIMIT " not in stmt.upper():
-            return f"{stmt} LIMIT {max(1, int(max_rows or 100))}"
+        body, first_word = SnowflakeSQLStatementEngine._trim_statement(stmt)
+        # BUG-LLMOP-011: every query (SELECT / WITH / parenthesised, any case or whitespace) is wrapped so
+        # an inner LIMIT, a subquery or a trailing comment cannot lift the row cap.
+        n = _sql_safety.bounded_int(max_rows, 100, 1, 1_000_000)
+        stmt = body
+        if first_word in ("SELECT", "WITH"):
+            if output_format == "JSON Object (OBJECT_CONSTRUCT)":
+                return f"SELECT OBJECT_CONSTRUCT(*) AS JSON_ROW FROM (\n{stmt}\n) LIMIT {n}"
+            return f"SELECT * FROM (\n{stmt}\n) LIMIT {n}"
         return stmt
 
 
@@ -763,9 +844,9 @@ class SnowflakeCortexSearchQueryEngine:
         scoring_config_json: str = "",
     ) -> tuple[str, dict[str, Any]]:
         svc_fqn = (
-            search_service.strip()
-            if "." in search_service
-            else f"{database.strip()}.{schema.strip()}.{search_service.strip()}"
+            _sql_safety.validate_fqn(search_service, "search_service", min_parts=3, max_parts=3)
+            if "." in (search_service or "")
+            else _sql_safety.join_fqn(database, schema, search_service, field_name="search_service")
         )
         cols = [c.strip() for c in (columns_csv or "chunk").split(",") if c.strip()]
         payload: dict[str, Any] = {
@@ -777,9 +858,23 @@ class SnowflakeCortexSearchQueryEngine:
             payload["filter"] = json.loads(filter_json)
         if (scoring_config_json or "").strip():
             payload["scoring_config"] = json.loads(scoring_config_json)
-        escaped_json = json.dumps(payload).replace("'", "''")
+        # Validated name + JSON-escaped payload; callers that can bind should use build_search_preview_request.
+        escaped_json = json.dumps(payload).replace("\\", "\\\\").replace("'", "''")
         sql = f"SELECT SNOWFLAKE.CORTEX.SEARCH_PREVIEW('{svc_fqn}', '{escaped_json}') AS SEARCH_RESULT"
         return sql, payload
+
+    @classmethod
+    def build_search_preview_request(cls, **kwargs: Any) -> tuple[str, dict[str, Any], dict[str, Any]]:
+        """``(sql, payload, bindings)``: ``SEARCH_PREVIEW(?, ?)`` with service name and JSON bound (BUG-UI-SQLI-04)."""
+        _, payload = cls.build_search_preview_sql(**kwargs)
+        search_service = kwargs.get("search_service") or ""
+        svc_fqn = (
+            _sql_safety.validate_fqn(search_service, "search_service", min_parts=3, max_parts=3)
+            if "." in search_service
+            else _sql_safety.join_fqn(kwargs.get("database"), kwargs.get("schema"), search_service, field_name="search_service")
+        )
+        sql = "SELECT SNOWFLAKE.CORTEX.SEARCH_PREVIEW(?, ?) AS SEARCH_RESULT"
+        return sql, payload, _sql_safety.to_sql_bindings([("TEXT", svc_fqn), ("TEXT", json.dumps(payload))])
 
 
 SUPPORTED_CUSTOM_TOOL_RESOURCE_TYPES: tuple[str, ...] = (
@@ -917,15 +1012,30 @@ class SnowflakeCustomToolEngine:
 
     @staticmethod
     def extract_bare_identifier(identifier: str, default_db_schema: str = "SNOWFLAKE_LANGFLOW.CORE") -> str:
-        head = (identifier or "").strip().split("(")[0].strip()
+        """Validated ``DB.SCH.ROUTINE`` (each part a plain identifier); raises ``ValueError`` otherwise."""
+        raw = (identifier or "").strip()
+        head = raw.split("(")[0].strip()
+        if "(" in raw:
+            # Anything after the name must be a well-formed type signature (BUG-UI-SQLI-02).
+            _sql_safety.validate_routine_signature(raw[raw.index("(") :])
         if not head:
-            return f"{default_db_schema}.SEND_EMAIL_ALL"
-        parts = [p.strip() for p in head.split(".") if p.strip()]
+            head = "SEND_EMAIL_ALL"
+        parts = head.split(".")
         if len(parts) >= 3:
-            return f"{parts[0]}.{parts[1]}.{parts[2]}"
+            return _sql_safety.validate_fqn(head, "custom_tool_identifier", min_parts=3, max_parts=3)
+        name = _sql_safety.validate_identifier(parts[-1], "custom_tool_identifier")
         if default_db_schema and default_db_schema != "Database All" and "." in default_db_schema:
-            return f"{default_db_schema.strip()}.{parts[-1]}"
-        return f"SNOWFLAKE_LANGFLOW.CORE.{parts[-1]}"
+            prefix = _sql_safety.validate_fqn(default_db_schema, "database_schema", min_parts=2, max_parts=2)
+            return f"{prefix}.{name}"
+        return f"SNOWFLAKE_LANGFLOW.CORE.{name}"
+
+    @staticmethod
+    def extract_signature_types(identifier: str) -> str:
+        """Allowlist-validated ``(TYPE, ...)`` part of an identifier, ``"()"`` when absent."""
+        raw = (identifier or "").strip()
+        if "(" not in raw:
+            return "()"
+        return _sql_safety.validate_routine_signature(raw[raw.index("(") :]) or "()"
 
     @classmethod
     def _split_top_level_commas(cls, text: str) -> list[str]:
@@ -979,7 +1089,6 @@ class SnowflakeCustomToolEngine:
             return []
 
         raw_tokens = cls._split_top_level_commas(inner)
-        default_email_names = ["body", "recipient_email", "subject"]
         params: list[dict[str, Any]] = []
         for idx, token in enumerate(raw_tokens):
             clean = token.strip()
@@ -991,14 +1100,14 @@ class SnowflakeCustomToolEngine:
             if len(pieces) == 2 and not pieces[0].upper().startswith(
                 ("VARCHAR", "NUMBER", "NUMERIC", "DECIMAL", "FLOAT", "DOUBLE", "INT", "BOOLEAN", "ARRAY", "OBJECT", "TEXT", "STRING", "VARIANT", "TIMESTAMP", "DATE", "TIME")
             ):
-                p_name = pieces[0].strip().strip('"').lower()
+                p_name = pieces[0].strip().strip('"')  # Snowflake's own case (DESCRIBE reports upper)
                 sql_t = pieces[1].strip().upper()
+                named = True
             else:
+                # BUG-LLMOP-005: no invented names; unnamed (types-only) signatures stay positional.
                 sql_t = clean.upper()
-                if obj_head == "SEND_EMAIL_ALL" and len(raw_tokens) == 3 and idx < 3:
-                    p_name = default_email_names[idx]
-                else:
-                    p_name = f"arg_{idx + 1}"
+                p_name = f"arg_{idx + 1}"
+                named = False
 
             json_t = cls.map_sql_type_to_json_schema_type(sql_t)
             params.append(
@@ -1008,6 +1117,7 @@ class SnowflakeCustomToolEngine:
                     "type": json_t,
                     "description": "",
                     "required": not has_default,
+                    "named": named,
                 }
             )
         return params
@@ -1037,6 +1147,8 @@ class SnowflakeCustomToolEngine:
                     "type": json_t,
                     "description": str(item.get("description") or ""),
                     "required": bool(item.get("required", True)),
+                    # BUG-LLMOP-006: keep whether the name is the routine's real argument name.
+                    "named": bool(item.get("named", not re.fullmatch(r"arg_\d+", p_name, re.I))),
                 }
             )
         mode = (sort_by or "Latest added").strip()
@@ -1072,6 +1184,7 @@ class SnowflakeCustomToolEngine:
                 "type": json_t,
                 "description": description or "",
                 "required": bool(required),
+                "named": True,
             }
         )
         return out
@@ -1166,21 +1279,39 @@ class SnowflakeCustomToolEngine:
         if ptype in ("integer", "number") and isinstance(value, (int, float)) and not isinstance(value, bool):
             return str(value)
         if ptype == "array" or isinstance(value, (list, tuple)):
-            arr_json = json.dumps(list(value) if isinstance(value, (list, tuple)) else value).replace("'", "''")
+            arr_json = json.dumps(list(value) if isinstance(value, (list, tuple)) else value).replace("\\", "\\\\").replace("'", "''")
             return f"PARSE_JSON('{arr_json}')"
-        escaped = str(value).replace("'", "''")
+        escaped = str(value).replace("\\", "\\\\").replace("'", "''")
         return f"'{escaped}'"
 
     @classmethod
-    def build_invocation_sql(
+    def _bind_argument(cls, value: Any, param_type: str, binder: "_sql_safety.BindingBuilder") -> str:
+        """Placeholder expression for one argument; the value itself only travels as a binding."""
+        if value is None:
+            return "NULL"
+        ptype = (param_type or "string").lower()
+        if ptype == "boolean" or isinstance(value, bool):
+            if isinstance(value, str):
+                value = value.strip().lower() in ("true", "1", "yes")
+            return binder.add(bool(value), "BOOLEAN")
+        if ptype in ("integer", "number") and isinstance(value, (int, float)) and not isinstance(value, bool):
+            return binder.add(value, "FIXED" if isinstance(value, int) else "REAL")
+        if ptype in ("array", "object") or isinstance(value, (list, tuple, dict)):
+            return f"PARSE_JSON({binder.add(json.dumps(list(value) if isinstance(value, tuple) else value), 'TEXT')})"
+        return binder.add(str(value), "TEXT")
+
+    @classmethod
+    def build_invocation_request(
         cls,
         *,
         resource_type: str = "procedure",
-        custom_tool_identifier: str = "SNOWFLAKE_LANGFLOW.CORE.SEND_EMAIL_ALL(VARCHAR, VARCHAR, VARCHAR)",
+        custom_tool_identifier: str = "",
         arguments: dict[str, Any] | list[Any] | str | None = None,
         parameters: list[dict[str, Any]] | None = None,
         default_db_schema: str = "SNOWFLAKE_LANGFLOW.CORE",
-    ) -> str:
+    ) -> tuple[str, dict[str, Any] | None]:
+        """``(sql, bindings)`` for the routine call. Arguments must be a JSON object/array (or the
+        equivalent dict/list); every value is sent through SQL API ``bindings`` (BUG-LLMOP-004)."""
         res_type = (resource_type or "procedure").strip().lower()
         if res_type not in cls.RESOURCE_TYPES:
             raise ValueError(f"Unsupported custom tool resource_type '{resource_type}'.")
@@ -1189,42 +1320,83 @@ class SnowflakeCustomToolEngine:
 
         if isinstance(arguments, str):
             str_arg = arguments.strip()
-            if str_arg.startswith("{") and str_arg.endswith("}"):
-                try:
-                    arguments = json.loads(str_arg)
-                except json.JSONDecodeError:
-                    pass
-            elif str_arg.startswith("[") and str_arg.endswith("]"):
-                try:
-                    arguments = json.loads(str_arg)
-                except json.JSONDecodeError:
-                    pass
-
-        formatted_args: list[str] = []
-        if isinstance(arguments, dict):
-            if params_meta:
-                for p in params_meta:
-                    pname = p["name"]
-                    if pname in arguments:
-                        formatted_args.append(cls._format_sql_literal(arguments[pname], p.get("type", "string")))
-                    elif p.get("required", True):
-                        formatted_args.append(cls._format_sql_literal("", p.get("type", "string")))
+            if not str_arg:
+                arguments = None
             else:
-                for k, v in arguments.items():
-                    formatted_args.append(cls._format_sql_literal(v, "string"))
-        elif isinstance(arguments, (list, tuple)):
-            for idx, v in enumerate(arguments):
-                ptype = params_meta[idx].get("type", "string") if idx < len(params_meta) else "string"
-                formatted_args.append(cls._format_sql_literal(v, ptype))
-        elif isinstance(arguments, str) and arguments.strip():
-            formatted_args = [arguments.strip()]
+                try:
+                    arguments = json.loads(str_arg)
+                except json.JSONDecodeError as exc:
+                    raise ValueError("Custom Tool arguments must be a JSON object or array.") from exc
+                if not isinstance(arguments, (dict, list)):
+                    raise ValueError("Custom Tool arguments must be a JSON object or array.")
+        elif arguments is not None and not isinstance(arguments, (dict, list, tuple)):
+            raise ValueError("Custom Tool arguments must be a JSON object or array.")
+
+        binder = _sql_safety.BindingBuilder()
+        formatted_args: list[str] = []
+        # BUG-LLMOP-006: real DESCRIBE names -> `NAME => ?` (order-independent, omitted optionals are
+        # simply left out). Unnamed signatures -> positional, where only trailing optionals may be omitted.
+        use_named = bool(params_meta) and all(
+            p.get("named", not re.fullmatch(r"arg_\d+", str(p.get("name", "")), re.I)) for p in params_meta
+        )
+        if isinstance(arguments, dict) and params_meta and not use_named:
+            # Unnamed (types-only) signature: keys are labels only, so values are taken in the given order
+            # unless they are the arg_N placeholders themselves.
+            if not all(re.fullmatch(r"arg_\d+", str(k), re.I) for k in arguments):
+                arguments = list(arguments.values())
+        if isinstance(arguments, (list, tuple)):
+            if params_meta and len(arguments) > len(params_meta):
+                raise ValueError(f"Custom Tool received {len(arguments)} arguments; the signature has {len(params_meta)}.")
+            arguments = {p["name"]: arguments[i] for i, p in enumerate(params_meta) if i < len(arguments)} if params_meta else list(arguments)
+        if isinstance(arguments, list):
+            formatted_args = [cls._bind_argument(v, "string", binder) for v in arguments]
+        elif params_meta:
+            args_in: dict[str, Any] = {}
+            for k, v in (arguments or {}).items():
+                if str(k).lower() in args_in:
+                    raise ValueError(f"Duplicate Custom Tool argument '{k}' (names are case-insensitive).")
+                args_in[str(k).lower()] = v
+            known = {str(p["name"]).lower() for p in params_meta}
+            unknown = sorted(set(args_in) - known)
+            if unknown:
+                raise ValueError(f"Unknown Custom Tool argument(s): {', '.join(unknown)}.")
+            missing_seen = False
+            for p in params_meta:
+                declared = str(p["name"])
+                pname = declared.lower()
+                if pname not in args_in or args_in[pname] is None and not p.get("required", True):
+                    if p.get("required", True):
+                        raise ValueError(f"Missing required Custom Tool argument '{pname}'.")
+                    missing_seen = True
+                    continue
+                if missing_seen and not use_named:
+                    raise ValueError(
+                        f"Argument '{pname}' follows an omitted optional argument; positional calls cannot skip it."
+                    )
+                expr = cls._bind_argument(args_in[pname], p.get("type", "string"), binder)
+                if use_named:
+                    # Unquoted-style names resolve upper-case in Snowflake; mixed/odd case is kept as declared.
+                    sf_name = declared.upper() if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_$]*", declared) and (
+                        declared.islower() or declared.isupper()
+                    ) else declared
+                    expr = f"{_sql_safety.quote_identifier(sf_name, 'argument')} => {expr}"
+                formatted_args.append(expr)
+        elif isinstance(arguments, dict):
+            formatted_args = [cls._bind_argument(v, "string", binder) for v in arguments.values()]
 
         joined_args = ", ".join(formatted_args)
         if res_type == "procedure":
-            return f"CALL {bare_fqn}({joined_args});"
-        if res_type == "table_function":
-            return f"SELECT * FROM TABLE({bare_fqn}({joined_args}));"
-        return f"SELECT {bare_fqn}({joined_args}) AS RESULT;"
+            sql = f"CALL {bare_fqn}({joined_args});"
+        elif res_type == "table_function":
+            sql = f"SELECT * FROM TABLE({bare_fqn}({joined_args}));"
+        else:
+            sql = f"SELECT {bare_fqn}({joined_args}) AS RESULT;"
+        return sql, binder.bindings
+
+    @classmethod
+    def build_invocation_sql(cls, **kwargs: Any) -> str:
+        """SQL text of ``build_invocation_request`` (``?`` placeholders; values are never inlined)."""
+        return cls.build_invocation_request(**kwargs)[0]
 
 
 class SnowflakeDecisionEngine:
@@ -1488,7 +1660,7 @@ class SnowflakeDecisionEngine:
         if isinstance(obj, dict):
             pairs = []
             for k, v in obj.items():
-                ek = str(k).replace("'", "''")
+                ek = str(k).replace("\\", "\\\\").replace("'", "''")
                 pairs.append(f"'{ek}': {cls._to_snowflake_map_literal(v)}")
             return "{" + ", ".join(pairs) + "}"
         if isinstance(obj, list):
@@ -1497,7 +1669,7 @@ class SnowflakeDecisionEngine:
             return "TRUE" if obj else "FALSE"
         if isinstance(obj, (int, float)):
             return str(obj)
-        escaped = str(obj if obj is not None else "").replace("'", "''")
+        escaped = str(obj if obj is not None else "").replace("\\", "\\\\").replace("'", "''")
         return f"'{escaped}'"
 
     @classmethod
@@ -1566,12 +1738,20 @@ class SnowflakeDecisionEngine:
         )
         questions_lit = cls._to_snowflake_map_literal(norm_questions)
         err_flag = "TRUE" if return_error_details else "FALSE"
-        table_fqn = (
-            table_name.strip()
-            if "." in table_name
-            else f"{(database or 'SNOWFLAKE_LANGFLOW').strip()}.{(schema or 'CORE').strip()}.{table_name.strip()}"
-        )
-        col = (state_column or "ticket_text").strip()
+        # BUG-LLMOP-003 / BUG-UI-SQLI-03: every object part is validated and quoted.
+        if "." in (table_name or ""):
+            table_fqn = _sql_safety.quote_fqn(table_name, "table_name", min_parts=3, max_parts=3)
+        else:
+            table_fqn = ".".join(
+                _sql_safety.quote_identifier(v, f)
+                for v, f in (
+                    (database or "SNOWFLAKE_LANGFLOW", "database"),
+                    (schema or "CORE", "schema"),
+                    (table_name, "table_name"),
+                )
+            )
+        col = _sql_safety.quote_identifier(state_column or "ticket_text", "state_column")
+        model = _sql_safety.validate_enum(model, cls.SUPPORTED_MODELS, "model")
         lim = max(1, int(max_rows or 100))
         return (
             "SELECT\n"
@@ -1663,13 +1843,21 @@ class SnowflakeDecisionEngine:
         table_name: str = "SUPPORT_TICKETS",
         state_column: str = "ticket_text",
         max_rows: int = 100,
-        active_role: str = "ACCOUNTADMIN",
+        active_role: str | None = None,
         # Legacy compatibility parameters
         engine_mode: str | None = None,
         input_context: str | None = None,
         decision_policy: str | None = None,
         branches_csv: str | None = None,
+        executor: Callable[[str], dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
+        """Build the AI_COMPLETE Decision SQL and, when ``executor`` is given, run it once and derive
+        answers/routing exclusively from the returned ``value.answers`` (BUG-LLMOP-001).
+
+        Without ``executor`` the result is an offline *preview* (``answers_source='offline_preview'``)
+        computed by ``evaluate_questions_offline``; runtime callers must always pass an executor.
+        """
+        active_role = _resolve_caller_role(active_role)
         if engine_mode and "SystemOne" in engine_mode:
             raise SnowflakeProviderError(
                 ERROR_UNSUPPORTED_CAPABILITY,
@@ -1733,32 +1921,48 @@ class SnowflakeDecisionEngine:
                 noul_threshold=noul_threshold,
             )
 
-        answers = cls.evaluate_questions_offline(state=eff_state, questions=norm_questions)
-        confidences: list[float] = []
-        noul_scores: list[float] = []
-        selected_branch = ""
-        for qid, ans in answers.items():
-            if ans["type"] in ("choice", "score"):
-                confidences.append(float(ans["confidence"]))
-                if ans["type"] == "choice" and not selected_branch:
-                    selected_branch = str(ans["choice"])
-            elif ans["type"] == "noul":
-                noul_scores.append(float(ans["noul"]))
+        is_table = evaluation_mode == "Table-Level Processing (Database.Schema.Table)"
+        row_results: list[dict[str, Any]] = []
+        execution_result: dict[str, Any] | None = None
+        if executor is not None:
+            execution_result = executor(sql_stmt)
+            if not isinstance(execution_result, dict) or not execution_result.get("ok"):
+                msg = (execution_result or {}).get("message") if isinstance(execution_result, dict) else None
+                raise SnowflakeProviderError(
+                    ERROR_UNSUPPORTED_CAPABILITY,
+                    f"Snowflake Decision AI_COMPLETE failed: {msg or 'no result'}",
+                    active_role=active_role,
+                    operation="snowflake_decision_evaluate",
+                )
+            rows = [r for r in (execution_result.get("rows") or []) if isinstance(r, dict)]
+            if not rows:
+                raise ValueError("Snowflake Decision returned no rows; refusing to route without a model answer.")
+            for row in rows:
+                row_answers = cls.parse_decision_result(cls._decision_cell(row))
+                row_results.append({**row, "answers": row_answers, **cls.summarize_answers(
+                    row_answers, confidence_threshold=confidence_threshold, noul_threshold=noul_threshold
+                )})
+            answers = row_results[0]["answers"]
+            answers_source = "snowflake_ai_complete"
+        else:
+            answers = cls.evaluate_questions_offline(state=eff_state, questions=norm_questions)
+            answers_source = "offline_preview"
 
-        min_conf = min(confidences) if confidences else 1.0
-        min_noul = min(noul_scores) if noul_scores else 1.0
-        is_high_confidence = (
-            (not confidences or min_conf >= float(confidence_threshold))
-            and (not noul_scores or min_noul >= float(noul_threshold))
-        )
-        primary_confidence = confidences[0] if confidences else (noul_scores[0] if noul_scores else 1.0)
-        route = "high_confidence" if is_high_confidence else "low_confidence"
+        summary = cls.summarize_answers(answers, confidence_threshold=confidence_threshold, noul_threshold=noul_threshold)
+        if is_table and row_results:
+            # Conservative table-level routing: high confidence only when every row is.
+            summary["high_confidence"] = all(r["high_confidence"] for r in row_results)
+            summary["route"] = "high_confidence" if summary["high_confidence"] else "low_confidence"
+        is_high_confidence = summary["high_confidence"]
+        selected_branch = summary["selected_branch"]
+        route = summary["route"]
 
-        return {
+        out: dict[str, Any] = {
             "answers": answers,
+            "answers_source": answers_source,
             "model": eff_model,
             "evaluation_mode": evaluation_mode,
-            "confidence": primary_confidence,
+            "confidence": summary["confidence"],
             "confidence_threshold": float(confidence_threshold),
             "noul_threshold": float(noul_threshold),
             "high_confidence": is_high_confidence,
@@ -1770,6 +1974,81 @@ class SnowflakeDecisionEngine:
             "warnings": warnings,
             "active_role": active_role,
             "sql_preview": sql_stmt,
+        }
+        if executor is not None:
+            out["execution_result"] = execution_result
+            if is_table:
+                out["rows"] = row_results
+        return out
+
+    @staticmethod
+    def _decision_cell(row: dict[str, Any]) -> Any:
+        for key in ("DECISION", "decision"):
+            if key in row:
+                return row[key]
+        return next(iter(row.values()), None) if len(row) == 1 else None
+
+    @classmethod
+    def parse_decision_result(cls, raw: Any) -> dict[str, dict[str, Any]]:
+        """``value.answers`` from a real AI_COMPLETE Decision result (dict or JSON string).
+
+        Accepts ``{"value": {"answers": ...}, "error": null}`` (return_error_details => TRUE) and
+        ``{"answers": ...}``. Raises ``ValueError`` on an error payload or any other shape; never
+        substitutes heuristic answers.
+        """
+        obj = raw
+        if isinstance(obj, str):
+            try:
+                obj = json.loads(obj)
+            except json.JSONDecodeError as exc:
+                raise ValueError("Snowflake Decision result is not valid JSON.") from exc
+        if not isinstance(obj, dict):
+            raise ValueError("Snowflake Decision result must be a JSON object.")
+        if "value" in obj or "error" in obj:
+            if obj.get("error"):
+                raise ValueError(f"Snowflake Decision returned an error: {obj.get('error')}")
+            obj = obj.get("value")
+            if isinstance(obj, str):
+                obj = json.loads(obj)
+        answers = obj.get("answers") if isinstance(obj, dict) else None
+        if not isinstance(answers, dict) or not answers or not all(isinstance(a, dict) for a in answers.values()):
+            raise ValueError("Snowflake Decision result has no 'answers' object.")
+        return answers
+
+    @classmethod
+    def summarize_answers(
+        cls,
+        answers: dict[str, dict[str, Any]],
+        *,
+        confidence_threshold: float,
+        noul_threshold: float,
+    ) -> dict[str, Any]:
+        """Routing derived from answers; uses the service ``confidence`` (formula only as fallback)."""
+        confidences: list[float] = []
+        noul_scores: list[float] = []
+        selected_branch = ""
+        for ans in answers.values():
+            a_type = str(ans.get("type") or ("noul" if "noul" in ans else "choice" if "choice" in ans else "score"))
+            if a_type in ("choice", "score"):
+                conf = ans.get("confidence")
+                if conf is None and isinstance(ans.get("probabilities"), dict):
+                    conf = cls.compute_confidence(ans["probabilities"])
+                confidences.append(float(conf if conf is not None else 0.0))
+                if a_type == "choice" and not selected_branch and ans.get("choice") is not None:
+                    selected_branch = str(ans["choice"])
+            elif a_type == "noul":
+                noul_scores.append(float(ans.get("noul") or 0.0))
+        min_conf = min(confidences) if confidences else 1.0
+        min_noul = min(noul_scores) if noul_scores else 1.0
+        high = (not confidences or min_conf >= float(confidence_threshold)) and (
+            not noul_scores or min_noul >= float(noul_threshold)
+        )
+        route = "high_confidence" if high else "low_confidence"
+        return {
+            "confidence": confidences[0] if confidences else (noul_scores[0] if noul_scores else 1.0),
+            "high_confidence": high,
+            "route": route,
+            "selected_branch": selected_branch or route,
         }
 
 

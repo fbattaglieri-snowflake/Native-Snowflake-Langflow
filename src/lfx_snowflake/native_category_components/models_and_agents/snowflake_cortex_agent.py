@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import re
 from typing import Any
 
@@ -11,7 +10,7 @@ from lfx.schema import Data
 from lfx.schema.message import Message
 
 from lfx_snowflake.context_helpers import _resolve_flow_id
-from lfx_snowflake.fastapi_live_bridge import LIVE_BRIDGE
+from lfx_snowflake.fastapi_live_bridge import LIVE_BRIDGE, _show_agents_sql
 from lfx_snowflake.providers.language_models import (
     CortexAgentToolSchema,
     build_structured_tool,
@@ -41,8 +40,7 @@ def _cortex_agents(
 ) -> list[str]:
     eff_fid = flow_id or _resolve_flow_id()
     agents = list(LIVE_BRIDGE.get_context_objects(database, schema, "cortex_agents", flow_id=eff_fid))
-    if not agents:
-        agents = [f"{database}.{schema}.EXAMPLE_AGENT", "EXAMPLE_AGENT"]
+    # BUG-CA-10: return an empty list when no agents exist (no phantom EXAMPLE_AGENT).
     return agents
 
 
@@ -272,11 +270,12 @@ class SnowflakeCortexAgentComponent(Component):
             if user_message_override is not None
             else (getattr(self, "user_message", None) or getattr(self, "user_prompt", "") or "Summarize active flow metrics")
         )
-        flow_id = _resolve_flow_id(self) or "default"
+        flow_id = _resolve_flow_id(self)  # BUG-A2A-03: no flow => None (RBAC only), never a pseudo flow id
         sess_id = (
             str(getattr(self, "session_id", "") or "").strip()
             or str(getattr(getattr(self, "graph", None), "session_id", "") or "").strip()
             or flow_id
+            or "default"
         )
         resume_thread = bool(getattr(self, "resume_thread", True))
         continuity_mode = str(getattr(self, "thread_continuity_mode", "Resume Latest Thread of this Agent") or "Resume Latest Thread of this Agent")
@@ -305,20 +304,63 @@ class SnowflakeCortexAgentComponent(Component):
             "schema_name": sch,
             "cortex_agent": agent,
             "agent_target": agent_fqn,
-            "discovery_sql": f"SHOW CORTEX AGENTS IN SCHEMA {db}.{sch}",
+            "discovery_sql": _show_agents_sql(db, sch),
             "rest_endpoint": f"/api/v2/databases/{db}/schemas/{sch}/agents/{short_agent}:run",
             "active_role": inv.get("active_role") or LIVE_BRIDGE.active_role,
             "context_epoch": inv.get("context_epoch", LIVE_BRIDGE.context_epoch),
             "user_message": str(prompt),
             "prompt": str(prompt),
         }
+        if not inv.get("ok", True):
+            # BUG-CA-13: a failed Cortex Agent call is a component error, not a 200 SUCCESS chat reply.
+            code = str(inv.get("error_code") or "CORTEX_AGENT_ERROR")
+            self.status = f"{code}: {inv.get('message') or 'Cortex Agent invocation failed'}"
+            raise ValueError(self.status)
         self.status = result_payload.get("thread_indicator") or result_payload.get("text") or "Completed"
         return result_payload
 
-    def invoke_agent(self) -> Message:
+    def _turn_cache_key(self) -> tuple[Any, ...]:
+        """Everything that defines one agent turn: input, agent/config, thread selection, session, run, role."""
+        graph = getattr(self, "graph", None)
+        run_id = getattr(graph, "run_id", None) or getattr(graph, "_run_id", None)
+        return (
+            id(graph) if graph is not None else None,
+            str(run_id or ""),
+            str(getattr(self, "user_message", "") or getattr(self, "user_prompt", "") or ""),
+            str(getattr(self, "session_id", "") or getattr(graph, "session_id", "") or ""),
+            str(getattr(self, "database", "") or ""),
+            str(getattr(self, "schema_name", "") or ""),
+            str(getattr(self, "cortex_agent", "") or getattr(self, "agent_target", "") or ""),
+            str(getattr(self, "tool_choice", "") or ""),
+            bool(getattr(self, "resume_thread", True)),
+            str(getattr(self, "thread_continuity_mode", "") or ""),
+            str(getattr(self, "conversation_thread", "") or ""),
+            str(getattr(self, "thread_id", "") or ""),
+            str(getattr(self, "parent_message_id", "") or ""),
+            str(LIVE_BRIDGE.active_role or ""),
+            int(LIVE_BRIDGE.context_epoch or 0),
+        )
+
+    def _cached_agent_turn(self, port: str) -> dict[str, Any]:
+        """BUG-CA-12: one execution feeds Response and Structured Response of the same turn.
+
+        A cached turn is reused only for an identical turn key and only by an output port that has not
+        consumed it yet; a second call to the same port (or any change of input/config/thread/session/run/role)
+        always runs a new turn, so a previous turn's response is never returned.
+        """
+        key = self._turn_cache_key()
+        cached = getattr(self, "_cached_turn", None)
+        if isinstance(cached, dict) and cached.get("key") == key and port not in cached["ports"]:
+            cached["ports"].add(port)
+            return cached["payload"]
         payload = self._execute_agent_turn()
+        self._cached_turn = {"key": key, "payload": payload, "ports": {port}}
+        return payload
+
+    def invoke_agent(self) -> Message:
+        payload = self._cached_agent_turn("response")
         return Message(
-            text=json.dumps(payload, indent=2),
+            text=str(payload.get("text") or ""),
             thread_id=payload.get("thread_id"),
             parent_message_id=payload.get("parent_message_id"),
             assistant_message_id=payload.get("assistant_message_id"),
@@ -326,7 +368,7 @@ class SnowflakeCortexAgentComponent(Component):
         )
 
     def invoke_agent_structured(self) -> Data:
-        payload = self._execute_agent_turn()
+        payload = self._cached_agent_turn("structured_response")
         return Data(data=payload)
 
     def to_toolkit(self) -> list[Any]:

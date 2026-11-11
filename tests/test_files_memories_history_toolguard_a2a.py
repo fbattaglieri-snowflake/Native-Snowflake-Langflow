@@ -9,6 +9,8 @@
 
 from __future__ import annotations
 
+from _test_fake_embed import fake_engine_embed
+
 import json
 import sys
 from pathlib import Path
@@ -250,6 +252,7 @@ def test_write_file_transfer_verification_failure_raises_error() -> None:
 
 def test_create_memory_and_4_vector_backends_with_permission_separation_and_isolation() -> None:
     engine = InMemoryVectorStoreEngine(
+        embed_fn=fake_engine_embed,
         active_role="ROLE_CREATOR",
         snowflake_privileges={
             "ROLE_CREATOR": {

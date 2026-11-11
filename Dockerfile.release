@@ -44,6 +44,7 @@ ENV PYTHONPATH="/opt/snowflake-langflow/src" \
     UV_CACHE_DIR=/tmp/uv-cache \
     XDG_CACHE_HOME=/tmp/.cache \
     SQLITE_TMPDIR=/tmp \
+    LANGFLOW_SSRF_ALLOWED_HOSTS="localhost,127.0.0.1" \
     LANGFLOW_PERSIST_DIR=/persist
 
 # The core Langflow DB and config must live on the /persist block volume, or every restart

@@ -28,6 +28,22 @@ from lfx_snowflake.governance.models import (
 )
 
 
+
+def _resolve_caller_role(explicit: str | None) -> str:
+    """Explicit caller role, else the resolved per-session bridge role; never a hard-coded admin role."""
+    from lfx_snowflake import identity as _sf_identity  # noqa: PLC0415
+
+    bridge_role = None
+    if not explicit:
+        try:
+            from lfx_snowflake.fastapi_live_bridge import LIVE_BRIDGE  # noqa: PLC0415
+
+            bridge_role = LIVE_BRIDGE.active_role
+        except Exception:  # noqa: BLE001
+            bridge_role = None
+    return _sf_identity.resolve_reported_role(explicit, bridge_role)
+
+
 class SnowflakeObjectProvisioner:
     """Governed object provisioner for Snowflake and Snowflake Postgres (:5432)."""
 
@@ -368,7 +384,8 @@ class SnowflakeObjectProvisioner:
         db_id = self.validate_identifier(database, "database")
         ddl = f"CREATE DATABASE {db_id}"
         if comment:
-            safe_comment = comment.replace("'", "''")[:256]
+            # Truncate BEFORE escaping so a cut can never split an escaped pair.
+            safe_comment = comment[:256].replace("\\", "\\\\").replace("'", "''")
             ddl += f" COMMENT = '{safe_comment}'"
 
         self.authz_service.precheck_sql_privileges(
@@ -534,7 +551,7 @@ class SnowflakeObjectProvisioner:
                     reason="Native VECTOR column type is not supported on Iceberg tables without qualification.",
                 )
             vol_id = self.validate_identifier(external_volume, "external_volume")
-            loc = (base_location or tbl_id.lower()).replace("'", "")
+            loc = (base_location or tbl_id.lower()).replace("\\", "").replace("'", "")
             ddl = (
                 f"CREATE ICEBERG TABLE {fqn} ({', '.join(col_defs)}) "
                 f"EXTERNAL_VOLUME = '{vol_id}' "
@@ -886,9 +903,10 @@ class SnowflakeObjectProvisioner:
         stage_imports: tuple[str, ...] = (),
         child_procedures: tuple[str, ...] = (),
         source: str = "llm_operations",
-        active_role: str = "ACCOUNTADMIN",
+        active_role: str | None = None,
     ) -> str:
         """Build governed DDL for Stored Procedure or UDF/UDTF in `LLM Operations` (`LLM-W2-01`)."""
+        active_role = _resolve_caller_role(active_role)
         self.enforce_hub_object_exclusion(routine_kind, source=source, active_role=active_role)
         db_id = self.validate_identifier(database, "database")
         sch_id = self.validate_identifier(schema, "schema")

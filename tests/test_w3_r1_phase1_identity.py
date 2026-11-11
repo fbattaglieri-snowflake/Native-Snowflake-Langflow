@@ -140,7 +140,7 @@ def test_no_hardcoded_admin_role_in_background_writes() -> None:
 
     src = Path(__file__).resolve().parents[1].joinpath("src/lfx_snowflake/fastapi_live_bridge.py").read_text()
     assert 'role="ACCOUNTADMIN"' not in src
-    assert "return _sf_identity.service_role() or self.active_role" in src
+    assert "return _sf_identity.service_role() or self.service_active_role" in src
 
 
 def test_switch_role_rejects_privileged_role_under_callers_rights(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -319,6 +319,7 @@ def test_no_role_sent_when_no_role_configured(monkeypatch: pytest.MonkeyPatch, t
     monkeypatch.delenv(idm.SERVICE_ROLE_ENV, raising=False)
     sent = _capture_payload(monkeypatch, tmp_path, flb)
     monkeypatch.setattr(flb.LIVE_BRIDGE, "active_role", "")
+    monkeypatch.setitem(flb.LIVE_BRIDGE.__dict__, "_base_active_role", "")
     flb.LIVE_BRIDGE.execute_sql("SELECT 1", role=flb.LIVE_BRIDGE._service_role(), mode=idm.MODE_SERVICE)
     assert "role" not in sent[0][1]
 

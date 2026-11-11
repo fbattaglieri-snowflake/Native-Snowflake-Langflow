@@ -18,6 +18,13 @@ from lfx_snowflake.components.ai_function import (
 from lfx_snowflake.context_helpers import _resolve_flow_id
 from lfx_snowflake.fastapi_live_bridge import LIVE_BRIDGE
 from lfx_snowflake.observability.redaction import mask_ai_redact_detect_spans
+from lfx_snowflake.flow_context_guard import flow_component_sql as _flow_component_sql
+
+
+def _flow_component_execute_sql(*args, **kwargs):
+    """BUG-CTX-03: this component's SQL is checked against the flow's `[ ❄️ Context ]`."""
+    with _flow_component_sql():
+        return LIVE_BRIDGE.execute_sql(*args, **kwargs)
 
 
 class SnowflakeAIRedactComponent(Component):
@@ -236,12 +243,11 @@ class SnowflakeAIRedactComponent(Component):
 
     def run_ai_redact(self) -> Message:
         plan = self._build_plan()
-        setup_sql = plan.get("session_setup_sql") or ""
-        if setup_sql:
-            LIVE_BRIDGE.execute_sql(setup_sql)
+        # PASSO3: `session_setup_sql` (ALTER SESSION) is reported, not executed: every SQL API request is its
+        # own session, so it never affected the next statement, and ALTER SESSION is not a flow-context statement.
 
         stmt = str(plan["sql"])
-        res = LIVE_BRIDGE.execute_sql(stmt)
+        res = _flow_component_execute_sql(stmt)
         if not res.get("ok"):
             if bool(getattr(self, "return_error_details", True)):
                 return Message(
@@ -249,7 +255,6 @@ class SnowflakeAIRedactComponent(Component):
                         {
                             "value": None,
                             "error": res.get("message") or "AI_REDACT execution failed",
-                            "sql_preview": stmt,
                         },
                         indent=2,
                     )
@@ -274,69 +279,38 @@ class SnowflakeAIRedactComponent(Component):
         mode = str(plan.get("mode") or "redact")
         txt_in = str(getattr(self, "input_text", "") or "")
 
-        if mode == "detect":
-            spans: list[dict[str, Any]] = []
-            if isinstance(raw_val, dict) and isinstance(raw_val.get("spans"), list):
-                spans = raw_val["spans"]
-            elif isinstance(raw_val, str) and raw_val.strip().startswith("{"):
-                parsed = json.loads(raw_val) if raw_val.strip().startswith("{") else {}
-                if isinstance(parsed, dict) and isinstance(parsed.get("spans"), list):
-                    spans = parsed["spans"]
-            if not spans and txt_in:
-                spans = [
-                    {
-                        "category": (plan.get("categories") or ["NAME"])[0],
-                        "start": 0,
-                        "end": min(len(txt_in), 12),
-                        "text": txt_in[:12],
-                    }
-                ]
-            safe_trace = mask_ai_redact_detect_spans(
-                {"input_text": txt_in, "spans": spans},
-                force_detect_context=True,
-            )
-            return Message(
-                text=json.dumps(
-                    {
-                        "mode": "detect",
-                        "spans": spans,
-                        "error": raw_err,
-                        "trace_safe_preview": safe_trace,
-                    },
-                    indent=2,
-                )
-            )
-
-        if mode == "detect_with_allowlist":
-            spans_list: list[dict[str, Any]] = []
-            if isinstance(raw_val, dict) and isinstance(raw_val.get("spans"), list):
-                spans_list = raw_val["spans"]
-            elif isinstance(raw_val, str) and raw_val.strip().startswith("{"):
-                parsed_obj = json.loads(raw_val)
-                if isinstance(parsed_obj, dict) and isinstance(parsed_obj.get("spans"), list):
-                    spans_list = parsed_obj["spans"]
+        if mode in ("detect", "detect_with_allowlist"):
+            # BUG-LLMOP-009: parse the real detect output; fail closed (never forward the original text,
+            # never invent spans). The original-text spans stay local; outputs carry masked values only.
+            if raw_err:
+                raise ValueError(f"AI_REDACT {mode} failed: {raw_err}")
+            try:
+                spans = SnowflakeAIRedactEngine.parse_detect_spans(raw_val, txt_in)
+            except ValueError as exc:
+                raise ValueError(f"AI_REDACT {mode} result could not be parsed safely: {exc}") from exc
             spliced = SnowflakeAIRedactEngine.apply_allowlist_splicing(
                 input_text=txt_in,
-                spans=spans_list,
-                allowlist=getattr(self, "allowlist_values", "") or "",
+                spans=spans,
+                allowlist=(getattr(self, "allowlist_values", "") or "") if mode == "detect_with_allowlist" else "",
             )
+            masked = SnowflakeAIRedactEngine.masked_spans(sorted(spliced["redacted_spans"], key=lambda sp: sp["start"]))
             safe_trace = mask_ai_redact_detect_spans(
-                {"input_text": spliced["redacted_text"], "spans": spliced["redacted_spans"]},
+                {"input_text": spliced["redacted_text"], "spans": masked},
                 force_detect_context=True,
             )
-            return Message(
-                text=json.dumps(
-                    {
-                        "mode": "detect_with_allowlist",
-                        "redacted_text": spliced["redacted_text"],
-                        "retained_spans": spliced["retained_spans"],
-                        "redacted_spans_count": len(spliced["redacted_spans"]),
-                        "error": raw_err,
-                        "trace_safe_preview": safe_trace,
-                    },
-                    indent=2,
-                )
-            )
+            payload: dict[str, Any] = {
+                "mode": mode,
+                "redacted_text": spliced["redacted_text"],
+                "spans": masked,
+                "detected_spans_count": len(spans),
+                "redacted_spans_count": len(spliced["redacted_spans"]),
+                "error": None,
+                "trace_safe_preview": safe_trace,
+            }
+            if mode == "detect_with_allowlist":
+                # Allowlisted values were explicitly approved by the user and stay in clear text.
+                payload["retained_spans"] = spliced["retained_spans"]
+            return Message(text=json.dumps(payload, indent=2))
 
         if isinstance(raw_val, (dict, list)):
             return Message(text=json.dumps(raw_val, indent=2))

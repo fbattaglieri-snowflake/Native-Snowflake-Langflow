@@ -9,6 +9,7 @@ from lfx.schema import Data, DataFrame, Message
 
 from lfx_snowflake.fastapi_live_bridge import LIVE_BRIDGE
 from lfx_snowflake.triggers_manager import (
+    active_trigger_run,
     ALERT_FREQUENCY_OPTIONS,
     ALERT_MODE_OPTIONS,
     COMMON_IANA_TIMEZONES,
@@ -21,6 +22,13 @@ from lfx_snowflake.triggers_manager import (
     get_triggers_manager,
     resolve_trigger_flow_id,
 )
+from lfx_snowflake.flow_context_guard import flow_component_sql as _flow_component_sql
+
+
+def _flow_component_execute_sql(*args, **kwargs):
+    """BUG-CTX-03: this component's SQL is checked against the flow's `[ ❄️ Context ]`."""
+    with _flow_component_sql():
+        return LIVE_BRIDGE.execute_sql(*args, **kwargs)
 
 
 class SnowflakeAlertTrigger(Component):
@@ -228,6 +236,13 @@ class SnowflakeAlertTrigger(Component):
             ),
         )
         node_id = str(getattr(self, "_id", None) or getattr(self, "id", None) or "SnowflakeAlertTrigger")
+        run = active_trigger_run(flow_id)
+        if run is not None:
+            # BUG-TRG-04: Snowflake fired this run, so the trigger already exists: never re-provision it,
+            # expose the incoming RUN_LANGFLOW_FLOW payload as this component's outputs instead.
+            rows = run["payload"].get("rows")
+            self._trigger_rows = list(rows) if isinstance(rows, list) else []
+            return {**ddl_spec, "provision_result": {"ok": True, "skipped": "trigger_run"}, "trigger_payload": run["payload"]}
         prov = get_triggers_manager().provision_trigger(
             ddl_spec=ddl_spec,
             node_id=node_id,
@@ -248,7 +263,7 @@ class SnowflakeAlertTrigger(Component):
         if isinstance(injected_rows, list):
             return DataFrame(injected_rows)
         limit = max(1, min(1000, int(getattr(self, "max_alert_rows", 100) or 100)))
-        res = LIVE_BRIDGE.execute_sql(f"SELECT * FROM ({spec['condition_sql']}) LIMIT {limit}")
+        res = _flow_component_execute_sql(f"SELECT * FROM ({spec['condition_sql']}) LIMIT {limit}")
         return DataFrame(res.get("rows", []))
 
     def build_trigger_message(self) -> Message:

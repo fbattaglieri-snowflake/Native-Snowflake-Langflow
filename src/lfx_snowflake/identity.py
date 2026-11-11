@@ -202,8 +202,45 @@ def is_read_only_statement(statement: str) -> bool:
     return not any(w in _WRITE_WORDS for w in words)
 
 
+# Unquoted Snowflake identifier; role names outside this grammar are never sent to Snowflake.
+_ROLE_IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_$]{0,254}$")
+
+
+def validate_role_identifier(role: str | None) -> str | None:
+    """Upper-cased role name if it is a plain Snowflake identifier, else ``None`` (fail closed)."""
+    clean = (role or "").strip()
+    if not clean or not _ROLE_IDENT_RE.match(clean):
+        return None
+    return clean.upper()
+
+
+def quote_role_identifier(role: str) -> str:
+    """Double-quoted identifier for SQL; raises ``ValueError`` for anything but a validated role name."""
+    valid = validate_role_identifier(role)
+    if valid is None:
+        raise ValueError("Invalid Snowflake role identifier.")
+    return f'"{valid}"'
+
+
+SECONDARY_ROLES_MODE_ENV = "LANGFLOW_SECONDARY_ROLES_MODE"
+_SECONDARY_ROLES_MODES = frozenset({"NONE", "ALL"})
+GUARDED_ADMIN_ROLE = "ACCOUNTADMIN"
+
+
+def resolve_reported_role(explicit: str | None, bridge_role: str | None = None) -> str:
+    """Role to report/act as: the explicit caller role, else the resolved bridge role, never a literal admin."""
+    return (explicit or bridge_role or "").strip().upper()
+
+
+def secondary_roles_mode() -> str:
+    """BUG-CA-01: secondary roles applied to every SQL execution. Anything but ``ALL`` means ``NONE``."""
+    value = (os.getenv(SECONDARY_ROLES_MODE_ENV) or "NONE").strip().upper()
+    return value if value in _SECONDARY_ROLES_MODES else "NONE"
+
+
 def is_selectable_role(role: str | None, available: list[str] | None) -> bool:
-    clean = (role or "").strip().upper()
+    """Single selectability policy shared by REST ``POST /role`` and MCP ``snowflake_switch_role``."""
+    clean = validate_role_identifier(role)
     if not clean or clean in PRIVILEGED_ROLES:
         return False
     return clean in {str(r).strip().upper() for r in (available or [])}

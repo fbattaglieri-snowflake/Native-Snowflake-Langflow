@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ast
 import json
+from typing import Any
 import sqlite3
 from pathlib import Path
 
@@ -84,8 +85,9 @@ def test_w2_r9_01_custom_tool_snowsight_alignment_and_object_rejection() -> None
     )
     assert len(params) == 3
     alpha_sorted = SnowflakeCustomToolEngine.sort_parameters(params, sort_by="Alphabetical")
-    assert [p["name"] for p in alpha_sorted] == ["priority", "recipient_email", "subject"]
+    assert [p["name"] for p in alpha_sorted] == ["PRIORITY", "RECIPIENT_EMAIL", "SUBJECT"]  # PASSO6: Snowflake case kept
 
+    comp.parameters_json = json.dumps(params)  # PASSO6: no SEND_EMAIL_ALL default any more
     comp.add_parameter(name="cc_list", param_type="array", description="Optional CC list", required=False)
     req_first = SnowflakeCustomToolEngine.sort_parameters(comp._parsed_parameters(), sort_by="Required first")
     assert req_first[0]["required"] is True
@@ -112,16 +114,17 @@ def test_w2_r9_01_custom_tool_snowsight_alignment_and_object_rejection() -> None
 
     # Invocation SQL for procedure, function, and table_function
     comp.resource_type = "procedure"
-    assert comp.build_invocation_sql({"body": "hi", "recipient_email": "a@b.com", "subject": "s"}).startswith("CALL ")
+    assert comp.build_invocation_sql({"recipient_email": "a@b.com", "subject": "s", "priority": 1}).startswith("CALL ")
     comp.resource_type = "function"
     comp.custom_tool_identifier = "SNOWFLAKE_LANGFLOW.CORE.CALC_TAX(NUMBER)"
+    comp.parameters_json = ""
     assert "SELECT SNOWFLAKE_LANGFLOW.CORE.CALC_TAX(" in comp.build_invocation_sql({"arg_1": 100})
     comp.resource_type = "table_function"
     comp.custom_tool_identifier = "SNOWFLAKE_LANGFLOW.CORE.SPLIT_ROWS_UDTF(VARCHAR)"
     assert "FROM TABLE(SNOWFLAKE_LANGFLOW.CORE.SPLIT_ROWS_UDTF(" in comp.build_invocation_sql({"arg_1": "abc"})
 
 
-def test_w2_r9_02_decision_official_ai_complete_models_and_question_types() -> None:
+def test_w2_r9_02_decision_official_ai_complete_models_and_question_types(monkeypatch) -> None:
     """Verify W2-R9-02: [ ❄️ ] Decision uses snowflake-decision-fast & snowflake-decision with choice, score (0..n-1), and noul."""
     assert SUPPORTED_DECISION_MODELS == ("snowflake-decision-fast", "snowflake-decision")
     assert SUPPORTED_DECISION_QUESTION_TYPES == ("choice", "score", "noul")
@@ -200,11 +203,24 @@ def test_w2_r9_02_decision_official_ai_complete_models_and_question_types() -> N
             include_none_of_these=False,
         )
 
-    # Component outputs
+    # Component outputs: answers come from the (mocked) real AI_COMPLETE result, not a heuristic.
+    import lfx_snowflake.native_category_components.llm_operations.snowflake_decision as dec_mod
+
+    live_cell = json.dumps({"value": {"answers": {"department": {"type": "choice", "choice": "billing",
+        "confidence": 0.97, "probabilities": {"billing": 0.99, "technical_support": 0.01}}}}, "error": None})
+    calls: list[str] = []
+
+    def _fake_exec(sql: str, **_k: Any) -> dict[str, Any]:
+        calls.append(sql)
+        return {"ok": True, "rows": [{"DECISION": live_cell}]}
+
+    monkeypatch.setattr(dec_mod, "_flow_component_execute_sql", _fake_exec)
     comp = SnowflakeDecisionComponent()
     assert len(comp.outputs) == 4
     out_data = comp.run_decision()
-    assert "answers" in out_data.data
+    assert out_data.data["answers"]["department"]["choice"] == "billing"
+    assert out_data.data["answers_source"] == "snowflake_ai_complete"
+    comp.evaluation_mode = "Table-Level Processing (Database.Schema.Table)"
     df_out = comp.run_table_decisions()
     assert len(df_out) >= 1
 
@@ -381,7 +397,8 @@ def test_w2_r9_live_bridge_custom_tools_stage_files_and_decision_edge_cases() ->
     # W2-R9-01: LiveBridge list_custom_tool_identifiers & describe_custom_tool_signature
     for rtype in ("procedure", "function", "table_function"):
         ids = bridge.list_custom_tool_identifiers(resource_type=rtype, database_schema="Database All")
-        assert isinstance(ids, list) and len(ids) >= 1
+        assert isinstance(ids, list)  # PASSO6: offline there are no invented identifiers
+        ids = ids or ["SNOWFLAKE_LANGFLOW.CORE.TOOL_X(VARCHAR)"]
         desc = bridge.describe_custom_tool_signature(resource_type=rtype, identifier=ids[0])
         assert desc["resource_type"] == rtype
         assert isinstance(desc["parameters"], list)

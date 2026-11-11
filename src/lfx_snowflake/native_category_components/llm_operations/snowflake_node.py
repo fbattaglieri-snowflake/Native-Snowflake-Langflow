@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from lfx_snowflake import sql_safety as _sql_safety
+
 import json
 from typing import Any
 
@@ -11,6 +13,13 @@ from lfx.schema.message import Message
 
 from lfx_snowflake.context_helpers import _resolve_flow_id
 from lfx_snowflake.fastapi_live_bridge import LIVE_BRIDGE
+from lfx_snowflake.flow_context_guard import flow_component_sql as _flow_component_sql
+
+
+def _flow_component_execute_sql(*args, **kwargs):
+    """BUG-CTX-03: this component's SQL is checked against the flow's `[ ❄️ Context ]`."""
+    with _flow_component_sql():
+        return LIVE_BRIDGE.execute_sql(*args, **kwargs)
 
 
 def _node_databases(flow_id: str | None = None) -> list[str]:
@@ -135,16 +144,21 @@ class SnowflakeLLMOperationComponent(Component):
         db = (self.database or "SNOWFLAKE_LANGFLOW").strip()
         sch = (self.schema_name or "CORE").strip()
         tgt = (self.target_object or "LANGFLOW_FLOW_RUNS").strip()
-        fqn = tgt if "." in tgt else f"{db}.{sch}.{tgt}"
         if self.operation_mode == "Execute Custom SQL" and (self.custom_sql or "").strip():
+            # Explicit, user-authored SQL mode (same contract as the SQL Statement component).
             return (self.custom_sql or "").strip()
+        fqn = (
+            _sql_safety.validate_fqn(tgt, "target_object", min_parts=3, max_parts=3)
+            if "." in tgt
+            else _sql_safety.join_fqn(db, sch, tgt, field_name="target_object")
+        )
         if self.operation_mode == "Inspect Metadata":
             return f"DESCRIBE TABLE {fqn}"
-        return f"SELECT * FROM {fqn} LIMIT {max(1, int(self.max_rows or 50))}"
+        return f"SELECT * FROM {fqn} LIMIT {_sql_safety.bounded_int(self.max_rows or 50, 50, 1, 10000)}"
 
     def run_operation(self) -> Message:
         stmt = self._build_sql()
-        res = LIVE_BRIDGE.execute_sql(stmt)
+        res = _flow_component_execute_sql(stmt)
         return Message(
             text=json.dumps(
                 {
@@ -161,7 +175,7 @@ class SnowflakeLLMOperationComponent(Component):
         )
 
     def run_dataframe(self) -> DataFrame:
-        res = LIVE_BRIDGE.execute_sql(self._build_sql())
+        res = _flow_component_execute_sql(self._build_sql())
         return DataFrame(res.get("rows", []))
 
     def run_metadata(self) -> Data:

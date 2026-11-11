@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from lfx_snowflake import sql_safety as _sql_safety
+
 import json
 from typing import Any
 
@@ -22,6 +24,18 @@ from lfx_snowflake._lfx_compat import Tool
 from lfx_snowflake.fastapi_live_bridge import LIVE_BRIDGE, LiveSnowflakeBridge
 from lfx_snowflake.traceability import AuditAction
 from lfx_snowflake.traceability import emit as emit_audit
+from lfx_snowflake.flow_context_guard import flow_component_sql as _flow_component_sql
+from lfx_snowflake.flow_context_guard import register_component_object as _register_component_object
+
+
+def _ddl_ok(res: object) -> bool:
+    return isinstance(res, dict) and bool(res.get("ok"))
+
+
+def _flow_component_execute_sql(*args, **kwargs):
+    """BUG-CTX-03: this component's SQL is checked against the flow's `[ ❄️ Context ]`."""
+    with _flow_component_sql():
+        return LIVE_BRIDGE.execute_sql(*args, **kwargs)
 
 
 def _ensure_bridge_memory_catalog_flow_id_compat() -> None:
@@ -414,7 +428,7 @@ class SnowflakeKnowledgeComponent(Component):
         db = str(getattr(self, "database", "") or LIVE_BRIDGE.database or "SNOWFLAKE_LANGFLOW").strip()
         sch = str(getattr(self, "schema_name", "") or LIVE_BRIDGE.schema or "CORE").strip()
         tbl = str(getattr(self, "knowledge_base", "") or "LANGFLOW_KNOWLEDGE_VECTORS").strip().split(".")[-1]
-        fqn = f"{db}.{sch}.{tbl}"
+        fqn = _sql_safety.join_fqn(db, sch, tbl, field_name="knowledge_base")
         action = str(getattr(self, "action", "Retrieve") or "Retrieve").strip()
         emb_obj = getattr(self, "embedding", None)
         emb_model = str(
@@ -423,6 +437,8 @@ class SnowflakeKnowledgeComponent(Component):
             or "snowflake-arctic-embed-m-v1.5"
         ).strip()
         no_emb = emb_model.startswith("No Embedding") or emb_model.lower() == "none"
+        # AI_EMBED requires the model as a literal: only allowlisted names are emitted (BUG-MEM-RCL-01 pattern).
+        emb_lit = "" if no_emb else _sql_safety.sql_string_literal(_sql_safety.validate_embed_model(emb_model))
         dim = 0 if no_emb else resolve_embedding_dimension(emb_model)
         provider = str(getattr(self, "db_provider", "Snowflake Standard Table") or "Snowflake Standard Table")
 
@@ -467,18 +483,20 @@ class SnowflakeKnowledgeComponent(Component):
                     "CREATED_AT TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP()"
                     ")"
                 )
-            LIVE_BRIDGE.execute_sql(ddl)
+            if _ddl_ok(_flow_component_execute_sql(ddl)):
+                _register_component_object(fqn, "tables")  # PASSO3: register before the INSERTs use it
             last_insert_sql = ""
             for t in texts:
-                safe_t = t.replace("'", "''")
                 if no_emb:
-                    last_insert_sql = f"INSERT INTO {fqn} (CONTENT) SELECT '{safe_t}'"
+                    last_insert_sql = f"INSERT INTO {fqn} (CONTENT) SELECT ?"
+                    binds = _sql_safety.to_sql_bindings([("TEXT", t)])
                 else:
                     last_insert_sql = (
                         f"INSERT INTO {fqn} (CONTENT, EMBEDDING) "
-                        f"SELECT '{safe_t}', SNOWFLAKE.CORTEX.AI_EMBED('{emb_model}', '{safe_t}')"
+                        f"SELECT ?, SNOWFLAKE.CORTEX.AI_EMBED({emb_lit}, ?)"
                     )
-                LIVE_BRIDGE.execute_sql(last_insert_sql)
+                    binds = _sql_safety.to_sql_bindings([("TEXT", t), ("TEXT", t)])
+                _flow_component_execute_sql(last_insert_sql, bindings=binds)
             return {
                 "action": "Ingest",
                 "database": db,
@@ -494,24 +512,25 @@ class SnowflakeKnowledgeComponent(Component):
             }
 
         query = str(getattr(self, "search_query", "") or "").strip()
-        safe_q = query.replace("'", "''")
-        top_k = max(1, int(getattr(self, "top_k", 5) or 5))
+        top_k = _sql_safety.bounded_int(getattr(self, "top_k", 5) or 5, 5, 1, 1000)
         if no_emb:
             sql_stmt = (
                 f"SELECT DOC_ID, CONTENT, METADATA, CREATED_AT "
                 f"FROM {fqn} "
-                f"WHERE CONTENT ILIKE '%{safe_q}%' "
+                f"WHERE CONTENT ILIKE ? "
                 f"ORDER BY CREATED_AT DESC LIMIT {top_k}"
             )
+            q_binds = _sql_safety.to_sql_bindings([("TEXT", f"%{query}%")])
         else:
             # VECTOR_COSINE_SIMILARITY strictly in SELECT projection (never in WHERE)
             sql_stmt = (
                 f"SELECT DOC_ID, CONTENT, METADATA, "
-                f"VECTOR_COSINE_SIMILARITY(EMBEDDING, SNOWFLAKE.CORTEX.AI_EMBED('{emb_model}', '{safe_q}')) AS SCORE "
+                f"VECTOR_COSINE_SIMILARITY(EMBEDDING, SNOWFLAKE.CORTEX.AI_EMBED({emb_lit}, ?)) AS SCORE "
                 f"FROM {fqn} "
                 f"ORDER BY SCORE DESC LIMIT {top_k}"
             )
-        res = LIVE_BRIDGE.execute_sql(sql_stmt)
+            q_binds = _sql_safety.to_sql_bindings([("TEXT", query)])
+        res = _flow_component_execute_sql(sql_stmt, bindings=q_binds)
         rows = res.get("rows", []) if isinstance(res, dict) else []
         if not rows:
             rows = [
@@ -703,7 +722,7 @@ class SnowflakeReadFileComponent(Component):
         db = str(getattr(self, "database", "") or LIVE_BRIDGE.database or "SNOWFLAKE_LANGFLOW").strip()
         sch = str(getattr(self, "schema_name", "") or LIVE_BRIDGE.schema or "CORE").strip()
         stg = str(getattr(self, "stage_name", "") or "").lstrip("@").strip().split(".")[-1]
-        stage_fqn = f"@{db}.{sch}.{stg}"
+        stage_fqn = "@" + _sql_safety.join_fqn(db, sch, stg, field_name="stage")
         rel_path = str(getattr(self, "stage_file_path", "") or getattr(self, "path", "") or "").strip()
         stage_prefix = f"{stg.lower()}/"
         if rel_path.lower().startswith(stage_prefix):
@@ -713,7 +732,7 @@ class SnowflakeReadFileComponent(Component):
         if mode not in ("LAYOUT", "OCR"):
             mode = "LAYOUT"
 
-        safe_rel = rel_path.replace("'", "''")
+        safe_rel = rel_path.replace("\\", "\\\\").replace("'", "''")
         if use_parse:
             sql_stmt = (
                 "SELECT SNOWFLAKE.CORTEX.AI_PARSE_DOCUMENT("
@@ -722,9 +741,10 @@ class SnowflakeReadFileComponent(Component):
                 ") AS PARSED_CONTENT"
             )
         else:
-            sql_stmt = f"SELECT $1 AS CONTENT FROM {stage_fqn}/{safe_rel}"
+            # The path is emitted unquoted after the stage reference: only safe path characters.
+            sql_stmt = f"SELECT $1 AS CONTENT FROM {_sql_safety.validate_stage_ref(f'{stage_fqn}/{rel_path}', 'stage_file_path', allow_path=True)}"
 
-        res = LIVE_BRIDGE.execute_sql(sql_stmt)
+        res = _flow_component_execute_sql(sql_stmt)
         rows = res.get("rows", []) if isinstance(res, dict) else []
         extracted_text = ""
         if isinstance(rows, list) and rows:

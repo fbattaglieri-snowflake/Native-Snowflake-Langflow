@@ -21,6 +21,14 @@ from lfx_snowflake.native_category_components.files_and_knowledge.snowflake_stag
     _register_created_object,
     _resolve_flow_id,
 )
+from lfx_snowflake.flow_context_guard import flow_component_sql as _flow_component_sql
+from lfx_snowflake import bridge_routines as _bridge_routines
+
+
+def _flow_component_execute_sql(*args, **kwargs):
+    """BUG-CTX-03: this component's SQL is checked against the flow's `[ ❄️ Context ]`."""
+    with _flow_component_sql():
+        return LIVE_BRIDGE.execute_sql(*args, **kwargs)
 
 
 def _database_options(flow_id: str | None = None) -> list[str]:
@@ -249,7 +257,8 @@ class SnowflakeCortexSearchSplitTextComponent(Component):
             "chunk_size_notice": CORTEX_SEARCH_CHUNK_SIZE_NOTICE,
             "pipeline_guide": CORTEX_SEARCH_PIPELINE_GUIDE_STEP_1,
             "ddl_preview": table_ddl,
-            "python_udf_ddl": udf_ddl,
+            "python_udf_ddl": udf_ddl,  # display only: provisioned by the bridge, never by this component
+            "python_udf_fqn": builder.langchain_udf_fqn() if udf_ddl else None,
             "split_insert_sql": insert_sql,
             "distribution_sql": stats_sql["distribution_sql"],
             "preview_sql": stats_sql["preview_sql"],
@@ -263,7 +272,7 @@ class SnowflakeCortexSearchSplitTextComponent(Component):
             denied = LIVE_BRIDGE.check_write_privilege_or_deny("SPLIT_TEXT_INSERT", spec.target_table_fqn)
             if denied:
                 raise ValueError(denied["message"])
-            tbl_res = LIVE_BRIDGE.execute_sql(table_ddl)
+            tbl_res = _flow_component_execute_sql(table_ddl)
             if _ddl_succeeded(tbl_res):
                 _register_created_object(
                     database=spec.database,
@@ -272,20 +281,14 @@ class SnowflakeCortexSearchSplitTextComponent(Component):
                     object_name=spec.target_table,
                     flow_id=_resolve_flow_id(self),
                 )
-            if udf_ddl:
-                udf_res = LIVE_BRIDGE.execute_sql(udf_ddl)
-                if _ddl_succeeded(udf_res):
-                    _register_created_object(
-                        database=spec.database,
-                        schema=spec.schema,
-                        category="functions",
-                        object_name="LANGCHAIN_RECURSIVE_SPLIT_UDTF",
-                        flow_id=_resolve_flow_id(self),
-                    )
-            LIVE_BRIDGE.execute_sql(insert_sql)
+            if spec.splitter_mode == "PYTHON_UDF_LANGCHAIN":
+                # The splitter is BRIDGE-OWNED (provisioned by an admin under the service role); the component
+                # never creates routines, it only invokes the exact bridge FQN the flow guard allows.
+                _bridge_routines.require_langchain_splitter(LIVE_BRIDGE)
+            _flow_component_execute_sql(insert_sql)
 
-        dist_res = LIVE_BRIDGE.execute_sql(stats_sql["distribution_sql"])
-        prev_res = LIVE_BRIDGE.execute_sql(stats_sql["preview_sql"])
+        dist_res = _flow_component_execute_sql(stats_sql["distribution_sql"])
+        prev_res = _flow_component_execute_sql(stats_sql["preview_sql"])
         dist_rows = dist_res.get("rows", [])
         dist_summary = dist_rows[0] if dist_rows else {"total_chunks": 0, "min_chars": 0, "avg_chars": 0, "max_chars": 0}
         total_chunks = dist_summary.get("total_chunks") or dist_summary.get("TOTAL_CHUNKS") or len(prev_res.get("rows", []))

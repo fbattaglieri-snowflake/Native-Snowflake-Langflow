@@ -20,6 +20,14 @@ from lfx_snowflake.native_category_components.files_and_knowledge.snowflake_stag
     _register_created_object,
     _resolve_flow_id,
 )
+from lfx_snowflake.flow_context_guard import flow_component_sql as _flow_component_sql
+from lfx_snowflake.flow_context_guard import register_component_object as _register_component_object
+
+
+def _flow_component_execute_sql(*args, **kwargs):
+    """BUG-CTX-03: this component's SQL is checked against the flow's `[ ❄️ Context ]`."""
+    with _flow_component_sql():
+        return LIVE_BRIDGE.execute_sql(*args, **kwargs)
 
 
 def _database_options(flow_id: str | None = None) -> list[str]:
@@ -329,7 +337,7 @@ class SnowflakeCortexSearchStreamTaskComponent(Component):
             return Data(data=payload)
 
         if "TASK_HISTORY" in action:
-            hist_res = LIVE_BRIDGE.execute_sql(history_sql)
+            hist_res = _flow_component_execute_sql(history_sql)
             payload.update(
                 {
                     "action": "TASK_HISTORY",
@@ -344,9 +352,15 @@ class SnowflakeCortexSearchStreamTaskComponent(Component):
             raise ValueError(denied["message"])
 
         if "Create Stream & Task" in action:
-            LIVE_BRIDGE.execute_sql(stage_dir_ddl)
-            stream_res = LIVE_BRIDGE.execute_sql(stream_ddl)
-            task_res = LIVE_BRIDGE.execute_sql(task_ddl)
+            _flow_component_execute_sql(stage_dir_ddl)
+            stream_res = _flow_component_execute_sql(stream_ddl)
+            # PASSO3: the task body reads the stream and writes the pipeline tables this component owns;
+            # register them in the flow context (only within an in-context schema) BEFORE the task DDL.
+            if _ddl_succeeded(stream_res):
+                _register_component_object(spec.stream_fqn, "streams")
+            _register_component_object(spec.parsed_table_fqn, "tables")
+            _register_component_object(spec.chunks_table_fqn, "tables")
+            task_res = _flow_component_execute_sql(task_ddl)
             if _ddl_succeeded(stream_res) or _ddl_succeeded(task_res):
                 eff_fid = _resolve_flow_id(self)
                 _register_created_object(
@@ -386,7 +400,7 @@ class SnowflakeCortexSearchStreamTaskComponent(Component):
             "Esegui ora (EXECUTE TASK)": exec_now_sql,
         }
         exec_sql = op_map.get(action, exec_now_sql)
-        res = LIVE_BRIDGE.execute_sql(exec_sql)
+        res = _flow_component_execute_sql(exec_sql)
         payload.update(
             {
                 "action": action,

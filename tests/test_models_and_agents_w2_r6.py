@@ -68,6 +68,27 @@ from lfx_snowflake.providers.language_models import (
     update_snowflake_language_model_build_config,
 )
 
+
+@pytest.fixture(autouse=True)
+def _emulated_describe_agent(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Offline stand-in for the BUG-A2A-03 Snowflake check: these tests cover threads/cards, not grants.
+
+    Mirrors what a live account returns: roles without access get 403, everything else may DESCRIBE.
+    Context membership and DESCRIBE failures are covered in test_v086_passo3_flow_context.py.
+    """
+    from lfx_snowflake import fastapi_live_bridge as _flb
+
+    def _access(self, db, sch, agent, role, flow_id):
+        if (role or "").upper() in ("PUBLIC", "ANONYMOUS", "DENIED_ROLE"):
+            return (
+                {"ok": False, "status_code": 403, "error_code": "AUTHZ_ROLE_DENIED",
+                 "message": f"Active role ({role}) is not authorized to access Cortex Agent {db}.{sch}.{agent}."},
+                {},
+            )
+        return None, {"ok": True, "rows": [{}]}
+
+    monkeypatch.setattr(_flb.LiveSnowflakeBridge, "_cortex_agent_access", _access)
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -114,7 +135,7 @@ def _make_client() -> Any:
             return self._json_body
 
     class _StubAPIRouter:
-        def __init__(self, prefix: str = "", tags: list[str] | None = None) -> None:
+        def __init__(self, prefix: str = "", tags: list[str] | None = None, **_kwargs: Any) -> None:
             self.prefix = prefix.rstrip("/")
             self.tags = tags or []
             self.routes: list[tuple[str, str, Any]] = []
@@ -148,6 +169,8 @@ def _make_client() -> Any:
     fastapi_mod = types.ModuleType("fastapi")
     fastapi_mod.APIRouter = _StubAPIRouter  # type: ignore[attr-defined]
     fastapi_mod.Request = _StubRequest  # type: ignore[attr-defined]
+    fastapi_mod.Depends = lambda dependency=None: dependency  # type: ignore[attr-defined]
+    fastapi_mod.HTTPException = type("HTTPException", (Exception,), {})  # type: ignore[attr-defined]
     resp_mod = types.ModuleType("fastapi.responses")
     resp_mod.JSONResponse = _StubJSONResponse  # type: ignore[attr-defined]
     sys.modules.setdefault("fastapi", fastapi_mod)
@@ -423,7 +446,10 @@ def test_ma_w2_r6_01_cortex_agent_component_execution_and_role_governance(
     comp.tool_choice = "auto"
 
     msg_out = comp.invoke_agent()
-    parsed = json.loads(msg_out.text)
+    # BUG-CA-12: Response is the clean reply text; the full envelope lives on Structured Response (same cached turn).
+    parsed = comp._cached_turn["payload"]
+    assert msg_out.text == str(parsed.get("text") or "")
+    assert not msg_out.text.lstrip().startswith("{")
     assert parsed["ok"] is True
     assert parsed["agent_fqn"] == "SNOWFLAKE_LANGFLOW.CORE.FINANCE_AGENT"
     assert parsed["rest_endpoint"] == "/api/v2/databases/SNOWFLAKE_LANGFLOW/schemas/CORE/agents/FINANCE_AGENT:run"
@@ -686,7 +712,7 @@ def test_ma_w2_r6_03_structured_tools_for_cortex_analyst_search_and_agent(
 
 
 def test_ma_w2_r6_04_models_and_agents_7_canonical_sidebar_components() -> None:
-    """Verify install_live_hooks_in_container.py enforces the exact 7 canonical Models & Agents components."""
+    """Verify install_live_hooks_in_container.py enforces the exact 8 canonical Models & Agents components."""
     hook_script = (REPO_ROOT / "scripts" / "install_live_hooks_in_container.py").read_text(encoding="utf-8")
     assert '"A2AAgent"' in hook_script
     assert '"Agent"' in hook_script
@@ -705,9 +731,11 @@ def test_ma_w2_r6_04_models_and_agents_7_canonical_sidebar_components() -> None:
         "SnowflakeCortexAgentA2A",
         "Memory",
         "SnowflakeMessageHistory",
-        "MCPTools",
     ):
         assert f'"{removed_dup}"' in hook_script
+    # BUG-MCP-04: native `MCP Tools` is canonical (8th component), never dropped as a duplicate
+    assert '"MCPTools",\n        "PoliciesComponent"' not in hook_script
+    assert '("models_and_agents", "MCPTools")' not in hook_script
 
     # Ensure backward-compatible Python class name on SnowflakeMessageHistoryNativeComponent is preserved
     assert SnowflakeMessageHistoryNativeComponent.name == "SnowflakeMessageHistory"
@@ -751,7 +779,8 @@ def test_ma_w2_r6_05_a2a_enabled_and_internal_external_modes(monkeypatch: pytest
     a2a_comp = SnowflakeA2AAgentComponent(a2a_registry=registry, max_depth=3)
     internal_opts = a2a_comp.list_internal_agents()
     assert any(opt.startswith("[Langflow Flow] Order Triage Flow (flow-alpha)") for opt in internal_opts)
-    assert any(opt.startswith("[Cortex Agent] ") for opt in internal_opts)
+    # BUG-CA-10: Cortex Agent entries appear only when SHOW AGENTS discovers them (no phantom EXAMPLE_AGENT).
+    assert not any(opt.endswith(".EXAMPLE_AGENT") for opt in internal_opts)
 
     # 1. Internal invocation of [Langflow Flow]
     flow_res = a2a_comp.invoke_internal(
@@ -785,7 +814,8 @@ def test_ma_w2_r6_05_a2a_enabled_and_internal_external_modes(monkeypatch: pytest
 
     # 4. External Quick Fill & invocation (A2A Bridge URL + Direct :run URL + Flow URL)
     qf_map = a2a_comp.list_quick_fill_endpoints(base_url="http://127.0.0.1:7860")
-    assert any("/api/v1/snowflake/a2a/cortex-agents/" in url for url in qf_map.values())
+    # BUG-CA-10: no discovered agents -> no phantom Cortex Agent quick-fill entries.
+    assert not any(url.endswith("/EXAMPLE_AGENT") for url in qf_map.values())
 
     ext_bridge_res = a2a_comp.invoke_external(
         agent_url="http://127.0.0.1:7860/api/v1/snowflake/a2a/cortex-agents/SNOWFLAKE_LANGFLOW/CORE/EXAMPLE_AGENT",
@@ -873,7 +903,9 @@ def test_ma_w2_r6_05_fastapi_a2a_v030_server_bridge_and_threads_routes(
         },
     )
     assert cancel_resp.status_code == 200
-    assert cancel_resp.json()["result"]["status"]["state"] == "canceled"
+    # BUG-A2A-05: a completed task is terminal -> A2A v0.3.0 TaskNotCancelableError (-32002), state untouched.
+    assert cancel_resp.json()["error"]["code"] == -32002
+    assert get_resp.json()["result"]["status"]["state"] == "completed"
 
     # 5. GET /api/v1/snowflake/cortex/threads & /api/v1/snowflake/language-models
     threads_resp = client.get("/api/v1/snowflake/cortex/threads")

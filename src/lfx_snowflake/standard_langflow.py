@@ -78,6 +78,20 @@ try:
 except ImportError:  # pragma: no cover
     anthropic = None  # type: ignore[assignment]
 
+_LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1", "[::1]"})
+
+
+def _is_loopback_allowed_host(candidate: str) -> bool:
+    """BUG-MCP-05: loopback entries of `LANGFLOW_SSRF_ALLOWED_HOSTS` let MCP Tools reach the in-container
+    Project MCP Server; they are never an LLM proxy / Ollama origin."""
+    host = candidate.split("://", 1)[-1].split("/", 1)[0].strip().lower()
+    if host.startswith("["):
+        host = host.split("]", 1)[0] + "]"
+    elif host.count(":") == 1:
+        host = host.split(":", 1)[0]
+    return host in _LOOPBACK_HOSTS
+
+
 def _resolve_proxy_origin() -> str:
     for env_key in ("SNOWFLAKE_STANDARD_PROXY_ORIGIN", "LLM_PROXY_BASE_URL", "SNOWFLAKE_PROXY_BASE_URL"):
         val = (os.environ.get(env_key) or "").strip().rstrip("/")
@@ -88,6 +102,8 @@ def _resolve_proxy_origin() -> str:
     allowed = (os.environ.get("LANGFLOW_SSRF_ALLOWED_HOSTS") or "").strip()
     if allowed:
         for candidate in (p.strip() for p in allowed.split(",") if p.strip()):
+            if _is_loopback_allowed_host(candidate):
+                continue
             if "ollama" not in candidate.lower() and "<" not in candidate:
                 if "://" in candidate:
                     return candidate.rstrip("/")
@@ -104,6 +120,8 @@ def _resolve_ollama_origin() -> str:
     allowed = (os.environ.get("LANGFLOW_SSRF_ALLOWED_HOSTS") or "").strip()
     if allowed:
         for candidate in (p.strip() for p in allowed.split(",") if p.strip()):
+            if _is_loopback_allowed_host(candidate):
+                continue
             if "ollama" in candidate.lower() and "<" not in candidate:
                 base = (
                     candidate.rstrip("/")
@@ -331,6 +349,8 @@ def refresh(config, protocol):
 
 class ProtectedAnthropic(ChatAnthropic):
     _transports: dict = PrivateAttr()
+    # Langflow session of the component that built this model (graph.session_id); scopes the replay store.
+    _sflf_session_id: str | None = PrivateAttr(default=None)
 
     @cached_property
     def _client(self):
@@ -339,6 +359,88 @@ class ProtectedAnthropic(ChatAnthropic):
     @cached_property
     def _async_client(self):
         return anthropic.AsyncAnthropic(**self._client_params, http_client=self._transports['http_async_client'])
+
+    # BUG-PROXY-A4-01: replay signed thinking + tool_use/tool_result of earlier turns of the same conversation.
+    def _sflf_scope(self):
+        from lfx_snowflake.providers import messages_replay as _replay
+
+        return _replay._scope(getattr(self, '_sflf_session_id', None))
+
+    def _sflf_prepare(self, messages, kwargs, scope):
+        from lfx_snowflake.providers import messages_replay as _replay
+
+        if not scope:
+            return list(messages)
+        thinking = getattr(self, 'thinking', None)
+        thinking_on = isinstance(thinking, dict) and thinking.get('type') == 'enabled'
+        return _replay.rehydrate(
+            messages, thinking_enabled=thinking_on, tools_bound=bool(kwargs.get('tools')), scope=scope
+        )
+
+    @staticmethod
+    def _sflf_record(messages, result, scope):
+        from lfx_snowflake.providers import messages_replay as _replay
+
+        if not scope:
+            return
+        try:
+            gens = getattr(result, 'generations', None) or []
+            if gens:
+                _replay.record_turn(messages, getattr(gens[0], 'message', None), scope=scope)
+        except Exception:  # noqa: BLE001 - replay is best effort, never breaks the turn
+            pass
+
+    def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+        scope = self._sflf_scope()
+        prepared = self._sflf_prepare(messages, kwargs, scope)
+        result = super()._generate(prepared, stop=stop, run_manager=run_manager, **kwargs)
+        self._sflf_record(prepared, result, scope)
+        return result
+
+    async def _agenerate(self, messages, stop=None, run_manager=None, **kwargs):
+        scope = self._sflf_scope()
+        prepared = self._sflf_prepare(messages, kwargs, scope)
+        result = await super()._agenerate(prepared, stop=stop, run_manager=run_manager, **kwargs)
+        self._sflf_record(prepared, result, scope)
+        return result
+
+    def _stream(self, messages, stop=None, run_manager=None, **kwargs):
+        from lfx_snowflake.providers import messages_replay as _replay
+
+        scope = self._sflf_scope()
+        prepared = self._sflf_prepare(messages, kwargs, scope)
+        merged = None
+        for chunk in super()._stream(prepared, stop=stop, run_manager=run_manager, **kwargs):
+            msg = getattr(chunk, 'message', None)
+            try:
+                merged = msg if merged is None else merged + msg
+            except Exception:  # noqa: BLE001
+                merged = None
+            yield chunk
+        try:
+            if scope:
+                _replay.record_turn(prepared, merged, scope=scope)
+        except Exception:  # noqa: BLE001
+            pass
+
+    async def _astream(self, messages, stop=None, run_manager=None, **kwargs):
+        from lfx_snowflake.providers import messages_replay as _replay
+
+        scope = self._sflf_scope()
+        prepared = self._sflf_prepare(messages, kwargs, scope)
+        merged = None
+        async for chunk in super()._astream(prepared, stop=stop, run_manager=run_manager, **kwargs):
+            msg = getattr(chunk, 'message', None)
+            try:
+                merged = msg if merged is None else merged + msg
+            except Exception:  # noqa: BLE001
+                merged = None
+            yield chunk
+        try:
+            if scope:
+                _replay.record_turn(prepared, merged, scope=scope)
+        except Exception:  # noqa: BLE001
+            pass
 
 
 def resolve_reasoning_options(
@@ -447,6 +549,12 @@ def build(
                 anth_kwargs['temperature'] = float(temperature)
             model = ProtectedAnthropic(**anth_kwargs)
             model._transports = clients
+            try:
+                from lfx_snowflake.providers.language_models import _bind_component_session  # noqa: PLC0415
+
+                _bind_component_session(model)
+            except Exception:  # noqa: BLE001
+                pass
         else:
             options = {}
             if protocol == 'responses':

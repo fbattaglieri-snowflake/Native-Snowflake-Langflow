@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from lfx_snowflake import sql_safety as _sql_safety
+
 import json
 from typing import Any
 
@@ -11,6 +13,13 @@ from lfx.schema import Data, DataFrame
 from lfx_snowflake._lfx_compat import Tool
 from lfx_snowflake.components.data_sources import filter_business_data_source_objects
 from lfx_snowflake.fastapi_live_bridge import LIVE_BRIDGE
+from lfx_snowflake.flow_context_guard import flow_component_sql as _flow_component_sql
+
+
+def _flow_component_execute_sql(*args, **kwargs):
+    """BUG-CTX-03: this component's SQL is checked against the flow's `[ ❄️ Context ]`."""
+    with _flow_component_sql():
+        return LIVE_BRIDGE.execute_sql(*args, **kwargs)
 
 
 def _resolve_flow_id(component: Any = None, build_config: dict[str, Any] | None = None) -> str | None:
@@ -201,16 +210,26 @@ class SnowflakeIcebergTablesComponent(Component):
             build_config["memory_catalog_ref"]["options"] = _memory_catalog_options()
         return build_config
 
+    def _build_request(self) -> tuple[str, dict | None]:
+        """Read query with a structured, bound filter; free SQL is never executed (BUG-UI-SQLI-01)."""
+        sql, bindings, _ = _sql_safety.build_filtered_select(
+            (getattr(self, "table_name", "") or "ICEBERG_EVENTS_TBL"),
+            database=(getattr(self, "database", "") or "SNOWFLAKE_LANGFLOW"),
+            schema=(getattr(self, "schema_name", "") or "CORE"),
+            filter_input=(getattr(self, "query_filter_input", "") or ""),
+            max_rows=getattr(self, "max_rows", 100) or 100,
+        )
+        return sql, bindings
+
     def _build_query(self) -> str:
-        db = (getattr(self, "database", "") or "SNOWFLAKE_LANGFLOW").strip()
-        sch = (getattr(self, "schema_name", "") or "CORE").strip()
-        tbl = (getattr(self, "table_name", "") or "ICEBERG_EVENTS_TBL").strip()
-        fqn = tbl if "." in tbl else f"{db}.{sch}.{tbl}"
-        custom = (getattr(self, "query_filter_input", "") or "").strip()
-        if custom.upper().startswith(("SELECT ", "SHOW ", "INSERT ")):
-            return custom
-        where = f" WHERE {custom}" if custom else ""
-        return f"SELECT * FROM {fqn}{where} LIMIT {max(1, int(getattr(self, 'max_rows', 100) or 100))}"
+        return self._build_request()[0]
+
+    def _qualified_name(self) -> str:
+        return _sql_safety.build_filtered_select(
+            (getattr(self, "table_name", "") or "ICEBERG_EVENTS_TBL"),
+            database=(getattr(self, "database", "") or "SNOWFLAKE_LANGFLOW"),
+            schema=(getattr(self, "schema_name", "") or "CORE"),
+        )[2]
 
     def run_iceberg_operation(self) -> Data:
         db = (getattr(self, "database", "") or "SNOWFLAKE_LANGFLOW").strip()
@@ -224,9 +243,11 @@ class SnowflakeIcebergTablesComponent(Component):
             if denied:
                 raise ValueError(denied["message"])
             payload = getattr(self, "rows_to_write", None) or {"content": getattr(self, "query_filter_input", "")}
-            payload_json = json.dumps(payload, default=str).replace("'", "''")
-            sql_stmt = f"INSERT INTO {fqn} SELECT '{payload_json}'"
-            res = LIVE_BRIDGE.execute_sql(sql_stmt)
+            fqn = self._qualified_name()
+            sql_stmt = f"INSERT INTO {fqn} SELECT ?"
+            res = _flow_component_execute_sql(
+                sql_stmt, bindings=_sql_safety.to_sql_bindings([("TEXT", json.dumps(payload, default=str))])
+            )
             return Data(
                 data={
                     "operation_mode": mode,
@@ -240,8 +261,8 @@ class SnowflakeIcebergTablesComponent(Component):
                 }
             )
 
-        stmt = self._build_query()
-        res = LIVE_BRIDGE.execute_sql(stmt)
+        stmt, stmt_bindings = self._build_request()
+        res = _flow_component_execute_sql(stmt, bindings=stmt_bindings)
         return Data(
             data={
                 "operation_mode": mode,
@@ -262,7 +283,8 @@ class SnowflakeIcebergTablesComponent(Component):
         )
 
     def read_dataframe(self) -> DataFrame:
-        res = LIVE_BRIDGE.execute_sql(self._build_query())
+        stmt, stmt_bindings = self._build_request()
+        res = _flow_component_execute_sql(stmt, bindings=stmt_bindings)
         return DataFrame(res.get("rows", []))
 
     def to_toolkit(self) -> list[Tool]:

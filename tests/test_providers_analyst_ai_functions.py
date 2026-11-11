@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from _test_fake_embed import fake_registry_executor
+
 import pathlib
 import sys
 
@@ -283,7 +285,10 @@ def test_ollama_and_embedding_space_guard() -> None:
         ollama.build_chat_payload("nomic-embed-text:latest", [{"role": "user", "content": "hi"}])
     assert exc_info.value.code == ERROR_UNSUPPORTED_CAPABILITY
 
-    embedder = SnowflakeEmbeddingModelAdapter(registry)
+    with pytest.raises(SnowflakeProviderError) as no_exec:
+        SnowflakeEmbeddingModelAdapter(registry).embed_documents("snowflake-arctic-embed-l-v2.0", ["x"])
+    assert "synthetic" in no_exec.value.message
+    embedder = SnowflakeEmbeddingModelAdapter(registry, embed_executor=fake_registry_executor)
     models = embedder.list_embedding_models()
     model_ids = {m.model_id for m in models}
     assert "snowflake-arctic-embed-l-v2.0" in model_ids

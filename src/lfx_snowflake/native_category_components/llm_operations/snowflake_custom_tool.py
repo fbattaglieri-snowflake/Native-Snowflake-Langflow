@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+from lfx_snowflake import sql_safety as _sql_safety
+
 import json
+import re
 from typing import Any
 
 import lfx_snowflake._lfx_compat  # noqa: F401
@@ -18,16 +21,48 @@ from lfx_snowflake.components.llm_operations import (
 from lfx_snowflake.context_helpers import _resolve_flow_id
 from lfx_snowflake.fastapi_live_bridge import LIVE_BRIDGE
 from lfx_snowflake.providers.language_models import (
-    CortexAgentToolSchema,
     build_structured_tool,
 )
+from lfx_snowflake.flow_context_guard import flow_component_sql as _flow_component_sql
 
 
-DEFAULT_CUSTOM_TOOL_IDENTIFIER = "SNOWFLAKE_LANGFLOW.CORE.SEND_EMAIL_ALL(VARCHAR, VARCHAR, VARCHAR)"
-DEFAULT_PARAMETERS_JSON = json.dumps(
-    SnowflakeCustomToolEngine.parse_signature_parameters(DEFAULT_CUSTOM_TOOL_IDENTIFIER),
-    indent=2,
-)
+def _flow_component_execute_sql(*args, **kwargs):
+    """BUG-CTX-03: this component's SQL is checked against the flow's `[ ❄️ Context ]`."""
+    with _flow_component_sql():
+        return LIVE_BRIDGE.execute_sql(*args, **kwargs)
+
+
+# BUG-LLMOP-005: no hard-coded routine; the identifier comes from the selected object.
+DEFAULT_CUSTOM_TOOL_IDENTIFIER = ""
+DEFAULT_PARAMETERS_JSON = "[]"
+
+_JSON_TO_PY: dict[str, Any] = {
+    "string": str,
+    "integer": int,
+    "number": float,
+    "boolean": bool,
+    "array": list,
+    "object": dict,
+}
+
+
+def build_args_schema(tool_name: str, parameters: list[dict[str, Any]]) -> Any:
+    """BUG-LLMOP-013: pydantic model of the routine's real parameters for StructuredTool."""
+    from pydantic import Field, create_model
+
+    fields: dict[str, Any] = {}
+    for p in parameters:
+        name = str(p.get("name") or "").strip()  # Snowflake's parameter name, case preserved
+        if not name.isidentifier() or name.startswith("_") or name.lower() in {f.lower() for f in fields}:
+            raise ValueError(f"Parameter name '{name}' cannot be exposed as a tool argument.")
+        py_t = _JSON_TO_PY.get(str(p.get("type") or "string").lower(), str)
+        desc = str(p.get("description") or p.get("sql_type") or "")
+        if p.get("required", True):
+            fields[name] = (py_t, Field(..., description=desc))
+        else:
+            fields[name] = (py_t | None, Field(None, description=desc))
+    model_name = re.sub(r"\W", "_", tool_name or "custom_tool") + "_args"
+    return create_model(model_name, **fields)
 
 
 def _custom_tool_db_schemas(flow_id: str | None = None) -> list[str]:
@@ -109,21 +144,6 @@ def _custom_tool_identifiers(
             if fqn not in identifiers:
                 identifiers.append(fqn)
 
-    prefix = target_pairs[0][0] + "." + target_pairs[0][1] if target_pairs else "SNOWFLAKE_LANGFLOW.CORE"
-    if not identifiers:
-        if res_type == "procedure":
-            identifiers = [
-                f"{prefix}.SEND_EMAIL_ALL(VARCHAR, VARCHAR, VARCHAR)",
-                f"{prefix}.ORCHESTRATE_WORKFLOW_STEP(VARCHAR)",
-            ]
-        elif res_type == "table_function":
-            identifiers = [
-                f"{prefix}.LOOKUP_CUSTOMERS_UDTF(VARCHAR, NUMBER)",
-            ]
-        else:
-            identifiers = [
-                f"{prefix}.CALCULATE_DISCOUNT(FLOAT, VARCHAR)",
-            ]
     return identifiers
 
 
@@ -294,7 +314,7 @@ class SnowflakeCustomToolComponent(Component):
             cur_id = build_config["custom_tool_identifier"].get("value")
             if field_name == "custom_tool_identifier" and isinstance(field_value, str):
                 build_config["custom_tool_identifier"]["value"] = field_value
-            elif field_name in ("resource_type", "database_schema") or (cur_id not in id_options and id_options):
+            elif id_options and (field_name in ("resource_type", "database_schema") or cur_id not in id_options):
                 build_config["custom_tool_identifier"]["value"] = id_options[0]
 
         selected_id = (
@@ -351,6 +371,11 @@ class SnowflakeCustomToolComponent(Component):
 
     def _parsed_parameters(self) -> list[dict[str, Any]]:
         raw = getattr(self, "parameters_json", None)
+        # BUG-LLMOP-005: the default "[]" (or blank) means "not configured" -> DESCRIBE the selected routine.
+        if isinstance(raw, str) and raw.strip() in ("", "[]"):
+            raw = None
+        if isinstance(raw, list) and not raw:
+            raw = None
         if isinstance(raw, list):
             return SnowflakeCustomToolEngine.sort_parameters(
                 raw, sort_by=getattr(self, "parameters_sort_by", "Latest added")
@@ -361,7 +386,9 @@ class SnowflakeCustomToolComponent(Component):
                 return SnowflakeCustomToolEngine.sort_parameters(
                     loaded, sort_by=getattr(self, "parameters_sort_by", "Latest added")
                 )
-        ident = getattr(self, "custom_tool_identifier", DEFAULT_CUSTOM_TOOL_IDENTIFIER) or DEFAULT_CUSTOM_TOOL_IDENTIFIER
+        ident = (getattr(self, "custom_tool_identifier", "") or "").strip()
+        if not ident:
+            return []
         res_t = getattr(self, "resource_type", "procedure") or "procedure"
         db_sch = getattr(self, "database_schema", "Database All") or "Database All"
         params = _describe_custom_tool_params(res_t, ident, database_schema=db_sch, flow_id=_resolve_flow_id(self))
@@ -413,13 +440,16 @@ class SnowflakeCustomToolComponent(Component):
         )
 
     def build_invocation_sql(self, arguments_override: Any = None) -> str:
+        return self.build_invocation_request(arguments_override=arguments_override)[0]
+
+    def build_invocation_request(self, arguments_override: Any = None) -> tuple[str, dict[str, Any] | None]:
         db_sch = (getattr(self, "database_schema", "Database All") or "Database All").strip()
         default_pair = db_sch if db_sch != "Database All" and "." in db_sch else "SNOWFLAKE_LANGFLOW.CORE"
         ident = (
             getattr(self, "custom_tool_identifier", DEFAULT_CUSTOM_TOOL_IDENTIFIER) or DEFAULT_CUSTOM_TOOL_IDENTIFIER
         ).strip()
         args = arguments_override if arguments_override is not None else getattr(self, "invocation_arguments", None)
-        return SnowflakeCustomToolEngine.build_invocation_sql(
+        return SnowflakeCustomToolEngine.build_invocation_request(
             resource_type=getattr(self, "resource_type", "procedure") or "procedure",
             custom_tool_identifier=ident,
             arguments=args,
@@ -429,27 +459,28 @@ class SnowflakeCustomToolComponent(Component):
 
     def _execute_tool(self, arguments_override: Any = None) -> dict[str, Any]:
         payload = self.build_tool_payload()
-        sql_stmt = self.build_invocation_sql(arguments_override=arguments_override)
+        sql_stmt, sql_bindings = self.build_invocation_request(arguments_override=arguments_override)
         t_name = payload["tool_spec"]["name"]
         res_cfg = payload["tool_resources"][t_name]
         exec_env = res_cfg["execution_environment"]
         timeout_s = exec_env["query_timeout"]
         wh = exec_env.get("warehouse")
-
-        session_statements: list[str] = [f"ALTER SESSION SET STATEMENT_TIMEOUT_IN_SECONDS = {timeout_s};"]
         if wh:
-            session_statements.insert(0, f"USE WAREHOUSE {wh};")
-            LIVE_BRIDGE.execute_sql(f"USE WAREHOUSE {wh};")
-        LIVE_BRIDGE.execute_sql(f"ALTER SESSION SET STATEMENT_TIMEOUT_IN_SECONDS = {timeout_s};")
-        exec_res = LIVE_BRIDGE.execute_sql(sql_stmt)
+            wh = _sql_safety.validate_identifier(wh, "warehouse")
+        timeout_s = _sql_safety.bounded_int(timeout_s, 60, 1, 600)
+
+        # BUG-LLMOP-007: every SQL API request is its own session, so warehouse and timeout travel in the
+        # /api/v2/statements body (the bridge polls the statement handle when timeout > 60s).
+        exec_res = _flow_component_execute_sql(sql_stmt, bindings=sql_bindings, timeout=timeout_s, warehouse=wh or None)
 
         return {
             "tool_name": t_name,
             "resource_type": res_cfg["type"],
             "identifier": res_cfg["identifier"],
             "execution_environment": exec_env,
-            "session_setup_sql": session_statements,
+            "request_overrides": {"warehouse": wh or None, "timeout": timeout_s},
             "invocation_sql": sql_stmt,
+            "invocation_bindings": sql_bindings,
             "tool_spec": payload["tool_spec"],
             "tool_resources": payload["tool_resources"],
             "active_role": LIVE_BRIDGE.active_role,
@@ -479,8 +510,10 @@ class SnowflakeCustomToolComponent(Component):
             build_structured_tool(
                 name=t_name,
                 description=t_desc,
-                func=lambda **kwargs: self._execute_tool(arguments_override=kwargs),
-                args_schema=CortexAgentToolSchema,
+                func=lambda **kwargs: self._execute_tool(
+                    arguments_override={k: v for k, v in kwargs.items() if v is not None}
+                ),
+                args_schema=build_args_schema(t_name, self._parsed_parameters()),
                 metadata=payload,
             )
         ]

@@ -190,7 +190,9 @@ def test_14a_run_id_only_for_flow_run_routes():
 def test_14a_middleware_binds_and_resets_trace_scope():
     src = (ROOT / "src" / "lfx_snowflake" / "fastapi_live_bridge.py").read_text()
     mw = src.split("async def snowflake_flow_context_and_trace_middleware", 1)[1].split("@sf_router", 1)[0]
-    assert "_trace.trace_scope(request_id=request_id, run_id=run_id)" in mw
+    compact = "".join(mw.split())
+    assert "_trace.trace_scope(request_id=request_id,run_id=run_id," in compact  # + trace_id/session_id (PASSO 8)
+    assert "_telemetry.CURRENT_RUN_RECORD.reset(run_token)" in mw
     assert "request_id_from_header" in mw and "run_id_for_request" in mw
     assert tr.CURRENT_REQUEST_ID.get() is None and tr.CURRENT_RUN_ID.get() is None
 
@@ -246,7 +248,7 @@ def test_14b_recall_not_found_is_not_audited_as_success(bridge, monkeypatch):
 
 
 def test_14b_patch_memory_emits_update_after_real_persistence(bridge, monkeypatch):
-    entry = {"name": "M1", "table_fqn": "DB.SCH.M1", "memory_id": "mb-1"}
+    entry = {"name": "M1", "table_fqn": "DB.SCH.M1", "memory_id": "mb-1", "langflow_user_id": "u-1"}
     monkeypatch.setattr(bridge, "_find_memory_entry", lambda mid: entry)
     monkeypatch.setattr(bridge, "_to_langflow_memory_base_read", lambda e: {"name": e["name"]})
 
@@ -267,7 +269,7 @@ def test_14b_stage_file_read_audited_with_real_outcome():
            / "snowflake_canonical_fk.py").read_text()
     body = src.split("def _read_impl", 1)[1].split("def read_stage_file_data", 1)[0]
     i_emit, i_raise = body.index("AuditAction.STAGE_FILE_READ"), body.index("raise ValueError")
-    assert body.index("LIVE_BRIDGE.execute_sql") < i_emit < i_raise
+    assert body.index("_flow_component_execute_sql") < i_emit < i_raise  # BUG-CTX-03 scoped wrapper
     assert '"text"' not in body[i_emit:i_raise]
 
 

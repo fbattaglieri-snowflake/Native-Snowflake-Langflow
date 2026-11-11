@@ -18,19 +18,13 @@ from lfx.io import (
 from lfx.schema import Data
 from lfx.schema.message import Message
 
-from lfx_snowflake.components.message_history import (
-    InMemoryMessageHistoryBackend,
-    MessageHistoryBackendType,
-    MessageHistoryStorageConfig,
-    SnowflakeMessageHistoryComponent,
-)
-from lfx_snowflake.fastapi_live_bridge import LIVE_BRIDGE, resolve_canonical_memory_type
+from lfx_snowflake.components.governed_message_history import GovernedMessageHistory
+from lfx_snowflake.fastapi_live_bridge import CURRENT_SNOWFLAKE_FLOW_ID, LIVE_BRIDGE, resolve_canonical_memory_type
 from lfx_snowflake.native_category_components.files_and_knowledge.snowflake_memory_base import (
     SnowflakeChatMessageHistoryAdapter,
     SnowflakeMemoryBaseNativeComponent,
 )
 
-_SHARED_HISTORY_BACKENDS: dict[str, InMemoryMessageHistoryBackend] = {}
 
 
 def _buffer_window_memory_options(flow_id: str | None = None) -> list[str]:
@@ -150,7 +144,8 @@ class SnowflakeMessageHistoryNativeComponent(Component):
         StrInput(
             name="session_id",
             display_name="Session ID",
-            value="fin-reconcile-session-001",
+            value="",
+            info="Empty = the running flow's session (graph.session_id), as in Langflow's native Message History.",
             show=True,
         ),
         IntInput(
@@ -168,13 +163,15 @@ class SnowflakeMessageHistoryNativeComponent(Component):
         StrInput(
             name="user_id",
             display_name="User ID",
-            value="fin_analyst_01",
+            value="",
+            info="Display only: LANGFLOW_MESSAGES.owner_user is always CURRENT_USER() (LANGFLOW_MEMORY_RAP).",
             advanced=True,
         ),
         StrInput(
             name="project_id",
             display_name="Project / Flow ID",
-            value="snowflake_full_memory_enterprise_agent",
+            value="",
+            info="Empty = the running flow's flow_id.",
             advanced=True,
         ),
         StrInput(
@@ -437,42 +434,20 @@ class SnowflakeMessageHistoryNativeComponent(Component):
         memories = self._resolve_external_memories()
         return memories[0] if memories else None
 
-    def _build_domain_component(self, *, storage_family_override: str | None = None) -> SnowflakeMessageHistoryComponent:
-        family = str(
-            storage_family_override or getattr(self, "storage_family", "snowflake_postgres") or "snowflake_postgres"
-        ).strip().lower()
-        is_pg = family == "snowflake_postgres"
-        role = LIVE_BRIDGE.active_role
-        pg_role = f"pg_{role.lower()}"
-        backend = _SHARED_HISTORY_BACKENDS.get(role)
-        if backend is None:
-            backend = InMemoryMessageHistoryBackend(
-                active_role=role,
-                snowflake_privileges={role: {("SELECT", "*"), ("INSERT", "*"), ("USAGE", "*")}},
-                postgres_privileges={pg_role: {("SELECT", "*"), ("INSERT", "*")}},
-            )
-            _SHARED_HISTORY_BACKENDS[role] = backend
-        else:
-            backend.active_role = role
-            backend.snowflake_privileges.setdefault(role, {("SELECT", "*"), ("INSERT", "*"), ("USAGE", "*")})
-            backend.postgres_privileges.setdefault(pg_role, {("SELECT", "*"), ("INSERT", "*")})
-        db = str(getattr(self, "database", "SNOWFLAKE_LANGFLOW") or "SNOWFLAKE_LANGFLOW").strip().upper()
-        sch = str(getattr(self, "schema_name", "CORE") or "CORE").strip().upper()
-        tbl = str(getattr(self, "table_name", "CHAT_WINDOW_HISTORY") or "CHAT_WINDOW_HISTORY").strip().upper()
-        pg_inst = str(getattr(self, "postgres_instance", "LANGFLOW_PG_INSTANCE") or "LANGFLOW_PG_INSTANCE").strip()
-        config = MessageHistoryStorageConfig(
-            backend_type=(
-                MessageHistoryBackendType.SNOWFLAKE_POSTGRES
-                if is_pg
-                else MessageHistoryBackendType.SNOWFLAKE_STANDARD_TABLE
-            ),
-            database=db,
-            schema=sch,
-            table_name=tbl,
-            postgres_instance=pg_inst if is_pg else None,
-            postgres_role=pg_role if is_pg else None,
+    def _graph_attr(self, name: str) -> str:
+        graph = getattr(self, "graph", None)
+        try:
+            val = getattr(graph, name, None) if graph is not None else None
+        except Exception:  # noqa: BLE001
+            val = None
+        return str(val or "").strip()
+
+    def _resolve_flow_id(self, explicit_project_id: str) -> str:
+        return (
+            self._graph_attr("flow_id")
+            or str(CURRENT_SNOWFLAKE_FLOW_ID.get() or "").strip()
+            or explicit_project_id
         )
-        return SnowflakeMessageHistoryComponent(backend, config)
 
     def _extract_input_message(self) -> tuple[str, str | None, str | None, str | None]:
         raw = getattr(self, "message_text", None)
@@ -506,10 +481,10 @@ class SnowflakeMessageHistoryNativeComponent(Component):
 
         mem_ref = str(getattr(self, "memory_base", "None") or "None").split(" (")[0].strip()
         storage_family = str(getattr(self, "storage_family", "snowflake_postgres") or "snowflake_postgres")
-        sess_id = str(getattr(self, "session_id", "fin-reconcile-session-001") or "fin-reconcile-session-001").strip()
+        sess_id = str(getattr(self, "session_id", "") or "").strip()
         win_k = int(getattr(self, "window_k", 8) or 8)
-        user_id = str(getattr(self, "user_id", "fin_analyst_01") or "fin_analyst_01")
-        project_id = str(getattr(self, "project_id", "snowflake_full_memory_enterprise_agent"))
+        user_id = str(getattr(self, "user_id", "") or "").strip()
+        project_id = str(getattr(self, "project_id", "") or "").strip()
 
         if ext_mem is not None:
             if "memory_base" not in explicit and getattr(ext_mem, "memory_name", None):
@@ -528,6 +503,10 @@ class SnowflakeMessageHistoryNativeComponent(Component):
         msg_str, msg_sender, msg_sender_name, msg_sess_id = self._extract_input_message()
         if "session_id" not in explicit and msg_sess_id:
             sess_id = str(msg_sess_id)
+        if not sess_id:
+            sess_id = self._graph_attr("session_id")
+        flow_id = self._resolve_flow_id(project_id)
+        project_id = project_id or flow_id
         sender = str(
             getattr(self, "sender", None)
             if "sender" in explicit
@@ -541,26 +520,12 @@ class SnowflakeMessageHistoryNativeComponent(Component):
         turn_id = str(getattr(self, "turn_id", "") or "").strip()
 
         mode = str(mode_override or getattr(self, "mode", "Retrieve") or "Retrieve").strip()
-        comp = self._build_domain_component(storage_family_override=storage_family)
+        history = GovernedMessageHistory(LIVE_BRIDGE, flow_id=flow_id, session_id=sess_id)
 
         stored_in_memories: list[str] = []
         if mode == "Store" and msg_str:
-            existing_rows = comp.retrieve_messages(
-                user_id=user_id,
-                project_id=project_id,
-                session_id=sess_id,
-                limit=max(win_k, 100),
-            ).get("Messages", [])
-            eff_msg_id = turn_id or f"msg-{sess_id}-{len(existing_rows) + 1}"
-            stored = comp.store_message(
-                message_id=eff_msg_id,
-                user_id=user_id,
-                project_id=project_id,
-                session_id=sess_id,
-                sender=sender,
-                sender_name=sender_name,
-                visible_text=msg_str,
-            )
+            receipt = history.store(msg_str, sender=sender, sender_name=sender_name, message_id=turn_id or None)
+            eff_msg_id = receipt["message_id"]
             for m_adapter in ext_memories:
                 if hasattr(m_adapter, "add_message"):
                     m_adapter.add_message(
@@ -577,13 +542,8 @@ class SnowflakeMessageHistoryNativeComponent(Component):
                         stored_in_memories.append(m_nm)
             if not stored_in_memories or ("memory_base" in explicit and mem_ref not in stored_in_memories):
                 stored_in_memories.append(mem_ref)
-        else:
-            stored = comp.retrieve_messages(
-                user_id=user_id,
-                project_id=project_id,
-                session_id=sess_id,
-                limit=win_k,
-            )
+        # Store and Retrieve both return the last window_k messages of (flow_id, session_id).
+        stored = {"Messages": history.retrieve(win_k)}
 
         ext_messages: list[dict[str, Any]] = []
         if ext_memories:
@@ -654,15 +614,8 @@ class SnowflakeMessageHistoryNativeComponent(Component):
                     deduped_by_pair[pair_key] = row
                 ext_messages.append(row)
 
-        recalled = LIVE_BRIDGE.recall_memory(
-            mem_ref,
-            session_id=sess_id,
-            user_id=user_id,
-            limit=win_k,
-        )
-        domain_msgs = list(stored.get("Messages") or stored.get("messages") or [])
-        recalled_rows = list(recalled.get("rows") or [])
-        resolved_messages = ext_messages or domain_msgs or recalled_rows
+        domain_msgs = list(stored.get("Messages") or [])
+        resolved_messages = ext_messages or domain_msgs
 
         return {
             "memory_base": mem_ref,
@@ -674,6 +627,8 @@ class SnowflakeMessageHistoryNativeComponent(Component):
             "postgres_instance": getattr(self, "postgres_instance", "LANGFLOW_PG_INSTANCE"),
             "pg_table": getattr(self, "pg_table", "public.chat_message_history"),
             "session_id": sess_id,
+            "flow_id": flow_id,
+            "messages_table": history.table_fqn,
             "window_k": win_k,
             "filter_by_session": True,
             "enable_embedding": False,
@@ -684,8 +639,8 @@ class SnowflakeMessageHistoryNativeComponent(Component):
             "stored_in_memories": stored_in_memories,
             "stored_text": msg_str if mode == "Store" else "",
             "messages": resolved_messages,
-            "recall_sql": recalled.get("recall_sql"),
-            "replay_state": stored.get("signed_replay_envelopes") or stored.get("replay_state", []),
+            "history_sql": list(history.last_sql),
+            "replay_state": [],
             "active_role": LIVE_BRIDGE.active_role,
         }
 

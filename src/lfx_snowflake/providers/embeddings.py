@@ -52,134 +52,52 @@ class EmbeddingModelSpec:
         }
 
 
+from lfx_snowflake.sql_safety import AI_EMBED_TEXT_MODEL_DIMENSIONS as _AI_EMBED_TEXT_DIMS
+
+_AI_EMBED_MODEL_INFO: dict[str, tuple[int, str]] = {
+    "snowflake-arctic-embed-m-v1.5": (512, "English"),
+    "snowflake-arctic-embed-m": (512, "English"),
+    "e5-base-v2": (512, "English"),
+    "snowflake-arctic-embed-l-v2.0": (512, "Multilingual"),
+    "snowflake-arctic-embed-l-v2.0-8k": (8192, "Multilingual"),
+    "multilingual-e5-large": (512, "Multilingual"),
+    "voyage-multilingual-2": (32000, "Multilingual"),
+    "nv-embed-qa-4": (512, "English"),
+}
+
+# Derived from sql_safety.AI_EMBED_TEXT_MODEL_DIMENSIONS (single source of truth, BUG-MEM-EMB-01/02).
 DEFAULT_CORTEX_EMBEDDING_MODELS: list[EmbeddingModelSpec] = [
-    EmbeddingModelSpec.create("snowflake-arctic-embed-l-v2.0", 1024, "cortex_embed"),
-    EmbeddingModelSpec.create("snowflake-arctic-embed-l-v2.0-8k", 1024, "cortex_embed"),
-    EmbeddingModelSpec.create("multilingual-e5-large", 1024, "cortex_embed"),
-    EmbeddingModelSpec.create("voyage-multilingual-2", 1024, "cortex_embed"),
-    EmbeddingModelSpec.create("nv-embed-qa-4", 1024, "cortex_embed"),
-    EmbeddingModelSpec.create("voyage-multimodal-3", 1024, "cortex_embed"),
-    EmbeddingModelSpec.create("snowflake-arctic-embed-m-v1.5", 768, "cortex_embed"),
-    EmbeddingModelSpec.create("snowflake-arctic-embed-m", 768, "cortex_embed"),
-    EmbeddingModelSpec.create("e5-base-v2", 768, "cortex_embed"),
+    EmbeddingModelSpec.create(model_id, dim, "cortex_embed") for model_id, dim in _AI_EMBED_TEXT_DIMS.items()
 ]
+
+
+def _official_entry(model_id: str, dim: int) -> dict[str, Any]:
+    max_tokens, language = _AI_EMBED_MODEL_INFO.get(model_id, (512, "English"))
+    return {
+        "id": model_id,
+        "model_id": model_id,
+        "model_name": model_id,
+        "name": model_id,
+        "provider": "Snowflake Cortex",
+        "model_type": "embeddings",
+        "dimension": dim,
+        "dimensions": dim,
+        "max_tokens": max_tokens,
+        "language": language,
+        "sql_function": f"SNOWFLAKE.CORTEX.AI_EMBED('{model_id}', ?)",
+        "default": True,
+        "deprecated": False,
+        "unsupported": False,
+    }
+
 
 OFFICIAL_SNOWFLAKE_AI_EMBED_MODELS: list[dict[str, Any]] = [
-    {
-        "id": "snowflake-arctic-embed-m-v1.5",
-        "model_id": "snowflake-arctic-embed-m-v1.5",
-        "model_name": "snowflake-arctic-embed-m-v1.5",
-        "name": "snowflake-arctic-embed-m-v1.5",
-        "provider": "Snowflake Cortex",
-        "model_type": "embeddings",
-        "dimension": 768,
-        "dimensions": 768,
-        "max_tokens": 512,
-        "language": "English",
-        "sql_function": "SNOWFLAKE.CORTEX.AI_EMBED('snowflake-arctic-embed-m-v1.5', :text)",
-        "default": True,
-        "deprecated": False,
-        "unsupported": False,
-    },
-    {
-        "id": "snowflake-arctic-embed-m",
-        "model_id": "snowflake-arctic-embed-m",
-        "model_name": "snowflake-arctic-embed-m",
-        "name": "snowflake-arctic-embed-m",
-        "provider": "Snowflake Cortex",
-        "model_type": "embeddings",
-        "dimension": 768,
-        "dimensions": 768,
-        "max_tokens": 512,
-        "language": "English",
-        "sql_function": "SNOWFLAKE.CORTEX.AI_EMBED('snowflake-arctic-embed-m', :text)",
-        "default": True,
-        "deprecated": False,
-        "unsupported": False,
-    },
-    {
-        "id": "e5-base-v2",
-        "model_id": "e5-base-v2",
-        "model_name": "e5-base-v2",
-        "name": "e5-base-v2",
-        "provider": "Snowflake Cortex",
-        "model_type": "embeddings",
-        "dimension": 768,
-        "dimensions": 768,
-        "max_tokens": 512,
-        "language": "English",
-        "sql_function": "SNOWFLAKE.CORTEX.AI_EMBED('e5-base-v2', :text)",
-        "default": True,
-        "deprecated": False,
-        "unsupported": False,
-    },
-    {
-        "id": "snowflake-arctic-embed-l-v2.0",
-        "model_id": "snowflake-arctic-embed-l-v2.0",
-        "model_name": "snowflake-arctic-embed-l-v2.0",
-        "name": "snowflake-arctic-embed-l-v2.0",
-        "provider": "Snowflake Cortex",
-        "model_type": "embeddings",
-        "dimension": 1024,
-        "dimensions": 1024,
-        "max_tokens": 512,
-        "language": "Multilingual",
-        "sql_function": "SNOWFLAKE.CORTEX.AI_EMBED('snowflake-arctic-embed-l-v2.0', :text)",
-        "default": True,
-        "deprecated": False,
-        "unsupported": False,
-    },
-    {
-        "id": "voyage-multilingual-2",
-        "model_id": "voyage-multilingual-2",
-        "model_name": "voyage-multilingual-2",
-        "name": "voyage-multilingual-2",
-        "provider": "Snowflake Cortex",
-        "model_type": "embeddings",
-        "dimension": 1024,
-        "dimensions": 1024,
-        "max_tokens": 32000,
-        "language": "Multilingual",
-        "sql_function": "SNOWFLAKE.CORTEX.AI_EMBED('voyage-multilingual-2', :text)",
-        "default": True,
-        "deprecated": False,
-        "unsupported": False,
-    },
-    {
-        "id": "nv-embed-qa-4",
-        "model_id": "nv-embed-qa-4",
-        "model_name": "nv-embed-qa-4",
-        "name": "nv-embed-qa-4",
-        "provider": "Snowflake Cortex",
-        "model_type": "embeddings",
-        "dimension": 1024,
-        "dimensions": 1024,
-        "max_tokens": 512,
-        "language": "English",
-        "sql_function": "SNOWFLAKE.CORTEX.AI_EMBED('nv-embed-qa-4', :text)",
-        "default": True,
-        "deprecated": False,
-        "unsupported": False,
-    },
+    _official_entry(model_id, dim) for model_id, dim in _AI_EMBED_TEXT_DIMS.items()
 ]
 
-OFFICIAL_SNOWFLAKE_AI_EMBED_MODEL_IDS: list[str] = [
-    m["model_name"] for m in OFFICIAL_SNOWFLAKE_AI_EMBED_MODELS
-]
+OFFICIAL_SNOWFLAKE_AI_EMBED_MODEL_IDS: list[str] = [m["model_name"] for m in OFFICIAL_SNOWFLAKE_AI_EMBED_MODELS]
 
-OFFICIAL_AI_EMBED_MODEL_DIMENSIONS: dict[str, int] = {
-    "snowflake-arctic-embed-m-v1.5": 768,
-    "snowflake-arctic-embed-m": 768,
-    "e5-base-v2": 768,
-    "nomic-embed-text": 768,
-    "nomic-embed-text:latest": 768,
-    "snowflake-arctic-embed-l-v2.0": 1024,
-    "snowflake-arctic-embed-l-v2.0-8k": 1024,
-    "multilingual-e5-large": 1024,
-    "voyage-multilingual-2": 1024,
-    "nv-embed-qa-4": 1024,
-    "voyage-multimodal-3": 1024,
-}
+OFFICIAL_AI_EMBED_MODEL_DIMENSIONS: dict[str, int] = dict(_AI_EMBED_TEXT_DIMS)
 
 
 def resolve_embedding_dimension(model_id: str, default: int = 768) -> int:
@@ -335,12 +253,22 @@ class SnowflakeEmbeddingModelAdapter:
                     operation="embed_documents",
                 ) from exc
         else:
-            # Deterministic unit-length synthetic vector generation for offline contract verification
-            vectors = []
-            for text in texts:
-                digest = hashlib.sha256(f"{spec.space_fingerprint}:{text}".encode("utf-8")).digest()
-                vec = [((digest[i % len(digest)] / 255.0) * 2.0 - 1.0) for i in range(spec.dimension)]
-                vectors.append(vec)
+            # BUG-MEM-EMB-03: never fabricate vectors when no real embedding executor is wired.
+            raise SnowflakeProviderError(
+                ERROR_TECHNICAL_EXECUTION_ERROR,
+                f"No embedding executor configured for '{model_id}'; refusing to return synthetic vectors.",
+                active_role=self.registry.active_role,
+                operation="embed_documents",
+            )
+        if not isinstance(vectors, list) or len(vectors) != len(texts) or any(
+            not isinstance(v, (list, tuple)) or len(v) != spec.dimension for v in vectors
+        ):
+            raise SnowflakeProviderError(
+                ERROR_TECHNICAL_EXECUTION_ERROR,
+                f"Embedding executor returned malformed vectors for '{model_id}' (expected {len(texts)}x{spec.dimension}).",
+                active_role=self.registry.active_role,
+                operation="embed_documents",
+            )
 
         return {
             "vectors": vectors,
@@ -355,6 +283,10 @@ except Exception:  # noqa: BLE001
 
     class _LangChainEmbeddingsBase:  # type: ignore[no-redef]
         """Fallback LangChain Embeddings base class when langchain_core is unavailable."""
+
+
+class SnowflakeCortexEmbeddingError(RuntimeError):
+    """Raised when AI_EMBED cannot produce a real vector (no synthetic fallback, BUG-MEM-EMB-03)."""
 
 
 class SnowflakeCortexEmbeddings(_LangChainEmbeddingsBase):
@@ -403,17 +335,16 @@ class SnowflakeCortexEmbeddings(_LangChainEmbeddingsBase):
         cleaned = str(raw_model or "snowflake-arctic-embed-m-v1.5").strip().split(" ")[0]
         return cleaned or "snowflake-arctic-embed-m-v1.5"
 
+    def build_ai_embed_request(self, text: str) -> tuple[str, dict[str, Any]]:
+        """``AI_EMBED(<allowlisted model literal>, ?)`` with the text as a binding (BUG-MEM-RCL-01)."""
+        from lfx_snowflake import sql_safety as _sql_safety
+
+        model_lit = _sql_safety.sql_string_literal(_sql_safety.validate_embed_model(self.model))
+        sql = f"SELECT SNOWFLAKE.CORTEX.AI_EMBED({model_lit}, ?) AS EMBEDDING"
+        return sql, _sql_safety.to_sql_bindings([("TEXT", str(text or ""))])
+
     def build_ai_embed_sql(self, text: str) -> str:
-        safe_text = str(text or "").replace("'", "''")
-        return f"SELECT SNOWFLAKE.CORTEX.AI_EMBED('{self.model}', '{safe_text}') AS EMBEDDING"
-
-    def _deterministic_unit_vector(self, text: str) -> list[float]:
-        import math
-
-        digest = hashlib.sha256(f"snowflake_cortex:{self.model}:{self.dimension}:{text}".encode("utf-8")).digest()
-        raw = [((digest[i % len(digest)] / 255.0) * 2.0 - 1.0) for i in range(self.dimension)]
-        norm = math.sqrt(sum(v * v for v in raw)) or 1.0
-        return [round(v / norm, 8) for v in raw]
+        return self.build_ai_embed_request(text)[0]
 
     def _extract_vector_from_sql_result(self, res: dict[str, Any] | None) -> list[float] | None:
         if not isinstance(res, dict) or res.get("mode") == "offline":
@@ -444,19 +375,32 @@ class SnowflakeCortexEmbeddings(_LangChainEmbeddingsBase):
         return None
 
     def embed_query(self, text: str) -> list[float]:
-        sql = self.build_ai_embed_sql(text)
+        """Embed via AI_EMBED; raises ``SnowflakeCortexEmbeddingError`` instead of faking a vector (BUG-MEM-EMB-03)."""
+        try:
+            sql, sql_bindings = self.build_ai_embed_request(text)
+        except Exception as exc:  # invalid / non-allowlisted model
+            raise SnowflakeCortexEmbeddingError(f"Invalid AI_EMBED model '{self.model}': {exc}") from exc
         self.last_sql = sql
-        res: dict[str, Any] | None = None
         try:
             from lfx_snowflake.fastapi_live_bridge import LIVE_BRIDGE
 
-            res = LIVE_BRIDGE.execute_sql(sql)
-        except Exception:  # noqa: BLE001
-            res = None
+            res = LIVE_BRIDGE.execute_sql(sql, bindings=sql_bindings)
+        except Exception as exc:  # noqa: BLE001
+            raise SnowflakeCortexEmbeddingError(f"AI_EMBED execution failed for model '{self.model}': {exc}") from exc
+        if isinstance(res, dict) and res.get("mode") == "offline":
+            raise SnowflakeCortexEmbeddingError(
+                f"AI_EMBED unavailable (no live Snowflake session) for model '{self.model}'."
+            )
+        if isinstance(res, dict) and (res.get("error") or res.get("status") == "error"):
+            raise SnowflakeCortexEmbeddingError(
+                f"AI_EMBED failed for model '{self.model}': {res.get('error') or res.get('message')}"
+            )
         vec = self._extract_vector_from_sql_result(res)
-        if vec is not None:
-            return vec
-        return self._deterministic_unit_vector(text)
+        if vec is None:
+            raise SnowflakeCortexEmbeddingError(
+                f"AI_EMBED returned no valid {self.dimension}-dimensional vector for model '{self.model}'."
+            )
+        return vec
 
     def embed_documents(self, texts: list[str]) -> list[list[float]]:
         if not texts:

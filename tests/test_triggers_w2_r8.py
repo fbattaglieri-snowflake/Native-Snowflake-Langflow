@@ -55,6 +55,26 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 TRIGGERS_PKG_DIR = REPO_ROOT / "src" / "lfx_snowflake" / "native_category_components" / "triggers"
 
 
+def _register_trigger_role(monkeypatch: pytest.MonkeyPatch, flow_id: str, role: str = "SNOWFLAKE_LANGFLOW_DEV_ROLE") -> None:
+    """BUG-TRG-04: unattended runs need a trigger registered for the flow with its persisted role."""
+    from lfx_snowflake.triggers_manager import TRIGGERS_MANAGER, RegisteredTriggerRecord, validate_flow_id
+
+    fid = validate_flow_id(flow_id)
+    rec = RegisteredTriggerRecord(
+        trigger_id=f"t-{fid}", flow_id=fid, flow_short_id=fid[:12], node_id="n1",
+        trigger_component="SnowflakeScheduleTrigger", trigger_type="SCHEDULED_RUN", status_mode="Active",
+        database="SNOWFLAKE_LANGFLOW", schema="CORE", primary_object_fqn="SNOWFLAKE_LANGFLOW.CORE.LF_SCHED_X",
+        active_role=role,
+    )
+    monkeypatch.setitem(TRIGGERS_MANAGER._triggers_by_id, rec.trigger_id, rec)
+
+    async def _ok_runner(*, flow_id, trigger_payload, run_id):
+        return {"found": True, "run_id": run_id, "session_id": None, "output_text": None}
+
+    if TRIGGERS_MANAGER.native_flow_runner is None:
+        monkeypatch.setattr(TRIGGERS_MANAGER, "native_flow_runner", _ok_runner)
+
+
 def _make_bridge_and_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[LiveSnowflakeBridge, Any, list[str]]:
     import lfx_snowflake.fastapi_live_bridge as fb_mod
     import lfx_snowflake.triggers_manager as tm_mod
@@ -131,7 +151,7 @@ def _make_bridge_and_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> 
             return json.dumps(self._json_body).encode("utf-8")
 
     class _StubAPIRouter:
-        def __init__(self, prefix: str = "", tags: list[str] | None = None) -> None:
+        def __init__(self, prefix: str = "", tags: list[str] | None = None, **_kwargs: Any) -> None:
             self.prefix = prefix.rstrip("/")
             self.tags = tags or []
             self.routes: list[tuple[str, str, Any]] = []
@@ -163,6 +183,8 @@ def _make_bridge_and_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> 
     fastapi_mod = types.ModuleType("fastapi")
     fastapi_mod.APIRouter = _StubAPIRouter  # type: ignore[attr-defined]
     fastapi_mod.Request = _StubRequest  # type: ignore[attr-defined]
+    fastapi_mod.Depends = lambda dependency=None: dependency  # type: ignore[attr-defined]
+    fastapi_mod.HTTPException = type("HTTPException", (Exception,), {})  # type: ignore[attr-defined]
     resp_mod = types.ModuleType("fastapi.responses")
     resp_mod.JSONResponse = _StubJSONResponse  # type: ignore[attr-defined]
     sys.modules["fastapi"] = fastapi_mod
@@ -351,6 +373,21 @@ def test_trg_w2_r8_02_service_trigger_batch_idempotency_and_context_restoration(
     """Verify `POST /api/v1/snowflake/service-trigger` batch format, idempotency, failure non-caching, and `[ ❄️ Context ]` restoration."""
     bridge, client, _ = _make_bridge_and_client(tmp_path, monkeypatch)
     flow_id = "11111111-2222-3333-4444-555555555555"
+    from lfx_snowflake import flow_context_guard as _g
+    from lfx_snowflake.fastapi_live_bridge import CURRENT_SNOWFLAKE_FLOW_ID
+    from lfx_snowflake.triggers_manager import TRIGGERS_MANAGER
+
+    seen: list[dict] = []
+
+    async def _fake_runner(*, flow_id, trigger_payload, run_id):  # BUG-TRG-04: stands in for Langflow `simple_run_flow`
+        ctx = bridge.get_flow_context(CURRENT_SNOWFLAKE_FLOW_ID.get(), create=False)
+        seen.append({"fid": CURRENT_SNOWFLAKE_FLOW_ID.get(), "db": ctx.get("database"), "scoped": _g.FLOW_COMPONENT_SQL.get()})
+        if trigger_payload.get("fail_run"):
+            raise RuntimeError("component exploded")
+        return {"found": True, "run_id": run_id, "session_id": "s1", "output_text": "ok"}
+
+    monkeypatch.setattr(TRIGGERS_MANAGER, "native_flow_runner", _fake_runner)
+    _register_trigger_role(monkeypatch, flow_id)
     bridge.update_selected_context(
         {
             "database": "SALES_DB",
@@ -384,8 +421,9 @@ def test_trg_w2_r8_02_service_trigger_batch_idempotency_and_context_restoration(
     assert res1["status"] == "SUCCEEDED"
     assert res1["deduplicated"] is False
     assert res1["flow_id"] == flow_id
-    assert bridge.database == "SALES_DB"
-    assert bridge.schema == "ANALYTICS"
+    assert res1["output_text"] == "ok" and res1["error_code"] is None
+    # the flow ran in its own scope: flow id + context restored, component SQL marked only by wrappers
+    assert seen[-1] == {"fid": flow_id, "db": "SALES_DB", "scoped": False}
 
     # Re-sending identical `(flow_id, trigger_type, scheduled_time)` must deduplicate and return the same `run_id`
     resp2 = client.post("/api/v1/snowflake/service-trigger", json=batch_req)
@@ -403,7 +441,7 @@ def test_trg_w2_r8_02_service_trigger_batch_idempotency_and_context_restoration(
                 {
                     "trigger_type": "STREAM_TRIGGER_RUN",
                     "batch_id": "batch-retry-test",
-                    "simulate_failure": True,
+                    "fail_run": True,
                 },
             ]
         ]
@@ -413,6 +451,7 @@ def test_trg_w2_r8_02_service_trigger_batch_idempotency_and_context_restoration(
     _, res_fail = resp_fail.json()["data"][0]
     assert res_fail["status"] == "FAILED"
     assert res_fail["deduplicated"] is False
+    assert res_fail["error_code"] == "FLOW_RUN_FAILED" and "component exploded" in res_fail["error_message"]
 
     # Retry of the same batch_id without `simulate_failure` succeeds fresh
     retry_req = {
@@ -423,7 +462,6 @@ def test_trg_w2_r8_02_service_trigger_batch_idempotency_and_context_restoration(
                 {
                     "trigger_type": "STREAM_TRIGGER_RUN",
                     "batch_id": "batch-retry-test",
-                    "simulate_failure": False,
                 },
             ]
         ]
@@ -604,7 +642,7 @@ def test_trg_w2_r8_04_table_change_trigger_component(tmp_path: Path, monkeypatch
     assert "APPEND_ONLY = TRUE" in ddl
     assert "WHEN SYSTEM$STREAM_HAS_DATA('SNOWFLAKE_LANGFLOW.CORE.LF_STRM_STREAMFLOW00_CUSTOMER_ORDERS')" in ddl
     assert "CREATE OR REPLACE TEMPORARY TABLE SNOWFLAKE_LANGFLOW.CORE._LF_STREAM_BATCH_STREAMFLOW00 AS" in ddl
-    assert "RAISE STATEMENT_ERROR;" in ddl
+    assert "RAISE LF_FLOW_RUN_FAILED;" in ddl  # BUG-TRG-01: custom exception, not built-in STATEMENT_ERROR
 
     # Dynamic Table / View target detection
     dt_ddl = build_table_change_trigger_ddl(
@@ -813,6 +851,7 @@ def test_trg_w2_r8_06_three_tier_observability_all_5_event_types(
     """Verify all 5 trigger event types (`SCHEDULED_RUN`, `STREAM_TRIGGER_RUN`, `STAGE_FILE_TRIGGER_RUN`, `ALERT_TRIGGER_RUN`, `WEBHOOK_RUN`) record 3-tier telemetry."""
     bridge, client, executed_sql = _make_bridge_and_client(tmp_path, monkeypatch)
     flow_id = "obs-flow-12345678"
+    _register_trigger_role(monkeypatch, flow_id)
 
     for idx, ev_type in enumerate(("SCHEDULED_RUN", "STREAM_TRIGGER_RUN", "STAGE_FILE_TRIGGER_RUN", "ALERT_TRIGGER_RUN")):
         r = client.post(

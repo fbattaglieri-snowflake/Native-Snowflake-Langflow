@@ -16,6 +16,13 @@ from lfx_snowflake.components.ai_function import (
 )
 from lfx_snowflake.context_helpers import _resolve_flow_id
 from lfx_snowflake.fastapi_live_bridge import LIVE_BRIDGE
+from lfx_snowflake.flow_context_guard import flow_component_sql as _flow_component_sql
+
+
+def _flow_component_execute_sql(*args, **kwargs):
+    """BUG-CTX-03: this component's SQL is checked against the flow's `[ ❄️ Context ]`."""
+    with _flow_component_sql():
+        return LIVE_BRIDGE.execute_sql(*args, **kwargs)
 
 
 AI_FUNCTION_VISIBLE_FIELDS: dict[str, tuple[str, ...]] = {
@@ -405,7 +412,7 @@ class SnowflakeAIFunctionComponent(Component):
 
     def run_ai_function(self) -> Message:
         stmt = self._build_sql()
-        res = LIVE_BRIDGE.execute_sql(stmt)
+        res = _flow_component_execute_sql(stmt)
         if not res.get("ok"):
             raise ValueError(res.get("message", f"{self.ai_function} execution failed"))
         rows = res.get("rows", [])

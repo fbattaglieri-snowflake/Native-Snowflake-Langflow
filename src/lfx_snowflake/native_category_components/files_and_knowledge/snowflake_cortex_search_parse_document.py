@@ -18,6 +18,13 @@ from lfx_snowflake.native_category_components.files_and_knowledge.snowflake_stag
     _register_created_object,
     _resolve_flow_id,
 )
+from lfx_snowflake.flow_context_guard import flow_component_sql as _flow_component_sql
+
+
+def _flow_component_execute_sql(*args, **kwargs):
+    """BUG-CTX-03: this component's SQL is checked against the flow's `[ ❄️ Context ]`."""
+    with _flow_component_sql():
+        return LIVE_BRIDGE.execute_sql(*args, **kwargs)
 
 
 CORTEX_SEARCH_PIPELINE_GUIDE_STEP_1 = (
@@ -239,7 +246,7 @@ class SnowflakeCortexSearchParseDocumentComponent(Component):
             )
 
         if "Testa su 1 file" in action:
-            res = LIVE_BRIDGE.execute_sql(test_sql)
+            res = _flow_component_execute_sql(test_sql)
             return Data(
                 data={
                     "tab": "Cortex Search 1: Parse Document",
@@ -266,9 +273,8 @@ class SnowflakeCortexSearchParseDocumentComponent(Component):
         denied = LIVE_BRIDGE.check_write_privilege_or_deny("PARSE_DOCUMENT_INSERT", spec.target_table_fqn)
         if denied:
             raise ValueError(denied["message"])
-        ddl_res = LIVE_BRIDGE.execute_sql(ddl)
-        ins_res = LIVE_BRIDGE.execute_sql(batch_sql)
-        if _ddl_succeeded(ddl_res):
+        ddl_res = _flow_component_execute_sql(ddl)
+        if _ddl_succeeded(ddl_res):  # PASSO3: register BEFORE the INSERT so the flow may use its own table
             _register_created_object(
                 database=spec.database,
                 schema=spec.schema,
@@ -276,6 +282,7 @@ class SnowflakeCortexSearchParseDocumentComponent(Component):
                 object_name=spec.target_table,
                 flow_id=_resolve_flow_id(self),
             )
+        ins_res = _flow_component_execute_sql(batch_sql)
         return Data(
             data={
                 "tab": "Cortex Search 1: Parse Document",

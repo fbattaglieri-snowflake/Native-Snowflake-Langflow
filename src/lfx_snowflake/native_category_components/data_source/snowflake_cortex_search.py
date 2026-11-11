@@ -17,6 +17,13 @@ from lfx_snowflake.providers.language_models import (
     build_structured_tool,
     sanitize_tool_identifier,
 )
+from lfx_snowflake.flow_context_guard import flow_component_sql as _flow_component_sql
+
+
+def _flow_component_execute_sql(*args, **kwargs):
+    """BUG-CTX-03: this component's SQL is checked against the flow's `[ ❄️ Context ]`."""
+    with _flow_component_sql():
+        return LIVE_BRIDGE.execute_sql(*args, **kwargs)
 
 
 def _resolve_flow_id(component: Any = None, build_config: dict[str, Any] | None = None) -> str | None:
@@ -192,7 +199,11 @@ class SnowflakeCortexSearchComponent(Component):
         return build_config
 
     def _build_sql_and_payload(self) -> tuple[str, dict[str, Any]]:
-        return SnowflakeCortexSearchQueryEngine.build_search_preview_sql(
+        sql, payload, _ = self._build_request()
+        return sql, payload
+
+    def _build_request(self) -> tuple[str, dict[str, Any], dict[str, Any]]:
+        return SnowflakeCortexSearchQueryEngine.build_search_preview_request(
             database=getattr(self, "database", "") or "SNOWFLAKE_LANGFLOW",
             schema=getattr(self, "schema_name", "") or "CORE",
             search_service=getattr(self, "search_service", "") or "DOC_SEARCH_SERVICE",
@@ -212,12 +223,12 @@ class SnowflakeCortexSearchComponent(Component):
                 limit=int(getattr(self, "limit", 5) or 5),
             )
             return Message(text=json.dumps(recalled, indent=2))
-        sql_stmt, payload = self._build_sql_and_payload()
+        sql_stmt, payload, sql_bindings = self._build_request()
         db = getattr(self, "database", "SNOWFLAKE_LANGFLOW") or "SNOWFLAKE_LANGFLOW"
         sch = getattr(self, "schema_name", "CORE") or "CORE"
         svc = getattr(self, "search_service", "DOC_SEARCH_SERVICE") or "DOC_SEARCH_SERVICE"
         rest_ep = _search_rest_endpoint(db, sch, svc)
-        res = LIVE_BRIDGE.execute_sql(sql_stmt)
+        res = _flow_component_execute_sql(sql_stmt, bindings=sql_bindings)
         return Message(
             text=json.dumps(
                 {

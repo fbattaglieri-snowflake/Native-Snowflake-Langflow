@@ -17,6 +17,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     LANGFLOW_PORT=7860 \
     LANGFLOW_A2A_ENABLED=true \
     LANGFLOW_BUNDLE_PACKAGES="lfx_snowflake" \
+    LANGFLOW_SSRF_ALLOWED_HOSTS="localhost,127.0.0.1" \
     SNOWFLAKE_UPSTREAM_TAG="v1.12.5"
 
 # Create dedicated non-root user and group (UID 1000 / GID 1000) and writable cache/SQLite WAL dirs (0777)

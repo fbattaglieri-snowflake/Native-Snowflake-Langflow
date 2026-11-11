@@ -126,7 +126,7 @@ def _build_fastapi_test_client() -> Any:
             return self._json_body
 
     class _StubAPIRouter:
-        def __init__(self, prefix: str = "", tags: list[str] | None = None) -> None:
+        def __init__(self, prefix: str = "", tags: list[str] | None = None, **_kwargs: Any) -> None:
             self.prefix = prefix.rstrip("/")
             self.tags = tags or []
             self.routes: list[tuple[str, str, Any]] = []
@@ -217,6 +217,8 @@ def _build_fastapi_test_client() -> Any:
     fastapi_mod = types.ModuleType("fastapi")
     fastapi_mod.APIRouter = _StubAPIRouter  # type: ignore[attr-defined]
     fastapi_mod.Request = _StubRequest  # type: ignore[attr-defined]
+    fastapi_mod.Depends = lambda dependency=None: dependency  # type: ignore[attr-defined]
+    fastapi_mod.HTTPException = type("HTTPException", (Exception,), {})  # type: ignore[attr-defined]
     fastapi_resp_mod = types.ModuleType("fastapi.responses")
     fastapi_resp_mod.JSONResponse = _StubJSONResponse  # type: ignore[attr-defined]
     sys.modules.setdefault("fastapi", fastapi_mod)
@@ -318,7 +320,7 @@ def test_w2_r4_02_five_canonical_memory_types_plus_coming_soon_slot_6_and_hover_
 def test_w2_r4_03_and_04_branch_a_vs_branch_b_ddl_and_object_peculiarities() -> None:
     """W2-R4-03 & W2-R4-04: Branch A (`Database ▸ Schema ▸ Table`) vs Branch B (`Snowflake Postgres` :5432) DDL & rules."""
     bridge = LiveSnowflakeBridge()
-    bridge.switch_role("ACCOUNTADMIN")
+    bridge.switch_role("SNOWFLAKE_LANGFLOW_ADMIN_ROLE")
 
     # 1. Branch A Hybrid Table with VECTOR: ensure VECTOR column is excluded from PRIMARY KEY and INDEX
     res_hybrid_vec = bridge.create_or_register_memory(
@@ -472,7 +474,7 @@ def test_w2_r4_04_four_snowflake_embedding_sources_and_llm_preprocessing_no_inge
     ]
 
     bridge = LiveSnowflakeBridge()
-    bridge.switch_role("ACCOUNTADMIN")
+    bridge.switch_role("SNOWFLAKE_LANGFLOW_ADMIN_ROLE")
 
     # Verify locked embedding rejection when reject_locked_embedding=True on #1 and #3
     for locked_type in ("graph_state_checkpointer", "summary_memory"):
@@ -631,8 +633,16 @@ def test_w2_r4_05_memory_detail_view_and_rest_routes_and_rbac() -> None:
     assert denied_delete.status_code == 403
     assert denied_delete.json()["error_code"] == "AUTHZ_ROLE_DENIED"
 
-    # Switch back to ACCOUNTADMIN -> DELETE succeeds
-    client.post("/api/v1/snowflake/role", json={"target_role": "ACCOUNTADMIN"})
+    # BUG-MCP-03: ACCOUNTADMIN is selectable only after a live grant check under the caller's identity.
+    privileged = client.post("/api/v1/snowflake/role", json={"target_role": "ACCOUNTADMIN"})
+    assert privileged.status_code == 403
+    assert privileged.json()["error_code"] == "AUTHZ_ROLE_DENIED"
+    LIVE_BRIDGE.__dict__["execute_sql"] = lambda *a, **k: {"ok": True, "rows": [{"VERIFIED_ROLE": "ACCOUNTADMIN"}]}
+    try:
+        granted = client.post("/api/v1/snowflake/role", json={"target_role": "ACCOUNTADMIN"})
+    finally:
+        LIVE_BRIDGE.__dict__.pop("execute_sql", None)
+    assert granted.status_code == 200
     ok_delete = client.delete("/api/v1/snowflake/memories/DETAIL_VIEW_PROFILE_MEM")
     assert ok_delete.status_code == 200
     assert ok_delete.json()["deleted"] == "DETAIL_VIEW_PROFILE_MEM"
@@ -650,7 +660,7 @@ def test_w2_r4_05_memory_detail_view_and_rest_routes_and_rbac() -> None:
         assert detail_marker in ui_js, f"Missing Detail View marker {detail_marker} in snowflake-ui-integration.js"
 
 
-def test_w2_r4_06_and_06b_dynamic_memory_base_message_history_and_data_sources_purity() -> None:
+def test_w2_r4_06_and_06b_dynamic_memory_base_message_history_and_data_sources_purity(monkeypatch) -> None:
     """W2-R4-06 & W2-R4-06B: Dynamic `Memory Base` (#1..#5), `Message History` (#2), and `Data Sources` purity."""
     manifest = get_bundle_manifest()
     comp_ids = {c["component_id"] for c in manifest["components"]}
@@ -688,15 +698,23 @@ def test_w2_r4_06_and_06b_dynamic_memory_base_message_history_and_data_sources_p
         postgres_instance="LANGFLOW_PG_INSTANCE",
         pg_table="public.chat_message_history",
         session_id="sess_window_01",
+        project_id="flow-w2r4-06",
         window_k=8,
     )
+    # BUG-MEM-MH-01: history lives in the governed LANGFLOW_MESSAGES table (fake double here).
+    import lfx_snowflake.native_category_components.models_and_agents.snowflake_message_history as _mh_mod
+    from _test_fake_messages import FakeGovernedMessagesBridge
+
+    _fake = FakeGovernedMessagesBridge(_mh_mod.LIVE_BRIDGE)
+    monkeypatch.setattr(_mh_mod, "LIVE_BRIDGE", _fake)
     pg_payload = json.loads(msg_hist_pg.retrieve_chat_history().text)
     assert pg_payload["canonical_memory_type"] == "buffer_window_memory"
     assert pg_payload["storage_family"] == "snowflake_postgres"
     assert pg_payload["window_k"] == 8
     assert pg_payload["filter_by_session"] is True
-    # W3-R1-01: MEM_2_CHAT_WINDOW is no longer seeded, so no recall SQL is fabricated
-    assert pg_payload["recall_sql"] is None
+    assert pg_payload["messages"] == []
+    assert pg_payload["flow_id"] == "flow-w2r4-06"
+    assert all(mode == "caller" for _sql, _b, mode in _fake.calls)
 
     # Verify W2-R4-06B: Data Sources strictly excludes technical memory tables
     mixed_tables = [
@@ -756,7 +774,7 @@ def test_w2_r4_07_end_to_end_full_memory_enterprise_agent_showcase_flow() -> Non
     assert len(SHOWCASE_MEMORIES_SPECS) == 5
 
     # Run multi-turn simulation with #5 Episodic Embedding ON (AI_EMBED 1024d) and OFF (SQL / AI_FILTER)
-    LIVE_BRIDGE.switch_role("ACCOUNTADMIN")
+    LIVE_BRIDGE.switch_role("SNOWFLAKE_LANGFLOW_ADMIN_ROLE")
 
     sim_vec_on = run_full_memory_showcase_simulation(LIVE_BRIDGE, dry_run=True, enable_episodic_embedding=True)
     assert sim_vec_on["ok"] is True
@@ -1183,7 +1201,7 @@ def test_w2_r4_09_native_canvas_components_two_node_delegation_and_post_run_auto
     from lfx.io import HandleInput, MessageInput, TabInput
     from lfx.schema.message import Message
 
-    LIVE_BRIDGE.switch_role("ACCOUNTADMIN")
+    LIVE_BRIDGE.switch_role("SNOWFLAKE_LANGFLOW_ADMIN_ROLE")
 
     # 1. Verify SnowflakeMemoryBaseNativeComponent exposes orange Memory output port returning SnowflakeChatMessageHistoryAdapter
     mem_base_outputs = {o.name: o for o in SnowflakeMemoryBaseNativeComponent.outputs}
@@ -1227,6 +1245,7 @@ def test_w2_r4_09_native_canvas_components_two_node_delegation_and_post_run_auto
         mode="Store",
         memory=adapter,
         session_id="sess_w2_r4_09_two_node",
+        project_id="flow-w2r4-09",
         message_text=Message(text="Verify Q4 EBITDA reconciliation in EUR", sender="User", sender_name="User"),
     )
     with pytest.raises(RuntimeError, match="NOT_CONFIGURED"):
@@ -1284,7 +1303,7 @@ def test_w2_r4_verifier_middleware_interception_and_bundle_patch_execution() -> 
     snowflake_flow_context_and_trace_middleware = dummy_app.http_middleware
     assert callable(snowflake_flow_context_and_trace_middleware)
 
-    LIVE_BRIDGE.switch_role("ACCOUNTADMIN")
+    LIVE_BRIDGE.switch_role("SNOWFLAKE_LANGFLOW_ADMIN_ROLE")
     mem_id = compute_deterministic_memory_uuid("MEM_2_CHAT_WINDOW")
 
     class _FakeURL:
@@ -1297,7 +1316,8 @@ def test_w2_r4_verifier_middleware_interception_and_bundle_patch_execution() -> 
             q_str = urllib.parse.urlencode(query_params or {})
             self.method = method
             self.url = _FakeURL(path, q_str)
-            self.headers: dict[str, str] = {}
+            # A6-2: middleware-answered paths require a Langflow credential.
+            self.headers: dict[str, str] = {"authorization": "Bearer test-token"}
             self.query_params = query_params or {}
             self._body_obj = body_obj or {}
 

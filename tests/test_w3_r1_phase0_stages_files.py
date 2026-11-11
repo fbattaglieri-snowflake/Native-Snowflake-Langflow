@@ -124,10 +124,9 @@ class TestAC02StageListMatchesShowStages:
         assert clean_bridge.get_context_objects("SNOWFLAKE_LANGFLOW", "CORE", "stages") == ["STAGE_ALPHA", "STAGE_EXT"]
         assert clean_bridge.get_context_objects("SNOWFLAKE_LANGFLOW", "PUBLIC", "stages") == []
         by_name = {s["name"]: s for s in clean_bridge.list_stages_for_context()["stages"]}
-        assert set(by_name) == {"STAGE_ALPHA", "STAGE_EXT"}
+        # BUG-CTX-STG-01: only INTERNAL stages are listed for the context.
+        assert set(by_name) == {"STAGE_ALPHA"}
         assert by_name["STAGE_ALPHA"]["stage_type"] == "INTERNAL"
-        assert by_name["STAGE_EXT"]["stage_type"] == "EXTERNAL"
-        assert by_name["STAGE_EXT"]["url"] == "s3://example-bucket/path/"
         assert by_name["STAGE_ALPHA"]["files_count"] is None
 
 

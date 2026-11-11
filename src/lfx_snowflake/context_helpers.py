@@ -19,15 +19,17 @@ def _can_create_database(context: Any = None) -> bool:
         if isinstance(privs_ctx, dict) and "can_create_database" in privs_ctx:
             return bool(privs_ctx["can_create_database"])
         role_ctx = str(context.get("active_role") or context.get("role") or "").strip().upper()
-        if role_ctx:
-            return role_ctx in ("ACCOUNTADMIN", "SYSADMIN", "SNOWFLAKE_LANGFLOW_ADMIN_ROLE")
+        if role_ctx and role_ctx != LIVE_BRIDGE.active_role.strip().upper():
+            # Role names prove nothing: an unknown role without explicit privileges fails closed.
+            return False
     fn = getattr(LIVE_BRIDGE, "can_create_database", None)
     if callable(fn):
         return bool(fn())
     privs = getattr(LIVE_BRIDGE, "role_privileges", None)
     if isinstance(privs, dict) and "can_create_database" in privs:
         return bool(privs["can_create_database"])
-    return LIVE_BRIDGE.active_role.upper() in ("ACCOUNTADMIN", "SYSADMIN", "SNOWFLAKE_LANGFLOW_ADMIN_ROLE")
+    # Fail closed: no privilege source is available.
+    return False
 
 
 def _can_create_schema(context: Any = None) -> bool:
@@ -36,15 +38,17 @@ def _can_create_schema(context: Any = None) -> bool:
         if isinstance(privs_ctx, dict) and "can_create_schema" in privs_ctx:
             return bool(privs_ctx["can_create_schema"])
         role_ctx = str(context.get("active_role") or context.get("role") or "").strip().upper()
-        if role_ctx:
-            return role_ctx not in ("PUBLIC", "SNOWFLAKE_LANGFLOW_VIEWER_ROLE", "VIEWER_ROLE")
+        if role_ctx and role_ctx != LIVE_BRIDGE.active_role.strip().upper():
+            # Role names prove nothing: an unknown role without explicit privileges fails closed.
+            return False
     fn = getattr(LIVE_BRIDGE, "can_create_schema", None)
     if callable(fn):
         return bool(fn())
     privs = getattr(LIVE_BRIDGE, "role_privileges", None)
     if isinstance(privs, dict) and "can_create_schema" in privs:
         return bool(privs["can_create_schema"])
-    return LIVE_BRIDGE.active_role.upper() not in ("PUBLIC", "SNOWFLAKE_LANGFLOW_VIEWER_ROLE", "VIEWER_ROLE")
+    # Fail closed: no privilege source is available.
+    return False
 
 
 def _resolve_flow_id(component: Any = None, build_config: dict[str, Any] | None = None) -> str | None:

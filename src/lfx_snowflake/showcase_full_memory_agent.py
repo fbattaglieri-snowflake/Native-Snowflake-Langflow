@@ -13,6 +13,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+from .components.governed_message_history import MessageHistoryError
 from .components.data_sources import filter_business_data_source_objects, is_technical_memory_table
 from .components.knowledge_and_memories import SnowflakeMemoryBaseComponent
 from .native_category_components.files_and_knowledge.snowflake_memory_base import (
@@ -129,7 +130,7 @@ SHOWCASE_MEMORIES_SPECS: list[dict[str, Any]] = [
         "embedding_provider": "none",
         "filter_by_session": True,
         "tool_mode": False,
-        "session_id": "fin-reconcile-session-001",
+        "session_id": "",
         "window_k": 8,
         "retention_days": 30,
         "auto_capture": True,
@@ -158,7 +159,7 @@ SHOWCASE_MEMORIES_SPECS: list[dict[str, Any]] = [
         "embedding_provider": "none",
         "filter_by_session": True,
         "tool_mode": False,
-        "session_id": "fin-reconcile-session-001",
+        "session_id": "",
         "summarizer_model": "openai-gpt-6-luna",
         "max_summary_tokens": 512,
         "auto_capture": True,
@@ -268,7 +269,7 @@ def build_snowflake_full_memory_enterprise_agent_flow() -> dict[str, Any]:
                         },
                         "session_id": {
                             "name": "session_id",
-                            "value": "fin-reconcile-session-001",
+                            "value": "",
                         },
                     },
                 },
@@ -328,7 +329,7 @@ def build_snowflake_full_memory_enterprise_agent_flow() -> dict[str, Any]:
                         "storage_family": {"name": "storage_family", "value": "snowflake_postgres"},
                         "postgres_instance": {"name": "postgres_instance", "value": "LANGFLOW_PG_INSTANCE"},
                         "pg_table": {"name": "pg_table", "value": "public.chat_message_history"},
-                        "session_id": {"name": "session_id", "value": "fin-reconcile-session-001"},
+                        "session_id": {"name": "session_id", "value": ""},
                         "window_k": {"name": "window_k", "value": 8},
                         "filter_by_session": {"name": "filter_by_session", "value": True},
                     },
@@ -349,7 +350,7 @@ def build_snowflake_full_memory_enterprise_agent_flow() -> dict[str, Any]:
                     "template": {
                         "memory_base": {"name": "memory_base", "value": "MEM_3_SESSION_SUMMARY"},
                         "canonical_memory_type": {"name": "canonical_memory_type", "value": "summary_memory"},
-                        "session_id": {"name": "session_id", "value": "fin-reconcile-session-001", "show": True},
+                        "session_id": {"name": "session_id", "value": "", "show": True},
                         "summarizer_model": {
                             "name": "summarizer_model",
                             "value": "openai-gpt-6-luna",
@@ -379,7 +380,7 @@ def build_snowflake_full_memory_enterprise_agent_flow() -> dict[str, Any]:
                             "name": "canonical_memory_type",
                             "value": "user_profile_entity_memory",
                         },
-                        "user_id": {"name": "user_id", "value": "fin_analyst_01", "show": True},
+                        "user_id": {"name": "user_id", "value": "", "show": True},
                         "entity_namespace": {
                             "name": "entity_namespace",
                             "value": "financial_reporting_prefs",
@@ -866,7 +867,7 @@ def _persist_showcase_execution_and_activity(
         "completion_tokens": 145,
         "total_tokens": 465,
         "user_identity": getattr(bridge, "authenticated_user", "LANGFLOW_SERVICE_USER"),
-        "active_role": getattr(bridge, "active_role", "ACCOUNTADMIN"),
+        "active_role": getattr(bridge, "active_role", ""),
         "context_epoch": getattr(bridge, "context_epoch", 1),
         "flow_context_json": dict(SHOWCASE_FLOW_CONTEXT),
         "input_payload": input_payload,
@@ -885,8 +886,16 @@ def _persist_showcase_execution_and_activity(
     snowflake_activity_synced = False
     if not dry_run and hasattr(bridge, "_build_activity_merge_sql") and hasattr(bridge, "execute_sql"):
         try:
-            merge_sql = bridge._build_activity_merge_sql(act_rec)
-            res = bridge.execute_sql(merge_sql, role="ACCOUNTADMIN", timeout=15)
+            if hasattr(bridge, "_build_activity_merge_request"):
+                merge_sql, merge_binds = bridge._build_activity_merge_request(act_rec)
+            else:
+                merge_sql, merge_binds = bridge._build_activity_merge_sql(act_rec), None
+            res = bridge.execute_sql(
+                merge_sql,
+                role=(bridge._service_role() if hasattr(bridge, "_service_role") else None),
+                bindings=merge_binds,
+                timeout=15,
+            )
             snowflake_activity_synced = bool(res.get("ok"))
             if hasattr(bridge, "_synced_activity_ids"):
                 bridge._synced_activity_ids.add(act_id)
@@ -1071,7 +1080,7 @@ def run_full_memory_showcase_simulation(
             "MERGE INTO SNOWFLAKE_LANGFLOW.CORE.USER_ENTITY_PROFILE AS t "
             "USING (SELECT 'fin_analyst_01' AS user_id, 'financial_reporting_prefs' AS entity_namespace, "
             "'reporting_prefs' AS memory_key, PARSE_JSON('"
-            + json.dumps(extracted_profile_json, ensure_ascii=False).replace("'", "''")
+            + json.dumps(extracted_profile_json, ensure_ascii=False).replace("\\", "\\\\").replace("'", "''")
             + "') AS profile_json) AS s "
             "ON t.user_id = s.user_id AND t.entity_namespace = s.entity_namespace AND t.memory_key = s.memory_key "
             "WHEN MATCHED THEN UPDATE SET profile_json = s.profile_json, updated_at = CURRENT_TIMESTAMP() "
@@ -1107,7 +1116,17 @@ def run_full_memory_showcase_simulation(
         mem2_cfg = mem2_comp.update_build_config(
             mem2_comp.to_build_config(), "MEM_2_CHAT_WINDOW", "memory_base"
         )
-        mem2_history = json.loads(mem2_comp.retrieve_chat_history().text)
+        try:
+            mem2_history = json.loads(mem2_comp.retrieve_chat_history().text)
+        except MessageHistoryError as mh_exc:
+            # BUG-MEM-MH-01: no in-RAM fallback; report the governed table as not reachable.
+            mem2_history = {
+                "window_k": 8,
+                "filter_by_session": True,
+                "history_sql": [],
+                "messages": [],
+                "status": mh_exc.error_code,
+            }
 
         mem3_comp = SnowflakeMemoryBaseNativeComponent(
             memory_base="MEM_3_SESSION_SUMMARY",
@@ -1210,7 +1229,8 @@ def run_full_memory_showcase_simulation(
                 "storage_family": mem2_cfg["storage_family"]["value"],
                 "window_k": mem2_history["window_k"],
                 "filter_by_session": mem2_history["filter_by_session"],
-                "recall_sql": mem2_history["recall_sql"],
+                "history_sql": mem2_history.get("history_sql", []),
+                "history_status": mem2_history.get("status", "OK"),
             },
             "mem_3_session_summary": {
                 "canonical_memory_type": mem3_cfg["_dynamic_memory_spec"]["canonical_memory_type"],

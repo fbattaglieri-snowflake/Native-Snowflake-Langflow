@@ -1288,7 +1288,7 @@ def register_snowflake_language_model_providers() -> dict[str, Any]:
                             if thinking_budget_tokens != 2048
                             else (ov.get("thinking_budget_tokens") or meta.get("thinking_budget_tokens") or 2048)
                         )
-                        return build_snowflake_language_model(
+                        built = build_snowflake_language_model(
                             provider=prov,
                             model_name=m_name,
                             stream=stream,
@@ -1298,6 +1298,8 @@ def register_snowflake_language_model_providers() -> dict[str, Any]:
                             extended_thinking=eff_thinking,
                             thinking_budget_tokens=eff_budget,
                         )
+                        _bind_component_session(built)
+                        return built
 
                 return orig_get_llm(
                     model=model,
@@ -1416,3 +1418,38 @@ def register_snowflake_language_model_providers() -> dict[str, Any]:
         pass
 
     return status
+
+
+def _component_session_id(max_depth: int = 8) -> str | None:
+    """graph.session_id of the nearest calling Langflow component (BUG-PROXY-A4-01 replay isolation)."""
+    import sys  # noqa: PLC0415
+
+    frame = sys._getframe(2)
+    for _ in range(max_depth):
+        if frame is None:
+            return None
+        obj = frame.f_locals.get("self")
+        graph = getattr(obj, "graph", None) if obj is not None else None
+        sid = getattr(graph, "session_id", None) if graph is not None else None
+        if sid:
+            return str(sid)
+        frame = frame.f_back
+    return None
+
+
+def _bind_component_session(model: Any) -> None:
+    """Scope the Messages replay store of a ProtectedAnthropic model to the calling component's session."""
+    if not hasattr(model, "_sflf_session_id"):
+        return
+    sid = _component_session_id()
+    if sid:
+        try:
+            model._sflf_session_id = sid
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            from lfx_snowflake import telemetry as _telemetry  # noqa: PLC0415
+
+            _telemetry.annotate_current_run(session_id=sid)
+        except Exception:  # noqa: BLE001
+            pass

@@ -27,6 +27,13 @@ from lfx_snowflake.components.llm_operations import (
 )
 from lfx_snowflake.context_helpers import _resolve_flow_id
 from lfx_snowflake.fastapi_live_bridge import LIVE_BRIDGE
+from lfx_snowflake.flow_context_guard import flow_component_sql as _flow_component_sql
+
+
+def _flow_component_execute_sql(*args, **kwargs):
+    """BUG-CTX-03: this component's SQL is checked against the flow's `[ ❄️ Context ]`."""
+    with _flow_component_sql():
+        return LIVE_BRIDGE.execute_sql(*args, **kwargs)
 
 
 DEFAULT_SUPPORT_TICKET_QUESTIONS = json.dumps(
@@ -245,11 +252,17 @@ class SnowflakeDecisionComponent(Component):
             display_name="Automated Action Route (High Confidence)",
             name="high_confidence_route",
             method="route_high_confidence",
+            # BUG-LLMOP-002: one port per route (Langflow If-Else pattern) so each branch is wired separately
+            # and self.stop() deactivates only the inactive one.
+            group_outputs=True,
         ),
         Output(
             display_name="Human Review / Fallback Route (Low Confidence)",
             name="low_confidence_route",
             method="route_low_confidence",
+            # BUG-LLMOP-002: one port per route (Langflow If-Else pattern) so each branch is wired separately
+            # and self.stop() deactivates only the inactive one.
+            group_outputs=True,
         ),
         Output(
             display_name="Table Decisions (DataFrame)",
@@ -339,7 +352,7 @@ class SnowflakeDecisionComponent(Component):
             entry["criteria"] = crit
         return {qid: entry}
 
-    def _compute(self) -> dict[str, Any]:
+    def _decision_inputs(self) -> dict[str, Any]:
         raw_state = getattr(self, "state_input", None)
         if raw_state is None:
             raw_state = getattr(self, "input_context", "")
@@ -349,7 +362,7 @@ class SnowflakeDecisionComponent(Component):
             state_val = raw_state or ""
 
         questions = self._resolve_questions()
-        return SnowflakeDecisionEngine.evaluate_decision(
+        return dict(
             model=getattr(self, "model", "snowflake-decision-fast") or "snowflake-decision-fast",
             state=state_val,
             questions=questions,
@@ -367,54 +380,63 @@ class SnowflakeDecisionComponent(Component):
             active_role=LIVE_BRIDGE.active_role,
         )
 
+    def _reset_decision_cache(self) -> None:
+        """Drop the cached execution (call at the start of a new build; PASSO 6 routing hooks here)."""
+        self.__dict__.pop("_decision_cache", None)
+
+    def _compute(self) -> dict[str, Any]:
+        """Run AI_COMPLETE once per build and share the result with every output port (BUG-LLMOP-001).
+
+        The cache key is the full set of decision inputs, so all ports of one build read the same
+        execution and a changed input forces a fresh call. Answers and routing come only from the
+        real Snowflake result; any failure raises (no heuristic fallback).
+        """
+        inputs = self._decision_inputs()
+        key = json.dumps(inputs, sort_keys=True, default=str)
+        cached = self.__dict__.get("_decision_cache")
+        if cached and cached[0] == key:
+            return cached[1]
+        res = SnowflakeDecisionEngine.evaluate_decision(**inputs, executor=_flow_component_execute_sql)
+        self.__dict__["_decision_cache"] = (key, res)
+        return res
+
     def run_decision(self) -> Data:
-        res = self._compute()
-        exec_res = LIVE_BRIDGE.execute_sql(res["sql_preview"])
-        payload = {**res, "execution_result": exec_res}
-        return Data(data=payload)
+        return Data(data=dict(self._compute()))
+
+    def _stop_route(self, output_name: str) -> None:
+        """BUG-LLMOP-002/003: Langflow If-Else pattern; only the active branch's downstream runs.
+
+        The route comes from the cached ``_compute()`` result (one AI_COMPLETE call per build) and the
+        confidence Snowflake returns."""
+        stop = getattr(self, "stop", None)
+        if callable(stop) and getattr(self, "_vertex", None) is not None:  # standalone builds have no graph
+            stop(output_name)
 
     def route_high_confidence(self) -> Data:
         res = self._compute()
         if not res["high_confidence"]:
+            self._stop_route("high_confidence_route")
             return Data(data={"active": False, "route": "low_confidence", "skipped": True, "decision": res})
+        self._stop_route("low_confidence_route")
         return Data(data={"active": True, "route": "high_confidence", **res})
 
     def route_low_confidence(self) -> Data:
         res = self._compute()
         if res["high_confidence"]:
+            self._stop_route("low_confidence_route")
             return Data(data={"active": False, "route": "high_confidence", "skipped": True, "decision": res})
+        self._stop_route("high_confidence_route")
         return Data(data={"active": True, "route": "low_confidence", **res})
 
     def run_table_decisions(self) -> DataFrame:
         res = self._compute()
-        table_sql = SnowflakeDecisionEngine.build_table_decision_sql(
-            model=res["model"],
-            database=getattr(self, "database", "SNOWFLAKE_LANGFLOW") or "SNOWFLAKE_LANGFLOW",
-            schema=getattr(self, "schema_name", "CORE") or "CORE",
-            table_name=getattr(self, "table_name", "SUPPORT_TICKETS") or "SUPPORT_TICKETS",
-            state_column=getattr(self, "state_column", "ticket_text") or "ticket_text",
-            questions=self._resolve_questions(),
-            include_none_of_these=bool(getattr(self, "include_none_of_these", True)),
-            return_error_details=bool(getattr(self, "return_error_details", True)),
-            noul_threshold=float(getattr(self, "noul_threshold", 0.70) or 0.70),
-            max_rows=int(getattr(self, "max_rows", 100) or 100),
-        )
-        exec_res = LIVE_BRIDGE.execute_sql(table_sql)
-        rows = exec_res.get("rows") if isinstance(exec_res, dict) and isinstance(exec_res.get("rows"), list) else []
-        if not rows:
-            rows = [
-                {
-                    "state_column": getattr(self, "state_column", "ticket_text") or "ticket_text",
-                    "decision": res["answers"],
-                    "sql_preview": table_sql,
-                }
-            ]
+        rows = res.get("rows")
+        if not isinstance(rows, list):
+            raise ValueError("Table-level decisions require evaluation_mode 'Table-Level Processing (Database.Schema.Table)'.")
         return DataFrame(rows)
 
     def get_decision_json(self) -> Message:
-        res = self._compute()
-        LIVE_BRIDGE.execute_sql(res["sql_preview"])
-        return Message(text=json.dumps(res, indent=2))
+        return Message(text=json.dumps(self._compute(), indent=2, default=str))
 
     def get_selected_branch(self) -> Message:
         res = self._compute()

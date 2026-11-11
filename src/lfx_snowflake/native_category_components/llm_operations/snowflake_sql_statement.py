@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+
+from lfx_snowflake import sql_safety as _sql_safety
 from typing import Any
 
 import lfx_snowflake._lfx_compat  # noqa: F401
@@ -12,6 +14,13 @@ from lfx.schema.message import Message
 from lfx_snowflake.components.llm_operations import SnowflakeSQLStatementEngine
 from lfx_snowflake.context_helpers import _resolve_flow_id
 from lfx_snowflake.fastapi_live_bridge import LIVE_BRIDGE
+from lfx_snowflake.flow_context_guard import flow_component_sql as _flow_component_sql
+
+
+def _flow_component_execute_sql(*args, **kwargs):
+    """BUG-CTX-03: this component's SQL is checked against the flow's `[ ❄️ Context ]`."""
+    with _flow_component_sql():
+        return LIVE_BRIDGE.execute_sql(*args, **kwargs)
 
 
 def _sql_databases(flow_id: str | None = None) -> list[str]:
@@ -20,6 +29,33 @@ def _sql_databases(flow_id: str | None = None) -> list[str]:
 
 def _sql_schemas(database: str | None = None, flow_id: str | None = None) -> list[str]:
     return LIVE_BRIDGE.get_context_schemas(database, flow_id=flow_id or _resolve_flow_id())
+
+
+def normalize_bindings(parsed: Any) -> dict[str, dict[str, Any]] | None:
+    """BUG-LLMOP-012: typed SQL API bindings ``{"1": {"type", "value"}}``.
+
+    Accepts a list of values (``[1, "a"]``), a positional dict (``{"1": 1}``) or an already typed dict
+    (``{"1": {"type": "FIXED", "value": "1"}}``); every entry goes through ``sql_safety.binding_for``."""
+    if parsed in (None, [], {}):
+        return None
+    if isinstance(parsed, list):
+        items = [(str(i + 1), v) for i, v in enumerate(parsed)]
+    elif isinstance(parsed, dict):
+        items = list(parsed.items())
+        keys = [str(k) for k, _ in items]
+        if not all(k.isdigit() and int(k) >= 1 for k in keys) or sorted(int(k) for k in keys) != list(
+            range(1, len(keys) + 1)
+        ):
+            raise ValueError('Bind Parameter keys must be positions "1".."n" matching the ? placeholders.')
+    else:
+        raise ValueError("Bind Parameters must be a JSON array or object.")
+    out: dict[str, dict[str, Any]] = {}
+    for key, val in items:
+        if isinstance(val, dict) and set(val) <= {"type", "value"} and "value" in val:
+            out[str(key)] = _sql_safety.binding_for(val["value"], val.get("type"))
+        else:
+            out[str(key)] = _sql_safety.binding_for(val)
+    return out
 
 
 class SnowflakeSQLStatementComponent(Component):
@@ -114,19 +150,22 @@ class SnowflakeSQLStatementComponent(Component):
         raw = (getattr(self, "bind_parameters_json", "") or "").strip()
         if not raw or raw == "{}":
             return None
-        parsed = json.loads(raw)
-        return parsed if isinstance(parsed, dict) and parsed else None
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise ValueError("Bind Parameters must be a JSON array or object.") from exc
+        return normalize_bindings(parsed)
 
     def run_dataframe(self) -> DataFrame:
         stmt = self._build_sql()
-        res = LIVE_BRIDGE.execute_sql(stmt, bindings=self._parse_bindings())
+        res = _flow_component_execute_sql(stmt, bindings=self._parse_bindings())
         if not res.get("ok"):
             raise ValueError(res.get("message", "Snowflake SQL Statement failed"))
         return DataFrame(res.get("rows", []))
 
     def run_json_message(self) -> Message:
         stmt = self._build_sql()
-        res = LIVE_BRIDGE.execute_sql(stmt, bindings=self._parse_bindings())
+        res = _flow_component_execute_sql(stmt, bindings=self._parse_bindings())
         return Message(
             text=json.dumps(
                 {

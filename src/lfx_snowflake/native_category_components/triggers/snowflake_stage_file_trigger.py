@@ -9,6 +9,7 @@ from lfx.schema import Data, DataFrame, Message
 
 from lfx_snowflake.fastapi_live_bridge import LIVE_BRIDGE
 from lfx_snowflake.triggers_manager import (
+    active_trigger_run,
     COMPUTE_MODE_OPTIONS,
     STAGE_TRIGGER_ON_OPTIONS,
     STATUS_MODE_OPTIONS,
@@ -20,6 +21,14 @@ from lfx_snowflake.triggers_manager import (
     get_triggers_manager,
     resolve_trigger_flow_id,
 )
+from lfx_snowflake.flow_context_guard import flow_component_sql as _flow_component_sql
+from lfx_snowflake.flow_context_guard import register_component_object as _register_component_object
+
+
+def _flow_component_execute_sql(*args, **kwargs):
+    """BUG-CTX-03: this component's SQL is checked against the flow's `[ ❄️ Context ]`."""
+    with _flow_component_sql():
+        return LIVE_BRIDGE.execute_sql(*args, **kwargs)
 
 
 class SnowflakeStageFileTrigger(Component):
@@ -214,6 +223,13 @@ class SnowflakeStageFileTrigger(Component):
             timeout_ms=int(getattr(self, "timeout_ms", 3600000) or 3600000),
         )
         node_id = str(getattr(self, "_id", None) or getattr(self, "id", None) or "SnowflakeStageFileTrigger")
+        run = active_trigger_run(flow_id)
+        if run is not None:
+            # BUG-TRG-04: Snowflake fired this run, so the trigger already exists: never re-provision it,
+            # expose the incoming RUN_LANGFLOW_FLOW payload as this component's outputs instead.
+            files = run["payload"].get("files")
+            self._trigger_files = list(files) if isinstance(files, list) else []
+            return {**ddl_spec, "provision_result": {"ok": True, "skipped": "trigger_run"}, "trigger_payload": run["payload"]}
         prov = get_triggers_manager().provision_trigger(
             ddl_spec=ddl_spec,
             node_id=node_id,
@@ -233,7 +249,9 @@ class SnowflakeStageFileTrigger(Component):
         if isinstance(injected_files, list):
             return DataFrame(injected_files)
         limit = max(1, min(1000, int(getattr(self, "max_files_per_run", 50) or 50)))
-        res = LIVE_BRIDGE.execute_sql(f"SELECT * FROM {spec['stream_fqn']} LIMIT {limit}")
+        # PASSO3: the stream this trigger provisioned is usable by the flow when its schema is in context.
+        _register_component_object(spec["stream_fqn"], "streams")
+        res = _flow_component_execute_sql(f"SELECT * FROM {spec['stream_fqn']} LIMIT {limit}")
         return DataFrame(res.get("rows", []))
 
     def build_trigger_message(self) -> Message:

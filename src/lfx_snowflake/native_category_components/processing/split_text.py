@@ -9,6 +9,13 @@ from lfx.schema import Data, DataFrame
 from lfx.schema.message import Message
 
 from lfx_snowflake.fastapi_live_bridge import LIVE_BRIDGE
+from lfx_snowflake.flow_context_guard import flow_component_sql as _flow_component_sql
+
+
+def _flow_component_execute_sql(*args, **kwargs):
+    """BUG-CTX-03: this component's SQL is checked against the flow's `[ ❄️ Context ]`."""
+    with _flow_component_sql():
+        return LIVE_BRIDGE.execute_sql(*args, **kwargs)
 
 
 def _unescape_sep(separator: str) -> str:
@@ -229,7 +236,7 @@ class SplitTextComponent(Component):
         raise TypeError(f"Unsupported input type: {type(raw)}")
 
     def build_cortex_split_sql(self, text: str) -> str:
-        safe_text = str(text or "").replace("'", "''")
+        safe_text = str(text or "").replace("\\", "\\\\").replace("'", "''")
         fmt = str(getattr(self, "split_format", "markdown") or "markdown").strip().lower()
         if fmt not in ("none", "markdown"):
             fmt = "markdown"
@@ -237,7 +244,7 @@ class SplitTextComponent(Component):
         overlap = max(0, int(getattr(self, "chunk_overlap", 200) or 0))
         seps_raw = str(getattr(self, "separators_csv", "") or "").strip()
         if seps_raw:
-            parts = [_unescape_sep(p.strip()).replace("'", "''") for p in seps_raw.split(",") if p.strip()]
+            parts = [_unescape_sep(p.strip()).replace("\\", "\\\\").replace("'", "''") for p in seps_raw.split(",") if p.strip()]
             if parts:
                 arr_sql = "ARRAY_CONSTRUCT(" + ", ".join(f"'{p}'" for p in parts) + ")"
                 return (
@@ -269,7 +276,7 @@ class SplitTextComponent(Component):
         for doc_idx, (text, base_meta) in enumerate(items):
             sql_stmt = self.build_cortex_split_sql(text)
             self.last_sql = sql_stmt
-            res = LIVE_BRIDGE.execute_sql(sql_stmt)
+            res = _flow_component_execute_sql(sql_stmt)
             live_chunks: list[str] = []
             if isinstance(res, dict) and res.get("mode") != "offline" and isinstance(res.get("rows"), list):
                 for r in res["rows"]:

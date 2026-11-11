@@ -17,6 +17,7 @@ Implements:
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import os
@@ -25,6 +26,7 @@ import sqlite3
 import threading
 import time
 import uuid
+from contextvars import ContextVar
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from typing import Any
@@ -36,7 +38,22 @@ from lfx_snowflake.providers.registry import (
 )
 
 
-IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_$]{0,254}$")
+from lfx_snowflake.sql_safety import IDENTIFIER_RE  # noqa: E402  (shared grammar)
+# BUG-TRG-04: set for the duration of a Snowflake-initiated (`RUN_LANGFLOW_FLOW`) run of a flow.
+# `{"flow_id", "trigger_type", "payload"}`; trigger components read it instead of re-provisioning.
+CURRENT_TRIGGER_RUN: ContextVar[dict[str, Any] | None] = ContextVar("CURRENT_TRIGGER_RUN", default=None)
+
+
+def active_trigger_run(flow_id: str | None = None) -> dict[str, Any] | None:
+    """Return the incoming trigger run of `flow_id` (any flow when None), or None for editor/API runs."""
+    run = CURRENT_TRIGGER_RUN.get()
+    if not run:
+        return None
+    if flow_id and str(run.get("flow_id") or "").replace("-", "").lower() != str(flow_id).replace("-", "").lower():
+        return None
+    return run
+
+
 FLOW_ID_SAFE_RE = re.compile(r"^[A-Za-z0-9_\-]{1,128}$")
 FILE_PATTERN_SAFE_RE = re.compile(r"^[A-Za-z0-9_.*?\-/]{0,255}$")
 TIMEZONE_FORMAT_RE = re.compile(r"^[A-Za-z0-9_+/\-]{1,64}$")
@@ -196,7 +213,8 @@ def validate_cron_expression(cron_expr: str | None) -> str:
     raw = (cron_expr or "").strip()
     if not raw:
         raise ValueError("Cron expression cannot be empty.")
-    if any(bad in raw for bad in ("'", '"', ";", "--", "/*", "*/", "\n", "\r", "(", ")")):
+    # BUG-TRG-05: `*/n` steps are valid Snowflake cron; the value is confined to a quoted literal.
+    if any(bad in raw for bad in ("'", '"', ";", "--", "\\", "$", "\n", "\r", "(", ")")):
         raise ValueError(f"Invalid Cron expression {cron_expr!r}: contains forbidden characters.")
     parts = raw.split()
     if len(parts) != 5:
@@ -248,12 +266,16 @@ def build_schedule_clause(
     hr = max(0, min(23, int(at_hour if at_hour is not None else 9)))
     mn = max(0, min(59, int(at_minute if at_minute is not None else 0)))
 
-    if stype == "Minutes":
-        mins = max(1, min(11520, int(interval_value or 15)))
-        return f"{mins} MINUTE"
-    if stype == "Hours":
-        hrs = max(1, min(192, int(interval_value or 1)))
-        return f"{hrs * 60} MINUTE"
+    if stype in ("Minutes", "Hours"):
+        # BUG-TRG-06: no silent defaults; out-of-range intervals are validation errors.
+        limit = 11520 if stype == "Minutes" else 192
+        try:
+            n = int(interval_value)
+        except (TypeError, ValueError):
+            raise ValueError(f"Invalid interval_value {interval_value!r} for schedule type {stype!r}.") from None
+        if not 1 <= n <= limit:
+            raise ValueError(f"interval_value {n} out of range (1..{limit}) for schedule type {stype!r}.")
+        return f"{n} MINUTE" if stype == "Minutes" else f"{n * 60} MINUTE"
     if stype == "Days":
         cron = validate_cron_expression(f"{mn} {hr} * * *")
         return f"USING CRON {cron} {tz}"
@@ -266,6 +288,10 @@ def build_schedule_clause(
         cron = validate_cron_expression(f"{mn} {hr} {dom_clean} * *")
         return f"USING CRON {cron} {tz}"
 
+    if stype != "Custom (Cron)":
+        raise ValueError(
+            f"Unknown schedule_type {schedule_type!r}: expected one of Custom (Cron), Minutes, Hours, Days, Weeks, Months."
+        )
     cron = validate_cron_expression(cron_expression)
     return f"USING CRON {cron} {tz}"
 
@@ -427,18 +453,36 @@ def verify_trigger_rbac_privileges(
     }
 
 
+_TARGET_COMPLETION_INTERVAL_RE = re.compile(r"^([1-9]\d{0,3}) (MINUTE|MINUTES|HOUR|HOURS)$")
+
+
+def validate_target_completion_interval(value: str | None) -> str:
+    """Validate a triggered-task `TARGET_COMPLETION_INTERVAL` (e.g. `15 MINUTES`)."""
+    raw = re.sub(r"\s+", " ", (value or "15 MINUTES").strip().upper())
+    if not _TARGET_COMPLETION_INTERVAL_RE.match(raw):
+        raise ValueError(f"Invalid target_completion_interval {value!r}: expected '<n> MINUTES' or '<n> HOURS'.")
+    return raw
+
+
 def _build_compute_ddl_lines(
     compute_mode: str = "Serverless (Managed)",
     warehouse: str | None = None,
+    *,
+    triggered: bool = False,
+    target_completion_interval: str | None = None,
 ) -> list[str]:
     mode = (compute_mode or "Serverless (Managed)").strip()
     if mode == "Warehouse" and warehouse and str(warehouse).strip():
         wh = _quote_ident(str(warehouse).strip(), "warehouse")
         return [f"  WAREHOUSE = {wh}"]
-    return [
+    lines = [
         "  SERVERLESS_TASK_MIN_STATEMENT_SIZE = 'XSMALL'",
         "  SERVERLESS_TASK_MAX_STATEMENT_SIZE = 'SMALL'",
     ]
+    if triggered:
+        # BUG-TRG-03: serverless triggered tasks (WHEN, no WAREHOUSE) require TARGET_COMPLETION_INTERVAL.
+        lines.append(f"  TARGET_COMPLETION_INTERVAL = '{validate_target_completion_interval(target_completion_interval)}'")
+    return lines
 
 
 def build_schedule_trigger_ddl(
@@ -503,7 +547,8 @@ def build_schedule_trigger_ddl(
             "AS",
             "DECLARE",
             "  res VARIANT;",
-            "  STATEMENT_ERROR EXCEPTION (-20001, 'SnowflakeLangflow scheduled flow run failed');",
+            "  rv VARCHAR;",
+            "  LF_FLOW_RUN_FAILED EXCEPTION (-20001, 'SnowflakeLangflow scheduled flow run failed');",
             "BEGIN",
             "  res := SNOWFLAKE_LANGFLOW.CORE.RUN_LANGFLOW_FLOW(",
             f"    '{safe_flow_id}',",
@@ -516,9 +561,10 @@ def build_schedule_trigger_ddl(
             "    )",
             "  );",
             "  IF ( COALESCE(:res:status::VARCHAR, 'SUCCEEDED') = 'FAILED' ) THEN",
-            "    RAISE STATEMENT_ERROR;",
+            "    RAISE LF_FLOW_RUN_FAILED;",
             "  END IF;",
-            "  CALL SYSTEM$SET_RETURN_VALUE(TO_VARCHAR(:res));",
+            "  rv := TO_VARCHAR(res);",
+            "  CALL SYSTEM$SET_RETURN_VALUE(:rv);",
             "END;",
         ]
     )
@@ -564,6 +610,7 @@ def build_table_change_trigger_ddl(
     retry_attempts: int = 3,
     suspend_after_failures: int = 5,
     timeout_ms: int = 3600000,
+    target_completion_interval: str = "15 MINUTES",
 ) -> dict[str, Any]:
     """Generate governed Snowflake Stream + pure Triggered Task DDL for `SnowflakeTableChangeTrigger`."""
     safe_flow_id = validate_flow_id(flow_id)
@@ -592,7 +639,9 @@ def build_table_change_trigger_ddl(
     append_only = "TRUE" if "Insert" in (trigger_on or "New Rows Only (Insert)") and "All" not in (trigger_on or "") else "FALSE"
     initial_rows = "TRUE" if bool(show_initial_rows) else "FALSE"
     batch_limit = max(1, min(10000, int(max_batch_rows if max_batch_rows is not None else 100)))
-    compute_lines = _build_compute_ddl_lines(compute_mode, warehouse)
+    compute_lines = _build_compute_ddl_lines(
+        compute_mode, warehouse, triggered=True, target_completion_interval=target_completion_interval
+    )
     retries = max(0, min(30, int(retry_attempts if retry_attempts is not None else 3)))
     suspend_num = max(1, min(100, int(suspend_after_failures if suspend_after_failures is not None else 5)))
     timeout_val = max(1000, min(86400000, int(timeout_ms if timeout_ms is not None else 3600000)))
@@ -622,7 +671,8 @@ def build_table_change_trigger_ddl(
             "  batch_count INTEGER;",
             "  rows_payload VARIANT;",
             "  res VARIANT;",
-            "  STATEMENT_ERROR EXCEPTION (-20002, 'SnowflakeLangflow stream trigger run failed; rolling back stream offset');",
+            "  rv VARCHAR;",
+            "  LF_FLOW_RUN_FAILED EXCEPTION (-20002, 'SnowflakeLangflow stream trigger run failed; rolling back stream offset');",
             "BEGIN",
             f"  CREATE OR REPLACE TEMPORARY TABLE {temp_batch_fqn} AS",
             f"    SELECT * FROM {stream_fqn}",
@@ -645,9 +695,10 @@ def build_table_change_trigger_ddl(
             "      )",
             "    );",
             "    IF ( COALESCE(:res:status::VARCHAR, 'SUCCEEDED') = 'FAILED' ) THEN",
-            "      RAISE STATEMENT_ERROR;",
+            "      RAISE LF_FLOW_RUN_FAILED;",
             "    END IF;",
-            "    CALL SYSTEM$SET_RETURN_VALUE(TO_VARCHAR(:res));",
+            "    rv := TO_VARCHAR(res);",
+            "    CALL SYSTEM$SET_RETURN_VALUE(:rv);",
             "  END IF;",
             "END;",
         ]
@@ -697,6 +748,7 @@ def build_stage_file_trigger_ddl(
     retry_attempts: int = 3,
     suspend_after_failures: int = 5,
     timeout_ms: int = 3600000,
+    target_completion_interval: str = "15 MINUTES",
 ) -> dict[str, Any]:
     """Generate governed Directory Table + Stream on Stage + Triggered Task DDL for `SnowflakeStageFileTrigger`."""
     safe_flow_id = validate_flow_id(flow_id)
@@ -726,7 +778,9 @@ def build_stage_file_trigger_ddl(
     where_sql = f" WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
 
     batch_limit = max(1, min(5000, int(max_files_per_run if max_files_per_run is not None else 50)))
-    compute_lines = _build_compute_ddl_lines(compute_mode, warehouse)
+    compute_lines = _build_compute_ddl_lines(
+        compute_mode, warehouse, triggered=True, target_completion_interval=target_completion_interval
+    )
     retries = max(0, min(30, int(retry_attempts if retry_attempts is not None else 3)))
     suspend_num = max(1, min(100, int(suspend_after_failures if suspend_after_failures is not None else 5)))
     timeout_val = max(1000, min(86400000, int(timeout_ms if timeout_ms is not None else 3600000)))
@@ -755,7 +809,8 @@ def build_stage_file_trigger_ddl(
             "  file_count INTEGER;",
             "  files_payload VARIANT;",
             "  res VARIANT;",
-            "  STATEMENT_ERROR EXCEPTION (-20003, 'SnowflakeLangflow stage file trigger run failed; rolling back stream offset');",
+            "  rv VARCHAR;",
+            "  LF_FLOW_RUN_FAILED EXCEPTION (-20003, 'SnowflakeLangflow stage file trigger run failed; rolling back stream offset');",
             "BEGIN",
             f"  CREATE OR REPLACE TEMPORARY TABLE {temp_batch_fqn} AS",
             "    SELECT",
@@ -788,9 +843,10 @@ def build_stage_file_trigger_ddl(
             "      )",
             "    );",
             "    IF ( COALESCE(:res:status::VARCHAR, 'SUCCEEDED') = 'FAILED' ) THEN",
-            "      RAISE STATEMENT_ERROR;",
+            "      RAISE LF_FLOW_RUN_FAILED;",
             "    END IF;",
-            "    CALL SYSTEM$SET_RETURN_VALUE(TO_VARCHAR(:res));",
+            "    rv := TO_VARCHAR(res);",
+            "    CALL SYSTEM$SET_RETURN_VALUE(:rv);",
             "  END IF;",
             "END;",
         ]
@@ -902,7 +958,7 @@ def build_alert_trigger_ddl(
             "    alert_rows VARIANT;",
             "    row_cnt INTEGER;",
             "    res VARIANT;",
-            "    STATEMENT_ERROR EXCEPTION (-20004, 'SnowflakeLangflow condition alert flow run failed');",
+            "    LF_FLOW_RUN_FAILED EXCEPTION (-20004, 'SnowflakeLangflow condition alert flow run failed');",
             "  BEGIN",
             "    cond_qid := SNOWFLAKE.ALERT.GET_CONDITION_QUERY_UUID();",
             "    SELECT COUNT(*), COALESCE(ARRAY_AGG(OBJECT_CONSTRUCT(*)), ARRAY_CONSTRUCT())",
@@ -922,7 +978,7 @@ def build_alert_trigger_ddl(
             "      )",
             "    );",
             "    IF ( COALESCE(:res:status::VARCHAR, 'SUCCEEDED') = 'FAILED' ) THEN",
-            "      RAISE STATEMENT_ERROR;",
+            "      RAISE LF_FLOW_RUN_FAILED;",
             "    END IF;",
             "  END;",
         ]
@@ -975,7 +1031,7 @@ class RegisteredTriggerRecord:
     primary_object_fqn: str
     secondary_object_fqn: str | None = None
     source_object_fqn: str | None = None
-    active_role: str = "SNOWFLAKE_LANGFLOW_ADMIN_ROLE"
+    active_role: str = ""
     config: dict[str, Any] = field(default_factory=dict)
     ddl: str = ""
     updated_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
@@ -992,6 +1048,8 @@ class SnowflakeTriggersManager:
         self._sqlite_path = sqlite_path or os.environ.get("LANGFLOW_Triggers_DB_PATH") or "/persist/langflow.db"
         self._triggers_by_id: dict[str, RegisteredTriggerRecord] = {}
         self._idempotency_ledger: dict[str, dict[str, Any]] = {}
+        # BUG-TRG-04: injectable async runner `(flow_id=, trigger_payload=, run_id=) -> dict`; None = native Langflow.
+        self.native_flow_runner: Any = None
         self._init_sqlite_tables()
         self._load_sqlite_registry()
 
@@ -1219,9 +1277,16 @@ class SnowflakeTriggersManager:
         2. Pure Status toggle (`Active` <-> `Paused` on identical definition): executes `ALTER TASK/ALERT <fqn> RESUME/SUSPEND;` preserving history.
         3. In-place parameter update on existing Task/Alert: prepends `ALTER TASK/ALERT IF EXISTS <fqn> SUSPEND;` (and `ALTER TASK <fqn> SET SCHEDULE = ...` when schedule changed) before applying changes and `RESUME`/`SUSPEND`.
         """
-        active_role = (
-            getattr(bridge, "active_role", None) if bridge is not None else None
-        ) or "SNOWFLAKE_LANGFLOW_ADMIN_ROLE"
+        # BUG-TRG-04: the creating role is persisted on the trigger and pins its unattended runs.
+        active_role = str((getattr(bridge, "active_role", None) if bridge is not None else None) or "").strip().upper()
+        if not active_role:
+            raise SnowflakeProviderError(
+                ERROR_AUTHZ_ROLE_DENIED,
+                "No active Snowflake role: a trigger cannot be provisioned without the role its runs will use.",
+                active_role="",
+                operation="CREATE_TRIGGER",
+                status_code=403,
+            )
         comp = ddl_spec.get("trigger_component", "")
         if comp == "SnowflakeScheduleTrigger":
             kind = "SCHEDULE"
@@ -1579,7 +1644,7 @@ class SnowflakeTriggersManager:
                     schedule_type=str(vals.get("schedule_type") or "Custom (Cron)"),
                     cron_expression=str(vals.get("cron_expression") or "0 9 * * 1-5"),
                     timezone_name=str(vals.get("timezone") or "Europe/Rome"),
-                    interval_value=int(vals.get("interval_value") or 15),
+                    interval_value=vals.get("interval_value", 15),  # BUG-TRG-06: 0/None raise, never coerced
                     days_of_week=str(vals.get("days_of_week") or "MON,TUE,WED,THU,FRI"),
                     day_of_month=str(vals.get("day_of_month") or "1"),
                     at_hour=int(vals.get("at_hour") if vals.get("at_hour") is not None else 9),
@@ -1696,7 +1761,7 @@ class SnowflakeTriggersManager:
 
         auto_paused: list[dict[str, Any]] = []
         statements: list[str] = []
-        active_role = str(getattr(bridge, "active_role", "SNOWFLAKE_LANGFLOW_ADMIN_ROLE") or "SNOWFLAKE_LANGFLOW_ADMIN_ROLE").upper()
+        active_role = str(getattr(bridge, "active_role", "") or "").upper()
         role_is_readonly = active_role == "PUBLIC" or "VIEWER" in active_role or "READONLY" in active_role
 
         for rec in candidates:
@@ -1934,7 +1999,7 @@ class SnowflakeTriggersManager:
                     schedule_type=str(vals.get("schedule_type") or "Custom (Cron)"),
                     cron_expression=str(vals.get("cron_expression") or "0 9 * * 1-5"),
                     timezone_name=str(vals.get("timezone") or "Europe/Rome"),
-                    interval_value=int(vals.get("interval_value") or 15),
+                    interval_value=vals.get("interval_value", 15),  # BUG-TRG-06: 0/None raise, never coerced
                     days_of_week=str(vals.get("days_of_week") or "MON,TUE,WED,THU,FRI"),
                     day_of_month=str(vals.get("day_of_month") or "1"),
                     at_hour=int(vals.get("at_hour") if vals.get("at_hour") is not None else 9),
@@ -2047,6 +2112,7 @@ class SnowflakeTriggersManager:
         batch_body: dict[str, Any],
         *,
         bridge: Any = None,
+        main_loop: asyncio.AbstractEventLoop | None = None,
     ) -> dict[str, Any]:
         """Handle SPCS Service Function batch request `{"data": [[row_idx, flow_id, trigger_payload], ...]}`."""
         rows = batch_body.get("data") if isinstance(batch_body, dict) else None
@@ -2074,10 +2140,64 @@ class SnowflakeTriggersManager:
                 flow_id=raw_flow_id,
                 trigger_payload=payload,
                 bridge=bridge,
+                main_loop=main_loop,
             )
             out_rows.append([row_idx, result_obj])
 
         return {"data": out_rows}
+
+    def _persisted_trigger_role(self, safe_fid: str, trigger_payload: dict[str, Any]) -> str | None:
+        """Role stored on the flow's registered trigger: the one named by the task/alert, else the newest."""
+        records = [r for r in self.list_triggers(safe_fid) if str(r.get("active_role") or "").strip()]
+        if not records:
+            return None
+        origin = str(trigger_payload.get("task_name") or trigger_payload.get("alert_name") or "").strip().upper()
+        if origin:
+            short = origin.split(".")[-1].strip('"')
+            for rec in records:
+                fqn = str(rec.get("primary_object_fqn") or "").upper()
+                if fqn.split(".")[-1].strip('"') == short:
+                    return str(rec["active_role"]).strip().upper()
+        newest = max(records, key=lambda r: str(r.get("updated_at") or ""))
+        return str(newest["active_role"]).strip().upper()
+
+    def _run_flow_in_scope(
+        self,
+        safe_fid: str,
+        trigger_payload: dict[str, Any],
+        run_id: str,
+        main_loop: asyncio.AbstractEventLoop | None,
+        run_role: str | None = None,
+        trigger_type: str = "SCHEDULED_RUN",
+    ) -> dict[str, Any]:
+        """BUG-TRG-04: run the flow with the native Langflow runner as code of `safe_fid`.
+
+        The run task is created through `flow_context_guard.run_in_flow_scope`, so it inherits
+        `CURRENT_SNOWFLAKE_FLOW_ID` (role + `[ ❄️ Context ]` of that flow). Inside the run only the
+        component SQL wrappers mark statements for context checks, exactly as in an interactive run.
+        """
+        from lfx_snowflake.flow_context_guard import FLOW_COMPONENT_SQL, run_in_flow_scope  # noqa: PLC0415
+
+        runner = self.native_flow_runner or _native_langflow_run
+        timeout_s = float(os.getenv("LANGFLOW_TRIGGER_RUN_TIMEOUT_S", "900") or 900)
+
+        async def _body() -> dict[str, Any]:
+            FLOW_COMPONENT_SQL.set(False)
+            CURRENT_TRIGGER_RUN.set({"flow_id": safe_fid, "trigger_type": trigger_type, "payload": dict(trigger_payload)})
+            if run_role:
+                from lfx_snowflake.fastapi_live_bridge import TRIGGER_RUN_ROLE  # noqa: PLC0415
+
+                TRIGGER_RUN_ROLE.set(run_role)
+            return await runner(flow_id=safe_fid, trigger_payload=trigger_payload, run_id=run_id)
+
+        async def _scoped() -> dict[str, Any]:
+            task = run_in_flow_scope(safe_fid, asyncio.get_running_loop().create_task, _body())
+            return await asyncio.wait_for(task, timeout_s)
+
+        if main_loop is not None and main_loop.is_running():
+            # Langflow's DB engine and services live on the server loop; never start a second loop for them.
+            return asyncio.run_coroutine_threadsafe(_scoped(), main_loop).result(timeout_s + 5)
+        return asyncio.run(_scoped())
 
     def _execute_single_trigger_invocation(
         self,
@@ -2085,6 +2205,7 @@ class SnowflakeTriggersManager:
         flow_id: str,
         trigger_payload: dict[str, Any],
         bridge: Any = None,
+        main_loop: asyncio.AbstractEventLoop | None = None,
     ) -> dict[str, Any]:
         t0 = time.perf_counter()
         safe_fid = validate_flow_id(flow_id)
@@ -2106,15 +2227,15 @@ class SnowflakeTriggersManager:
                     dup["deduplicated"] = True
                     return dup
 
-        run_id = f"trg_run_{uuid.uuid4().hex[:16]}"
+        run_id = str(uuid.uuid4())
         trace_id = f"trg_trace_{uuid.uuid4().hex[:16]}"
-        simulate_fail = bool(trigger_payload.get("simulate_failure") or trigger_payload.get("force_error"))
-        status = "FAILED" if simulate_fail else "SUCCEEDED"
-        error_msg = str(trigger_payload.get("error_message") or "Simulated trigger execution failure") if simulate_fail else None
-
-        flow_ctx: dict[str, Any] = {}
-        active_role = "SNOWFLAKE_LANGFLOW_ADMIN_ROLE"
-        warehouse = "COMPUTE_WH"
+        status = "FAILED"
+        error_code: str | None = None
+        error_msg: str | None = None
+        output_text: str | None = None
+        session_id: str | None = None
+        active_role: str | None = None
+        warehouse: str | None = None
         ctx_token = None
         try:
             from lfx_snowflake.fastapi_live_bridge import CURRENT_SNOWFLAKE_FLOW_ID  # noqa: PLC0415
@@ -2124,21 +2245,43 @@ class SnowflakeTriggersManager:
             ctx_token = None
 
         try:
+            # BUG-TRG-04: unattended runs use the role persisted on the flow's trigger at creation time,
+            # never the caller/service role; no registered trigger -> refuse (fail-closed).
+            active_role = self._persisted_trigger_role(safe_fid, trigger_payload)
             if bridge is not None:
-                if hasattr(bridge, "set_active_flow"):
-                    flow_ctx = dict(bridge.set_active_flow(safe_fid) or {})
-                elif hasattr(bridge, "set_current_flow_id"):
-                    bridge.set_current_flow_id(safe_fid)
-                if not flow_ctx and hasattr(bridge, "get_flow_context"):
-                    flow_ctx = dict(bridge.get_flow_context(safe_fid) or {})
-                active_role = str(flow_ctx.get("active_role") or getattr(bridge, "active_role", active_role))
-                warehouse = str(flow_ctx.get("warehouse") or getattr(bridge, "warehouse", warehouse))
+                flow_ctx: dict[str, Any] = {}
+                if hasattr(bridge, "get_flow_context"):
+                    flow_ctx = dict(bridge.get_flow_context(safe_fid, create=False) or {})
+                warehouse = str(flow_ctx.get("warehouse") or getattr(bridge, "warehouse", "") or "").strip() or None
+            if not active_role:
+                error_code = ERROR_AUTHZ_ROLE_DENIED
+                error_msg = f"No trigger with a persisted Snowflake role is registered for flow {safe_fid}; run refused (fail-closed)."
+            else:
+                try:
+                    outcome = self._run_flow_in_scope(
+                        safe_fid, trigger_payload, run_id, main_loop, run_role=active_role, trigger_type=trigger_type
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    error_code = "FLOW_RUN_FAILED"
+                    error_msg = f"{type(exc).__name__}: {exc}"[:2000]
+                else:
+                    if not outcome.get("found", True):
+                        error_code = "FLOW_NOT_FOUND"
+                        error_msg = f"Flow {safe_fid} does not exist."
+                    elif outcome.get("error"):
+                        error_code = "FLOW_RUN_FAILED"
+                        error_msg = str(outcome["error"])[:2000]
+                    else:
+                        status = "SUCCEEDED"
+                        output_text = outcome.get("output_text")
+                        session_id = outcome.get("session_id")
+                        run_id = str(outcome.get("run_id") or run_id)
 
-            duration_ms = round(max(1.0, (time.perf_counter() - t0) * 1000.0), 2)
+            duration_ms = round((time.perf_counter() - t0) * 1000.0, 2)
             summary = (
-                f"{trigger_type} for flow {safe_fid}: {error_msg}"
-                if simulate_fail
-                else f"{trigger_type} completed for flow {safe_fid}"
+                f"{trigger_type} completed for flow {safe_fid}"
+                if status == "SUCCEEDED"
+                else f"{trigger_type} for flow {safe_fid}: {error_msg}"
             )
 
             result_dict: dict[str, Any] = {
@@ -2154,10 +2297,22 @@ class SnowflakeTriggersManager:
                 "warehouse": warehouse,
                 "duration_ms": duration_ms,
                 "summary": summary,
+                "session_id": session_id,
+                "output_text": output_text,
+                "error_code": error_code,
                 "error_message": error_msg,
             }
+            if error_code == "FLOW_NOT_FOUND":
+                result_dict["status_code"] = 404
+            elif error_code == ERROR_AUTHZ_ROLE_DENIED:
+                result_dict["status_code"] = 403
 
-            if bridge is not None and hasattr(bridge, "record_trigger_execution_telemetry"):
+            # Unknown or unregistered flows leave no telemetry rows (no phantom runs/activity for arbitrary ids).
+            if (
+                bridge is not None
+                and hasattr(bridge, "record_trigger_execution_telemetry")
+                and error_code not in ("FLOW_NOT_FOUND", ERROR_AUTHZ_ROLE_DENIED)
+            ):
                 bridge.record_trigger_execution_telemetry(
                     flow_id=safe_fid,
                     run_id=run_id,
@@ -2167,7 +2322,7 @@ class SnowflakeTriggersManager:
                     duration_ms=duration_ms,
                     trigger_payload=trigger_payload,
                     result_payload=result_dict,
-                    active_role=active_role,
+                    active_role=active_role or "",
                     error_message=error_msg,
                 )
         finally:
@@ -2210,6 +2365,69 @@ class SnowflakeTriggersManager:
 
         return result_dict
 
+
+
+def _first_output_text(run_response: Any) -> str | None:
+    """Best-effort text of the first output message of a Langflow `RunResponse` (for `TASK_HISTORY`)."""
+    for run_output in getattr(run_response, "outputs", None) or []:
+        for result in getattr(run_output, "outputs", None) or []:
+            for msg in (getattr(result, "messages", None) or []):
+                text = getattr(msg, "message", None)
+                if text:
+                    return str(text)[:2000]
+            results = getattr(result, "results", None)
+            if isinstance(results, dict):
+                for val in results.values():
+                    text = getattr(val, "text", None) or (val.get("text") if isinstance(val, dict) else None)
+                    if text:
+                        return str(text)[:2000]
+    return None
+
+
+async def _native_langflow_run(*, flow_id: str, trigger_payload: dict[str, Any], run_id: str) -> dict[str, Any]:
+    """BUG-TRG-04: execute a stored flow through Langflow's own `/api/v1/run` engine (`simple_run_flow`).
+
+    Runs unattended as the flow owner (`FAMILY_WEBHOOK`, the native identity for published-flow
+    triggers). The trigger payload is the run's chat input. Returns ``{"found": False}`` when the
+    flow does not exist; any engine failure propagates to the caller as an exception.
+    """
+    from langflow.api.utils.execution_principal import FAMILY_WEBHOOK  # noqa: PLC0415
+    from langflow.api.v1.endpoints import simple_run_flow  # noqa: PLC0415
+    from langflow.api.v1.schemas import SimplifiedAPIRequest  # noqa: PLC0415
+    from langflow.services.database.models.flow.model import Flow  # noqa: PLC0415
+    from langflow.services.database.models.user.model import User  # noqa: PLC0415
+    from langflow.services.deps import session_scope  # noqa: PLC0415
+
+    try:
+        flow_uuid = uuid.UUID(flow_id)
+    except ValueError:
+        return {"found": False}
+    async with session_scope() as session:
+        flow = await session.get(Flow, flow_uuid)
+        if flow is None:
+            return {"found": False}
+        owner = await session.get(User, flow.user_id) if flow.user_id else None
+        input_request = SimplifiedAPIRequest(
+            input_value=json.dumps(trigger_payload, default=str),
+            input_type="chat",
+            output_type="chat",
+            tweaks={},
+            session_id=None,
+        )
+        response = await simple_run_flow(
+            flow=flow,
+            input_request=input_request,
+            api_key_user=owner,
+            run_id=run_id,
+            execution_family=FAMILY_WEBHOOK,
+            interactive=False,
+        )
+    return {
+        "found": True,
+        "run_id": run_id,
+        "session_id": getattr(response, "session_id", None),
+        "output_text": _first_output_text(response),
+    }
 
 def resolve_trigger_flow_id(component: Any = None, build_config: dict[str, Any] | None = None, bridge: Any = None) -> str:
     """Resolve the active Langflow `flow_id` for a Trigger component."""

@@ -40,6 +40,69 @@ from .files_and_stage import (
 FORBIDDEN_CREDENTIAL_MARKERS = ("bearer eyj", "password=", "secret=", "private_key=", "aws_secret")
 
 
+
+def _resolve_a2a_role(
+    caller_effective_role: str | None,
+    session_role: str | None,
+    service_role: str | None = None,
+) -> str:
+    """BUG-A2A-02: resolve the A2A execution role without any hard-coded fallback.
+
+    Precedence: explicit caller role > the user's verified session role (privileged roles allowed: they were
+    grant-checked at switch time) > service base role. A privileged service base role, an invalid identifier,
+    or no role at all (outside caller's rights) raises 403 AUTHZ_ROLE_DENIED.
+    """
+    from lfx_snowflake import identity as _sf_identity  # noqa: PLC0415
+
+    def _deny(role: str | None) -> SnowflakeComponentError:
+        return SnowflakeComponentError(
+            ErrorCode.AUTHZ_ROLE_DENIED,
+            "A2A invocation requires an authorized Snowflake role; nothing was executed.",
+            http_status=403,
+            role=role or None,
+        )
+
+    for candidate in (caller_effective_role, session_role):
+        if candidate and str(candidate).strip():
+            valid = _sf_identity.validate_role_identifier(candidate)
+            if valid is None:
+                raise _deny(None)
+            return valid
+    fallback = (service_role or "").strip()
+    if fallback:
+        valid = _sf_identity.validate_role_identifier(fallback)
+        if valid is None or valid in _sf_identity.PRIVILEGED_ROLES:
+            raise _deny(valid)
+        return valid
+    if _sf_identity.callers_rights_enabled():
+        return ""
+    raise _deny(None)
+
+
+def resolve_a2a_session_role(caller_effective_role: str | None = None) -> str:
+    """Resolve the A2A role for the current request (also used by the installer-injected A2A component)."""
+    from lfx_snowflake.fastapi_live_bridge import LIVE_BRIDGE  # noqa: PLC0415
+
+    return _resolve_a2a_role(
+        caller_effective_role,
+        LIVE_BRIDGE.current_session_role(),
+        LIVE_BRIDGE.service_active_role,
+    )
+
+
+
+def _taxonomy_code(raw: Any) -> ErrorCode:
+    """Map a bridge error code onto the 4-code component taxonomy (BUG-A2A-03).
+
+    Bridge-only codes such as ``AUTHZ_OBJECT_NOT_IN_FLOW_CONTEXT`` are authorization failures; the
+    original code travels in ``SnowflakeComponentError.details["error_code"]``.
+    """
+    text = str(raw or "").strip()
+    try:
+        return ErrorCode(text)
+    except ValueError:
+        return ErrorCode.AUTHZ_ROLE_DENIED if text.startswith("AUTHZ_") else ErrorCode.TECHNICAL_EXECUTION_ERROR
+
 class A2APublicationStatus(str, Enum):
     UNAVAILABLE = "Unavailable"
     SAVED_NOT_PUBLISHED = "Saved (Not Published)"
@@ -604,6 +667,31 @@ class SnowflakeA2AAgentComponent:
                     qf_map[f"[Langflow Flow] {c_name} -> {url_val}"] = url_val
         return qf_map
 
+    def _next_hop(
+        self,
+        target: str,
+        *,
+        flow_id: str | None,
+        call_chain: tuple[str, ...],
+        max_depth: int | None,
+        role: str | None,
+    ) -> tuple[tuple[str, ...], tuple[str, ...], int]:
+        """BUG-A2A-01: (base_chain, next_chain, depth) merging in-process/inbound chain + caller flow; blocks cycles."""
+        from lfx_snowflake import a2a_call_chain as _chain
+
+        depth = _chain.effective_max_depth(max_depth if max_depth is not None else self.max_depth)
+        base = _chain.merge_chains(_chain.inbound_call_chain(), call_chain, (flow_id,) if flow_id else ())
+        try:
+            return base, _chain.extend_call_chain(base, target, depth), depth
+        except _chain.A2ARecursionError as exc:
+            raise SnowflakeComponentError(
+                ErrorCode.TECHNICAL_EXECUTION_ERROR,
+                f"A2A recursion loop or max_depth={exc.max_depth} exceeded: {' -> '.join((*exc.chain, exc.target))}",
+                http_status=400,
+                role=role,
+                details={"error_code": "A2A_RECURSION_BLOCKED", "call_chain": list(exc.chain)},
+            ) from exc
+
     def invoke_internal(
         self,
         *,
@@ -620,7 +708,7 @@ class SnowflakeA2AAgentComponent:
         import re as _re
         from lfx_snowflake.fastapi_live_bridge import LIVE_BRIDGE
 
-        eff_role = (caller_effective_role or LIVE_BRIDGE.active_role or "ACCOUNTADMIN").strip()
+        eff_role = resolve_a2a_session_role(caller_effective_role)
         sel = (selected_agent or "").strip()
         if not sel:
             raise SnowflakeComponentError(
@@ -641,6 +729,7 @@ class SnowflakeA2AAgentComponent:
                     role=eff_role,
                 )
             db, sch, ag_name = parts[0], parts[1], parts[2]
+            self._next_hop(f"{db}.{sch}.{ag_name}", flow_id=flow_id, call_chain=call_chain, max_depth=max_depth, role=eff_role)
             if self.cortex_adapter is not None:
                 self.cortex_adapter.active_role = eff_role
                 return self.cortex_adapter.run_saved_cortex_agent(
@@ -662,31 +751,28 @@ class SnowflakeA2AAgentComponent:
             )
             if not res.get("ok", True):
                 raise SnowflakeComponentError(
-                    ErrorCode(res.get("error_code") or ErrorCode.TECHNICAL_EXECUTION_ERROR.value),
+                    _taxonomy_code(res.get("error_code")),
                     str(res.get("message") or "Cortex Agent invocation failed"),
                     http_status=int(res.get("status_code") or 502),
                     role=eff_role,
+                    details={"error_code": res.get("error_code")},
                 )
             return res
 
         # Otherwise: [Langflow Flow] <Flow Name> (<flow_id>)
         m_fid = _re.search(r"\(([^()]+)\)\s*$", sel)
         target_fid = m_fid.group(1).strip() if m_fid else (flow_id or sel.replace("[Langflow Flow]", "").strip())
-        depth_limit = int(max_depth if max_depth is not None else self.max_depth)
-        if target_fid in call_chain or len(call_chain) >= depth_limit:
-            raise SnowflakeComponentError(
-                ErrorCode.TECHNICAL_EXECUTION_ERROR,
-                f"A2A recursion loop or max_depth={depth_limit} exceeded: {' -> '.join((*call_chain, target_fid))}",
-                http_status=400,
-                role=eff_role,
-            )
+        base_chain, next_chain, _depth = self._next_hop(
+            # flow_id is the caller unless it was only used as the target fallback (no "(<id>)" in the selector).
+            target_fid, flow_id=flow_id if m_fid else None, call_chain=call_chain, max_depth=max_depth, role=eff_role
+        )
         if self.a2a_registry is not None and target_fid in self.a2a_registry.flows:
             return self.a2a_registry.invoke_published_flow(
                 flow_id=target_fid,
                 message=message,
                 caller_authenticated=caller_authenticated,
                 caller_effective_role=eff_role,
-                call_chain=call_chain,
+                call_chain=base_chain,
                 session_id=session_id or "sess-default",
             )
         return {
@@ -694,7 +780,7 @@ class SnowflakeA2AAgentComponent:
             "target_type": A2ATargetType.INTERNAL_A2A_FLOW.value,
             "flow_id": target_fid,
             "effective_role": eff_role,
-            "call_chain": list((*call_chain, target_fid)),
+            "call_chain": list(next_chain),
             "response": {"text": f"[A2A:{target_fid}] Processed by role {eff_role}: {message}"},
         }
 
@@ -706,12 +792,14 @@ class SnowflakeA2AAgentComponent:
         caller_effective_role: str | None = None,
         flow_id: str | None = None,
         session_id: str | None = None,
+        call_chain: tuple[str, ...] = (),
+        max_depth: int | None = None,
     ) -> dict[str, Any]:
         """Invoke an External A2A endpoint or direct Snowflake Cortex Agent REST `:run` URL (`MA-W2-R6-05`)."""
         import re as _re
         from lfx_snowflake.fastapi_live_bridge import LIVE_BRIDGE
 
-        eff_role = (caller_effective_role or LIVE_BRIDGE.active_role or "ACCOUNTADMIN").strip()
+        eff_role = resolve_a2a_session_role(caller_effective_role)
         raw_url = (agent_url or "").strip()
         if "->" in raw_url:
             raw_url = raw_url.split("->", 1)[1].strip()
@@ -724,6 +812,7 @@ class SnowflakeA2AAgentComponent:
         )
         if m_run:
             db, sch, ag_name = m_run.group(1), m_run.group(2), m_run.group(3)
+            self._next_hop(f"{db}.{sch}.{ag_name}", flow_id=flow_id, call_chain=call_chain, max_depth=max_depth, role=eff_role)
             res = LIVE_BRIDGE.invoke_cortex_agent(
                 database=db,
                 schema=sch,
@@ -736,10 +825,11 @@ class SnowflakeA2AAgentComponent:
             )
             if not res.get("ok", True):
                 raise SnowflakeComponentError(
-                    ErrorCode(res.get("error_code") or ErrorCode.TECHNICAL_EXECUTION_ERROR.value),
+                    _taxonomy_code(res.get("error_code")),
                     str(res.get("message") or "Cortex Agent REST :run invocation failed"),
                     http_status=int(res.get("status_code") or 502),
                     role=eff_role,
+                    details={"error_code": res.get("error_code")},
                 )
             return res
 
@@ -750,7 +840,12 @@ class SnowflakeA2AAgentComponent:
             flags=_re.IGNORECASE,
         )
         if m_bridge:
+            from lfx_snowflake import a2a_call_chain as _chain
+
             db, sch, ag_name = m_bridge.group(1), m_bridge.group(2), m_bridge.group(3)
+            base_chain, _next, depth = self._next_hop(
+                f"{db}.{sch}.{ag_name}", flow_id=flow_id, call_chain=call_chain, max_depth=max_depth, role=eff_role
+            )
             rpc_resp = LIVE_BRIDGE.handle_cortex_agent_a2a_jsonrpc(
                 db,
                 sch,
@@ -764,18 +859,23 @@ class SnowflakeA2AAgentComponent:
                             "role": "user",
                             "contextId": session_id or "",
                             "parts": [{"kind": "text", "text": message}],
-                        }
+                        },
+                        "metadata": _chain.outbound_metadata(base_chain, depth),
                     },
                 },
                 flow_id=flow_id,
                 role=eff_role,
             )
             if "error" in rpc_resp:
+                err = rpc_resp["error"] if isinstance(rpc_resp["error"], dict) else {}
+                err_data = err.get("data") if isinstance(err.get("data"), dict) else {}
+                err_code = str(err_data.get("error_code") or "")
                 raise SnowflakeComponentError(
-                    ErrorCode.AUTHZ_ROLE_DENIED if rpc_resp["error"].get("code") == -32001 else ErrorCode.TECHNICAL_EXECUTION_ERROR,
-                    str(rpc_resp["error"].get("message") or "A2A JSON-RPC error"),
-                    http_status=403 if rpc_resp["error"].get("code") == -32001 else 502,
+                    _taxonomy_code(err_code) if err_code else ErrorCode.TECHNICAL_EXECUTION_ERROR,
+                    str(err.get("message") or "A2A JSON-RPC error"),
+                    http_status=int(err_data.get("status_code") or 502),
                     role=eff_role,
+                    details={"error_code": err_code or None, "jsonrpc_code": err.get("code")},
                 )
             task_res = rpc_resp.get("result") or {}
             msg_parts = ((task_res.get("status") or {}).get("message") or {}).get("parts") or []
@@ -794,12 +894,16 @@ class SnowflakeA2AAgentComponent:
         m_flow = _re.search(r"/api/v1/a2a/(?:flows/)?([^/?#]+)", raw_url)
         if m_flow:
             target_fid = m_flow.group(1).strip()
+            base_chain, _next, _depth = self._next_hop(
+                target_fid, flow_id=flow_id, call_chain=call_chain, max_depth=max_depth, role=eff_role
+            )
             if self.a2a_registry is not None and target_fid in self.a2a_registry.flows:
                 return self.a2a_registry.invoke_published_flow(
                     flow_id=target_fid,
                     message=message,
                     caller_authenticated=True,
                     caller_effective_role=eff_role,
+                    call_chain=base_chain,
                     session_id=session_id or "sess-default",
                 )
             return {
@@ -853,6 +957,7 @@ class SnowflakeA2AAgentComponent:
                 caller_effective_role=caller_effective_role,
                 flow_id=flow_id,
                 session_id=thread_id,
+                call_chain=call_chain,
             )
 
         t_type = target_type if isinstance(target_type, A2ATargetType) else A2ATargetType(str(target_type))

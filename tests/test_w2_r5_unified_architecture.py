@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from _test_fake_embed import FakeAIEmbedBridge
+
 import asyncio
 import inspect
 import re
@@ -115,7 +117,7 @@ def _make_client() -> Any:
             return self._json_body
 
     class _StubAPIRouter:
-        def __init__(self, prefix: str = "", tags: list[str] | None = None) -> None:
+        def __init__(self, prefix: str = "", tags: list[str] | None = None, **_kwargs: Any) -> None:
             self.prefix = prefix.rstrip("/")
             self.tags = tags or []
             self.routes: list[tuple[str, str, Any]] = []
@@ -234,6 +236,8 @@ def _make_client() -> Any:
     fastapi_mod = types.ModuleType("fastapi")
     fastapi_mod.APIRouter = _StubAPIRouter  # type: ignore[attr-defined]
     fastapi_mod.Request = _StubRequest  # type: ignore[attr-defined]
+    fastapi_mod.Depends = lambda dependency=None: dependency  # type: ignore[attr-defined]
+    fastapi_mod.HTTPException = type("HTTPException", (Exception,), {})  # type: ignore[attr-defined]
     fastapi_resp_mod = types.ModuleType("fastapi.responses")
     fastapi_resp_mod.JSONResponse = _StubJSONResponse  # type: ignore[attr-defined]
     sys.modules["fastapi"] = fastapi_mod
@@ -409,11 +413,11 @@ def test_w2_r5_02_unified_memories_native_create_and_snowflake_vector_store_back
             "chunk_overlap": 200,
         },
     )
-    # W3-R1-01/05: without a Snowflake token the CREATE TABLE is not executed -> fail closed, nothing registered
-    assert resp.status_code == 501
+    # BUG-MEM-MB-01: no explicit flow_id -> fail closed before any DDL, nothing registered
+    assert resp.status_code == 422
     payload = resp.json()
     assert payload["ok"] is False
-    assert payload["error_code"] == "NOT_CONFIGURED"
+    assert payload["error_code"] == "MISSING_FLOW_ID"
 
     list_resp = client.get("/api/v1/memories")
     assert list_resp.status_code == 200
@@ -421,7 +425,7 @@ def test_w2_r5_02_unified_memories_native_create_and_snowflake_vector_store_back
     assert not any(it["name"] == "W2_R5_NATIVE_CREATED_MEM" for it in items)
 
 
-def test_w2_r5_03_multi_memory_wiring_on_message_history_and_agent_tools() -> None:
+def test_w2_r5_03_multi_memory_wiring_on_message_history_and_agent_tools(monkeypatch) -> None:
     """Verify W2-R5-03: Multi-Memory fan-in/fan-out on Message History (is_list=True) and Tool Mode for Agent."""
     mh_inputs = {inp.name: inp for inp in SnowflakeMessageHistoryNativeComponent.inputs}
     assert "memory" in mh_inputs
@@ -445,6 +449,7 @@ def test_w2_r5_03_multi_memory_wiring_on_message_history_and_agent_tools() -> No
         mode="Store",
         memory=[adapter_conv, adapter_win],
         session_id="multi-mem-sess-001",
+        project_id="flow-multi-mem",
         user_id="analyst_multi",
         sender="User",
         sender_name="Analyst",
@@ -461,9 +466,14 @@ def test_w2_r5_03_multi_memory_wiring_on_message_history_and_agent_tools() -> No
         mode="Retrieve",
         memory=[adapter_conv, adapter_win],
         session_id="multi-mem-sess-001",
+        project_id="flow-multi-mem",
         user_id="analyst_multi",
         window_k=10,
     )
+    import lfx_snowflake.native_category_components.models_and_agents.snowflake_message_history as _mh_mod
+    from _test_fake_messages import FakeGovernedMessagesBridge
+
+    monkeypatch.setattr(_mh_mod, "LIVE_BRIDGE", FakeGovernedMessagesBridge(_mh_mod.LIVE_BRIDGE))
     ret_data = mh_retrieve.retrieve_history_table().data
     assert ret_data["external_memory_count"] == 2
     texts = [m.get("text") or m.get("content") for m in ret_data["messages"]]
@@ -483,8 +493,8 @@ def test_w2_r5_03_multi_memory_wiring_on_message_history_and_agent_tools() -> No
     assert any("mem_5_structured_entity" in n for n in tool_names)
 
 
-def test_w2_r5_04_snowflake_cortex_embeddings_and_split_text_component() -> None:
-    """Verify W2-R5-04: 6 official SNOWFLAKE.CORTEX.AI_EMBED models and SplitTextComponent with SPLIT_TEXT_RECURSIVE_CHARACTER."""
+def test_w2_r5_04_snowflake_cortex_embeddings_and_split_text_component(monkeypatch) -> None:
+    """Verify W2-R5-04: 8 official SNOWFLAKE.CORTEX.AI_EMBED models and SplitTextComponent with SPLIT_TEXT_RECURSIVE_CHARACTER."""
     expected_models = {
         "snowflake-arctic-embed-m-v1.5": 768,
         "snowflake-arctic-embed-m": 768,
@@ -492,13 +502,15 @@ def test_w2_r5_04_snowflake_cortex_embeddings_and_split_text_component() -> None
         "snowflake-arctic-embed-l-v2.0": 1024,
         "voyage-multilingual-2": 1024,
         "nv-embed-qa-4": 1024,
+        "snowflake-arctic-embed-l-v2.0-8k": 1024,
+        "multilingual-e5-large": 1024,
     }
     assert set(OFFICIAL_SNOWFLAKE_AI_EMBED_MODEL_IDS) == set(expected_models.keys())
     assert OFFICIAL_SNOWFLAKE_CORTEX_AI_EMBED_MODELS == expected_models
-    assert len(OFFICIAL_SNOWFLAKE_AI_EMBED_MODELS) == 6
+    assert len(OFFICIAL_SNOWFLAKE_AI_EMBED_MODELS) == 8
 
     catalog = get_snowflake_cortex_embedding_catalog()
-    assert len(catalog) == 6
+    assert len(catalog) == 8
     for entry in catalog:
         assert entry["provider"] == "Snowflake Cortex"
         assert entry["api_key_required"] is False
@@ -516,8 +528,17 @@ def test_w2_r5_04_snowflake_cortex_embeddings_and_split_text_component() -> None
     emb_json = emb_resp.json()
     assert emb_json["ok"] is True
     assert emb_json["provider"] == "Snowflake Cortex"
-    assert len(emb_json["models"]) == 6
+    assert len(emb_json["models"]) == 8
 
+    import lfx_snowflake.fastapi_live_bridge as _bridge_mod
+    from lfx_snowflake.providers.embeddings import SnowflakeCortexEmbeddingError
+
+    # BUG-MEM-EMB-03: without a live session AI_EMBED must raise, never return a fake vector.
+    with pytest.raises(SnowflakeCortexEmbeddingError):
+        SnowflakeCortexEmbeddings(model="snowflake-arctic-embed-m-v1.5").embed_query("x")
+    with pytest.raises(SnowflakeCortexEmbeddingError):
+        SnowflakeCortexEmbeddings(model="not-a-real-model", dimensions=768).embed_query("x")
+    monkeypatch.setattr(_bridge_mod, "LIVE_BRIDGE", FakeAIEmbedBridge(expected_models))
     for model_id, expected_dim in expected_models.items():
         emb = SnowflakeCortexEmbeddings(model=model_id)
         assert emb.dimension == expected_dim

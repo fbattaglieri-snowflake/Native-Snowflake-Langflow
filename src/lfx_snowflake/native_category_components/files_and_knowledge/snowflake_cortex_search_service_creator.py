@@ -21,6 +21,13 @@ from lfx_snowflake.native_category_components.files_and_knowledge.snowflake_stag
     _register_created_object,
     _resolve_flow_id,
 )
+from lfx_snowflake.flow_context_guard import flow_component_sql as _flow_component_sql
+
+
+def _flow_component_execute_sql(*args, **kwargs):
+    """BUG-CTX-03: this component's SQL is checked against the flow's `[ ❄️ Context ]`."""
+    with _flow_component_sql():
+        return LIVE_BRIDGE.execute_sql(*args, **kwargs)
 
 
 def _database_options(flow_id: str | None = None) -> list[str]:
@@ -265,8 +272,8 @@ class SnowflakeCortexSearchServiceCreatorComponent(Component):
             return Data(data=payload)
 
         if "Inspect Status" in action:
-            show_res = LIVE_BRIDGE.execute_sql(status_sql["show_sql"])
-            desc_res = LIVE_BRIDGE.execute_sql(status_sql["describe_sql"])
+            show_res = _flow_component_execute_sql(status_sql["show_sql"])
+            desc_res = _flow_component_execute_sql(status_sql["describe_sql"])
             payload.update(
                 {
                     "action": "INSPECT_STATUS",
@@ -289,7 +296,7 @@ class SnowflakeCortexSearchServiceCreatorComponent(Component):
             "Resume Serving": resume_srv_sql,
         }
         exec_sql = sql_map.get(action, create_ddl)
-        res = LIVE_BRIDGE.execute_sql(exec_sql)
+        res = _flow_component_execute_sql(exec_sql)
         if action == "Create or Replace Cortex Search Service" and _ddl_succeeded(res):
             _register_created_object(
                 database=spec.database,

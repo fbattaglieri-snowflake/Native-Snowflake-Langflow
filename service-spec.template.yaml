@@ -12,6 +12,10 @@ spec:
         SNOWFLAKE_POSTGRES_INSTANCE: "<POSTGRES_INSTANCE>"
         LLM_PROXY_BASE_URL: "<LLM_PROXY_BASE_URL>"
         OLLAMA_BASE_URL: "<OLLAMA_BASE_URL>"
+        # BUG-MCP-05: proxy/Ollama hosts plus loopback only, so MCP Tools can reach the in-container
+        # Project MCP Server (/api/v1/mcp/project/<PROJECT_ID>/streamable). Loopback entries are never
+        # picked as LLM proxy / Ollama origins.
+        LANGFLOW_SSRF_ALLOWED_HOSTS: "<LLM_PROXY_HOST>,<OLLAMA_HOST>,localhost,127.0.0.1"
         LANGFLOW_HOST: "0.0.0.0"
         LANGFLOW_PORT: "7860"
         LANGFLOW_PERSIST_DIR: "/persist"

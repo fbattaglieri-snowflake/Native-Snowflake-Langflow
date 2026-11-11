@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+from lfx_snowflake import sql_safety as _sql_safety
+
 import copy
+import json
+import re
 from dataclasses import dataclass
 from typing import Any, Callable
 
@@ -166,7 +170,7 @@ def detect_stage_media_kind(file_path: str) -> str:
     return "text"
 
 
-def normalize_stage_and_path(
+def _normalize_stage_and_path_unchecked(
     stage_selector: str = "",
     stage_file_path: str = "",
     default_stage: str = "@SNOWFLAKE_LANGFLOW.CORE.SNOWFLAKE_LANGFLOW_STAGE",
@@ -196,6 +200,19 @@ def normalize_stage_and_path(
 
     return default_stage, raw_file.lstrip("/")
 
+
+def normalize_stage_and_path(
+    stage_selector: str = "",
+    stage_file_path: str = "",
+    default_stage: str = "@SNOWFLAKE_LANGFLOW.CORE.SNOWFLAKE_LANGFLOW_STAGE",
+) -> tuple[str, str]:
+    """Normalized ``(@DB.SCH.STAGE, relative_path)``; the stage name is validated because it is
+    emitted unquoted in ``DIRECTORY(...)`` (BUG-UI-SQLI-04). Raises ``ValueError`` when unsafe."""
+    stg, rel = _normalize_stage_and_path_unchecked(stage_selector, stage_file_path, default_stage)
+    safe_stg = _sql_safety.validate_stage_ref(stg, "stage", allow_path=False)
+    if "\x00" in rel or any(seg == ".." for seg in rel.split("/")):
+        raise _sql_safety.SqlSafetyError(f"Invalid stage file path: {rel!r}", "stage_file_path")
+    return safe_stg, rel
 
 def filter_stage_files_for_function(
     files: list[Any],
@@ -288,6 +305,60 @@ AI_REDACT_LIMITATIONS_DISCLAIMER = (
 )
 
 
+# BUG-LLMOP-008: official AI_COUNT_TOKENS signatures (docs: sql-reference/functions/ai_count_tokens).
+COUNT_TOKENS_MODEL_FUNCTIONS: tuple[str, ...] = ("ai_complete", "ai_embed")
+COUNT_TOKENS_TASK_FUNCTIONS: tuple[str, ...] = (
+    "ai_sentiment", "ai_summarize", "ai_redact", "ai_classify", "ai_translate", "ai_similarity",
+)
+_COUNT_TOKENS_MODEL_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,127}$")
+
+
+def _ct_lit(value: str) -> str:
+    return "'" + str(value or "").replace("\\", "\\\\").replace("'", "''") + "'"
+
+
+def build_count_tokens_expr(
+    target: str | None,
+    safe_txt: str,
+    *,
+    categories: str = "",
+    source_lang: str = "",
+    target_lang: str = "",
+    second_text: str = "",
+) -> str:
+    """AI_COUNT_TOKENS expression for a model (AI_COMPLETE / AI_EMBED) or a task-specific function target.
+
+    ``target`` is either an ``ai_*`` function name (task-specific functions use their default model and take no
+    model argument) or a model name, optionally prefixed ``ai_embed:`` / ``ai_complete:``."""
+    raw = (target or "claude-sonnet-5-5").strip().lower()
+    fn, _, mdl = raw.partition(":") if ":" in raw else ("", "", raw)
+    if not fn and raw.startswith("ai_"):
+        fn, mdl = raw, ""
+    if fn and fn not in COUNT_TOKENS_MODEL_FUNCTIONS + COUNT_TOKENS_TASK_FUNCTIONS:
+        raise ValueError(f"AI_COUNT_TOKENS does not support function target {fn!r}.")
+    if fn in COUNT_TOKENS_TASK_FUNCTIONS:
+        if mdl:
+            raise ValueError(f"{fn} uses its default model; AI_COUNT_TOKENS takes no model for it.")
+        if fn == "ai_classify":
+            cats = [c.strip() for c in (categories or "").split(",") if c.strip()]
+            if not cats:
+                raise ValueError("AI_COUNT_TOKENS('ai_classify', ...) needs the categories.")
+            return f"AI_COUNT_TOKENS('ai_classify', '{safe_txt}', ARRAY_CONSTRUCT({', '.join(_ct_lit(c) for c in cats)}))"
+        if fn == "ai_translate":
+            return (
+                f"AI_COUNT_TOKENS('ai_translate', '{safe_txt}', {_ct_lit(source_lang)}, {_ct_lit(target_lang or 'en')})"
+            )
+        if fn == "ai_similarity":
+            return f"AI_COUNT_TOKENS('ai_similarity', '{safe_txt}', {_ct_lit(second_text)})"
+        return f"AI_COUNT_TOKENS('{fn}', '{safe_txt}')"
+    if not mdl:
+        raise ValueError(f"{fn or 'ai_complete'} requires a model name for AI_COUNT_TOKENS.")
+    if not _COUNT_TOKENS_MODEL_RE.match(mdl):
+        raise ValueError(f"Invalid model name for AI_COUNT_TOKENS: {mdl!r}.")
+    fn = fn or ("ai_embed" if "embed" in mdl else "ai_complete")
+    return f"AI_COUNT_TOKENS('{fn}', '{mdl}', '{safe_txt}')"
+
+
 @dataclass(frozen=True)
 class AIFunctionExecutionPlan:
     ai_function: str
@@ -342,7 +413,7 @@ class SnowflakeAIFunctionComponent:
 
     def estimate_tokens(self, ai_function: str, texts: list[str]) -> tuple[str, int]:
         fn_lower = ai_function.lower()
-        token_sql = f"SELECT SUM(SNOWFLAKE.CORTEX.AI_COUNT_TOKENS('{fn_lower}', val)) FROM input_batch"
+        token_sql = f"SELECT SUM(AI_COUNT_TOKENS('{fn_lower}', val)) FROM input_batch"
         # Deterministic offline estimate (~1 token per 4 chars, min 1 for non-empty text)
         total_tokens = sum(max(1, (len(t) + 3) // 4) if t else 0 for t in texts)
         return token_sql, total_tokens
@@ -664,7 +735,7 @@ class SnowflakeAIFunctionComponent:
         target_lang: str = "it",
         pii_categories: str = "",
         second_text_or_stage_file: str = "",
-        model_for_count_tokens: str = "llama3.1-8b",
+        model_for_count_tokens: str = "claude-sonnet-5-5",
         return_as_json: bool = False,
         stage_selector: str = "",
         stage_file_path: str = "",
@@ -693,7 +764,7 @@ class SnowflakeAIFunctionComponent:
                 operation="build_task_specific_sql",
             )
 
-        safe_txt = (input_text or "").replace("'", "''")
+        safe_txt = (input_text or "").replace("\\", "\\\\").replace("'", "''")
         effective_stage_file = (stage_file_path or "").strip()
         if not effective_stage_file and (second_text_or_stage_file or "").strip().startswith("@"):
             effective_stage_file = (second_text_or_stage_file or "").strip()
@@ -703,8 +774,8 @@ class SnowflakeAIFunctionComponent:
             stage_selector=stage_selector,
             stage_file_path=effective_stage_file,
         )
-        safe_stg = stg_fqn.replace("'", "''")
-        safe_rel = rel_path.replace("'", "''")
+        safe_stg = stg_fqn.replace("\\", "\\\\").replace("'", "''")
+        safe_rel = rel_path.replace("\\", "\\\\").replace("'", "''")
         to_file_expr = (
             f"TO_FILE('{safe_stg}', relative_path)"
             if batch_directory_mode
@@ -712,7 +783,7 @@ class SnowflakeAIFunctionComponent:
         )
 
         if fn == "AI_CLASSIFY":
-            cats = [c.strip().replace("'", "''") for c in (categories_or_schema or "general").split(",") if c.strip()]
+            cats = [c.strip().replace("\\", "\\\\").replace("'", "''") for c in (categories_or_schema or "general").split(",") if c.strip()]
             arr_sql = ", ".join(f"'{c}'" for c in cats) or "'general'"
             if has_stage_input:
                 expr = f"AI_CLASSIFY({to_file_expr}, ARRAY_CONSTRUCT({arr_sql}))"
@@ -721,10 +792,10 @@ class SnowflakeAIFunctionComponent:
         elif fn == "AI_EXTRACT":
             raw_schema = (categories_or_schema or "summary").strip()
             if raw_schema.startswith("{") or raw_schema.startswith("["):
-                safe_schema = raw_schema.replace("'", "''")
+                safe_schema = raw_schema.replace("\\", "\\\\").replace("'", "''")
                 resp_fmt = f"PARSE_JSON('{safe_schema}')"
             else:
-                fields = [c.strip().replace("'", "''") for c in raw_schema.split(",") if c.strip()]
+                fields = [c.strip().replace("\\", "\\\\").replace("'", "''") for c in raw_schema.split(",") if c.strip()]
                 arr_sql = ", ".join(f"'{c}'" for c in fields) or "'summary'"
                 resp_fmt = f"ARRAY_CONSTRUCT({arr_sql})"
             if has_stage_input:
@@ -732,13 +803,14 @@ class SnowflakeAIFunctionComponent:
             else:
                 expr = f"AI_EXTRACT(text => '{safe_txt}', responseFormat => {resp_fmt})"
         elif fn == "AI_FILTER":
-            pred = (categories_or_schema or safe_txt or "Is this item valid?").replace("'", "''")
+            # Escape once: fall back to the raw input text, never to the already-escaped safe_txt.
+            pred = (categories_or_schema or input_text or "Is this item valid?").replace("\\", "\\\\").replace("'", "''")
             if has_stage_input:
                 expr = f"AI_FILTER(PROMPT('{pred}: {{0}}', {to_file_expr}))"
             else:
                 expr = f"AI_FILTER(PROMPT('{pred}: {{0}}', '{safe_txt}'))"
         elif fn == "AI_SENTIMENT":
-            aspect_cats = [c.strip().replace("'", "''") for c in (categories_or_schema or "").split(",") if c.strip()][:10]
+            aspect_cats = [c.strip().replace("\\", "\\\\").replace("'", "''") for c in (categories_or_schema or "").split(",") if c.strip()][:10]
             if aspect_cats:
                 arr_sql = ", ".join(f"'{c}'" for c in aspect_cats)
                 expr = f"AI_SENTIMENT('{safe_txt}', ARRAY_CONSTRUCT({arr_sql}))"
@@ -759,7 +831,7 @@ class SnowflakeAIFunctionComponent:
                 )
             return f"SELECT {expr} AS RESULT"
         elif fn == "AI_AGG":
-            instr = (categories_or_schema or "Summarize key insights across all rows").replace("'", "''")
+            instr = (categories_or_schema or "Summarize key insights across all rows").replace("\\", "\\\\").replace("'", "''")
             expr = f"AI_AGG(column1, '{instr}') FROM (VALUES ('{safe_txt}'))"
             if return_as_json:
                 return (
@@ -768,11 +840,11 @@ class SnowflakeAIFunctionComponent:
                 )
             return f"SELECT {expr} AS RESULT"
         elif fn == "AI_TRANSLATE":
-            src_l = (source_lang or "").strip().replace("'", "''")
-            tgt_l = (target_lang or "it").strip().replace("'", "''") or "it"
+            src_l = (source_lang or "").strip().replace("\\", "\\\\").replace("'", "''")
+            tgt_l = (target_lang or "it").strip().replace("\\", "\\\\").replace("'", "''") or "it"
             expr = f"AI_TRANSLATE('{safe_txt}', '{src_l}', '{tgt_l}')"
         elif fn == "AI_REDACT":
-            cats = [c.strip().replace("'", "''") for c in (pii_categories or "").split(",") if c.strip()]
+            cats = [c.strip().replace("\\", "\\\\").replace("'", "''") for c in (pii_categories or "").split(",") if c.strip()]
             if cats:
                 arr_sql = ", ".join(f"'{c}'" for c in cats)
                 expr = f"AI_REDACT(input => '{safe_txt}', categories => ARRAY_CONSTRUCT({arr_sql}))"
@@ -784,14 +856,20 @@ class SnowflakeAIFunctionComponent:
                 stg2, rel2 = normalize_stage_and_path(stage_selector=stage_selector, stage_file_path=second_raw)
                 expr = (
                     f"AI_SIMILARITY({to_file_expr}, "
-                    f"TO_FILE('{stg2.replace(chr(39), chr(39)*2)}', '{rel2.replace(chr(39), chr(39)*2)}'))"
+                    f"TO_FILE({_sql_safety.sql_string_literal(stg2)}, {_sql_safety.sql_string_literal(rel2)}))"
                 )
             else:
-                second_safe = second_raw.replace("'", "''")
+                second_safe = second_raw.replace("\\", "\\\\").replace("'", "''")
                 expr = f"AI_SIMILARITY('{safe_txt}', '{second_safe}')"
         elif fn == "AI_COUNT_TOKENS":
-            mdl = (model_for_count_tokens or "llama3.1-8b").strip().replace("'", "''")
-            expr = f"AI_COUNT_TOKENS('{mdl}', '{safe_txt}')"
+            expr = build_count_tokens_expr(
+                model_for_count_tokens,
+                safe_txt,
+                categories=categories_or_schema,
+                source_lang=source_lang,
+                target_lang=target_lang,
+                second_text=second_text_or_stage_file,
+            )
         elif fn == "AI_TRANSCRIBE":
             if not batch_directory_mode:
                 stage_ref = (
@@ -801,7 +879,7 @@ class SnowflakeAIFunctionComponent:
                     or "@SNOWFLAKE_LANGFLOW.CORE.SNOWFLAKE_LANGFLOW_STAGE/audio.mp3"
                 ).strip()
                 stg_t, rel_t = normalize_stage_and_path(stage_selector=stage_selector, stage_file_path=stage_ref)
-                tf_call = f"TO_FILE('{stg_t.replace(chr(39), chr(39)*2)}', '{rel_t.replace(chr(39), chr(39)*2)}')"
+                tf_call = f"TO_FILE({_sql_safety.sql_string_literal(stg_t)}, {_sql_safety.sql_string_literal(rel_t)})"
             else:
                 tf_call = to_file_expr
             gran = (transcribe_timestamp_granularity or "default").strip().lower()
@@ -823,7 +901,7 @@ class SnowflakeAIFunctionComponent:
                     or "@SNOWFLAKE_LANGFLOW.CORE.SNOWFLAKE_LANGFLOW_STAGE/document.pdf"
                 ).strip()
                 stg_p, rel_p = normalize_stage_and_path(stage_selector=stage_selector, stage_file_path=stage_ref)
-                tf_call = f"TO_FILE('{stg_p.replace(chr(39), chr(39)*2)}', '{rel_p.replace(chr(39), chr(39)*2)}')"
+                tf_call = f"TO_FILE({_sql_safety.sql_string_literal(stg_p)}, {_sql_safety.sql_string_literal(rel_p)})"
             else:
                 tf_call = to_file_expr
             pmode = (parse_document_mode or "LAYOUT").strip().upper()
@@ -834,19 +912,19 @@ class SnowflakeAIFunctionComponent:
             else:
                 expr = f"AI_PARSE_DOCUMENT({tf_call}, OBJECT_CONSTRUCT('mode', '{pmode}'))"
         elif fn == "AI_EMBED":
-            emdl = (embed_model or "snowflake-arctic-embed-l-v2.0").strip().replace("'", "''")
+            emdl = (embed_model or "snowflake-arctic-embed-l-v2.0").strip().replace("\\", "\\\\").replace("'", "''")
             if has_stage_input:
                 expr = f"AI_EMBED('{emdl}', {to_file_expr})"
             else:
                 expr = f"AI_EMBED('{emdl}', '{safe_txt}')"
         elif fn == "AI_MULTI_EMBED":
-            emdl = (embed_model or "twelvelabs-marengo-embed-3-0").strip().replace("'", "''")
+            emdl = (embed_model or "twelvelabs-marengo-embed-3-0").strip().replace("\\", "\\\\").replace("'", "''")
             if emdl != "twelvelabs-marengo-embed-3-0":
                 emdl = "twelvelabs-marengo-embed-3-0"
             target_arg = to_file_expr if has_stage_input else f"'{safe_txt}'"
             opts_raw = (multi_embed_options_json or "").strip()
             if opts_raw:
-                safe_opts = opts_raw.replace("'", "''")
+                safe_opts = opts_raw.replace("\\", "\\\\").replace("'", "''")
                 expr = f"AI_MULTI_EMBED('{emdl}', {target_arg}, PARSE_JSON('{safe_opts}'))"
             else:
                 expr = f"AI_MULTI_EMBED('{emdl}', {target_arg})"
@@ -931,7 +1009,7 @@ class SnowflakeAIRedactEngine:
         categories: list[str] | tuple[str, ...] | str | None = None,
     ) -> str:
         validated_cats = cls.validate_categories(categories)
-        safe_txt = str(input_text or "").replace("'", "''")
+        safe_txt = str(input_text or "").replace("\\", "\\\\").replace("'", "''")
         if validated_cats:
             arr_sql = ", ".join(f"'{c}'" for c in validated_cats)
             return f"SELECT AI_COUNT_TOKENS('ai_redact', '{safe_txt}', ARRAY_CONSTRUCT({arr_sql})) AS TOKEN_COUNT"
@@ -948,7 +1026,7 @@ class SnowflakeAIRedactEngine:
     ) -> str:
         """Build the official Snowflake `SPLIT_TEXT_RECURSIVE_CHARACTER` + `AI_REDACT` + `LISTAGG` CTE for texts > 4,096 tokens."""
         validated_cats = cls.validate_categories(categories)
-        safe_txt = str(input_text or "").replace("'", "''")
+        safe_txt = str(input_text or "").replace("\\", "\\\\").replace("'", "''")
         safe_chunk_size = max(100, int(chunk_size or cls.DEFAULT_CHUNK_SIZE))
         err_bool = "TRUE" if return_error_details else "FALSE"
 
@@ -1055,7 +1133,7 @@ class SnowflakeAIRedactEngine:
             }
 
         # Determine input expression: direct text, table column, or stage pre-conversion (AI_PARSE_DOCUMENT / AI_TRANSCRIBE)
-        safe_txt = str(input_text or "").replace("'", "''")
+        safe_txt = str(input_text or "").replace("\\", "\\\\").replace("'", "''")
         pre_conversion: str | None = None
         if source_mode in (
             "Stage Document (AI_PARSE_DOCUMENT -> AI_REDACT)",
@@ -1066,8 +1144,8 @@ class SnowflakeAIRedactEngine:
                 stage_selector=stage_selector,
                 stage_file_path=stage_file_path,
             )
-            safe_stg = stg_fqn.replace("'", "''")
-            safe_rel = rel_path.replace("'", "''")
+            safe_stg = stg_fqn.replace("\\", "\\\\").replace("'", "''")
+            safe_rel = rel_path.replace("\\", "\\\\").replace("'", "''")
             media_kind = detect_stage_media_kind(rel_path)
             if "Audio" in source_mode or "TRANSCRIBE" in source_mode or media_kind in ("audio", "video"):
                 input_expr = f"AI_TRANSCRIBE(TO_FILE('{safe_stg}', '{safe_rel}')):text::VARCHAR"
@@ -1079,7 +1157,7 @@ class SnowflakeAIRedactEngine:
                 )
                 pre_conversion = "AI_PARSE_DOCUMENT"
         elif source_mode == "Table Column" and table_fqn and text_column:
-            input_expr = str(text_column).strip()
+            input_expr = _sql_safety.quote_identifier(text_column, "text_column")
         else:
             input_expr = f"'{safe_txt}'"
 
@@ -1096,7 +1174,7 @@ class SnowflakeAIRedactEngine:
         redact_expr = f"AI_REDACT({', '.join(args)})"
 
         if source_mode == "Table Column" and table_fqn and text_column:
-            clean_tbl = str(table_fqn).strip()
+            clean_tbl = _sql_safety.quote_fqn(table_fqn, "table_fqn", min_parts=1, max_parts=3)
             lim = max(1, int(max_rows or 100))
             if return_error_details:
                 stmt = (
@@ -1126,6 +1204,68 @@ class SnowflakeAIRedactEngine:
             "sql_mode": sql_mode,
             "categories": validated_cats or list(cls.SUPPORTED_CATEGORIES),
         }
+
+    @classmethod
+    def parse_detect_spans(cls, raw: Any, input_text: str) -> list[dict[str, Any]]:
+        """Spans from a real ``AI_REDACT(..., mode => 'detect')`` result (BUG-LLMOP-009).
+
+        Accepted shapes (dict/list or their JSON text): the live array ``[{category,start,end,text}]``,
+        the documented ``{"spans": [...]}`` and the ``return_error_details`` wrapper
+        ``{"value": <either>, "error": null}``. Every span must be an in-bounds ``[start, end)`` range
+        whose ``text`` (when present) matches ``input_text``. Anything else raises ``ValueError``
+        (fail closed: the caller must not forward the original text). An empty list means no PII.
+        """
+        obj = raw
+        for _ in range(3):
+            if isinstance(obj, str):
+                txt = obj.strip()
+                if not txt:
+                    raise ValueError("AI_REDACT detect returned an empty result.")
+                try:
+                    obj = json.loads(txt)
+                except json.JSONDecodeError as exc:
+                    raise ValueError("AI_REDACT detect result is not valid JSON.") from exc
+            if isinstance(obj, dict) and ("value" in obj or "error" in obj) and "spans" not in obj:
+                if obj.get("error"):
+                    raise ValueError(f"AI_REDACT detect returned an error: {obj.get('error')}")
+                obj = obj.get("value")
+                continue
+            break
+        if isinstance(obj, dict) and isinstance(obj.get("spans"), list):
+            obj = obj["spans"]
+        if not isinstance(obj, list):
+            raise ValueError("AI_REDACT detect result is not a span array.")
+        text = str(input_text or "")
+        spans: list[dict[str, Any]] = []
+        for sp in obj:
+            if not isinstance(sp, dict):
+                raise ValueError("AI_REDACT detect span is not an object.")
+            try:
+                start, end = int(sp["start"]), int(sp["end"])
+            except (KeyError, TypeError, ValueError) as exc:
+                raise ValueError("AI_REDACT detect span is missing start/end.") from exc
+            if not (0 <= start < end <= len(text)):
+                raise ValueError("AI_REDACT detect span is out of bounds for the input text.")
+            sp_text = sp.get("text")
+            if sp_text is not None and text[start:end] != str(sp_text):
+                raise ValueError("AI_REDACT detect span text does not match the input text.")
+            spans.append(
+                {
+                    "category": str(sp.get("category") or "PII").strip().upper(),
+                    "start": start,
+                    "end": end,
+                    "text": text[start:end],
+                }
+            )
+        return spans
+
+    @staticmethod
+    def masked_spans(spans: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Span metadata with the PII value replaced by ``[CATEGORY]`` (safe for outputs and traces)."""
+        return [
+            {"category": sp["category"], "start": sp["start"], "end": sp["end"], "text": f"[{sp['category']}]"}
+            for sp in spans
+        ]
 
     @classmethod
     def apply_allowlist_splicing(
@@ -1164,12 +1304,28 @@ class SnowflakeAIRedactEngine:
             key=lambda x: int(x.get("start", 0)),
             reverse=True,
         )
-        redacted_text = str(input_text or "")
-        for sp in sorted_to_redact:
+        # Merge overlapping/adjacent spans on the original offsets, then rebuild left to right so no PII
+        # fragment can survive between two placeholders.
+        source = str(input_text or "")
+        merged: list[list[Any]] = []
+        for sp in sorted(to_redact_spans, key=lambda x: (int(x.get("start", 0)), int(x.get("end", 0)))):
             start = max(0, int(sp.get("start", 0)))
-            end = max(start, int(sp.get("end", start)))
+            end = min(len(source), max(start, int(sp.get("end", start))))
             cat = str(sp.get("category") or "PII").strip().upper()
-            redacted_text = redacted_text[:start] + f"[{cat}]" + redacted_text[end:]
+            if merged and start <= merged[-1][1]:
+                merged[-1][1] = max(merged[-1][1], end)
+                if cat not in merged[-1][2]:
+                    merged[-1][2].append(cat)
+            else:
+                merged.append([start, end, [cat]])
+        pieces: list[str] = []
+        cursor = 0
+        for start, end, cats in merged:
+            pieces.append(source[cursor:start])
+            pieces.append(f"[{'/'.join(cats)}]")
+            cursor = end
+        pieces.append(source[cursor:])
+        redacted_text = "".join(pieces)
 
         return {
             "redacted_text": redacted_text,
@@ -1198,22 +1354,36 @@ class SnowflakeAICompleteEngine:
         stage_file_path: str = "",
         additional_stage_files: str | list[str] = "",
         batch_directory_mode: bool = False,
-        temperature: float = 0.0,
-        top_p: float = 1.0,
-        max_tokens: int = 1024,
+        temperature: float | None = 0.0,
+        top_p: float | None = 1.0,
+        max_tokens: int | None = 1024,
         guardrails: bool = False,
         response_format_mode: str = "None (Text)",
         response_json_schema: str = "",
         show_details: bool = False,
         return_error_details: bool = False,
     ) -> str:
-        mdl = (model or "claude-4-sonnet").strip().replace("'", "''")
-        safe_prompt = (prompt or "").replace("'", "''")
-        params_sql = (
-            f"OBJECT_CONSTRUCT('temperature', {float(temperature)}, "
-            f"'top_p', {float(top_p)}, 'max_tokens', {int(max_tokens)}, "
-            f"'guardrails', {'TRUE' if guardrails else 'FALSE'})"
-        )
+        mdl = (model or "claude-4-sonnet").strip().replace("\\", "\\\\").replace("'", "''")
+        safe_prompt = (prompt or "").replace("\\", "\\\\").replace("'", "''")
+        # BUG-LLMOP-010: None = not set (omitted, service default); 0 is a real value and is kept.
+        opt_parts: list[str] = []
+        if temperature is not None:
+            t = float(temperature)
+            if not 0.0 <= t <= 1.0:
+                raise ValueError("temperature must be between 0 and 1.")
+            opt_parts.append(f"'temperature', {t}")
+        if top_p is not None:
+            tp = float(top_p)
+            if not 0.0 <= tp <= 1.0:
+                raise ValueError("top_p must be between 0 and 1.")
+            opt_parts.append(f"'top_p', {tp}")
+        if max_tokens is not None:
+            mt = int(max_tokens)
+            if mt < 1:
+                raise ValueError("max_tokens must be a positive integer.")
+            opt_parts.append(f"'max_tokens', {mt}")
+        opt_parts.append(f"'guardrails', {'TRUE' if guardrails else 'FALSE'}")
+        params_sql = f"OBJECT_CONSTRUCT({', '.join(opt_parts)})"
 
         args: list[str] = [f"model => '{mdl}'"]
         stg_ref = (stage_file_path or "").strip()
@@ -1225,7 +1395,7 @@ class SnowflakeAICompleteEngine:
 
         if batch_directory_mode:
             stg_name, _ = normalize_stage_and_path(stage_selector=stage_selector, stage_file_path=stg_ref)
-            safe_stg = stg_name.replace("'", "''")
+            safe_stg = stg_name.replace("\\", "\\\\").replace("'", "''")
             prompt_tmpl = safe_prompt if "{0}" in safe_prompt else f"{safe_prompt} {{0}}"
             args.append(f"prompt => PROMPT('{prompt_tmpl}', TO_FILE('{safe_stg}', relative_path))")
         elif stg_ref or extra_refs:
@@ -1233,8 +1403,8 @@ class SnowflakeAICompleteEngine:
             to_file_calls: list[str] = []
             for ref in all_refs:
                 stg_name, rel_path = normalize_stage_and_path(stage_selector=stage_selector, stage_file_path=ref)
-                safe_stg = stg_name.replace("'", "''")
-                safe_rel = rel_path.replace("'", "''")
+                safe_stg = stg_name.replace("\\", "\\\\").replace("'", "''")
+                safe_rel = rel_path.replace("\\", "\\\\").replace("'", "''")
                 to_file_calls.append(f"TO_FILE('{safe_stg}', '{safe_rel}')")
             placeholders = " ".join(
                 f"{{{i}}}" for i in range(len(to_file_calls)) if f"{{{i}}}" not in safe_prompt
@@ -1255,7 +1425,7 @@ class SnowflakeAICompleteEngine:
                     '"required":["decision","confidence","reasoning","selected_branch","policy_action"]}'
                 )
             else:
-                schema_literal = (response_json_schema or '{"type":"object"}').strip().replace("'", "''")
+                schema_literal = (response_json_schema or '{"type":"object"}').strip().replace("\\", "\\\\").replace("'", "''")
             args.append(
                 f"response_format => OBJECT_CONSTRUCT('type', 'json', 'schema', PARSE_JSON('{schema_literal}'))"
             )
@@ -1267,7 +1437,7 @@ class SnowflakeAICompleteEngine:
 
         if batch_directory_mode:
             stg_name, _ = normalize_stage_and_path(stage_selector=stage_selector, stage_file_path=stg_ref)
-            safe_stg = stg_name.replace("'", "''")
+            safe_stg = stg_name.replace("\\", "\\\\").replace("'", "''")
             return f"SELECT relative_path, size, last_modified, AI_COMPLETE({', '.join(args)}) AS RESULT FROM DIRECTORY({safe_stg})"
 
         return f"SELECT AI_COMPLETE({', '.join(args)}) AS RESULT"

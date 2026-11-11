@@ -28,6 +28,20 @@ from lfx_snowflake.components.ai_function import (
 )
 from lfx_snowflake.context_helpers import _resolve_flow_id
 from lfx_snowflake.fastapi_live_bridge import LIVE_BRIDGE
+from lfx_snowflake.flow_context_guard import flow_component_sql as _flow_component_sql
+
+
+def _flow_component_execute_sql(*args, **kwargs):
+    """BUG-CTX-03: this component's SQL is checked against the flow's `[ ❄️ Context ]`."""
+    with _flow_component_sql():
+        return LIVE_BRIDGE.execute_sql(*args, **kwargs)
+
+
+def _optional_number(value: Any, cast: Any) -> Any:
+    """BUG-LLMOP-010: ``None``/blank means "not set"; ``0`` is a real value."""
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return None
+    return cast(value)
 
 
 class SnowflakeAICompleteComponent(Component):
@@ -235,9 +249,9 @@ class SnowflakeAICompleteComponent(Component):
             stage_file_path=getattr(self, "stage_file_path", "") or "",
             additional_stage_files=getattr(self, "additional_stage_files", "") or "",
             batch_directory_mode=bool(getattr(self, "batch_directory_mode", False)),
-            temperature=float(getattr(self, "temperature", 0.0) or 0.0),
-            top_p=float(getattr(self, "top_p", 1.0) or 1.0),
-            max_tokens=int(getattr(self, "max_tokens", 1024) or 1024),
+            temperature=_optional_number(getattr(self, "temperature", None), float),
+            top_p=_optional_number(getattr(self, "top_p", None), float),
+            max_tokens=_optional_number(getattr(self, "max_tokens", None), int),
             guardrails=bool(getattr(self, "guardrails", False)),
             response_format_mode=getattr(self, "response_format_mode", "None (Text)") or "None (Text)",
             response_json_schema=getattr(self, "response_json_schema", "") or "",
@@ -247,7 +261,7 @@ class SnowflakeAICompleteComponent(Component):
 
     def run_ai_complete(self) -> Message:
         stmt = self._build_sql()
-        res = LIVE_BRIDGE.execute_sql(stmt)
+        res = _flow_component_execute_sql(stmt)
         if not res.get("ok"):
             if getattr(self, "return_error_details", False):
                 return Message(text=json.dumps({"error": res, "sql_preview": stmt}, indent=2))

@@ -27,7 +27,10 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Callable, Mapping, Protocol
 
-IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_$]{0,254}$")
+from lfx_snowflake import sql_safety as _sql_safety
+
+IDENTIFIER_RE = _sql_safety.IDENTIFIER_RE
+_FILE_EXTENSION_RE = re.compile(r"^\.?[a-z0-9]{1,16}$")
 EXCLUDED_UPLOAD_NAMES = frozenset({".git", "__pycache__", ".DS_Store", ".env", ".venv"})
 FORBIDDEN_URI_TOKENS = ("aws_key_id", "aws_secret_key", "sas_token", "presigned", "signature=", "token=")
 
@@ -91,14 +94,15 @@ def raise_role_denied(role: str, operation: str, resource: str, audit_sink: Call
 
 
 def validate_snowflake_identifier(value: str, field_name: str) -> str:
-    cleaned = (value or "").strip()
-    if not IDENTIFIER_RE.match(cleaned):
+    """Component-facing wrapper over ``sql_safety.validate_identifier`` (single shared grammar)."""
+    try:
+        return _sql_safety.validate_identifier(value, field_name)
+    except _sql_safety.SqlSafetyError as exc:
         raise SnowflakeComponentError(
             ErrorCode.TECHNICAL_EXECUTION_ERROR,
-            f"Invalid Snowflake identifier for {field_name}: {value!r}",
+            str(exc),
             http_status=400,
-        )
-    return cleaned.upper()
+        ) from exc
 
 
 def normalize_and_validate_subpath(
@@ -1030,7 +1034,7 @@ def build_stage_creation_ddl(
                 http_status=400,
             )
         integ = validate_snowflake_identifier(storage_integration, "storage_integration")
-        safe_url = clean_url.replace("'", "''")
+        safe_url = clean_url.replace("\\", "\\\\").replace("'", "''")
         return (
             f"CREATE STAGE IF NOT EXISTS {db}.{sch}.{stg} "
             f"URL = '{safe_url}' "
@@ -1105,6 +1109,12 @@ class CortexSearchParseDocumentBuilder:
         exts = [e.strip().lower() for e in self.spec.file_extensions_filter if e and e.strip()]
         if not exts:
             return ""
+        for e in exts:
+            # Interpolated inside LIKE '...': only plain extensions are allowed (A6 PASSO2 veto item 3).
+            if not _FILE_EXTENSION_RE.match(e):
+                raise SnowflakeComponentError(
+                    ErrorCode.TECHNICAL_EXECUTION_ERROR, f"Invalid file extension filter: {e!r}", http_status=400
+                )
         checks = [
             f"LOWER(RELATIVE_PATH) LIKE '%{e if e.startswith('.') else '.' + e}'"
             for e in exts
@@ -1217,30 +1227,25 @@ class CortexSearchSplitTextBuilder:
             f")"
         )
 
+    def langchain_udf_fqn(self) -> str:
+        """The BRIDGE-OWNED LangChain splitter (never a function in the user's schema)."""
+        from lfx_snowflake import bridge_routines as _bridge_routines  # lazy: bridge_routines imports the bridge
+
+        return _bridge_routines.langchain_splitter_udf_fqn()
+
     def build_langchain_python_udf_ddl(self) -> str:
-        udf_fqn = f"{self.spec.database}.{self.spec.schema}.LANGCHAIN_SPLIT_TEXT_UDF"
-        return (
-            f"CREATE OR REPLACE FUNCTION {udf_fqn}(text_val VARCHAR, chunk_sz INT, chunk_ovlp INT)\n"
-            f"RETURNS ARRAY\n"
-            f"LANGUAGE PYTHON\n"
-            f"RUNTIME_VERSION = '3.12'\n"
-            f"PACKAGES = ('langchain-text-splitters')\n"
-            f"HANDLER = 'split_fn'\n"
-            f"AS $$\n"
-            f"from langchain_text_splitters import RecursiveCharacterTextSplitter\n"
-            f"def split_fn(text_val: str, chunk_sz: int, chunk_ovlp: int):\n"
-            f"    if not text_val:\n"
-            f"        return []\n"
-            f"    splitter = RecursiveCharacterTextSplitter(chunk_size=chunk_sz, chunk_overlap=chunk_ovlp)\n"
-            f"    return splitter.split_text(text_val)\n"
-            f"$$"
-        )
+        """Display-only: the fixed DDL the bridge provisions (``bridge_routines.provision_bridge_routines``).
+
+        Flow components never execute it; the flow context guard rejects any component CREATE FUNCTION.
+        """
+        from lfx_snowflake import bridge_routines as _bridge_routines
+
+        return _bridge_routines.build_langchain_splitter_udf_ddl(self.langchain_udf_fqn())
 
     def build_split_insert_sql(self) -> str:
-        lang = (self.spec.language or "it").replace("'", "''")
+        lang = (self.spec.language or "it").replace("\\", "\\\\").replace("'", "''")
         if self.spec.splitter_mode == "PYTHON_UDF_LANGCHAIN":
-            udf_fqn = f"{self.spec.database}.{self.spec.schema}.LANGCHAIN_SPLIT_TEXT_UDF"
-            split_expr = f"{udf_fqn}(p.page_content, {int(self.spec.chunk_size)}, {int(self.spec.chunk_overlap)})"
+            split_expr = f"{self.langchain_udf_fqn()}(p.page_content, {int(self.spec.chunk_size)}, {int(self.spec.chunk_overlap)})"
         else:
             split_expr = (
                 f"SNOWFLAKE.CORTEX.SPLIT_TEXT_RECURSIVE_CHARACTER("
@@ -1325,8 +1330,8 @@ class CortexSearchServiceCreatorBuilder:
         for col in select_cols:
             if col.upper() not in [c.upper() for c in dedup_cols]:
                 dedup_cols.append(col)
-        lag = (self.spec.target_lag or "1 hour").replace("'", "''")
-        emb = (self.spec.embedding_model or "snowflake-arctic-embed-m-v1.5").replace("'", "''")
+        lag = (self.spec.target_lag or "1 hour").replace("\\", "\\\\").replace("'", "''")
+        emb = (self.spec.embedding_model or "snowflake-arctic-embed-m-v1.5").replace("\\", "\\\\").replace("'", "''")
         return (
             f"CREATE OR REPLACE CORTEX SEARCH SERVICE {self.spec.service_fqn}\n"
             f"  ON {self.spec.search_column}{attr_clause}\n"
@@ -1392,6 +1397,12 @@ class CortexSearchStreamTaskSpec:
         object.__setattr__(self, "parsed_table", validate_snowflake_identifier(self.parsed_table, "parsed_table"))
         object.__setattr__(self, "chunks_table", validate_snowflake_identifier(self.chunks_table, "chunks_table"))
         object.__setattr__(self, "warehouse", validate_snowflake_identifier(self.warehouse, "warehouse"))
+        # parse_mode / split_format are interpolated into the task DDL: closed enums only.
+        try:
+            object.__setattr__(self, "parse_mode", _sql_safety.validate_enum(self.parse_mode or "LAYOUT", ("LAYOUT", "OCR"), "parse_mode"))
+            object.__setattr__(self, "split_format", _sql_safety.validate_enum(self.split_format or "markdown", ("markdown", "none"), "split_format"))
+        except _sql_safety.SqlSafetyError as exc:
+            raise SnowflakeComponentError(ErrorCode.TECHNICAL_EXECUTION_ERROR, str(exc), http_status=400) from exc
 
     @property
     def stage_fqn(self) -> str:
@@ -1427,10 +1438,10 @@ class CortexSearchStreamTaskBuilder:
         return f"CREATE OR REPLACE STREAM {self.spec.stream_fqn} ON STAGE {self.spec.stage_fqn}"
 
     def build_task_ddl(self) -> str:
-        sched = (self.spec.schedule or "5 MINUTE").replace("'", "''")
+        sched = (self.spec.schedule or "5 MINUTE").replace("\\", "\\\\").replace("'", "''")
         mode = (self.spec.parse_mode or "LAYOUT").strip().upper()
         fmt = (self.spec.split_format or "markdown").strip().lower()
-        lang = (self.spec.language or "it").replace("'", "''")
+        lang = (self.spec.language or "it").replace("\\", "\\\\").replace("'", "''")
         return (
             f"CREATE OR REPLACE TASK {self.spec.task_fqn}\n"
             f"  WAREHOUSE = {self.spec.warehouse}\n"

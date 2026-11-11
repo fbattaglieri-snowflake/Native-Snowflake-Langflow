@@ -471,6 +471,8 @@ def test_ctx_arch_07_1_non_destructive_role_switch_intersection() -> None:
 
 def test_ctx_arch_07_2_auto_registration_of_provisioned_objects_in_flow_context() -> None:
     """Verify CTX-ARCH-07 #2: Objects created via components are automatically registered in the active flow's context."""
+    # A6-5: empty role no longer implies creation rights; run as the governed admin role.
+    LIVE_BRIDGE.active_role = "SNOWFLAKE_LANGFLOW_ADMIN_ROLE"
     flow_id = "88888888-8888-4888-8888-888888888888"
     LIVE_BRIDGE.contexts_by_flow_id.pop(flow_id, None)
     LIVE_BRIDGE.update_selected_context(
@@ -489,8 +491,10 @@ def test_ctx_arch_07_2_auto_registration_of_provisioned_objects_in_flow_context(
     try:
         assert _resolve_flow_id() == flow_id
         assert _ddl_succeeded({"ok": True}) is True
-        assert _can_create_database({"active_role": "ACCOUNTADMIN"}) is True
-        assert _can_create_schema({"active_role": "ACCOUNTADMIN"}) is True
+        assert _can_create_database({"role_privileges": {"can_create_database": True}}) is True
+        assert _can_create_schema({"role_privileges": {"can_create_schema": True}}) is True
+        # A bare privileged role name is no proof of privilege: fail closed.
+        assert _can_create_database({"active_role": "UNVERIFIED_ROLE_XYZ"}) is False
 
         # 1. Provisioned table registered in active flow context via context_helpers
         _register_created_object(
@@ -672,6 +676,8 @@ def test_ctx_arch_06_and_07_5_live_bridge_flow_activity_traces_and_soft_delete()
 
 def test_verifier_ddl_auto_register_cortex_search_pipeline_and_preserved_zero_diff() -> None:
     """Verifier check: DDL auto-registration on execute_sql, Cortex Search 1..4 auto-registration, and preserved_js zero diff."""
+    # A6-5: empty role no longer implies creation rights; run as the governed admin role.
+    LIVE_BRIDGE.active_role = "SNOWFLAKE_LANGFLOW_ADMIN_ROLE"
     import subprocess
     from lfx_snowflake.native_category_components.files_and_knowledge.snowflake_cortex_search_parse_document import (
         SnowflakeCortexSearchParseDocumentComponent,

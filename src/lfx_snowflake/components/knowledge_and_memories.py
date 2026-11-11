@@ -23,6 +23,7 @@ Covers:
 
 from __future__ import annotations
 
+from lfx_snowflake import sql_safety as _sql_safety_catalog
 import hashlib
 import math
 from dataclasses import dataclass, field
@@ -247,77 +248,37 @@ class EmbeddingModelSpec:
         return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:24]
 
 
+_AI_EMBED_MODEL_VERSIONS: dict[str, str] = {
+    "snowflake-arctic-embed-m-v1.5": "1.5",
+    "snowflake-arctic-embed-m": "1.0",
+    "e5-base-v2": "2.0",
+    "snowflake-arctic-embed-l-v2.0": "2.0",
+    "snowflake-arctic-embed-l-v2.0-8k": "2.0-8k",
+    "multilingual-e5-large": "1.0",
+    "voyage-multilingual-2": "2.0",
+    "nv-embed-qa-4": "4.0",
+}
+
+# Only the 8 official AI_EMBED text models (sql_safety.AI_EMBED_TEXT_MODEL_DIMENSIONS is the source of truth).
+# Marengo is AI_MULTI_EMBED-only and nomic-embed-text is an Ollama model: neither is an AI_EMBED text embedder.
 DEFAULT_SNOWFLAKE_EMBEDDING_CATALOG: dict[str, EmbeddingModelSpec] = {
-    "snowflake-arctic-embed-l-v2.0": EmbeddingModelSpec(
-        model_id="snowflake-arctic-embed-l-v2.0",
+    _model_id: EmbeddingModelSpec(
+        model_id=_model_id,
         provider="Snowflake Cortex Embedding",
-        dimension=1024,
-        version="2.0",
-    ),
-    "snowflake-arctic-embed-l-v2.0-8k": EmbeddingModelSpec(
-        model_id="snowflake-arctic-embed-l-v2.0-8k",
-        provider="Snowflake Cortex Embedding",
-        dimension=1024,
-        version="2.0-8k",
-    ),
-    "multilingual-e5-large": EmbeddingModelSpec(
-        model_id="multilingual-e5-large",
-        provider="Snowflake Cortex Embedding",
-        dimension=1024,
-        version="1.0",
-    ),
-    "voyage-multilingual-2": EmbeddingModelSpec(
-        model_id="voyage-multilingual-2",
-        provider="Snowflake Cortex Embedding",
-        dimension=1024,
-        version="2.0",
-    ),
-    "nv-embed-qa-4": EmbeddingModelSpec(
-        model_id="nv-embed-qa-4",
-        provider="Snowflake Cortex Embedding",
-        dimension=1024,
-        version="4.0",
-    ),
-    "voyage-multimodal-3": EmbeddingModelSpec(
-        model_id="voyage-multimodal-3",
-        provider="Snowflake Cortex Embedding",
-        dimension=1024,
-        version="3.0",
-    ),
-    "snowflake-arctic-embed-m-v1.5": EmbeddingModelSpec(
-        model_id="snowflake-arctic-embed-m-v1.5",
-        provider="Snowflake Cortex Embedding",
-        dimension=768,
-        version="1.5",
-    ),
-    "snowflake-arctic-embed-m": EmbeddingModelSpec(
-        model_id="snowflake-arctic-embed-m",
-        provider="Snowflake Cortex Embedding",
-        dimension=768,
-        version="1.0",
-    ),
-    "e5-base-v2": EmbeddingModelSpec(
-        model_id="e5-base-v2",
-        provider="Snowflake Cortex Embedding",
-        dimension=768,
-        version="2.0",
-    ),
-    "nomic-embed-text": EmbeddingModelSpec(
-        model_id="nomic-embed-text",
-        provider="Ollama (Snowflake Hosted)",
-        dimension=768,
-        version="1.5",
-    ),
-    "twelvelabs-marengo-embed-3-0": EmbeddingModelSpec(
-        model_id="twelvelabs-marengo-embed-3-0",
-        provider="Snowflake Cortex Embedding",
-        dimension=512,
-        version="3.0",
-    ),
+        dimension=_dim,
+        version=_AI_EMBED_MODEL_VERSIONS.get(_model_id, "1.0"),
+    )
+    for _model_id, _dim in _sql_safety_catalog.AI_EMBED_TEXT_MODEL_DIMENSIONS.items()
 }
 
 EXTERNAL_EMBEDDING_MODELS_CATALOG: dict[str, EmbeddingModelSpec] = {
     **DEFAULT_SNOWFLAKE_EMBEDDING_CATALOG,
+    "nomic-embed-text": EmbeddingModelSpec(
+        model_id="nomic-embed-text",
+        provider="Ollama (SPCS / External)",
+        dimension=768,
+        version="1.5",
+    ),
     "text-embedding-3-small": EmbeddingModelSpec(
         model_id="text-embedding-3-small",
         provider="OpenAI Embeddings (External)",
@@ -541,12 +502,8 @@ class VectorStoreConfig:
         return f"{self.database}.{self.schema}.{self.cortex_search_service_name}"
 
 
-def deterministic_embed_text(text: str, spec: EmbeddingModelSpec) -> list[float]:
-    """Generate a deterministic unit-normalized vector for offline/contract tests."""
-    seed = hashlib.sha256(f"{spec.space_fingerprint}::{text}".encode("utf-8")).digest()
-    raw = [((seed[i % len(seed)] / 255.0) * 2.0 - 1.0) for i in range(spec.dimension)]
-    norm = math.sqrt(sum(v * v for v in raw)) or 1.0
-    return [round(v / norm, 6) for v in raw]
+class EmbeddingUnavailableError(RuntimeError):
+    """Raised when no real embedding function is wired; synthetic vectors are forbidden (BUG-MEM-EMB-03)."""
 
 
 class InMemoryVectorStoreEngine:
@@ -559,8 +516,10 @@ class InMemoryVectorStoreEngine:
         snowflake_privileges: Mapping[str, set[tuple[str, str]]] | None = None,
         postgres_privileges: Mapping[str, set[tuple[str, str]]] | None = None,
         preprocessor_fn: Callable[[str, LLMPreprocessingConfig], str] | None = None,
+        embed_fn: Callable[[str, EmbeddingModelSpec], list[float]] | None = None,
     ) -> None:
         self.active_role = active_role
+        self._embed_fn = embed_fn
         self.snowflake_privileges: dict[str, set[tuple[str, str]]] = {
             k: set(v) for k, v in (snowflake_privileges or {}).items()
         }
@@ -1135,7 +1094,15 @@ class SnowflakeKnowledgeComponent:
                     vec = None
                 else:
                     self.engine.embedding_calls += 1
-                    vec = deterministic_embed_text(processed_text, spec)
+                    if self.engine._embed_fn is None:
+                        raise EmbeddingUnavailableError(
+                            f"No embedding function configured for model '{spec.model_id}'; refusing synthetic vectors."
+                        )
+                    vec = list(self.engine._embed_fn(processed_text, spec))
+                    if len(vec) != spec.dimension:
+                        raise EmbeddingUnavailableError(
+                            f"Embedding for '{spec.model_id}' has {len(vec)} dims, expected {spec.dimension}."
+                        )
 
                 rec_id = str(
                     row.get(id_column)

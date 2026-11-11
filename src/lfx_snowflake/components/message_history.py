@@ -217,6 +217,7 @@ class SnowflakeMessageHistoryComponent:
         branch_id: str = "main",
         signed_replay: SignedReplayEnvelope | None = None,
         cortex_thread_ref: CortexThreadReference | None = None,
+        window_k: int = 100,
     ) -> dict[str, Any]:
         role = self.backend.check_access(self.config, "INSERT")
         bucket = self._storage_bucket()
@@ -267,7 +268,9 @@ class SnowflakeMessageHistoryComponent:
             cortex_thread_ref=cortex_thread_ref,
         )
         bucket.append(record)
-        return self._format_output([record], branch_id=branch_id, role=role, idempotent_hit=False)
+        # BUG-MEM-MH-01: Store returns the last `window_k` messages of the session, not just the new one.
+        window = (branch_records + [record])[-max(1, int(window_k)) :]
+        return self._format_output(window, branch_id=branch_id, role=role, idempotent_hit=False)
 
     def retrieve_messages(
         self,

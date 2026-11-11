@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from lfx_snowflake import sql_safety as _sql_safety
+
 from typing import Any
 
 import lfx_snowflake._lfx_compat  # noqa: F401
@@ -9,6 +11,13 @@ from lfx.schema import Data
 
 from lfx_snowflake.components.files_and_stage import build_stage_creation_ddl
 from lfx_snowflake.fastapi_live_bridge import LIVE_BRIDGE
+from lfx_snowflake.flow_context_guard import flow_component_sql as _flow_component_sql
+
+
+def _flow_component_execute_sql(*args, **kwargs):
+    """BUG-CTX-03: this component's SQL is checked against the flow's `[ ❄️ Context ]`."""
+    with _flow_component_sql():
+        return LIVE_BRIDGE.execute_sql(*args, **kwargs)
 
 
 CREATE_INTERNAL_STAGE_OPTION = "+ Create New Internal Stage..."
@@ -284,13 +293,14 @@ class SnowflakeStageFileSystemComponent(Component):
         stg = (getattr(self, "stage_name", "") or "").strip()
         override = (getattr(self, "stage_fqn", "") or "").lstrip("@").strip()
         if override:
-            parts = override.split(".")
+            parts = _sql_safety.validate_fqn(override, "stage_fqn", min_parts=1, max_parts=3).split(".")
             if len(parts) == 3:
-                return parts[0], parts[1], parts[2], override
-            return db, sch, override, override
+                return parts[0], parts[1], parts[2], ".".join(parts)
+            return db, sch, parts[-1], _sql_safety.join_fqn(db, sch, parts[-1], field_name="stage_fqn")
         if stg in (CREATE_INTERNAL_STAGE_OPTION, CREATE_EXTERNAL_STAGE_OPTION, CREATE_STAGE_DISABLED_OPTION):
             stg = (getattr(self, "new_stage_name", "") or "DOCS_STAGE").strip()
-        clean_fqn = f"{db}.{sch}.{stg}"
+        # Stage parts are emitted unquoted in LIST @...: validate every part (BUG-UI-SQLI-04).
+        clean_fqn = _sql_safety.join_fqn(db, sch, stg, field_name="stage")
         return db, sch, stg, clean_fqn
 
     def run_stage_op(self) -> Data:
@@ -304,7 +314,7 @@ class SnowflakeStageFileSystemComponent(Component):
             )
 
         if self.operation == "List Stage Files":
-            res = LIVE_BRIDGE.execute_sql(f"LIST @{clean_stage}")
+            res = _flow_component_execute_sql(f"LIST @{clean_stage}")
             return Data(
                 data={
                     "operation": self.operation,
@@ -344,7 +354,7 @@ class SnowflakeStageFileSystemComponent(Component):
                 external_url=getattr(self, "external_url", "s3://example-bucket/prefix/"),
                 storage_integration=getattr(self, "storage_integration", "S3_DOCS_INT"),
             )
-            exec_res = LIVE_BRIDGE.execute_sql(ddl)
+            exec_res = _flow_component_execute_sql(ddl)
             if _ddl_succeeded(exec_res):
                 _register_created_object(
                     database=db,
@@ -368,7 +378,10 @@ class SnowflakeStageFileSystemComponent(Component):
             )
 
         if self.operation == "Read Stage File":
-            res = LIVE_BRIDGE.execute_sql(f"LIST @{clean_stage}/{self.file_subpath}")
+            target = _sql_safety.validate_stage_ref(
+                f"@{clean_stage}/{str(self.file_subpath or '').lstrip('/')}", "file_subpath", allow_path=True
+            )
+            res = _flow_component_execute_sql(f"LIST {target}")
             return Data(
                 data={
                     "operation": self.operation,

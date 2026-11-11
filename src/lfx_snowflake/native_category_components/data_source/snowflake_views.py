@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from lfx_snowflake import sql_safety as _sql_safety
+
 from typing import Any
 
 import lfx_snowflake._lfx_compat  # noqa: F401
@@ -10,6 +12,13 @@ from lfx.schema import Data, DataFrame
 from lfx_snowflake._lfx_compat import Tool
 from lfx_snowflake.components.data_sources import filter_business_data_source_objects
 from lfx_snowflake.fastapi_live_bridge import LIVE_BRIDGE
+from lfx_snowflake.flow_context_guard import flow_component_sql as _flow_component_sql
+
+
+def _flow_component_execute_sql(*args, **kwargs):
+    """BUG-CTX-03: this component's SQL is checked against the flow's `[ ❄️ Context ]`."""
+    with _flow_component_sql():
+        return LIVE_BRIDGE.execute_sql(*args, **kwargs)
 
 
 def _resolve_flow_id(component: Any = None, build_config: dict[str, Any] | None = None) -> str | None:
@@ -169,16 +178,26 @@ class SnowflakeViewsComponent(Component):
             build_config["memory_catalog_ref"]["options"] = _memory_catalog_options()
         return build_config
 
+    def _build_request(self) -> tuple[str, dict | None]:
+        """Read query with a structured, bound filter; free SQL is never executed (BUG-UI-SQLI-01)."""
+        sql, bindings, _ = _sql_safety.build_filtered_select(
+            (getattr(self, "view_name", "") or "FLOW_ACTIVITY_VIEW"),
+            database=(getattr(self, "database", "") or "SNOWFLAKE_LANGFLOW"),
+            schema=(getattr(self, "schema_name", "") or "CORE"),
+            filter_input=(getattr(self, "query_filter_input", "") or ""),
+            max_rows=getattr(self, "max_rows", 100) or 100,
+        )
+        return sql, bindings
+
     def _build_query(self) -> str:
-        db = (getattr(self, "database", "") or "SNOWFLAKE_LANGFLOW").strip()
-        sch = (getattr(self, "schema_name", "") or "CORE").strip()
-        vw = (getattr(self, "view_name", "") or "FLOW_ACTIVITY_VIEW").strip()
-        fqn = vw if "." in vw else f"{db}.{sch}.{vw}"
-        custom = (getattr(self, "query_filter_input", "") or "").strip()
-        if custom.upper().startswith(("SELECT ", "SHOW ")):
-            return custom
-        where = f" WHERE {custom}" if custom else ""
-        return f"SELECT * FROM {fqn}{where} LIMIT {max(1, int(getattr(self, 'max_rows', 100) or 100))}"
+        return self._build_request()[0]
+
+    def _qualified_name(self) -> str:
+        return _sql_safety.build_filtered_select(
+            (getattr(self, "view_name", "") or "FLOW_ACTIVITY_VIEW"),
+            database=(getattr(self, "database", "") or "SNOWFLAKE_LANGFLOW"),
+            schema=(getattr(self, "schema_name", "") or "CORE"),
+        )[2]
 
     def run_view_query(self) -> Data:
         mem_ref = (getattr(self, "memory_catalog_ref", "None") or "None").strip()
@@ -194,8 +213,8 @@ class SnowflakeViewsComponent(Component):
         sch = (getattr(self, "schema_name", "") or "CORE").strip()
         vw = (getattr(self, "view_name", "") or "FLOW_ACTIVITY_VIEW").strip()
         fqn = vw if "." in vw else f"{db}.{sch}.{vw}"
-        stmt = self._build_query()
-        res = LIVE_BRIDGE.execute_sql(stmt)
+        stmt, stmt_bindings = self._build_request()
+        res = _flow_component_execute_sql(stmt, bindings=stmt_bindings)
         return Data(
             data={
                 "view_subtype": getattr(self, "view_subtype", "Standard View"),
@@ -213,7 +232,8 @@ class SnowflakeViewsComponent(Component):
         )
 
     def read_dataframe(self) -> DataFrame:
-        res = LIVE_BRIDGE.execute_sql(self._build_query())
+        stmt, stmt_bindings = self._build_request()
+        res = _flow_component_execute_sql(stmt, bindings=stmt_bindings)
         return DataFrame(res.get("rows", []))
 
     def to_toolkit(self) -> list[Tool]:

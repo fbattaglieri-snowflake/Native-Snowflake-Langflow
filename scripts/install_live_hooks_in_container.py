@@ -423,6 +423,43 @@ def _is_entry_chunk(path: Path) -> bool:
         return False
 
 
+A2A_BLOCK_MARKERS = (
+    "    # >>> SFLF_A2A_PATCH BEGIN (managed by install_live_hooks; do not edit)\n",
+    "    # <<< SFLF_A2A_PATCH END\n",
+)
+# Unique first lines of the legacy (undelimited) appended blocks; never the upstream method definition.
+_A2A_LEGACY_BLOCK_STARTS = (
+    "    # SFLF_A2A_PATCH_V2 (BUG-A2A-01 call_chain/max_depth, agent_name_selected UI+API)\n",
+    "    async def _populate_internal_agents(self, build_config: dotdict) -> None:\n"
+    '        """Fill the Internal dropdown with both published Langflow A2A flows',
+)
+
+
+def apply_delimited_class_block(text: str, block: str, begin: str, end: str) -> str:
+    """Install ``block`` at the end of the trailing class, between ``begin``/``end`` markers, idempotently.
+
+    * markers present: exactly the delimited span is replaced (upstream code is never touched);
+    * legacy undelimited block (always appended at EOF by older installers): removed only when it starts
+      with one of the unique legacy first lines and sits after every upstream line of the class;
+    * otherwise the delimited block is appended. Running twice yields identical text.
+    """
+    body = block.strip("\n") + "\n"
+    wrapped = begin + body + end
+    b_idx = text.find(begin)
+    if b_idx != -1:
+        e_idx = text.find(end, b_idx)
+        if e_idx == -1:
+            raise RuntimeError("SFLF_A2A_PATCH BEGIN marker without END marker; refusing to patch")
+        return text[:b_idx] + wrapped + text[e_idx + len(end):]
+    for legacy in _A2A_LEGACY_BLOCK_STARTS:
+        l_idx = text.find(legacy)
+        # Legacy blocks contain the _sflf_/_populate_quick_fill_endpoints helpers; upstream never does.
+        if l_idx != -1 and "_populate_quick_fill_endpoints" in text[l_idx:]:
+            text = text[:l_idx]
+            break
+    return text.rstrip("\n") + "\n\n" + wrapped
+
+
 def counted_replace(text: str, target: str, pid: str, old: str, new: str, *, applied: str | None = None, expect=1, reason: str = "") -> str:
     """In-memory exact-string patch with a declared match count; records the outcome in PATCH_LEDGER."""
     try:
@@ -527,6 +564,56 @@ def assert_patch_ledger_clean() -> None:
             "[install_live_hooks] FAIL-CLOSED: patch anchors did not match their declared count:\n"
             + "\n".join(f"  - {r['target']} :: {r['id']} found={r['found']} applied={r['applied']} expected={r['expected']} {r['detail']}" for r in fails)
         )
+
+
+def _patch_upstream_memory_base_component() -> None:
+    """BUG-MEM-MB-01: route Snowflake `LF_MEM_*` Memory Bases of the native MemoryBaseComponent to Snowflake."""
+    mr_file = LFX_COMPONENTS_DIR / "files_and_knowledge" / "memory_retrieval.py"
+    if not mr_file.exists():
+        _record("lfx/components/files_and_knowledge/memory_retrieval.py", "memory_base.snowflake_hook", "FAIL", 0, 0, (1, 1), "file not found")
+        raise RuntimeError("memory_retrieval.py not found: cannot attach Snowflake Memory Bases (fail closed)")
+    mr_txt = mr_file.read_text(encoding="utf-8")
+    if "install_snowflake_memory_base_hook" in mr_txt:
+        _record("lfx/components/files_and_knowledge/memory_retrieval.py", "memory_base.snowflake_hook", "ALREADY", 0, 1, (1, 1))
+        return
+    if "class MemoryBaseComponent" not in mr_txt:
+        _record("lfx/components/files_and_knowledge/memory_retrieval.py", "memory_base.snowflake_hook", "FAIL", 0, 0, (1, 1), "MemoryBaseComponent not found")
+        raise RuntimeError("MemoryBaseComponent not found in memory_retrieval.py (fail closed)")
+    mr_txt += (
+        "\n# Snowflake Langflow: LF_MEM_* Memory Bases resolve to Snowflake (BUG-MEM-MB-01)\n"
+        "from lfx_snowflake.native_memory_base_hook import install_snowflake_memory_base_hook as _sf_mb_hook\n"
+        "_sf_mb_hook(MemoryBaseComponent)\n"
+    )
+    _record("lfx/components/files_and_knowledge/memory_retrieval.py", "memory_base.snowflake_hook", "OK", 1, 0, (1, 1))
+    if not REPORT_ONLY:
+        mr_file.write_text(mr_txt, encoding="utf-8")
+        print("[install_live_hooks] Patched memory_retrieval.py with the Snowflake Memory Base hook")
+
+
+def _patch_upstream_memory_base_auto_capture() -> None:
+    """Native auto-capture (`on_flow_output` -> `_maybe_trigger`) feeds Snowflake LF_MEM Memory Bases."""
+    ing_file = SITE_PACKAGES / "langflow" / "services" / "memory_base" / "ingestion.py"
+    label = "langflow/services/memory_base/ingestion.py"
+    if not ing_file.exists():
+        _record(label, "memory_base.auto_capture", "FAIL", 0, 0, (1, 1), "file not found")
+        raise RuntimeError("memory_base/ingestion.py not found: LF_MEM auto-capture unavailable (fail closed)")
+    ing_txt = ing_file.read_text(encoding="utf-8")
+    if "install_snowflake_auto_capture" in ing_txt:
+        _record(label, "memory_base.auto_capture", "ALREADY", 0, 1, (1, 1))
+        return
+    if "async def _maybe_trigger(" not in ing_txt or "async def on_flow_output(" not in ing_txt:
+        _record(label, "memory_base.auto_capture", "FAIL", 0, 0, (1, 1), "_maybe_trigger/on_flow_output not found")
+        raise RuntimeError("Unsupported Langflow memory_base ingestion module (fail closed)")
+    ing_txt += (
+        "\n# Snowflake Langflow: LF_MEM_* Memory Bases ingest into Snowflake (BUG-MEM-PROV-01)\n"
+        "import sys as _sf_sys\n"
+        "from lfx_snowflake.memories_lf_mem_ingest import install_snowflake_auto_capture as _sf_capture\n"
+        "_sf_capture(_sf_sys.modules[__name__])\n"
+    )
+    _record(label, "memory_base.auto_capture", "OK", 1, 0, (1, 1))
+    if not REPORT_ONLY:
+        ing_file.write_text(ing_txt, encoding="utf-8")
+        print("[install_live_hooks] Patched memory_base/ingestion.py with Snowflake LF_MEM auto-capture")
 
 
 def _patch_upstream_models_and_agents_files() -> None:
@@ -713,7 +800,8 @@ def _patch_upstream_models_and_agents_files() -> None:
     a2a_file = ma_dir / "a2a_agent.py"
     if a2a_file.exists():
         a2a_txt = a2a_file.read_text(encoding="utf-8")
-        if "quick_fill_endpoint" not in a2a_txt or REPORT_ONLY:
+        a2a_orig = a2a_txt
+        if True:  # idempotent: quick_fill_endpoint uses applied=..., the method block is delimited (see below)
             a2a_txt = counted_replace(
                 a2a_txt,
                 "lfx/components/models_and_agents/a2a_agent.py",
@@ -739,6 +827,27 @@ def _patch_upstream_models_and_agents_files() -> None:
                 applied="quick_fill_endpoint",
             )
             a2a_patch_block = '''
+    # SFLF_A2A_PATCH_V2 (BUG-A2A-01 call_chain/max_depth, agent_name_selected UI+API)
+    def _sflf_selected_agent(self) -> str:
+        """agent_name_selected from UI or JSON/API tweak; falls back to the value configured on the node."""
+        val = getattr(self, "agent_name_selected", None)
+        if not (isinstance(val, str) and val.strip()):
+            params = getattr(self, "_parameters", None) or {}
+            val = params.get("agent_name_selected") if isinstance(params, dict) else None
+        if not (isinstance(val, str) and val.strip()):
+            node = getattr(self, "_vertex", None)
+            tmpl = ((getattr(node, "data", None) or {}).get("node") or {}).get("template") or {}
+            val = (tmpl.get("agent_name_selected") or {}).get("value") if isinstance(tmpl, dict) else None
+        return str(val or "").strip()
+
+    def _sflf_next_hop(self, target: str) -> tuple:
+        from lfx_snowflake import a2a_call_chain as _chain
+        from lfx_snowflake.context_helpers import _resolve_flow_id
+
+        try:
+            return _chain.component_next_hop(_resolve_flow_id(self), target, getattr(self, "max_depth", None))
+        except _chain.A2ARecursionError as exc:
+            raise ValueError(f"A2A_RECURSION_BLOCKED: {exc}") from exc
 
     async def _populate_internal_agents(self, build_config: dotdict) -> None:
         """Fill the Internal dropdown with both published Langflow A2A flows and [ ❄️ Context ] Snowflake Cortex Agents (`MA-W2-R6-05`)."""
@@ -767,7 +876,9 @@ def _patch_upstream_models_and_agents_files() -> None:
 
         build_config["agent_name_selected"]["options"] = options
         build_config["agent_name_selected"]["options_metadata"] = metadata
-        if options and build_config["agent_name_selected"].get("value") not in options:
+        # Free text / API-provided values (e.g. "DB.SCH.AGENT" or a flow id) must survive a refresh.
+        build_config["agent_name_selected"]["combobox"] = True
+        if options and not str(build_config["agent_name_selected"].get("value") or "").strip():
             build_config["agent_name_selected"]["value"] = options[0]
 
     def _populate_quick_fill_endpoints(self, build_config: dotdict) -> dict[str, str]:
@@ -820,7 +931,7 @@ def _patch_upstream_models_and_agents_files() -> None:
         from lfx_snowflake.fastapi_live_bridge import LIVE_BRIDGE
         from lfx_snowflake.context_helpers import _resolve_flow_id
 
-        agent_name = (self.agent_name_selected or "").strip()
+        agent_name = self._sflf_selected_agent()
         if not agent_name:
             raise ValueError("Select an A2A agent ([Langflow Flow] or [Cortex Agent]) to call.")
 
@@ -829,8 +940,17 @@ def _patch_upstream_models_and_agents_files() -> None:
             parts = [p.strip() for p in fqn.split(".") if p.strip()]
             if len(parts) != 3:
                 raise ValueError(f"Invalid Cortex Agent FQN: {agent_name!r}")
-            flow_id = _resolve_flow_id(self) or "default"
-            sess_id = getattr(getattr(self, "graph", None), "session_id", None) or flow_id
+            self._sflf_next_hop(".".join(parts))
+            # BUG-A2A-02: no hard-coded role; missing/unauthorized role fails closed (403 AUTHZ_ROLE_DENIED).
+            from lfx_snowflake.components.a2a_and_cortex_agent import resolve_a2a_session_role
+            from lfx_snowflake.components.files_and_stage import SnowflakeComponentError as _SfAuthzError
+
+            try:
+                resolve_a2a_session_role()
+            except _SfAuthzError as _authz_exc:
+                raise ValueError(f"AUTHZ_ROLE_DENIED: {_authz_exc}") from _authz_exc
+            flow_id = _resolve_flow_id(self)  # BUG-A2A-03: no flow => None (RBAC only), never a pseudo flow id
+            sess_id = getattr(getattr(self, "graph", None), "session_id", None) or flow_id or "default"
             res = LIVE_BRIDGE.invoke_cortex_agent(
                 database=parts[0],
                 schema=parts[1],
@@ -864,8 +984,12 @@ def _patch_upstream_models_and_agents_files() -> None:
         if not flow or not flow.data:
             raise ValueError(f"Agent flow '{agent_name}' could not be found.")
 
+        from lfx_snowflake import a2a_call_chain as _chain
+
+        next_chain, depth = self._sflf_next_hop(str(flow_id))
         graph = await self.load_flow(flow_id)
-        run_outputs = await self._run_target_isolated(graph, flow_id)
+        with _chain.bind_call_chain(next_chain, depth):
+            run_outputs = await self._run_target_isolated(graph, flow_id)
         answer = self._reply_from_run(run_outputs)
         message = Message(text=answer or "No response received from the agent.")
         self.status = message
@@ -887,8 +1011,17 @@ def _patch_upstream_models_and_agents_files() -> None:
             flags=_re.IGNORECASE,
         )
         if m_run:
-            flow_id = _resolve_flow_id(self) or "default"
-            sess_id = getattr(getattr(self, "graph", None), "session_id", None) or flow_id
+            self._sflf_next_hop(f"{m_run.group(1)}.{m_run.group(2)}.{m_run.group(3)}")
+            # BUG-A2A-02: no hard-coded role; missing/unauthorized role fails closed (403 AUTHZ_ROLE_DENIED).
+            from lfx_snowflake.components.a2a_and_cortex_agent import resolve_a2a_session_role
+            from lfx_snowflake.components.files_and_stage import SnowflakeComponentError as _SfAuthzError
+
+            try:
+                resolve_a2a_session_role()
+            except _SfAuthzError as _authz_exc:
+                raise ValueError(f"AUTHZ_ROLE_DENIED: {_authz_exc}") from _authz_exc
+            flow_id = _resolve_flow_id(self)  # BUG-A2A-03: no flow => None (RBAC only), never a pseudo flow id
+            sess_id = getattr(getattr(self, "graph", None), "session_id", None) or flow_id or "default"
             res = LIVE_BRIDGE.invoke_cortex_agent(
                 database=m_run.group(1),
                 schema=m_run.group(2),
@@ -910,8 +1043,19 @@ def _patch_upstream_models_and_agents_files() -> None:
             flags=_re.IGNORECASE,
         )
         if m_bridge and (not raw_url.startswith("http") or "127.0.0.1" in raw_url or "localhost" in raw_url):
-            flow_id = _resolve_flow_id(self) or "default"
-            sess_id = getattr(getattr(self, "graph", None), "session_id", None) or flow_id
+            from lfx_snowflake import a2a_call_chain as _chain
+
+            hop_chain, hop_depth = self._sflf_next_hop(f"{m_bridge.group(1)}.{m_bridge.group(2)}.{m_bridge.group(3)}")
+            # BUG-A2A-02: no hard-coded role; missing/unauthorized role fails closed (403 AUTHZ_ROLE_DENIED).
+            from lfx_snowflake.components.a2a_and_cortex_agent import resolve_a2a_session_role
+            from lfx_snowflake.components.files_and_stage import SnowflakeComponentError as _SfAuthzError
+
+            try:
+                resolve_a2a_session_role()
+            except _SfAuthzError as _authz_exc:
+                raise ValueError(f"AUTHZ_ROLE_DENIED: {_authz_exc}") from _authz_exc
+            flow_id = _resolve_flow_id(self)  # BUG-A2A-03: no flow => None (RBAC only), never a pseudo flow id
+            sess_id = getattr(getattr(self, "graph", None), "session_id", None) or flow_id or "default"
             rpc = LIVE_BRIDGE.handle_cortex_agent_a2a_jsonrpc(
                 m_bridge.group(1),
                 m_bridge.group(2),
@@ -925,7 +1069,8 @@ def _patch_upstream_models_and_agents_files() -> None:
                             "role": "user",
                             "contextId": str(sess_id),
                             "parts": [{"kind": "text", "text": str(self.input_value or "")}],
-                        }
+                        },
+                        "metadata": _chain.outbound_metadata(hop_chain[:-1], hop_depth),
                     },
                 },
                 flow_id=flow_id,
@@ -945,6 +1090,11 @@ def _patch_upstream_models_and_agents_files() -> None:
             timeout = DEFAULT_TIMEOUT
 
         agent_url = _agent_base_url(raw_url)
+        from lfx_snowflake import a2a_call_chain as _chain
+
+        # Remote hop: the caller chain travels as X-Snowflake-A2A-Call-Chain / -Max-Depth headers.
+        # Precise hop identity: agent FQN / flow id / scheme://host:port/path (never host-only).
+        ext_chain, ext_depth = self._sflf_next_hop(_chain.hop_from_url(raw_url))
         try:
             _validated_url, validated_ips = await asyncio.to_thread(validate_and_resolve_connector_url, agent_url)
         except SSRFProtectionError as e:
@@ -952,6 +1102,8 @@ def _patch_upstream_models_and_agents_files() -> None:
             raise ValueError(msg) from e
 
         client = build_a2a_client(agent_url, validated_ips, api_key=self.api_key, timeout=timeout)
+        if hasattr(client, "headers"):
+            client.headers.update(_chain.outbound_headers(ext_chain[:-1], ext_depth))
         try:
             async with client:
                 answer = await call_a2a_agent(agent_url, self.input_value, httpx_client=client)
@@ -966,8 +1118,9 @@ def _patch_upstream_models_and_agents_files() -> None:
         self.status = message
         return message
 '''
-            if "quick_fill_endpoint" in a2a_txt and "_populate_quick_fill_endpoints" not in a2a_txt and not REPORT_ONLY:
-                a2a_txt = a2a_txt.rstrip() + "\n" + a2a_patch_block
+            if "quick_fill_endpoint" in a2a_txt:
+                a2a_txt = apply_delimited_class_block(a2a_txt, a2a_patch_block, *A2A_BLOCK_MARKERS)
+            if a2a_txt != a2a_orig and not REPORT_ONLY:
                 a2a_file.write_text(a2a_txt, encoding="utf-8")
                 print("[install_live_hooks] Patched lfx/components/models_and_agents/a2a_agent.py")
 
@@ -1893,6 +2046,8 @@ def install_all() -> None:
         print(f"[install_live_hooks] Warning registering Snowflake Vector Store backends: {exc}")
 
     _patch_upstream_models_and_agents_files()
+    _patch_upstream_memory_base_component()
+    _patch_upstream_memory_base_auto_capture()
 
     try:
         from lfx_snowflake.providers.language_models import register_snowflake_language_model_providers
@@ -1977,7 +2132,6 @@ def install_all() -> None:
         ("models_and_agents", "SnowflakeCortexAgentA2A"),
         ("models_and_agents", "Memory"),
         ("models_and_agents", "SnowflakeMessageHistory"),
-        ("models_and_agents", "MCPTools"),
         ("utilities", "SnowflakePythonInterpreterPyPI"),
     )
     for stale_cat, stale_comp in stale_index_entries:
@@ -2086,14 +2240,15 @@ def install_all() -> None:
         "SnowflakeCortexAgentA2A",
         "Memory",
         "SnowflakeMessageHistory",
-        "MCPTools",
         "PoliciesComponent",
     ):
         ma_entries.pop(dup_ma, None)
 
+    # BUG-MCP-04: the native Langflow `MCP Tools` client stays in Models & Agents (never a duplicate to drop).
     canonical_ma_keys = {
         "A2AAgent",
         "Agent",
+        "MCPTools",
         "SnowflakeCortexAgent",
         "EmbeddingModel",
         "LanguageModelComponent",
@@ -2175,6 +2330,7 @@ def install_all() -> None:
     for ma_comp in (
         "A2AAgent",
         "Agent",
+        "MCPTools",
         "SnowflakeCortexAgent",
         "EmbeddingModel",
         "LanguageModelComponent",
@@ -2189,13 +2345,14 @@ def install_all() -> None:
         [
             "A2AAgent",
             "Agent",
+            "MCPTools",
             "SnowflakeCortexAgent",
             "EmbeddingModel",
             "LanguageModelComponent",
             "MessageHistory",
             "Prompt Template",
         ]
-    ), f"Expected strictly 7 canonical non-legacy components in models_and_agents, got: {non_legacy_ma}"
+    ), f"Expected strictly 8 canonical non-legacy components in models_and_agents, got: {non_legacy_ma}"
     for ma_removed in (
         "StandardChat",
         "StandardResponses",
@@ -2204,7 +2361,6 @@ def install_all() -> None:
         "SnowflakeCortexAgentA2A",
         "Memory",
         "SnowflakeMessageHistory",
-        "MCPTools",
     ):
         assert ma_removed not in idx_cats["models_and_agents"], (
             f"Removed duplicate {ma_removed} still in models_and_agents"

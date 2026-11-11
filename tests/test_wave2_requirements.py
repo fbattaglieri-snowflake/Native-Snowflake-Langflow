@@ -637,7 +637,9 @@ def test_w2_r2_01_02_03_model_catalog_and_dynamic_update_build_config() -> None:
     ct_comp.update_build_config(ct_cfg, "User's default", "warehouse_mode")
     assert ct_cfg["custom_warehouse"]["show"] is False
     ct_comp.update_build_config(ct_cfg, "function", "resource_type")
-    assert ct_cfg["custom_tool_identifier"]["options"]
+    # PASSO6 BUG-LLMOP-005: offline there is no live catalog, so no invented identifiers are offered.
+    assert isinstance(ct_cfg["custom_tool_identifier"]["options"], list)
+    assert not any("SEND_EMAIL_ALL" in str(o) for o in ct_cfg["custom_tool_identifier"]["options"])
 
     # W2-R2-03 & W2-R9-04: AI Function & AI Redact dynamic field visibility
     aif_comp = SidebarAIFunctionComponent()
@@ -1505,7 +1507,9 @@ def test_w2_r4_03_automatic_sqlite_transaction_and_vertex_build_replication_and_
 
     def _mock_sql(statement: str, **kwargs):
         if statement.strip().upper().startswith("MERGE INTO"):
-            executed_merges.append(statement)
+            # Values travel as SQL API bindings (BUG-UI-SQLI-05); keep them next to the statement text.
+            bound = " ".join(str(b.get("value")) for b in (kwargs.get("bindings") or {}).values())
+            executed_merges.append(f"{statement} {bound}")
         return {"ok": True, "rows": [], "columns": []}
 
     monkeypatch.setattr(bridge, "execute_sql", _mock_sql)

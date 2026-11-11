@@ -19,6 +19,7 @@ Replace the following placeholders with your target environment values during de
 - `<POSTGRES_INSTANCE>` — Snowflake Postgres instance for transactional ORM persistence and `pgvector`
 - `<LLM_PROXY_BASE_URL>` — Internal SPCS DNS or ingress URL of the Standard LLM Proxy (`Chat`, `Responses`, `Messages`)
 - `<OLLAMA_BASE_URL>` — Internal SPCS DNS or ingress URL of the Snowflake-hosted Ollama service
+- `<LLM_PROXY_HOST>`, `<OLLAMA_HOST>` — Host (`name[:port]`) of the two services above, for `LANGFLOW_SSRF_ALLOWED_HOSTS`. Keep `localhost,127.0.0.1` in that list: the `MCP Tools` component reaches the in-container Project MCP Server over loopback (still authenticated with the project's `x-api-key`).
 
 If your AWS region uses cross-region Cortex inference, enable:
 

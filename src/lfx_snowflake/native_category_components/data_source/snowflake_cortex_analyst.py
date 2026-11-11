@@ -210,6 +210,7 @@ class SnowflakeCortexAnalystComponent(Component):
             question=getattr(self, "question", "") or "Show the latest flow runs by active role",
             execute_sql=bool(getattr(self, "execute_generated_sql", True)),
             max_rows=int(getattr(self, "max_rows", 50) or 50),
+            flow_id=_resolve_flow_id(self),
         )
         res.setdefault("rest_endpoint", "/api/v2/cortex/analyst/message")
         res["discovery_sql"] = (
