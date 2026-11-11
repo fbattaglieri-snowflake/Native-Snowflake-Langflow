@@ -342,45 +342,101 @@ def test_record_flow_run_counts_and_sync_flushes(monkeypatch: pytest.MonkeyPatch
     assert len(flushed) == 2
 
 
-def test_secondary_roles_prefix_stripped_and_retried_once_on_422() -> None:
+class _SRResp:
+    def __init__(self, status: int, body: dict) -> None:
+        self.status_code, self._b = status, body
+        self.content = b"x"
+
+    def json(self) -> dict:
+        return self._b
+
+
+def test_t2_denied_user_statement_100132_never_retried_without_prefix() -> None:
+    """E2E rerun-2/T2: 100132 on statement 2 (denied SELECT) must surface, never retry, never leak."""
     from lfx_snowflake.fastapi_live_bridge import LiveSnowflakeBridge
 
-    class _Resp:
-        def __init__(self, status: int, body: dict) -> None:
-            self.status_code, self._b = status, body
-            self.content = b"x"
-
-        def json(self) -> dict:
-            return self._b
-
-    for code in ("100132", "391911"):
+    for status_code in (422, 200):
         posted: list[str] = []
 
         class _Client:
             def post(self, url, headers=None, json=None, timeout=None):
                 posted.append(json["statement"])
                 if json["statement"].upper().startswith("USE SECONDARY ROLES"):
-                    return _Resp(422, {"code": code, "message": "restricted"})
-                return _Resp(200, {"data": [["1"]]})
+                    return _SRResp(status_code if status_code == 422 else 422, {
+                        "code": "100132",
+                        "message": "SQL compilation error: Object 'SECRET_T' does not exist or not authorized.",
+                        "statementHandle": "h2",
+                        "statementHandles": ["h1", "h2"],
+                    })
+                return _SRResp(200, {"data": [["TOP-SECRET"]]})
+
+            def get(self, *a, **k):
+                raise AssertionError("no child fetch on error")
+
+        status, body = LiveSnowflakeBridge._post_sql_statements(
+            _Client(), "u", {}, {"statement": "USE SECONDARY ROLES NONE;\nSELECT * FROM SECRET_T"}, 5.0
+        )
+        assert status == 422 and len(posted) == 1
+        assert "TOP-SECRET" not in repr(body) and "not authorized" in body["message"]
+
+    # Same error without handles: message is not the USE rejection -> surfaced, no retry.
+    posted.clear()
+
+    class _NoHandles:
+        def post(self, url, headers=None, json=None, timeout=None):
+            posted.append(json["statement"])
+            return _SRResp(422, {"code": "100132", "message": "Object does not exist or not authorized."})
+
+    status, _ = LiveSnowflakeBridge._post_sql_statements(_NoHandles(), "u", {}, {"statement": "USE SECONDARY ROLES ALL;\nSELECT 2"}, 5.0)
+    assert status == 422 and len(posted) == 1
+
+
+def test_secondary_roles_prefix_rejection_is_403_and_user_sql_never_sent() -> None:
+    from lfx_snowflake.fastapi_live_bridge import LiveSnowflakeBridge
+
+    cases = [
+        {"code": "100132", "message": "USE ROLE not allowed in SYSTEM$MULTISTMT"},
+        {"code": "391911", "message": "Command not supported by SQL API: USE"},
+        {"code": "100132", "message": "x", "statementHandle": "h1", "statementHandles": ["h1", "h2"]},
+    ]
+    for err in cases:
+        posted: list[str] = []
+
+        class _Client:
+            def post(self, url, headers=None, json=None, timeout=None):
+                posted.append(json["statement"])
+                if not json["statement"].upper().startswith("USE SECONDARY ROLES"):
+                    raise AssertionError("user SQL sent without prefix")
+                return _SRResp(422, dict(err))
 
             def get(self, *a, **k):
                 raise AssertionError("no polling expected")
 
         status, body = LiveSnowflakeBridge._post_sql_statements(
-            _Client(), "https://h/api/v2/statements", {}, {"statement": "USE SECONDARY ROLES NONE;\nSELECT 1"}, 10.0
+            _Client(), "u", {}, {"statement": "USE SECONDARY ROLES NONE;\nSELECT 1"}, 5.0
         )
-        assert status == 200 and body == {"data": [["1"]]}
-        assert posted == ["USE SECONDARY ROLES NONE;\nSELECT 1", "SELECT 1"]
+        assert status == 403 and body["error_code"] == "AUTHZ_ROLE_DENIED" and len(posted) == 1
 
-    posted.clear()
+
+def test_secondary_roles_success_and_unprefixed_paths_unchanged() -> None:
+    from lfx_snowflake.fastapi_live_bridge import LiveSnowflakeBridge
+
+    class _Ok:
+        def post(self, url, headers=None, json=None, timeout=None):
+            return _SRResp(200, {"statementHandles": ["h1", "h2"]})
+
+        def get(self, url, headers=None, timeout=None):
+            assert url.endswith("/h2")
+            return _SRResp(200, {"data": [["1"]]})
+
+    status, body = LiveSnowflakeBridge._post_sql_statements(_Ok(), "u", {}, {"statement": "USE SECONDARY ROLES NONE;\nSELECT 1"}, 5.0)
+    assert status == 200 and body == {"data": [["1"]]}
+    posted: list[str] = []
 
     class _Always422:
         def post(self, url, headers=None, json=None, timeout=None):
             posted.append(json["statement"])
-            return _Resp(422, {"code": "100132"})
+            return _SRResp(422, {"code": "100132", "message": "USE ROLE not allowed in SYSTEM$MULTISTMT"})
 
-    status, _ = LiveSnowflakeBridge._post_sql_statements(_Always422(), "u", {}, {"statement": "USE SECONDARY ROLES ALL;\nSELECT 2"}, 5.0)
-    assert status == 422 and len(posted) == 2  # retried exactly once
-    posted.clear()
     status, _ = LiveSnowflakeBridge._post_sql_statements(_Always422(), "u", {}, {"statement": "SELECT 3"}, 5.0)
-    assert status == 422 and posted == ["SELECT 3"]  # no prefix -> no retry
+    assert status == 422 and posted == ["SELECT 3"]  # no prefix -> passthrough, no retry

@@ -215,6 +215,20 @@ def resolve_component_code(code: str) -> str:
     return current or code
 
 
+def _apply_runtime_class_hooks(built: Any) -> Any:
+    """Hook classes built from source text, independent of that text (BUG-MEM-MB-01 rerun-2).
+
+    The installer appends the LF_MEM hook to ``memory_retrieval.py``, but nodes are built by exec'ing the
+    stored or installed source, which may be an unpatched copy. Hooking the built class guarantees the
+    native ``MemoryBaseComponent`` always resolves Snowflake memories to the governed LF_MEM backend.
+    """
+    if isinstance(built, type) and built.__name__ == "MemoryBaseComponent" and hasattr(built, "_build_backend"):
+        from lfx_snowflake.native_memory_base_hook import install_snowflake_memory_base_hook  # noqa: PLC0415
+
+        install_snowflake_memory_base_hook(built)
+    return built
+
+
 def install_stale_component_guard() -> int:
     """Wrap every loaded binding of lfx ``eval_custom_component_code``; returns the number of bindings."""
     try:
@@ -233,7 +247,8 @@ def install_stale_component_guard() -> int:
         pass
 
     def guarded_eval_custom_component_code(code: str, *args: Any, **kwargs: Any):
-        return original(resolve_component_code(code), *args, **kwargs)
+        built = original(resolve_component_code(code), *args, **kwargs)
+        return _apply_runtime_class_hooks(built)
 
     guarded_eval_custom_component_code._sflf_stale_guard = True  # type: ignore[attr-defined]
     guarded_eval_custom_component_code.__wrapped__ = original  # type: ignore[attr-defined]

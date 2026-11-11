@@ -9162,19 +9162,25 @@ class LiveSnowflakeBridge:
 
         resp = client.post(url, headers=headers, json=payload, timeout=timeout)
         status, body = _wait(int(resp.status_code), resp.json() if resp.content else {})
-        # PASSO8/C3 (observed live): restricted sessions reject the USE SECONDARY ROLES prefix with 422
-        # (100132 "USE ROLE not allowed in SYSTEM$MULTISTMT", 391911 "Command not supported by SQL API: USE").
-        # Retry once without the prefix; the secondary-roles guard still judges the real session (fail closed).
+        # E2E rerun-2/T2 (CRITICAL): 100132 is the generic multi-statement child-failure code, so a denied
+        # user SELECT also answers 100132. The statement is NEVER re-sent without the USE SECONDARY ROLES
+        # prefix (that retry ran it with default secondary roles and leaked the row). Only a rejection of
+        # the prefix itself (statement 1) is mapped to 403 AUTHZ_ROLE_DENIED; any other error is surfaced.
         stmt_txt = str(payload.get("statement") or "")
         if (
-            status == 422
+            status >= 400
             and isinstance(body, dict)
-            and str(body.get("code") or "") in _SECONDARY_ROLES_REJECT_CODES
             and _SECONDARY_ROLES_PREFIX_RE.match(stmt_txt)
+            and _secondary_roles_prefix_rejected(body)
         ):
-            retry_payload = {**payload, "statement": _SECONDARY_ROLES_PREFIX_RE.sub("", stmt_txt, count=1)}
-            resp = client.post(url, headers=headers, json=retry_payload, timeout=timeout)
-            status, body = _wait(int(resp.status_code), resp.json() if resp.content else {})
+            return 403, {
+                "code": str(body.get("code") or ""),
+                "error_code": ErrorCode.AUTHZ_ROLE_DENIED.value,
+                "message": (
+                    "Secondary roles policy cannot be enforced in this session (USE SECONDARY ROLES "
+                    "rejected); the statement was not executed."
+                ),
+            }
         handles = body.get("statementHandles") if isinstance(body, dict) else None
         if status < 400 and isinstance(handles, list) and handles:
             # Multi-statement (e.g. the USE SECONDARY ROLES prefix): the user statement is the last child,
@@ -9416,11 +9422,25 @@ class LiveSnowflakeBridge:
         return self._build_activity_merge_request(record)[0]
 
     def _telemetry_row_pending(self, key: str, ts: Any) -> bool:
-        """T10: an ambiguous span row waits (not marked synced) until it is older than the match grace window."""
-        when = _telemetry._parse_ts(ts)
-        if when is None:
-            return False
-        return (datetime.now(timezone.utc) - when).total_seconds() < _telemetry.RUNS.match_grace_s
+        """T10: an ambiguous span row waits at most one match grace window, then is written with NULL run_id.
+
+        The window is measured from when this process first saw the row (monotonic), never from the row's own
+        timestamp, so a future-dated or skewed row cannot be held forever. Rows still pending are re-fetched by
+        id on the next sync (``_pending_row_ids``), so they cannot fall out of the bounded newest-N fetch.
+        """
+        pending: dict[str, float] = self.__dict__.setdefault("_telemetry_pending_since", {})
+        first = pending.setdefault(key, time.monotonic())
+        if time.monotonic() - first < _telemetry.RUNS.match_grace_s:
+            return True
+        pending.pop(key, None)
+        return False
+
+    def _pending_row_ids(self, prefix: str) -> list[str]:
+        pending: dict[str, float] = self.__dict__.get("_telemetry_pending_since") or {}
+        return [k[len(prefix):] for k in list(pending) if k.startswith(prefix)][:500]
+
+    def _resolve_pending(self, key: str) -> None:
+        (self.__dict__.get("_telemetry_pending_since") or {}).pop(key, None)
 
     def _submit_telemetry(self, request: tuple[str, dict[str, Any]], query_tag: str | None = None) -> None:
         """PASSO 8: telemetry DML runs off the turn's critical path (batched writer) in live mode."""
@@ -10140,20 +10160,39 @@ class LiveSnowflakeBridge:
                             flow_meta[norm_fl_id] = meta_entry
                             flow_meta[norm_fl_id.replace("-", "")] = meta_entry
 
+                    # T10: raw Langflow rows are read from the local SQLite (cheap; already-synced ids are skipped in
+                    # memory), wider than the UI ``limit`` so concurrent runs cannot push unsynced rows out of view.
+                    raw_bound = max(bounded_tx, 200)
                     tx_rows = (
                         cur.execute(
-                            'SELECT * FROM "transaction" ORDER BY timestamp DESC LIMIT ?', (bounded_tx,)
+                            'SELECT * FROM "transaction" ORDER BY timestamp DESC LIMIT ?', (raw_bound,)
                         ).fetchall()
                         if "transaction" in tables
                         else []
                     )
                     vb_rows = (
                         cur.execute(
-                            'SELECT * FROM "vertex_build" ORDER BY timestamp DESC LIMIT ?', (bounded_tx,)
+                            'SELECT * FROM "vertex_build" ORDER BY timestamp DESC LIMIT ?', (raw_bound,)
                         ).fetchall()
                         if "vertex_build" in tables
                         else []
                     )
+                    # Pending (ambiguous) rows are always re-read by primary key until written.
+                    for tbl, pk, prefix, rows in (
+                        ("transaction", "id", "tx:", tx_rows),
+                        ("vertex_build", "build_id", "vb:", vb_rows),
+                    ):
+                        want = [i for i in self._pending_row_ids(prefix) if i] if tbl in tables else []
+                        if want:
+                            seen = {str(dict(r).get(pk) or "") for r in rows}
+                            want = [i for i in want if i not in seen]
+                        for i in range(0, len(want), 100):
+                            chunk = want[i : i + 100]
+                            rows.extend(
+                                cur.execute(
+                                    f'SELECT * FROM "{tbl}" WHERE {pk} IN ({",".join("?" * len(chunk))})', tuple(chunk)
+                                ).fetchall()
+                            )
                     conn.close()
 
                     _telemetry.install_langflow_row_stamping()
@@ -10209,11 +10248,12 @@ class LiveSnowflakeBridge:
                         elif tx_ambiguous:
                             if self._telemetry_row_pending(f"tx:{tx_id}", tx_ts):
                                 continue  # retry on a later sync: the owning run may still be stamped
-                            rid = tid = sess = None
+                            rid = tid = sess = None  # still ambiguous after grace: written, run_id NULL
                         else:
                             # No live run at all (e.g. after a restart): one derived run per job, else per row.
                             rid, tid = _telemetry.derived_run_ids(flow_id, f"job:{tx_job}" if tx_job else f"tx:{tx_id}")
                             sess = None
+                        self._resolve_pending(f"tx:{tx_id}")
                         sess = str(row_dict.get("session_id") or sess or "") or None
                         vertex_id = str(row_dict.get("vertex_id") or "vertex")
                         status_val = str(row_dict.get("status") or "SUCCESS").upper()
@@ -10240,8 +10280,8 @@ class LiveSnowflakeBridge:
                                     ("authenticated_user", self.authenticated_user, "TEXT"),
                                     ("effective_role", self.active_role, "TEXT"),
                                     ("execution_mode", exec_mode_v, "TEXT"),
-                                    ("start_ts", _telemetry.utc_iso(tx_ts), "TS"),
-                                    ("end_ts", _telemetry.utc_iso(tx_ts), "TS"),
+                                    ("start_ts", _telemetry.utc_iso_clamped(tx_ts), "TS"),
+                                    ("end_ts", _telemetry.utc_iso_clamped(tx_ts), "TS"),
                                     ("status", status_val, "TEXT"),
                                     ("redacted_inputs", inputs_redacted, "JSON"),
                                     ("redacted_outputs", outputs_redacted, "JSON"),
@@ -10269,8 +10309,8 @@ class LiveSnowflakeBridge:
                                         ("authenticated_user", self.authenticated_user, "TEXT"),
                                         ("effective_role", self.active_role, "TEXT"),
                                         ("execution_mode", exec_mode_v, "TEXT"),
-                                        ("start_ts", _telemetry.utc_iso(tx_ts), "TS"),
-                                        ("end_ts", _telemetry.utc_iso(tx_ts), "TS"),
+                                        ("start_ts", _telemetry.utc_iso_clamped(tx_ts), "TS"),
+                                        ("end_ts", _telemetry.utc_iso_clamped(tx_ts), "TS"),
                                         ("status", status_val, "TEXT"),
                                         ("input_payload", inputs_redacted, "JSON"),
                                         ("output_payload", outputs_redacted, "JSON"),
@@ -10295,8 +10335,8 @@ class LiveSnowflakeBridge:
                                 "project_id": f_meta.get("project_id") or "default",
                                 "project_name": f_meta.get("project_name") or "Default Project",
                                 "session_id": sess or flow_id,
-                                "timestamp": str(row_dict.get("timestamp") or datetime.now(timezone.utc).isoformat()),
-                                "run_timestamp": str(row_dict.get("timestamp") or datetime.now(timezone.utc).isoformat()),
+                                "timestamp": _telemetry.utc_iso_clamped(row_dict.get("timestamp")),
+                                "run_timestamp": _telemetry.utc_iso_clamped(row_dict.get("timestamp")),
                                 "status": status_val,
                                 "latency_ms": float(row_dict.get("latency_ms") or 12.5),
                                 "total_latency_ms": float(row_dict.get("latency_ms") or 12.5),
@@ -10347,11 +10387,12 @@ class LiveSnowflakeBridge:
                         elif vb_ambiguous:
                             if self._telemetry_row_pending(f"vb:{vb_id}", vb_ts):
                                 continue
-                            vb_rid = vb_tid = vb_sess = None
+                            vb_rid = vb_tid = vb_sess = None  # still ambiguous after grace: written, run_id NULL
                         else:
                             vb_job = vb_dict.get("job_id")
                             vb_rid, vb_tid = _telemetry.derived_run_ids(flow_id, f"job:{vb_job}" if vb_job else f"vb:{vb_id}")
                             vb_sess = None
+                        self._resolve_pending(f"vb:{vb_id}")
                         vertex_id = str(vb_dict.get("id") or vb_dict.get("vertex_id") or "vertex")
                         valid_flag = vb_dict.get("valid")
                         status_val = "SUCCESS" if valid_flag in (True, 1, "1", "true", "TRUE", None) else "ERROR"
@@ -10377,8 +10418,8 @@ class LiveSnowflakeBridge:
                                     ("authenticated_user", self.authenticated_user, "TEXT"),
                                     ("effective_role", self.active_role, "TEXT"),
                                     ("execution_mode", _trace.audit_execution_mode(_sf_identity.origin_mode()), "TEXT"),
-                                    ("start_ts", _telemetry.utc_iso(vb_ts), "TS"),
-                                    ("end_ts", _telemetry.utc_iso(vb_ts), "TS"),
+                                    ("start_ts", _telemetry.utc_iso_clamped(vb_ts), "TS"),
+                                    ("end_ts", _telemetry.utc_iso_clamped(vb_ts), "TS"),
                                     ("status", status_val, "TEXT"),
                                     ("redacted_inputs", params_redacted, "JSON"),
                                     ("redacted_outputs", data_redacted, "JSON"),
@@ -10403,8 +10444,8 @@ class LiveSnowflakeBridge:
                                 "project_id": f_meta.get("project_id") or "default",
                                 "project_name": f_meta.get("project_name") or "Default Project",
                                 "session_id": vb_sess or flow_id,
-                                "timestamp": str(vb_dict.get("timestamp") or datetime.now(timezone.utc).isoformat()),
-                                "run_timestamp": str(vb_dict.get("timestamp") or datetime.now(timezone.utc).isoformat()),
+                                "timestamp": _telemetry.utc_iso_clamped(vb_dict.get("timestamp")),
+                                "run_timestamp": _telemetry.utc_iso_clamped(vb_dict.get("timestamp")),
                                 "status": status_val,
                                 "latency_ms": 8.0,
                                 "total_latency_ms": 8.0,
@@ -10535,6 +10576,27 @@ LIVE_BRIDGE = LiveSnowflakeBridge()
 
 _SECONDARY_ROLES_REJECT_CODES = frozenset({"100132", "391911"})
 _SECONDARY_ROLES_PREFIX_RE = re.compile(r"^\s*USE SECONDARY ROLES (?:NONE|ALL)\s*;\s*\n?", re.IGNORECASE)
+# Messages Snowflake returns when the USE statement itself is refused (observed live, PASSO8/C3).
+_SECONDARY_ROLES_REJECT_MSG_RE = re.compile(
+    r"\bUSE(?:\s+SECONDARY)?\s+ROLES?\b.*not allowed|not supported by SQL API:\s*USE", re.IGNORECASE
+)
+
+
+def _secondary_roles_prefix_rejected(body: dict[str, Any]) -> bool:
+    """True only when the error belongs to statement 1 (the USE SECONDARY ROLES prefix).
+
+    Requires a known reject code AND either the failing handle == statementHandles[0] or the documented
+    USE-rejection message; a failing handle pointing at a later statement is never the prefix.
+    """
+    if str(body.get("code") or "") not in _SECONDARY_ROLES_REJECT_CODES:
+        return False
+    handles = body.get("statementHandles")
+    failing = body.get("statementHandle")
+    if isinstance(handles, list) and handles and failing:
+        if failing != handles[0]:
+            return False
+        return True
+    return bool(_SECONDARY_ROLES_REJECT_MSG_RE.search(str(body.get("message") or "")))
 
 
 async def _session_id_from_body(request: Any) -> str | None:

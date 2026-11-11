@@ -460,6 +460,15 @@ class ProtectedResponses(_SflfReplayMixin, ChatOpenAI):
         return True
 
 
+class ProtectedChat(_SflfReplayMixin, ChatOpenAI):
+    """T7 Chat Completions model; replays earlier turns' assistant tool_calls + tool messages per user|flow|session."""
+
+    _sflf_session_id: str | None = PrivateAttr(default=None)
+
+
+_REPLAY_CLASSES = {'responses': ProtectedResponses, 'chat': ProtectedChat}
+
+
 def resolve_reasoning_options(
     protocol: str,
     identifier: str,
@@ -586,13 +595,13 @@ def build(
                 options['temperature'] = float(temperature) if temperature is not None else 0.1
             elif temperature is not None and not resolved.get('extra_body') and protocol == 'chat':
                 options['temperature'] = float(temperature)
-            model = (ProtectedResponses if protocol == 'responses' else ChatOpenAI)(
+            model = _REPLAY_CLASSES.get(protocol, ChatOpenAI)(
                 **common,
                 **clients,
                 use_responses_api=protocol == 'responses',
                 **options,
             )
-            if protocol == 'responses':
+            if protocol in _REPLAY_CLASSES:
                 try:
                     from lfx_snowflake.providers.language_models import _bind_component_session  # noqa: PLC0415
 

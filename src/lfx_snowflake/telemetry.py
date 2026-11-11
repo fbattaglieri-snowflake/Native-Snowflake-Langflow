@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import atexit
+import logging
 import queue
 import threading
 import time
@@ -23,6 +24,8 @@ from datetime import datetime, timezone
 from typing import Any, Callable
 
 from lfx_snowflake.traceability import canonical_flow_id
+
+_log = logging.getLogger("lfx_snowflake.telemetry")
 
 CURRENT_RUN_RECORD: ContextVar["RunRecord | None"] = ContextVar("sflf_current_run_record", default=None)
 _RUN_NAMESPACE = uuid.UUID("6f1c3a8e-58a4-4d0b-9a7e-1b2c3d4e5f60")
@@ -124,7 +127,7 @@ class RunRegistry:
         if fp:
             self._remember(self._row_runs, fp, rec.run_id)
         if row_id:
-            self._remember(self._row_runs, f"id:{row_id}", rec.run_id)
+            self._remember(self._row_runs, f"id:{_norm_row_id(row_id)}", rec.run_id)
         return rec
 
     def link_job(self, run_id: str | None, job_id: Any) -> None:
@@ -136,7 +139,7 @@ class RunRegistry:
 
     def by_row(self, *, flow_id: Any, vertex_id: Any, ts: Any, row_id: Any = None) -> RunRecord | None:
         with self._lock:
-            rid = (self._row_runs.get(f"id:{row_id}") if row_id else None) or self._row_runs.get(
+            rid = (self._row_runs.get(f"id:{_norm_row_id(row_id)}") if row_id else None) or self._row_runs.get(
                 row_fingerprint(flow_id, vertex_id, ts) or ""
             )
         return self.get(rid)
@@ -207,6 +210,11 @@ class RunRegistry:
             active = [r for r in active if r.session_id == str(session_id)] or active
         return active[0] if len(active) == 1 else None
 
+def _norm_row_id(row_id: Any) -> str:
+    """Langflow stores UUID primary keys as 32-char hex in SQLite; writers hand us ``uuid.UUID`` (dashed)."""
+    return str(row_id).replace("-", "").strip().lower()
+
+
 def row_fingerprint(flow_id: Any, vertex_id: Any, ts: Any) -> str | None:
     when = _parse_ts(ts)
     if when is None or not vertex_id:
@@ -218,6 +226,15 @@ def utc_iso(ts: Any) -> str | None:
     """T10: every telemetry timestamp as ISO-8601 UTC with an explicit ``+00:00`` offset (naive = UTC)."""
     when = _parse_ts(ts)
     return when.astimezone(timezone.utc).isoformat() if when is not None else None
+
+
+def utc_iso_clamped(ts: Any, now: datetime | None = None) -> str:
+    """T10: ``utc_iso`` that never returns a future instant (clamped to now UTC); missing/invalid -> now."""
+    current = now or _now()
+    when = _parse_ts(ts)
+    if when is None or when.astimezone(timezone.utc) > current:
+        return current.isoformat()
+    return when.astimezone(timezone.utc).isoformat()
 
 
 def _parse_ts(ts: Any) -> datetime | None:
@@ -347,24 +364,39 @@ class TelemetryWriter:
 
 
 # --- T10: stamp Langflow's own transaction / vertex_build rows with the run that wrote them ----------------
+# Module-level writers (legacy direct-write path, Langflow <= 1.13 with telemetry_writer_enabled=False).
 _LANGFLOW_ROW_WRITERS = (
     ("langflow.services.database.models.transactions.crud", "log_transaction"),
     ("langflow.services.database.models.vertex_builds.crud", "log_vertex_build"),
 )
+# Langflow 1.13 default (telemetry_writer_enabled=True): rows are dict payloads handed to the disk-backed outbox
+# in the request context and flushed later by a background task, so they never reach the crud writers above.
+_LANGFLOW_ROW_WRITER_METHODS = (
+    ("langflow.services.telemetry_writer.service", "TelemetryWriterService", "enqueue_transaction"),
+    ("langflow.services.telemetry_writer.service", "TelemetryWriterService", "enqueue_vertex_build"),
+)
+_INSTALL_LOGGED: set[tuple[int, int]] = set()
 _STAMPED_ATTR = "__sflf_run_stamped__"
 
 
+def _field(obj: Any, name: str) -> Any:
+    return obj.get(name) if isinstance(obj, dict) else getattr(obj, name, None)
+
+
 def _stamp_row(obj: Any) -> None:
+    """Stamp a transaction / vertex_build row (model object or Langflow 1.13 telemetry-writer dict payload)."""
+    if obj is None:
+        return
     try:
-        ts = getattr(obj, "timestamp", None)
+        is_tx = _field(obj, "vertex_id") is not None
         RUNS.bind_row(
-            flow_id=getattr(obj, "flow_id", None),
-            vertex_id=getattr(obj, "vertex_id", None) or getattr(obj, "id", None),
-            ts=ts,
-            row_id=getattr(obj, "build_id", None) or (getattr(obj, "id", None) if hasattr(obj, "vertex_id") else None),
+            flow_id=_field(obj, "flow_id"),
+            vertex_id=_field(obj, "vertex_id") if is_tx else _field(obj, "id"),
+            ts=_field(obj, "timestamp"),
+            row_id=_field(obj, "id") if is_tx else _field(obj, "build_id"),
         )
         rec = CURRENT_RUN_RECORD.get()
-        job = getattr(obj, "job_id", None)
+        job = _field(obj, "job_id")
         if rec is not None and job:
             RUNS.link_job(rec.run_id, job)
     except Exception:  # noqa: BLE001 - telemetry never breaks a build
@@ -380,8 +412,8 @@ def wrap_row_writer(fn: Callable[..., Any]) -> Callable[..., Any]:
         return fn
 
     def _row_arg(args: tuple[Any, ...], kwargs: dict[str, Any]) -> Any:
-        for v in list(args[1:]) + list(kwargs.values()):
-            if hasattr(v, "flow_id"):
+        for v in list(args) + list(kwargs.values()):
+            if (isinstance(v, dict) and "flow_id" in v) or (not isinstance(v, dict) and hasattr(v, "flow_id")):
                 return v
         return None
 
@@ -389,8 +421,11 @@ def wrap_row_writer(fn: Callable[..., Any]) -> Callable[..., Any]:
 
         @functools.wraps(fn)
         async def _async(*args: Any, **kwargs: Any) -> Any:
+            row = _row_arg(args, kwargs)
+            _stamp_row(row)  # stamp before the write: the stamp is a contextvar read, never blocks the row
             result = await fn(*args, **kwargs)
-            _stamp_row(result if hasattr(result, "flow_id") else _row_arg(args, kwargs))
+            if hasattr(result, "flow_id") and result is not row:
+                _stamp_row(result)
             return result
 
         wrapped: Callable[..., Any] = _async
@@ -398,8 +433,11 @@ def wrap_row_writer(fn: Callable[..., Any]) -> Callable[..., Any]:
 
         @functools.wraps(fn)
         def _sync(*args: Any, **kwargs: Any) -> Any:
+            row = _row_arg(args, kwargs)
+            _stamp_row(row)
             result = fn(*args, **kwargs)
-            _stamp_row(result if hasattr(result, "flow_id") else _row_arg(args, kwargs))
+            if hasattr(result, "flow_id") and result is not row:
+                _stamp_row(result)
             return result
 
         wrapped = _sync
@@ -413,13 +451,17 @@ def install_langflow_row_stamping() -> int:
     import sys
 
     patched = 0
+    active = 0  # writers stamped (now or earlier): 0 means no Langflow row writer was found at all
     for mod_name, attr in _LANGFLOW_ROW_WRITERS:
         try:
             mod = importlib.import_module(mod_name)
         except Exception:  # noqa: BLE001 - Langflow not installed / different version
             continue
         original = getattr(mod, attr, None)
-        if original is None or getattr(original, _STAMPED_ATTR, False):
+        if original is None:
+            continue
+        active += 1
+        if getattr(original, _STAMPED_ATTR, False):
             continue
         wrapped = wrap_row_writer(original)
         for other in list(sys.modules.values()):
@@ -430,4 +472,21 @@ def install_langflow_row_stamping() -> int:
                         patched += 1
             except Exception:  # noqa: BLE001
                 continue
+    for mod_name, cls_name, attr in _LANGFLOW_ROW_WRITER_METHODS:
+        try:
+            cls = getattr(importlib.import_module(mod_name), cls_name)
+        except Exception:  # noqa: BLE001
+            continue
+        original = cls.__dict__.get(attr)
+        if original is None:
+            continue
+        active += 1
+        if getattr(original, _STAMPED_ATTR, False):
+            continue
+        setattr(cls, attr, wrap_row_writer(original))
+        patched += 1
+    state = (patched, active)
+    if patched or state not in _INSTALL_LOGGED:
+        _INSTALL_LOGGED.add(state)
+        _log.info("sflf telemetry row stamping: patched=%d active_writers=%d", patched, active)
     return patched
