@@ -210,6 +210,11 @@ def test_native_auto_capture_hook_routes_only_lf_mem(monkeypatch):
 
     monkeypatch.setattr(ing, "PIPELINE", LfMemIngestionPipeline(sf, background=False))
     flow_id, user_id = uuid.uuid4(), uuid.uuid4()
+
+    async def owns(mb):  # emulates the stored Flow(id, user_id) row
+        return mb.flow_id == flow_id and mb.user_id == user_id
+
+    monkeypatch.setattr(ing, "_owns_flow", owns)
     from types import SimpleNamespace
 
     sf_mb = SimpleNamespace(kb_name=_spec().to_kb_name(), flow_id=flow_id, user_id=user_id, threshold=1,

@@ -31,6 +31,7 @@ from typing import Any
 
 from lfx_snowflake import sql_safety
 from lfx_snowflake.memories_lf_mem import (
+    iso_timestamp,
     DEFAULT_KILL_PHRASE,
     MAX_INGEST_BATCH,
     LfMemError,
@@ -157,7 +158,7 @@ class LfMemIngestionPipeline:
             values += [
                 ("TEXT", str(m["message_id"])[:64]), ("TEXT", flow_id), ("TEXT", session_id),
                 ("TEXT", str(m.get("sender") or "User")[:32]), ("TEXT", str(m.get("sender_name") or m.get("sender") or "")[:256]),
-                ("TEXT", str(m.get("text") or "")), ("TEXT", str(m.get("created_at") or datetime.now(timezone.utc).isoformat())),
+                ("TEXT", str(m.get("text") or "")), ("TEXT", iso_timestamp(m.get("created_at"))),
             ]
         target = sql_safety.quote_fqn(messages_fqn, "LANGFLOW_MESSAGES_TABLE", min_parts=3, max_parts=3)
         sql = (
@@ -180,11 +181,11 @@ class LfMemIngestionPipeline:
             # Governed LANGFLOW_MESSAGES is bridge-owned (guard exemption is append-only): read outside the flow
             # guard, owner-scoped by LANGFLOW_MEMORY_RAP in the caller session.
             sql, binds = LfMemSpec.build_pending_messages_request(
-                messages_fqn, flow_id=fid, session_id=sid, cursor_ts=str(cursor_ts) if cursor_ts else None
+                messages_fqn, flow_id=fid, session_id=sid, cursor_ts=iso_timestamp(cursor_ts, default_now=False)
             )
             pending = [
                 {"message_id": _row(r, "message_id", 0), "sender": _row(r, "sender", 1), "sender_name": _row(r, "sender_name", 2),
-                 "text": _row(r, "text", 3), "created_at": str(_row(r, "created_at", 4) or "")}
+                 "text": _row(r, "text", 3), "created_at": iso_timestamp(_row(r, "created_at", 4))}
                 for r in (self._exec(sql, binds, guarded=False, flow_id=fid).get("rows") or [])
             ]
             if not threshold_reached(len(pending), job["threshold"]):
@@ -243,14 +244,51 @@ def _message_dict(msg: Any) -> dict[str, Any]:
         "sender": getattr(msg, "sender", None),
         "sender_name": getattr(msg, "sender_name", None),
         "text": getattr(msg, "text", None),
-        "created_at": ts.isoformat() if hasattr(ts, "isoformat") else (str(ts) if ts else None),
+        "created_at": iso_timestamp(ts),
     }
 
 
-async def capture_snowflake_memory_base(mb: Any, session_id: str, *, pipeline: LfMemIngestionPipeline | None = None) -> str | None:
+def _as_uuid(value: Any) -> uuid.UUID | None:
+    if isinstance(value, uuid.UUID):
+        return value
+    try:
+        return uuid.UUID(str(value))
+    except (TypeError, ValueError, AttributeError):
+        return None
+
+
+async def _owns_flow(mb: Any) -> bool:
+    """Our owner check replacing upstream ``resolve_owned_memory_flow`` for LF_MEM bases (fail closed).
+
+    Upstream rejects every UUIDv5 flow id as "virtual" (``is_virtual_flow_id``), but the bridge's
+    deterministic flow ids are uuid5, so existing flows raised ``MemoryBaseFlowNotFoundError``.
+    Here: the stored Flow row must exist with ``id == mb.flow_id`` and ``user_id == mb.user_id``.
+    """
+    flow_id, user_id = _as_uuid(getattr(mb, "flow_id", None)), _as_uuid(getattr(mb, "user_id", None))
+    if flow_id is None or user_id is None:
+        return False
+    try:
+        from langflow.services.database.models.flow.model import Flow  # noqa: PLC0415
+        from langflow.services.deps import session_scope  # noqa: PLC0415
+        from sqlmodel import select  # noqa: PLC0415
+
+        async with session_scope() as db:
+            row = (await db.exec(select(Flow.id).where(Flow.id == flow_id).where(Flow.user_id == user_id))).first()
+    except Exception:  # noqa: BLE001 - fail closed on any lookup failure
+        _LOG.exception("LF_MEM auto-capture owner check failed memory_base=%s", getattr(mb, "id", None))
+        return False
+    return row is not None
+
+
+async def capture_snowflake_memory_base(
+    mb: Any, session_id: str, *, pipeline: LfMemIngestionPipeline | None = None, owner_check: Any = None
+) -> str | None:
     """Per-Memory-Base auto-capture for LF_MEM bases; None when ``mb`` is not a Snowflake Memory Base."""
     spec = LfMemSpec.from_kb_name(getattr(mb, "kb_name", None))
     if spec is None:
+        return None
+    if not await (owner_check or _owns_flow)(mb):
+        _LOG.warning("LF_MEM auto-capture refused memory_base=%s: flow not owned by memory base owner", getattr(mb, "id", None))
         return None
     from langflow.memory import aget_messages  # noqa: PLC0415
 
@@ -276,7 +314,10 @@ def install_snowflake_auto_capture(ingestion_module: Any) -> bool:
 
     async def _maybe_trigger(*, mb, session_id, job_id, get_or_create_session):  # type: ignore[no-untyped-def]
         if LfMemSpec.from_kb_name(getattr(mb, "kb_name", None)) is not None:
-            await capture_snowflake_memory_base(mb, session_id)
+            try:
+                await capture_snowflake_memory_base(mb, session_id)
+            except Exception:  # noqa: BLE001 - never fall through to the native resolver for LF_MEM bases
+                _LOG.exception("LF_MEM auto-capture failed memory_base=%s", getattr(mb, "id", None))
             return None
         return await native_maybe_trigger(mb=mb, session_id=session_id, job_id=job_id, get_or_create_session=get_or_create_session)
 

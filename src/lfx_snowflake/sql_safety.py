@@ -437,3 +437,189 @@ __all__ = [
     "validate_routine_signature",
     "validate_stage_ref",
 ]
+
+
+# --------------------------------------------------------------------------- null bindings (rerun-3)
+
+_PH_IDENT_START = set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz_")
+_PH_IDENT_CHARS = _PH_IDENT_START | set("0123456789$")
+
+
+def _scan_placeholders(sql: str) -> list[tuple[int, int, str]] | None:
+    """Positions of bind placeholders in ``sql`` as ``(start, end, text)`` (``?`` or ``:<digits>``).
+
+    Lexing mirrors ``flow_context_guard._lex``: comments (``--``, ``//``, ``/* */``), ``'...'`` strings
+    (``\\`` escapes, ``''``), ``"..."`` identifiers and ``$$...$$`` bodies are skipped; ``::`` is a cast and
+    ``x:1`` directly after a name / literal / ``)`` / ``]`` is a semi-structured path, not a bind. Returns ``None``
+    when the statement cannot be lexed (unterminated token) -- callers then leave it untouched.
+    """
+    out: list[tuple[int, int, str]] = []
+    i, n = 0, len(sql)
+    prev = ""  # kind of the previous significant token: name | lit | close | other
+    while i < n:
+        ch = sql[i]
+        if ch.isspace():
+            i += 1
+            continue
+        if sql.startswith("--", i) or sql.startswith("//", i):
+            j = sql.find("\n", i)
+            i = n if j == -1 else j + 1
+            continue
+        if sql.startswith("/*", i):
+            j = sql.find("*/", i + 2)
+            if j == -1:
+                return None
+            i = j + 2
+            continue
+        if sql.startswith("$$", i):
+            j = sql.find("$$", i + 2)
+            if j == -1:
+                return None
+            i, prev = j + 2, "lit"
+            continue
+        if ch == "'":
+            j = i + 1
+            while True:
+                if j >= n:
+                    return None
+                if sql[j] == "\\":
+                    j += 2
+                    continue
+                if sql[j] == "'":
+                    if j + 1 < n and sql[j + 1] == "'":
+                        j += 2
+                        continue
+                    break
+                j += 1
+            i, prev = j + 1, "lit"
+            continue
+        if ch == '"':
+            j = i + 1
+            while True:
+                if j >= n:
+                    return None
+                if sql[j] == '"':
+                    if j + 1 < n and sql[j + 1] == '"':
+                        j += 2
+                        continue
+                    break
+                j += 1
+            i, prev = j + 1, "name"
+            continue
+        if ch == "?":
+            out.append((i, i + 1, "?"))
+            i, prev = i + 1, "other"
+            continue
+        if sql.startswith("::", i):
+            i, prev = i + 2, "other"
+            continue
+        # ``v:1`` (no whitespace after a name / literal / ``)`` / ``]``) is a semi-structured path.
+        if ch == ":" and i + 1 < n and sql[i + 1].isdigit() and not (i > 0 and prev in ("name", "lit", "close") and not sql[i - 1].isspace()):
+            j = i + 1
+            while j < n and sql[j].isdigit():
+                j += 1
+            if j < n and sql[j] in _PH_IDENT_CHARS:
+                i, prev = j, "other"  # ``:1abc`` is not a positional bind
+                continue
+            out.append((i, j, sql[i:j]))
+            i, prev = j, "other"
+            continue
+        if ch in _PH_IDENT_START or ch == "$":
+            j = i + 1
+            while j < n and sql[j] in _PH_IDENT_CHARS:
+                j += 1
+            i, prev = j, "name"
+            continue
+        if ch.isdigit():
+            j = i + 1
+            while j < n and (sql[j].isalnum() or sql[j] == "."):
+                j += 1
+            i, prev = j, "lit"
+            continue
+        prev = "close" if ch in ")]" else "other"
+        i += 1
+    return out
+
+
+# A bound null keeps its SQL API type; an untyped NULL literal does not (live: TRY_TO_TIMESTAMP_TZ(NULL) is a
+# 001065 compile error, TRY_TO_TIMESTAMP_TZ(NULL::VARCHAR) is fine). Unknown/missing types fall back to VARCHAR.
+_NULL_LITERAL_BY_TYPE = {
+    "TEXT": "NULL::VARCHAR",
+    "FIXED": "NULL::NUMBER",
+    "REAL": "NULL::FLOAT",
+    "BOOLEAN": "NULL::BOOLEAN",
+    "BINARY": "NULL::BINARY",
+    "DATE": "NULL::DATE",
+    "TIME": "NULL::TIME",
+    "TIMESTAMP_LTZ": "NULL::TIMESTAMP_LTZ",
+    "TIMESTAMP_NTZ": "NULL::TIMESTAMP_NTZ",
+    "TIMESTAMP_TZ": "NULL::TIMESTAMP_TZ",
+}
+
+
+def _null_literal(entry: Any) -> str:
+    typ = str(entry.get("type") or "").upper() if isinstance(entry, dict) else ""
+    return _NULL_LITERAL_BY_TYPE.get(typ, "NULL::VARCHAR")
+
+
+def _is_null_binding(entry: Any) -> bool:
+    return entry is None or (isinstance(entry, dict) and entry.get("value") is None)
+
+
+def inline_null_bindings(
+    statement: str, bindings: dict[str, Any] | None
+) -> tuple[str, dict[str, Any] | None]:
+    """Replace placeholders bound to ``None`` with the SQL literal ``NULL`` and renumber the rest.
+
+    Rerun-3: bridge statements are multi-statement requests (``USE SECONDARY ROLES ...;`` prefix,
+    MULTI_STATEMENT_COUNT=0); there the SQL API treats a ``{"value": null}`` binding as unset (002049
+    "Bind variable ? not set", wrapped in 100132). Only the constant ``NULL`` is ever written into the SQL
+    text, cast to the binding's type (``TEXT`` -> ``NULL::VARCHAR``); non-null values always stay bindings.
+
+    The statement is returned unchanged when no binding is null, when keys are not ``1..N``, when ``?``
+    and ``:n`` placeholders are mixed, when the placeholder count does not match, or when it cannot be lexed
+    -- Snowflake then reports the error itself (fail safe: never guess).
+    """
+    if not bindings or not any(_is_null_binding(v) for v in bindings.values()):
+        return statement, bindings
+    try:
+        keys = sorted(int(k) for k in bindings)
+    except (TypeError, ValueError):
+        return statement, bindings
+    if keys != list(range(1, len(keys) + 1)):
+        return statement, bindings
+    phs = _scan_placeholders(statement)
+    if not phs:
+        return statement, bindings
+    styles = {"?" if t == "?" else ":" for _, _, t in phs}
+    if len(styles) != 1:
+        return statement, bindings
+    if "?" in styles:
+        if len(phs) != len(keys):
+            return statement, bindings
+        refs = [str(k) for k in range(1, len(phs) + 1)]
+    else:
+        refs = [t[1:].lstrip("0") or "0" for _, _, t in phs]
+        if set(refs) - set(bindings) or set(bindings) - set(refs):
+            return statement, bindings
+    remap: dict[str, str] = {}
+    new_bindings: dict[str, Any] = {}
+    for k in map(str, keys):
+        if not _is_null_binding(bindings[k]):
+            remap[k] = str(len(new_bindings) + 1)
+            new_bindings[remap[k]] = bindings[k]
+    parts: list[str] = []
+    last = 0
+    for (start, end, tok), ref in zip(phs, refs):
+        parts.append(statement[last:start])
+        if ref in remap:
+            parts.append("?" if tok == "?" else f":{remap[ref]}")
+        else:
+            left = statement[start - 1] if start > 0 else " "
+            right = statement[end] if end < len(statement) else " "
+            pad_l = " " if left in _PH_IDENT_CHARS else ""
+            pad_r = " " if right in _PH_IDENT_CHARS else ""
+            parts.append(f"{pad_l}{_null_literal(bindings[ref])}{pad_r}")
+        last = end
+    parts.append(statement[last:])
+    return "".join(parts), (new_bindings or None)

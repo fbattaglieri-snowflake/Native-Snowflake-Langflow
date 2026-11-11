@@ -16,6 +16,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from lfx_snowflake import sql_safety
+from lfx_snowflake.memories_lf_mem import iso_timestamp
 
 MAX_WINDOW_K = 1000
 
@@ -119,7 +120,7 @@ class GovernedMessageHistory:
     # ------------------------------------------------------------------ API
     def store(self, text: str, *, sender: str = "User", sender_name: str | None = None, message_id: str | None = None) -> dict[str, Any]:
         msg_id = str(message_id or uuid.uuid4().hex)[:64]
-        created_at = datetime.now(timezone.utc).isoformat()
+        created_at = iso_timestamp(datetime.now(timezone.utc))
         sender = str(sender or "User")[:32]
         sender_name = str(sender_name or sender)[:256]
         native_stored = False

@@ -21,9 +21,38 @@ import json
 import re
 import uuid
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any
 
 from lfx_snowflake import sql_safety
+
+_TZ_NAME_SUFFIX = re.compile(r"\s*(?:UTC|GMT|Z)$", re.IGNORECASE)
+
+
+def iso_timestamp(ts: Any, *, default_now: bool = True) -> str | None:
+    """ISO-8601 with an explicit offset for every ``TO_TIMESTAMP_TZ(?)`` binding (BUG-MEM rerun-3).
+
+    Accepts datetimes and strings such as Langflow's ``'2026-11-11 19:40:12.123456 UTC'``, ``...Z`` or
+    naive values (assumed UTC). Unparseable/missing -> now UTC (``default_now``) or ``None``.
+    """
+    when: datetime | None = None
+    if isinstance(ts, datetime):
+        when = ts
+    elif ts not in (None, ""):
+        raw = str(ts).strip()
+        suffixed = bool(_TZ_NAME_SUFFIX.search(raw))
+        raw = _TZ_NAME_SUFFIX.sub("", raw)
+        try:
+            when = datetime.fromisoformat(raw)
+        except ValueError:
+            when = None
+        if when is not None and suffixed and when.tzinfo is None:
+            when = when.replace(tzinfo=timezone.utc)
+    if when is None:
+        return datetime.now(timezone.utc).isoformat(timespec="microseconds") if default_now else None
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    return when.astimezone(timezone.utc).isoformat(timespec="microseconds")
 
 LF_MEM_PREFIX = "LF_MEM_"
 MEMORY_RAP_NAME = "LANGFLOW_MEMORY_RAP"
@@ -436,7 +465,7 @@ class LfMemSpec:
         """The session's governed messages newer than ``cursor_ts`` (oldest first); the RAP scopes the owner."""
         msg_fqn = sql_safety.quote_fqn(messages_fqn, "LANGFLOW_MESSAGES_TABLE", min_parts=3, max_parts=3)
         k = sql_safety.bounded_int(limit, MAX_INGEST_BATCH, 1, MAX_INGEST_BATCH)
-        values = [("TEXT", str(flow_id)), ("TEXT", str(session_id)), ("TEXT", cursor_ts or "1970-01-01T00:00:00Z")]
+        values = [("TEXT", str(flow_id)), ("TEXT", str(session_id)), ("TEXT", iso_timestamp(cursor_ts, default_now=False) or "1970-01-01T00:00:00+00:00")]
         sql = (
             "SELECT m.message_id, m.sender, m.sender_name, m.text, "
             "TO_VARCHAR(m.created_at, 'YYYY-MM-DD\"T\"HH24:MI:SS.FF6TZH:TZM') AS created_at FROM ("

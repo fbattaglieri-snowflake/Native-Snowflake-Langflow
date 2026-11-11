@@ -229,6 +229,17 @@ def _apply_runtime_class_hooks(built: Any) -> Any:
     return built
 
 
+def _install_lf_mem_auto_capture() -> bool:
+    """Route native Memory Base auto-capture of LF_MEM bases to the Snowflake pipeline (rerun-3: was never installed)."""
+    try:
+        import langflow.services.memory_base.ingestion as ingestion  # noqa: PLC0415
+    except ImportError:
+        return False
+    from lfx_snowflake.memories_lf_mem_ingest import install_snowflake_auto_capture  # noqa: PLC0415
+
+    return install_snowflake_auto_capture(ingestion)
+
+
 def install_stale_component_guard() -> int:
     """Wrap every loaded binding of lfx ``eval_custom_component_code``; returns the number of bindings."""
     try:
@@ -250,6 +261,7 @@ def install_stale_component_guard() -> int:
         built = original(resolve_component_code(code), *args, **kwargs)
         return _apply_runtime_class_hooks(built)
 
+    _install_lf_mem_auto_capture()
     guarded_eval_custom_component_code._sflf_stale_guard = True  # type: ignore[attr-defined]
     guarded_eval_custom_component_code.__wrapped__ = original  # type: ignore[attr-defined]
     patched = 0

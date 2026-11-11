@@ -253,6 +253,8 @@ _DETAIL_ALLOWLIST: frozenset[str] = frozenset(
         # BUG-UI-TRC-01 correlation ids (no content).
         "request_id", "session_id", "trace_id", "cortex_thread_id", "a2a_task_id", "retained_objects_count", "hidden_by_role_count", "trigger_type", "path", "method",
         "durable_snowflake_audit_preserved", "source", "object_kind", "hierarchy_path",
+        # Rerun-3 ROLE_SWITCH audit: who switched, through which channel, with what result (identifiers only).
+        "user", "channel", "outcome", "error_code", "display_only",
     }
 )
 # Never allowlisted: message, reason, ddl, sql, text, content, prompt, trigger_payload, result, ...
@@ -334,12 +336,6 @@ def build_audit_insert(
     if req_id:
         clean_details.setdefault("request_id", str(req_id)[:64])
     details_json = json.dumps(clean_details, separators=(",", ":"))
-    stmt = (
-        f"INSERT INTO {audit_table} (event_id, event_ts, authenticated_user, effective_role, execution_mode, "
-        "context_epoch, action, outcome, error_code, target_object, project_id, flow_id, run_id, trace_id, "
-        "redacted_details) SELECT ?, CURRENT_TIMESTAMP(), ?, ?, ?, ?, ?, ?, ?, ?, 'default', ?, ?, ?, "
-        f"TRY_PARSE_JSON(?) WHERE NOT EXISTS (SELECT 1 FROM {audit_table} WHERE event_id = ?)"
-    )
     values: list[tuple[str, Any]] = [
         ("TEXT", event_id),
         ("TEXT", authenticated_user),
@@ -356,7 +352,24 @@ def build_audit_insert(
         ("TEXT", details_json),
         ("TEXT", event_id),
     ]
-    bindings = {str(i + 1): {"type": t, "value": None if v is None else str(v)} for i, (t, v) in enumerate(values)}
+    # Rerun-3: NULL values are SQL literals, never ``{"value": null}`` bindings. Every bridge statement is sent
+    # as a multi-statement request (``USE SECONDARY ROLES ...;`` prefix) and the SQL API treats a null-valued
+    # binding there as unset (002049 "Bind variable ? not set"), so ALLOWED events (no error_code) were lost.
+    ph: list[str] = []
+    bindings: dict[str, dict[str, Any]] = {}
+    for t, v in values:
+        if v is None:
+            ph.append("NULL")
+        else:
+            bindings[str(len(bindings) + 1)] = {"type": t, "value": str(v)}
+            ph.append("?")
+    stmt = (
+        f"INSERT INTO {audit_table} (event_id, event_ts, authenticated_user, effective_role, execution_mode, "
+        "context_epoch, action, outcome, error_code, target_object, project_id, flow_id, run_id, trace_id, "
+        f"redacted_details) SELECT {ph[0]}, CURRENT_TIMESTAMP(), {', '.join(ph[1:9])}, 'default', "
+        f"{', '.join(ph[9:12])}, TRY_PARSE_JSON({ph[12]}) "
+        f"WHERE NOT EXISTS (SELECT 1 FROM {audit_table} WHERE event_id = {ph[13]})"
+    )
     return stmt, bindings
 
 

@@ -14,6 +14,7 @@ from __future__ import annotations
 import atexit
 import logging
 import queue
+import re
 import threading
 import time
 import uuid
@@ -76,6 +77,43 @@ class RunRegistry:
         # of the same flow are never resolved by time window alone.
         self._row_runs: OrderedDict[str, str] = OrderedDict()
         self._job_runs: OrderedDict[str, str] = OrderedDict()
+        # Rerun-3: rows replicated without a live run record are grouped into one derived execution per
+        # (flow, job) or, without a job id, per (flow, session) burst; each burst ends after ``derived_gap_s``.
+        self.derived_gap_s = 5.0
+        self._derived_bursts: OrderedDict[str, list[tuple[str, float, float]]] = OrderedDict()
+
+    def derived_execution(self, *, flow_id: Any, ts: Any, job_id: Any = None, session_id: Any = None) -> tuple[str, str]:
+        """(run_id, trace_id) of the derived execution owning an unlinked row: one RUN per execution, not per row.
+
+        Keyed by job id when Langflow recorded one; otherwise rows of the same flow/session whose timestamps lie
+        within ``derived_gap_s`` of a burst's [first, last] range share that burst's run. Sync reads rows newest
+        first and transactions/vertex_builds in separate passes, so a burst grows in both directions and keeps
+        the anchor of the first row seen (its id never changes once rows were written with it).
+        """
+        fid = canonical_flow_id(flow_id) or ""
+        if job_id:
+            return derived_run_ids(fid, f"job:{job_id}")
+        when = _parse_ts(ts)
+        sess = str(session_id or "").strip()[:250]
+        if when is None:
+            return derived_run_ids(fid, f"sess:{sess}" if sess else "nots")
+        t = when.timestamp()
+        key = f"{fid}|{sess}"
+        gap = self.derived_gap_s
+        with self._lock:
+            bursts = self._derived_bursts.setdefault(key, [])
+            for i, (anchor, lo, hi) in enumerate(bursts):
+                if lo - gap <= t <= hi + gap:
+                    bursts[i] = (anchor, min(lo, t), max(hi, t))
+                    break
+            else:
+                anchor = when.astimezone(timezone.utc).isoformat(timespec="milliseconds")
+                bursts.append((anchor, t, t))
+                del bursts[:-50]  # bounded per flow/session
+            self._derived_bursts.move_to_end(key)
+            while len(self._derived_bursts) > self.max_runs:
+                self._derived_bursts.popitem(last=False)
+        return derived_run_ids(fid, f"burst:{sess}:{anchor}")
 
     def start(
         self,
@@ -266,6 +304,30 @@ def annotate_current_run(**values: Any) -> None:
 RUNS = RunRegistry()
 
 
+def _sink_of(sql: str) -> str:
+    """Target table of a telemetry statement for log lines (identifier only, never values)."""
+    m = re.search(r"\b(?:MERGE\s+INTO|INSERT\s+INTO)\s+([A-Za-z0-9_$.\"]+)", sql or "", re.IGNORECASE)
+    return m.group(1).split(".")[-1].strip('"')[:64] if m else "?"
+
+
+def check_write_result(result: Any, sql: str) -> bool:
+    """Rerun-3: a telemetry write is successful only if the SQL API said so; failures log at WARNING with code.
+
+    ``execute_sql`` returns ``{"ok": False, ...}`` instead of raising, so the batched writer used to count
+    rejected RUN/AUDIT MERGEs as written and nothing was ever logged.
+    """
+    if not isinstance(result, dict) or result.get("ok") is not False:
+        return True
+    _log.warning(
+        "sflf telemetry write failed: sink=%s error_code=%s status_code=%s sql_code=%s",
+        _sink_of(sql),
+        result.get("error_code"),
+        result.get("status_code"),
+        result.get("code") or result.get("sql_state"),
+    )
+    return False
+
+
 class TelemetryWriter:
     """Queue + one daemon thread draining batches; synchronous when ``enabled`` is False (tests/local)."""
 
@@ -311,11 +373,16 @@ class TelemetryWriter:
         sql, binds, tag, ctx = item
         try:
             if ctx is not None:
-                ctx.run(self._execute, sql, binds, tag)
+                result = ctx.run(self._execute, sql, binds, tag)
             else:
-                self._execute(sql, binds, tag)
+                result = self._execute(sql, binds, tag)
+        except Exception as exc:  # noqa: BLE001 - telemetry must never break the caller
+            self.failed += 1
+            _log.warning("sflf telemetry write raised: sink=%s error=%s", _sink_of(sql), type(exc).__name__)
+            return
+        if check_write_result(result, sql):
             self.written += 1
-        except Exception:  # noqa: BLE001 - telemetry must never break the caller
+        else:
             self.failed += 1
 
     def _drain(self, max_items: int) -> int:

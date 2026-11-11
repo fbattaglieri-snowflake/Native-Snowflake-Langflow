@@ -8926,6 +8926,8 @@ class LiveSnowflakeBridge:
         # BUG-CA-01: every SQL API request is its own session, so secondary roles are pinned per execution.
         sr_mode = _sf_identity.secondary_roles_mode()
         self.secondary_roles_mode = sr_mode
+        # Rerun-3: null bindings are unset in multi-statement requests -> inline ``NULL`` (constant only).
+        statement, bindings = _sql_safety.inline_null_bindings(statement, bindings)
         payload: dict[str, Any] = {
             "statement": self._with_secondary_roles(statement, sr_mode),
             "timeout": timeout,
@@ -9352,20 +9354,29 @@ class LiveSnowflakeBridge:
         b = _sql_safety.BindingBuilder()
         key_ph = b.add(str(key_value), "TEXT")
         values: list[str] = []
+        # Rerun-3: a NULL value is the SQL literal NULL, never a ``{"value": null}`` binding. Bridge statements
+        # are multi-statement requests (``USE SECONDARY ROLES ...;`` prefix) and there the SQL API treats a null
+        # binding as unset (002049 "Bind variable ? not set"): every RUN row (NULL cortex/a2a ids) was rejected.
         for _col, val, kind in columns:
             if kind == "NOW":
                 # T10: always UTC (+00:00), never the session TIMEZONE (was -08:00 next to +00:00 rows).
                 values.append("CONVERT_TIMEZONE('UTC', CURRENT_TIMESTAMP())")
             elif kind == "TS":
                 # Real event time normalized to an explicit-UTC ISO-8601 binding; falls back to now (UTC).
-                values.append(
-                    f"CONVERT_TIMEZONE('UTC', COALESCE(TRY_TO_TIMESTAMP_TZ({b.add(_telemetry.utc_iso(val), 'TEXT')}), "
-                    f"CURRENT_TIMESTAMP()))"
-                )
+                ts_iso = _telemetry.utc_iso(val)
+                if ts_iso is None:
+                    values.append("CONVERT_TIMEZONE('UTC', CURRENT_TIMESTAMP())")
+                else:
+                    values.append(
+                        f"CONVERT_TIMEZONE('UTC', COALESCE(TRY_TO_TIMESTAMP_TZ({b.add(ts_iso, 'TEXT')}), "
+                        f"CURRENT_TIMESTAMP()))"
+                    )
+            elif val is None:
+                values.append("NULL")
             elif kind == "JSON":
                 values.append(f"PARSE_JSON({b.add(val, 'TEXT')})")
             else:
-                values.append(b.add(val if val is None else (str(val) if kind == "TEXT" else val), kind))
+                values.append(b.add(str(val) if kind == "TEXT" else val, kind))
         sql = (
             f"MERGE INTO {table} t "
             f"USING (SELECT {key_ph} AS {key_col}) s ON t.{key_col} = s.{key_col} "
@@ -9377,7 +9388,9 @@ class LiveSnowflakeBridge:
     def _execute_bound(self, request: tuple[str, dict[str, Any]], *, timeout: int = 15) -> dict[str, Any]:
         """Run a ``(sql, bindings)`` telemetry request as the service role."""
         sql, binds = request
-        return self.execute_sql(sql, role=self._service_role(), mode=_sf_identity.MODE_SERVICE, bindings=binds or None, timeout=timeout)
+        result = self.execute_sql(sql, role=self._service_role(), mode=_sf_identity.MODE_SERVICE, bindings=binds or None, timeout=timeout)
+        _telemetry.check_write_result(result, sql)  # rerun-3: rejected span/RUN MERGEs are logged, not silent
+        return result
 
     def _build_activity_merge_request(self, record: dict[str, Any]) -> tuple[str, dict[str, Any]]:
         """Idempotent `MERGE INTO <activity_table>` preserving `deleted_in_ui_at` (`CTX-ARCH-06`); values bound."""
@@ -9448,7 +9461,8 @@ class LiveSnowflakeBridge:
         if self._has_spcs_token() and not self._is_execute_sql_mocked():
             _TELEMETRY_WRITER.submit(sql, binds or None, query_tag, ctx=_telemetry_ctx())
         else:
-            self.execute_sql(sql, role=self._service_role(), mode=_sf_identity.MODE_SERVICE, bindings=binds or None, query_tag=query_tag)
+            result = self.execute_sql(sql, role=self._service_role(), mode=_sf_identity.MODE_SERVICE, bindings=binds or None, query_tag=query_tag)
+            _telemetry.check_write_result(result, sql)
 
     def _build_run_merge_request(self, rec: Any, *, extra: dict[str, Any] | None = None) -> tuple[str, dict[str, Any]]:
         """BUG-LLMOP-A4-01: one LANGFLOW_FLOW_RUNS row per flow execution with real ids and timestamps."""
@@ -9486,8 +9500,10 @@ class LiveSnowflakeBridge:
         try:
             self._submit_telemetry(self._build_run_merge_request(rec), tag)
             self.synced_runs_count += 1
-        except Exception:  # noqa: BLE001 - telemetry never breaks a run
-            pass
+        except Exception as exc:  # noqa: BLE001 - telemetry never breaks a run
+            logging.getLogger("lfx_snowflake.telemetry").warning(
+                "sflf telemetry RUN record failed: run_id=%s error=%s", rec.run_id, type(exc).__name__
+            )
 
     def flush_telemetry(self, timeout: float | None = None) -> bool:
         return _TELEMETRY_WRITER.flush(timeout)
@@ -9807,8 +9823,49 @@ class LiveSnowflakeBridge:
         verified = str((rows[0] or {}).get("VERIFIED_ROLE") or "").strip().upper() if rows else ""
         return bool(check.get("ok")) and verified == role
 
-    def switch_role(self, target_role: str, flow_id: str | None = None) -> dict[str, Any]:
+    def _audit_role_switch(
+        self,
+        outcome: str,
+        new_role: str,
+        flow_id: str | None,
+        previous_role: str | None,
+        channel: str,
+        error_code: str | None = None,
+        **extra: Any,
+    ) -> None:
+        """Rerun-3: one LANGFLOW_AUDIT_LOG ROLE_SWITCH row per REST/MCP switch attempt (allowed or denied).
+
+        Metadata only (allowlisted): user, flow, old/new role, channel, outcome; request_id/trace come from
+        ``record_audit_event``. A failed audit write never changes the switch result.
+        """
+        try:
+            self.record_audit_event(
+                action="ROLE_SWITCH",
+                outcome=outcome,
+                error_code=error_code,
+                target_object=new_role or None,
+                flow_id=flow_id,
+                details={
+                    "user": self._role_session_user() or self.authenticated_user,
+                    "flow_id": flow_id,
+                    "previous_role": previous_role,
+                    "new_role": new_role,
+                    "requested_role": new_role,
+                    "channel": channel,
+                    "outcome": outcome,
+                    "error_code": error_code,
+                    **extra,
+                },
+            )
+        except Exception as exc:  # noqa: BLE001 - auditing never breaks the switch
+            logging.getLogger("lfx_snowflake.telemetry").warning(
+                "sflf ROLE_SWITCH audit failed: outcome=%s error=%s", outcome, type(exc).__name__
+            )
+
+    def switch_role(self, target_role: str, flow_id: str | None = None, *, channel: str = "REST") -> dict[str, Any]:
         clean = _sf_identity.validate_role_identifier(target_role) or ""
+        audit_fid = self._normalize_flow_id(flow_id or CURRENT_SNOWFLAKE_FLOW_ID.get())
+        audit_prev = self.current_session_role() or self.active_role
         # BUG-MCP-03: REST and MCP share one policy. Privileged roles are selectable only after a live grant
         # check under the caller's identity; every other role must be in the discovered role list.
         privileged = clean in _sf_identity.PRIVILEGED_ROLES
@@ -9817,12 +9874,9 @@ class LiveSnowflakeBridge:
         else:
             role_allowed = _sf_identity.is_selectable_role(clean, self.available_roles)
         if not role_allowed:
-            self.record_audit_event(
-                action="ROLE_SWITCH",
-                outcome="DENIED",
-                error_code=ErrorCode.AUTHZ_ROLE_DENIED.value,
-                target_object=clean,
-                details={"requested_role": clean, "available_roles": self.available_roles},
+            self._audit_role_switch(
+                "DENIED", clean, audit_fid, audit_prev, channel, ErrorCode.AUTHZ_ROLE_DENIED.value,
+                available_roles=self.available_roles,
             )
             return {
                 "ok": False,
@@ -9838,13 +9892,7 @@ class LiveSnowflakeBridge:
             "SELECT CURRENT_ROLE() AS VERIFIED_ROLE", role=clean, timeout=12
         )
         if not check.get("ok") and self._has_spcs_token():
-            self.record_audit_event(
-                action="ROLE_SWITCH",
-                outcome="DENIED",
-                error_code=ErrorCode.AUTHZ_ROLE_DENIED.value,
-                target_object=clean,
-                details={"reason": check.get("message")},
-            )
+            self._audit_role_switch("DENIED", clean, audit_fid, audit_prev, channel, ErrorCode.AUTHZ_ROLE_DENIED.value)
             return {
                 "ok": False,
                 "status_code": 403,
@@ -9860,7 +9908,11 @@ class LiveSnowflakeBridge:
             # E2E T2: the selection is still recorded for *this* authenticated user and flow, so caller-mode
             # execute_sql sends it as the SQL API role (otherwise the token default role ran, e.g. ACCOUNTADMIN).
             if self._role_session_user():
-                self._set_session_role(clean, self._normalize_flow_id(flow_id or CURRENT_SNOWFLAKE_FLOW_ID.get()))
+                self._set_session_role(clean, audit_fid)
+            # Rerun-3: the caller's-rights switch was never audited (no ROLE_SWITCH row on REST/MCP).
+            self._audit_role_switch(
+                "ALLOWED", clean, audit_fid, audit_prev, channel, display_only=True, context_epoch=self.context_epoch
+            )
             return {
                 "ok": True,
                 "display_only": True,
@@ -9873,11 +9925,13 @@ class LiveSnowflakeBridge:
         session_fid = self._normalize_flow_id(flow_id or CURRENT_SNOWFLAKE_FLOW_ID.get())
         flow_token = CURRENT_SNOWFLAKE_FLOW_ID.set(session_fid)
         try:
-            return self._apply_session_role_switch(clean, flow_id, session_fid)
+            return self._apply_session_role_switch(clean, flow_id, session_fid, channel=channel)
         finally:
             CURRENT_SNOWFLAKE_FLOW_ID.reset(flow_token)
 
-    def _apply_session_role_switch(self, clean: str, flow_id: str | None, session_fid: str | None) -> dict[str, Any]:
+    def _apply_session_role_switch(
+        self, clean: str, flow_id: str | None, session_fid: str | None, *, channel: str = "REST"
+    ) -> dict[str, Any]:
         previous_role = self.active_role
         self._set_session_role(clean, session_fid)
         # CTX-ARCH-07 #1: Non-destructive role switch — only the switched flow's context is re-stamped.
@@ -9902,18 +9956,15 @@ class LiveSnowflakeBridge:
             else {"ok": True, "flow_id": None, "auto_paused": [], "statements": [], "skipped": "user_wide_switch"}
         )
 
-        self.record_audit_event(
-            action="ROLE_SWITCH",
-            outcome="ALLOWED",
-            target_object=clean,
-            flow_id=eff_fid,
-            details={
-                "previous_role": previous_role,
-                "new_role": clean,
-                "context_epoch": self.context_epoch,
-                "retained_objects_count": intersection["retained_objects_count"],
-                "hidden_by_role_count": intersection["hidden_by_role_count"],
-            },
+        self._audit_role_switch(
+            "ALLOWED",
+            clean,
+            eff_fid,
+            previous_role,
+            channel,
+            context_epoch=self.context_epoch,
+            retained_objects_count=intersection["retained_objects_count"],
+            hidden_by_role_count=intersection["hidden_by_role_count"],
         )
         return {
             "ok": True,
@@ -10250,8 +10301,9 @@ class LiveSnowflakeBridge:
                                 continue  # retry on a later sync: the owning run may still be stamped
                             rid = tid = sess = None  # still ambiguous after grace: written, run_id NULL
                         else:
-                            # No live run at all (e.g. after a restart): one derived run per job, else per row.
-                            rid, tid = _telemetry.derived_run_ids(flow_id, f"job:{tx_job}" if tx_job else f"tx:{tx_id}")
+                            # No live run at all (e.g. after a restart). Rerun-3: one derived run per execution
+                            # (job id, else a burst of rows of this flow), never one per row (165 RUNs / 25 runs).
+                            rid, tid = _telemetry.RUNS.derived_execution(flow_id=flow_id, ts=tx_ts, job_id=tx_job)
                             sess = None
                         self._resolve_pending(f"tx:{tx_id}")
                         sess = str(row_dict.get("session_id") or sess or "") or None
@@ -10293,8 +10345,7 @@ class LiveSnowflakeBridge:
 
                         if run_rec is None and rid is not None and rid not in self._synced_derived_run_ids:
                             # Executions without a live run record (e.g. before a restart): one derived run row.
-                            self._synced_derived_run_ids.add(rid)
-                            self._execute_bound(
+                            derived_res = self._execute_bound(
                                 self._merge_insert_request(
                                     self.runs_table,
                                     "run_id",
@@ -10318,7 +10369,9 @@ class LiveSnowflakeBridge:
                                 ),
                                 timeout=12,
                             )
-                            replicated_runs += 1
+                            if not (isinstance(derived_res, dict) and derived_res.get("ok") is False):  # retried next sync
+                                self._synced_derived_run_ids.add(rid)
+                                replicated_runs += 1
 
                         act_id = f"act-tx-{tx_id[:24]}"
                         if act_id not in self._synced_activity_ids:
@@ -10389,8 +10442,9 @@ class LiveSnowflakeBridge:
                                 continue
                             vb_rid = vb_tid = vb_sess = None  # still ambiguous after grace: written, run_id NULL
                         else:
-                            vb_job = vb_dict.get("job_id")
-                            vb_rid, vb_tid = _telemetry.derived_run_ids(flow_id, f"job:{vb_job}" if vb_job else f"vb:{vb_id}")
+                            vb_rid, vb_tid = _telemetry.RUNS.derived_execution(
+                                flow_id=flow_id, ts=vb_ts, job_id=vb_dict.get("job_id")
+                            )
                             vb_sess = None
                         self._resolve_pending(f"vb:{vb_id}")
                         vertex_id = str(vb_dict.get("id") or vb_dict.get("vertex_id") or "vertex")
@@ -12758,10 +12812,20 @@ def register_snowflake_fastapi_routes(app: Any) -> None:
                         "message": "target_role is required.",
                     }
                     _emit_mcp_denial("snowflake_switch_role", payload, requested_role.upper() or None)
+                    LIVE_BRIDGE._audit_role_switch(
+                        "DENIED",
+                        "",
+                        LIVE_BRIDGE._normalize_flow_id(request.headers.get("X-Snowflake-Flow-Id")),
+                        LIVE_BRIDGE.current_session_role() or LIVE_BRIDGE.active_role,
+                        "MCP",
+                        ErrorCode.AUTHZ_ROLE_DENIED.value,
+                    )
                 else:
                     # BUG-MCP-03: same per-(user, flow) session semantics as REST POST /role.
                     mcp_flow_id = str(args.get("flow_id") or "").strip() or request.headers.get("X-Snowflake-Flow-Id")
-                    payload = await asyncio.to_thread(LIVE_BRIDGE.switch_role, requested_role, mcp_flow_id)
+                    payload = await asyncio.to_thread(
+                        LIVE_BRIDGE.switch_role, requested_role, mcp_flow_id, channel="MCP"
+                    )
             elif tool_name == "snowflake_query_sql":
                 mcp_statement = str(args.get("statement") or "SELECT CURRENT_ROLE()")
                 if not _sf_identity.is_read_only_statement(mcp_statement):
@@ -12775,8 +12839,12 @@ def register_snowflake_fastapi_routes(app: Any) -> None:
                 else:
                     payload = await asyncio.to_thread(LIVE_BRIDGE.execute_sql, mcp_statement)
             elif tool_name == "snowflake_sync_traces":
+                # In-process (never an HTTP self-call): runs under this request's bound caller identity and
+                # returns the real replication counts of this sync.
                 payload = await asyncio.to_thread(
-                    LIVE_BRIDGE.sync_langflow_traces_to_snowflake, limit=int(args.get("limit") or 20)
+                    LIVE_BRIDGE.sync_langflow_traces_to_snowflake,
+                    limit=_sql_safety.bounded_int(args.get("limit"), 20, 1, 50),
+                    replicate_sqlite=True,
                 )
             else:
                 return JSONResponse(

@@ -71,7 +71,9 @@ def test_tr01_audit_insert_uses_bindings_and_is_idempotent():
         error_code=None, target_object="o'; DROP TABLE x;--", flow_id="f", run_id="r", details={"top_k": 5},
     )
     assert "DROP TABLE" not in stmt and stmt.startswith("INSERT INTO DB.CORE.LANGFLOW_AUDIT_LOG") and "WHERE NOT EXISTS" in stmt
-    assert stmt.count("?") == len(binds) == 14
+    # rerun-3: the NULL error_code is a SQL literal, never a null binding (002049 in multi-statement requests).
+    assert stmt.count("?") == len(binds) == 13
+    assert all(b["value"] is not None for b in binds.values())
     with pytest.raises(ValueError):
         tr.build_audit_insert("x; DROP", event_id="e", authenticated_user=None, effective_role=None,
                               execution_mode="m", context_epoch=0, action="a", outcome="o", error_code=None,

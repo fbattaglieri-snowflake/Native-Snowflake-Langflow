@@ -124,9 +124,15 @@ def bridge(monkeypatch, tmp_path):
 
 def _audit_values(b):
     stmt, k = next((s, k) for s, k in b.sent if s.startswith("INSERT INTO"))
-    vals = [v["value"] for _, v in sorted(k["bindings"].items(), key=lambda kv: int(kv[0]))]
-    # bindings order: event_id, user, effective_role, execution_mode, epoch, action, outcome, err, target,
-    # flow_id, run_id, trace_id, details, event_id
+    bound = iter(v["value"] for _, v in sorted(k["bindings"].items(), key=lambda kv: int(kv[0])))
+    # rerun-3: NULL values are SQL literals, so map the SELECT list back to columns: event_id, ts, user,
+    # effective_role, execution_mode, epoch, action, outcome, err, target, project, flow_id, run_id, trace_id, details
+    select = stmt.split(" SELECT ", 1)[1].split(" WHERE NOT EXISTS", 1)[0]
+    vals = []
+    for tok in (t.strip() for t in select.split(", ")):
+        if tok in ("CURRENT_TIMESTAMP()", "'default'"):
+            continue
+        vals.append(None if "NULL" in tok else next(bound))
     return {"effective_role": vals[2], "execution_mode": vals[3], "run_id": vals[10], "trace_id": vals[11]}
 
 
