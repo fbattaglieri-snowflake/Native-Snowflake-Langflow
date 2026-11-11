@@ -121,3 +121,26 @@ flowchart TB
 | **W2-R9-01..04** | `LLM Operations` Refactoring (`Custom Tool`, `Decision`, `AI Redact`, `AI Complete`, `AI Function`, `SQL Statement`, `Operations`) | Replaces `Stored Procedure` and `Function (UDF / UDTF)` with Snowsight-aligned `Custom Tool` (`snowflake_custom_tool.py`); redesigns `Decision` (`snowflake_decision.py`) on `snowflake-decision-fast` (default) and `snowflake-decision` (`choice`, `score` `0..n-1`, `noul`); separates `AI Redact` (`snowflake_ai_redact.py`, 13 PII categories, 4,096-token limit + auto-chunking) from `AI Function` (`snowflake_ai_function.py`, 14 `AI_*` functions) and `AI Complete` (`snowflake_ai_complete.py`), with full Internal & External Stage (`@<DATABASE>.<SCHEMA>.<STAGE_NAME>`) multimodal `TO_FILE(...)` and `DIRECTORY(@...)` support. |
 | **TRG-W2-R8-01..07** | `Triggers` (`triggers`, `icon="Zap"`) Sidebar Category & SPCS Service Function (`RUN_LANGFLOW_FLOW`) | Positioned immediately after `Input & Output` and before `Data Sources`. Provides `Schedule Trigger`, `Table Change Trigger`, `Stage File Trigger`, `Condition Alert Trigger`, and `Webhook`, executed via `<DATABASE>.<SCHEMA>.RUN_LANGFLOW_FLOW` (`POST /api/v1/snowflake/service-trigger`) under `CURRENT_ROLE()`. |
 | **W2-R9-05** & **W2-R9-06** | Transient Overlay Auto-Dismiss (`dismissTransientSnowflakeOverlays`) & Clean Startup Persistence | Automatically closes `#sflf-memory-type-dropdown` and transient overlays on left-rail tab switch, leaving `Memories`, outside click, `Escape`, or route change (`W2-R9-05`). Disables unsolicited auto-seeding of `Snowflake_Full_Memory_Enterprise_Agent` unless `SNOWFLAKE_SEED_SHOWCASE_FLOW=true` and purges unsolicited `New Flow (Backup)` rows while preserving 100% of user flows in `/persist/langflow.db` (`W2-R9-06`). |
+
+---
+
+## 4. v0.8.6 Capability Updates
+
+| Area | Capability | Behaviour |
+|---|---|---|
+| Perimeter | Langflow-native auth on `/api/v1/snowflake/*` | API key or browser session required; only the A2A agent card may be public. |
+| RBAC | `USE SECONDARY ROLES NONE` | Applied to every session; fail closed on error. |
+| RBAC | Privileged roles | Selectable only with a verified grant. |
+| RBAC | Role sessions | Per user and per flow; caller's-rights role takes precedence in caller mode. |
+| SQL safety | Shared `sql_safety` helper | Typed SQL API bindings, typed `NULL` inlining, identifier validation. |
+| Context | Flow `[ ❄️ Context ]` guard | Fail closed for all component SQL. |
+| Runtime | Stale component code guard | `upgrade` (default) or `refuse` with `COMPONENT_CODE_OUTDATED`. |
+| Files & Knowledge | Split Text UDF | Bridge-owned; provisioned by `scripts/provision_bridge_routines.py`. |
+| Triggers | Scheduling & execution | Valid Snowflake Scripting, `TARGET_COMPLETION_INTERVAL`, cron steps, real flow run with persisted role. |
+| LLM Operations | Custom Tool / Decision / AI Redact / tokens / SQL Statement | Typed args; routing; detect mode; `AI_COUNT_TOKENS`; row limits and bindings. |
+| Models & Agents | Cortex Agent | Thread continuity; clean `Message` output. |
+| Models & Agents | A2A | Call-chain limits; JSON-RPC `-32000` authz, `-32001` task not found, `-32002` not cancelable. |
+| Memories | `LF_MEM_*`, Message History | Governed objects, single `AI_EMBED` catalog, kill phrase. |
+| Tools | MCP Tools | Direct streamable project server; `localhost,127.0.0.1` in `LANGFLOW_SSRF_ALLOWED_HOSTS`. |
+| Models & Agents | Snowflake Proxy | `Messages` / `Responses` / `Chat` replay per session. |
+| Observability | Run/trace telemetry | One RUN per execution; batched span sync on run close. |

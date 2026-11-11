@@ -18,6 +18,9 @@
 > This is a public fork of [langflow-ai/langflow](https://github.com/langflow-ai/langflow) released under the **MIT License**. It contains only the Snowflake extension code (the isolated `lfx_snowflake` package, installer, SQL and docs), not the upstream source. The release image is built on the official `langflowai/langflow:1.13.1` image pinned by digest (`v1.13.1` baseline).
 
 > [!NOTE]
+> **v0.8.6 released.** Security perimeter, RBAC, fail-closed context enforcement, governed memories and unified telemetry. See the [v0.8.6 changelog](#changelog).
+
+> [!NOTE]
 > **W3-R1 redesign in progress.** Memories, Knowledge & Files, caller identity, and traceability are being reworked. Phase 0 (safety fixes) and Phase 1 (identity and traceability plumbing) are merged; the Langflow 1.13.1 base-image upgrade is deployed. Caller's-rights execution is still disabled by default, stage upload is not implemented yet, and the Phase 2 Memories/Files work has not started. See [Status & Roadmap](#status--roadmap).
 
 ---
@@ -43,12 +46,12 @@
 |---|---|---|
 | `[ ❄️ Context ]`, Cortex AI nodes, 5 Triggers | Live | Behaviour unchanged by W3-R1 |
 | Langflow 1.13.1 base image | Live | Pinned official image + fail-closed installer; core DB on the `/persist` block volume |
-| Memories pages and Memory Base | Planned | Demo rows and in-memory backends are being removed; only real Snowflake objects will be shown |
+| Memories pages and Memory Base | Live (v0.8.6) | Governed `LF_MEM_*` objects, single `AI_EMBED` catalog, kill phrase |
 | Stages & Volumes | In progress | Internal and external stages from live metadata; upload to internal stages only; External Volumes in a separate panel |
-| Message History on Snowflake | In progress | Current backend is in-memory per role |
-| Caller's-rights identity | In progress | Plumbing merged in W3-R1 Phase 1; disabled by default until qualified |
+| Message History on Snowflake | Live (v0.8.6) | Governed table (`LANGFLOW_MESSAGES_TABLE`), role-scoped |
+| Caller's-rights identity | Live (v0.8.6, opt-in) | Per-user/flow role sessions; caller's-rights role precedence; disabled by default |
 | Stage upload | Planned | Returns `501 Not Implemented` today |
-| Traceability (query tags, audit) | In progress | Query tags and audit fields merged in W3-R1 Phase 1; per-user attribution pending caller's rights |
+| Traceability (query tags, audit) | Live (v0.8.6) | Unified run/trace telemetry: one RUN per execution, batched span sync on run close |
 
 ---
 
@@ -336,3 +339,37 @@ Run the automated sanitization gate and test suite before any commit or push:
 python3 scripts/verify_public_repo_sanitization.py
 pytest
 ```
+
+---
+
+## Changelog
+
+### v0.8.6
+
+**Security & RBAC**
+- `/api/v1/snowflake/*` is protected by Langflow-native authentication (API key or browser session). Only the A2A agent card can be public (`SNOWFLAKE_LANGFLOW_PUBLIC_AGENT_CARD`, default on).
+- Every SQL session runs `USE SECONDARY ROLES NONE` (`LANGFLOW_SECONDARY_ROLES_MODE`). If the statement fails, the request fails closed; there is no silent fallback.
+- Privileged roles (e.g. `ACCOUNTADMIN`) are selectable only with a verified grant.
+- Role sessions are kept per user and per flow. In caller's-rights mode the caller's selected role takes precedence over the service role.
+
+**SQL safety & context**
+- Shared `sql_safety` helper: identifier validation, typed SQL API bindings, and typed `NULL` inlining (null bindings no longer break multi-statement writes).
+- Fail-closed flow `[ ❄️ Context ]` guard for all component SQL.
+- Stale stored component code guard (`SNOWFLAKE_LANGFLOW_STALE_COMPONENT_POLICY=upgrade|refuse`); refresh stored flows with `scripts/refresh_stored_flow_component_code.py`.
+- Split Text (LangChain mode) uses a bridge-owned UDF provisioned by `scripts/provision_bridge_routines.py` (see [`docs/DEPLOYMENT_SPCS.md`](docs/DEPLOYMENT_SPCS.md)).
+
+**Components**
+- Triggers: valid Snowflake Scripting, `TARGET_COMPLETION_INTERVAL`, real flow execution with the persisted role, cron steps.
+- LLM Operations: Custom Tool typed arguments, Decision routing, AI Redact detect mode, `AI_COUNT_TOKENS`, SQL Statement row limits and bindings.
+- Cortex Agent: thread continuity and clean `Message` output.
+- A2A: call-chain limits and JSON-RPC errors `-32000` (authorization), `-32001` (task not found), `-32002` (task not cancelable).
+- Memories: governed `LF_MEM_*` objects, Message History on Snowflake, single `AI_EMBED` model catalog, kill phrase.
+- MCP Tools: direct streamable connection to the project MCP server (`LANGFLOW_SSRF_ALLOWED_HOSTS` must include `localhost,127.0.0.1`).
+- Snowflake Proxy: `Messages`, `Responses` and `Chat` history replay per session.
+
+**Observability**
+- Unified run/trace telemetry: one RUN row per execution, batched span sync when the run closes, role-switch audit.
+
+**Deployment**
+- New environment variables, listed in [`docs/DEPLOYMENT_SPCS.md`](docs/DEPLOYMENT_SPCS.md#6-v086-environment-variables).
+- Remove any pinned `sha256:` from a spec copied out of `DESCRIBE SERVICE`, otherwise the old image keeps running.

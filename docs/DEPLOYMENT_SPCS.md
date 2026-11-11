@@ -125,3 +125,42 @@ CREATE SERVICE <DATABASE>.<SCHEMA>.SNOWFLAKE_LANGFLOW_SERVICE
 GRANT SERVICE ROLE <DATABASE>.<SCHEMA>.SNOWFLAKE_LANGFLOW_SERVICE!ALL_ENDPOINTS_USAGE
   TO ROLE <AUTHORIZED_CALLER_ROLE>;
 ```
+
+> [!IMPORTANT]
+> **Deploy gotcha — pinned image digest.** If you build the new spec from the output of `DESCRIBE SERVICE`, the `image:` line contains a resolved `@sha256:<DIGEST>`. Remove that digest (keep the tag, e.g. `.../snowflake-langflow:<VERSION>`) before `ALTER SERVICE ... FROM SPECIFICATION`. Otherwise the service is updated but the old image keeps running. Confirm the new digest with `SHOW SERVICE CONTAINERS IN SERVICE <DATABASE>.<SCHEMA>.SNOWFLAKE_LANGFLOW_SERVICE`.
+
+---
+
+## 6. v0.8.6 Environment Variables
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `LANGFLOW_SECONDARY_ROLES_MODE` | `NONE` | Secondary roles applied to every SQL session. Any value other than `ALL` means `NONE`. If `USE SECONDARY ROLES` fails, the request fails closed. |
+| `LANGFLOW_MEMORY_SCHEMA` | flow `[Context]` schema | `<SCHEMA>` or `<DATABASE>.<SCHEMA>` for governed `LF_MEM_*` memory objects. |
+| `LANGFLOW_GOVERNANCE_SCHEMA` | bridge schema | `<SCHEMA>` or `<DATABASE>.<SCHEMA>` for governance/audit objects used by memories. |
+| `LANGFLOW_BRIDGE_ROUTINES_SCHEMA` | bridge database/schema | `<DATABASE>.<SCHEMA>` holding bridge-owned routines (Split Text UDF). |
+| `LANGFLOW_MESSAGES_TABLE` | unset | Fully qualified governed Message History table (`<DATABASE>.<SCHEMA>.<TABLE>`). |
+| `SNOWFLAKE_LANGFLOW_SERVICE_TRIGGER_SECRET` | unset | Shared secret that authenticates Snowflake-side trigger calls into the service (recommended; pass it from the service function). Store it in a Snowflake secret, never in the spec. |
+| `SNOWFLAKE_LANGFLOW_STALE_COMPONENT_POLICY` | `upgrade` | Stored flow component code older than the installed component: `upgrade` rebuilds it from the installed code; `refuse` fails with `COMPONENT_CODE_OUTDATED`. |
+| `SNOWFLAKE_LANGFLOW_PUBLIC_AGENT_CARD` | `1` | Whether the A2A agent card (`/.well-known/agent-card.json`) is public. All other `/api/v1/snowflake/*` routes always require Langflow authentication. |
+| `LANGFLOW_SSRF_ALLOWED_HOSTS` | — | Must include `localhost,127.0.0.1` so `MCP Tools` can reach the project MCP server over the direct streamable transport. |
+
+---
+
+## 7. Provisioning Bridge-Owned Routines (Split Text UDF)
+
+The Split Text component (LangChain mode) calls a fixed-code UDF owned by the bridge. Flow components never create routines; they only invoke the configured FQN.
+
+```bash
+export LANGFLOW_BRIDGE_ROUTINES_SCHEMA=<DATABASE>.<SCHEMA>
+python3 scripts/provision_bridge_routines.py           # dry run: prints the DDL
+python3 scripts/provision_bridge_routines.py --apply   # creates the UDF under the service role
+```
+
+The service role needs `USAGE` on the database and schema and `CREATE FUNCTION` on the schema. The script exits with an error when they are missing (no fallback). Then grant use to the roles that run flows:
+
+```sql
+GRANT USAGE ON DATABASE <DATABASE> TO ROLE <FLOW_ROLE>;
+GRANT USAGE ON SCHEMA <DATABASE>.<SCHEMA> TO ROLE <FLOW_ROLE>;
+GRANT USAGE ON ALL FUNCTIONS IN SCHEMA <DATABASE>.<SCHEMA> TO ROLE <FLOW_ROLE>;
+```

@@ -117,3 +117,11 @@ flowchart TB
 
     Release --> Branch --> Report --> Gate --> Rehearsal --> Main --> Snapshot --> Deploy
 ```
+
+---
+
+## 5. v0.8.6 Upgrade Notes
+
+- After an image upgrade, stored flows may hold older component code. The stale component guard (`SNOWFLAKE_LANGFLOW_STALE_COMPONENT_POLICY`) upgrades or refuses them; run `scripts/refresh_stored_flow_component_code.py` to refresh stored flows explicitly.
+- Re-run `scripts/provision_bridge_routines.py --apply` if the bridge-owned routines change.
+- When rolling out, remove any pinned `sha256:` from a spec copied from `DESCRIBE SERVICE` (see [`DEPLOYMENT_SPCS.md`](DEPLOYMENT_SPCS.md)).
