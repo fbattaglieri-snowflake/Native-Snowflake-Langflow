@@ -374,12 +374,12 @@ def test_w2_r5_02_unified_memories_native_create_and_snowflake_vector_store_back
     )
     assert ins_res["ok"] is True
     assert ins_res["ingested_count"] == 1
-    assert "SNOWFLAKE.CORTEX.AI_EMBED('snowflake-arctic-embed-l-v2.0'" in ins_res["sql_statements"][0]
+    assert "AI_EMBED('snowflake-arctic-embed-l-v2.0'" in ins_res["sql_statements"][0]
 
     search_res = vec_backend.search("AI_EMBED vectors", top_k=3, session_id="sess-vec-01")
     search_sql = search_res["sql"]
     select_part, where_part = search_sql.split(" WHERE ", 1)
-    assert "VECTOR_COSINE_SIMILARITY(EMBEDDING, SNOWFLAKE.CORTEX.AI_EMBED('snowflake-arctic-embed-l-v2.0'" in select_part
+    assert "VECTOR_COSINE_SIMILARITY(EMBEDDING, AI_EMBED('snowflake-arctic-embed-l-v2.0'" in select_part
     assert "VECTOR_COSINE_SIMILARITY" not in where_part
     assert "SESSION_ID = 'sess-vec-01'" in where_part
     assert len(search_res["rows"]) >= 1
@@ -544,7 +544,7 @@ def test_w2_r5_04_snowflake_cortex_embeddings_and_split_text_component(monkeypat
         assert emb.dimension == expected_dim
         vec = emb.embed_query("Test Snowflake Cortex AI_EMBED query")
         assert len(vec) == expected_dim
-        assert f"SNOWFLAKE.CORTEX.AI_EMBED('{model_id}'" in emb.last_sql
+        assert f"AI_EMBED('{model_id}'" in emb.last_sql
         docs_vecs = emb.embed_documents(["Doc A", "Doc B"])
         assert len(docs_vecs) == 2
         assert all(len(v) == expected_dim for v in docs_vecs)

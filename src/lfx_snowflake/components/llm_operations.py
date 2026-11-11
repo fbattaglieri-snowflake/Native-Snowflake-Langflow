@@ -865,7 +865,7 @@ class SnowflakeCortexSearchQueryEngine:
 
     @classmethod
     def build_search_preview_request(cls, **kwargs: Any) -> tuple[str, dict[str, Any], dict[str, Any]]:
-        """``(sql, payload, bindings)``: ``SEARCH_PREVIEW(?, ?)`` with service name and JSON bound (BUG-UI-SQLI-04)."""
+        """``(sql, payload, bindings)``: ``SEARCH_PREVIEW('<validated fqn>', ?)`` with JSON bound (BUG-UI-SQLI-04)."""
         _, payload = cls.build_search_preview_sql(**kwargs)
         search_service = kwargs.get("search_service") or ""
         svc_fqn = (
@@ -873,8 +873,10 @@ class SnowflakeCortexSearchQueryEngine:
             if "." in search_service
             else _sql_safety.join_fqn(kwargs.get("database"), kwargs.get("schema"), search_service, field_name="search_service")
         )
-        sql = "SELECT SNOWFLAKE.CORTEX.SEARCH_PREVIEW(?, ?) AS SEARCH_RESULT"
-        return sql, payload, _sql_safety.to_sql_bindings([("TEXT", svc_fqn), ("TEXT", json.dumps(payload))])
+        # SEARCH_PREVIEW requires the service name as a constant literal (and the flow-context guard
+        # verifies that literal); the FQN is identifier-validated, so quoting is safe. Query JSON stays bound.
+        sql = f"SELECT SNOWFLAKE.CORTEX.SEARCH_PREVIEW({_sql_safety.sql_string_literal(svc_fqn)}, ?) AS SEARCH_RESULT"
+        return sql, payload, _sql_safety.to_sql_bindings([("TEXT", json.dumps(payload))])
 
 
 SUPPORTED_CUSTOM_TOOL_RESOURCE_TYPES: tuple[str, ...] = (

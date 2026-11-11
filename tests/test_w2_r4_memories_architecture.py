@@ -840,7 +840,7 @@ def test_w2_r4_verifier_route_ordering_recall_and_native_build_config_and_router
     assert recall_resp.status_code == 404
     recall_payload = recall_resp.json()
     assert recall_payload["ok"] is False
-    assert recall_payload["error_code"] in ("NOT_FOUND", "NOT_CONFIGURED")
+    assert recall_payload["error_code"] in ("NOT_FOUND", "MEMORY_NOT_FOUND_OR_LEGACY", "NOT_CONFIGURED")
     assert recall_payload["rows"] == []
 
     # 2. Verify SnowflakeMemoryBaseNativeComponent.update_build_config toggles type-specific fields across #1..#5

@@ -249,9 +249,10 @@ def test_bug_ui_sqli_04_redact_complete_and_search_validated() -> None:
     sql, payload, binds = SnowflakeCortexSearchQueryEngine.build_search_preview_request(
         database="db", schema="sch", search_service="svc", query="it's \\ fine"
     )
-    assert sql == "SELECT SNOWFLAKE.CORTEX.SEARCH_PREVIEW(?, ?) AS SEARCH_RESULT"
-    assert binds["1"] == {"type": "TEXT", "value": "DB.SCH.SVC"}
-    assert json.loads(binds["2"]["value"])["query"] == "it's \\ fine" == payload["query"]
+    # v0.8.6 E2E: service name must be a validated literal (SEARCH_PREVIEW + flow-context guard); JSON stays bound.
+    assert sql == "SELECT SNOWFLAKE.CORTEX.SEARCH_PREVIEW('DB.SCH.SVC', ?) AS SEARCH_RESULT"
+    assert list(binds) == ["1"]
+    assert json.loads(binds["1"]["value"])["query"] == "it's \\ fine" == payload["query"]
 
 
 # --------------------------------------------------------------------------- BUG-UI-SQLI-05
@@ -346,7 +347,7 @@ def test_bug_mem_rcl_01_embedding_provider_binds_text() -> None:
     emb = SnowflakeCortexEmbeddings.__new__(SnowflakeCortexEmbeddings)
     emb.model = "snowflake-arctic-embed-m-v1.5"
     sql, binds = emb.build_ai_embed_request("a'b")
-    assert sql == "SELECT SNOWFLAKE.CORTEX.AI_EMBED('snowflake-arctic-embed-m-v1.5', ?) AS EMBEDDING"
+    assert sql == "SELECT AI_EMBED('snowflake-arctic-embed-m-v1.5', ?) AS EMBEDDING"
     assert binds == {"1": {"type": "TEXT", "value": "a'b"}}
     emb.model = "x'); DROP"
     with pytest.raises(ss.SqlSafetyError):

@@ -112,6 +112,24 @@ def _row_get(row: Any, key: str, idx: int) -> Any:
     return None
 
 
+def _split_schema(value: Any, database: str, field_name: str) -> str:
+    """Accept ``SCHEMA`` or ``DB.SCHEMA`` (LANGFLOW_MEMORY_SCHEMA / LANGFLOW_GOVERNANCE_SCHEMA style).
+
+    A database prefix must match the Memory Base database; returns the bare, validated schema.
+    """
+    raw = str(value or "").strip()
+    if "." in raw:
+        fqn = sql_safety.validate_fqn(raw, field_name, min_parts=2, max_parts=2)
+        db, schema = fqn.split(".")
+        if db.strip('"').upper() != str(database).upper():
+            raise LfMemError(
+                f"{field_name} {raw!r} belongs to database {db!r}, expected {database!r}.",
+                error_code="INVALID_IDENTIFIER",
+            )
+        raw = schema
+    return sql_safety.validate_identifier(raw, field_name).upper()
+
+
 @dataclass(frozen=True)
 class LfMemSpec:
     """One Memory Base backed by ``<database>.<memory_schema>.LF_MEM_<NAME>``."""
@@ -128,9 +146,9 @@ class LfMemSpec:
         object.__setattr__(self, "name", validate_memory_name(self.name))
         object.__setattr__(self, "memory_base_id", str(uuid.UUID(str(self.memory_base_id))))
         object.__setattr__(self, "database", sql_safety.validate_identifier(self.database, "database").upper())
-        object.__setattr__(self, "memory_schema", sql_safety.validate_identifier(self.memory_schema, "memory schema").upper())
+        object.__setattr__(self, "memory_schema", _split_schema(self.memory_schema, self.database, "memory schema"))
         gov = self.governance_schema or self.memory_schema
-        object.__setattr__(self, "governance_schema", sql_safety.validate_identifier(gov, "governance schema").upper())
+        object.__setattr__(self, "governance_schema", _split_schema(gov, self.database, "governance schema"))
         model = str(self.embedding_model or "").split(" (")[0].strip()
         if model not in sql_safety.AI_EMBED_TEXT_MODEL_DIMENSIONS:
             raise LfMemError(
@@ -515,3 +533,38 @@ def format_batch(messages: list[dict[str, Any]]) -> str:
         if body:
             parts.append(f"[{m.get('created_at') or ''}] {m.get('sender_name') or m.get('sender') or ''}:\n{body}")
     return "\n\n---\n\n".join(parts)
+
+
+def legacy_memory_not_found(memory_ref: str) -> dict[str, Any]:
+    """Recall/lookup response for a Memory Base that is not an ``LF_MEM_*`` (v0.8.6) Memory Base.
+
+    Memory Bases created before v0.8.6 (e.g. ``E2E_MB_A3_*``) were not stored as governed ``LF_MEM_<NAME>``
+    tables with an ``SFLF_LF_MEM|...`` marker, so they cannot be resolved. No data is migrated or synthesized
+    automatically: the user must recreate the Memory Base and re-ingest from the original source.
+    """
+    ref = str(memory_ref or "").strip()
+    return {
+        "ok": False,
+        "recalled": False,
+        "error_code": "MEMORY_NOT_FOUND_OR_LEGACY",
+        "http_status": 404,
+        "message": (
+            f"Memory '{ref}' is not registered in the current Context. If it was created before v0.8.6 "
+            "it is a legacy Memory Base that v0.8.6 cannot resolve (no LF_MEM_<NAME> table / "
+            "SFLF_LF_MEM marker). Migration: recreate it from Memories > New Memory Base (same name), "
+            "attach it to this flow's Context, and re-ingest the original messages/documents. "
+            "Legacy data is not migrated automatically."
+        ),
+        "migration": {
+            "required": True,
+            "steps": [
+                "Create a new Memory Base (v0.8.6 LF_MEM backend) with the desired name and embedding model.",
+                "Add it to the flow Context (visible_objects.memories).",
+                "Re-ingest source content (Message History auto-capture or explicit ingest).",
+                "Optionally drop the legacy table after verifying the new one.",
+            ],
+        },
+        "memory_ref": ref,
+        "query_id": None,
+        "rows": [],
+    }

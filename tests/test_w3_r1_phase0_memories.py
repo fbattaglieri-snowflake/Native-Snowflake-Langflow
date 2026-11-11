@@ -137,7 +137,7 @@ class TestAC01CleanStateNoSyntheticMemories:
         monkeypatch.setattr(clean_bridge, "execute_sql", lambda s, **kw: calls.append(s) or {"ok": True, "rows": []})
         res = clean_bridge.recall_memory("NON_EXISTENT_MEM_XYZ", query="x")
         assert res["ok"] is False and res["recalled"] is False
-        assert res["error_code"] == "NOT_FOUND"
+        assert res["error_code"] == "MEMORY_NOT_FOUND_OR_LEGACY"
         assert res["rows"] == [] and res["query_id"] is None
         assert "MEM_NON_EXISTENT_MEM_XYZ" not in json.dumps(res)
         assert calls == []

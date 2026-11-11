@@ -49,6 +49,26 @@ def flow_component_sql() -> Iterator[None]:
         FLOW_COMPONENT_SQL.reset(token)
 
 
+class FlowContextDenied(PermissionError):
+    """E2E T1: a flow component's SQL was refused by the flow-context guard (Langflow-native component error).
+
+    Raised by component SQL wrappers so the refusal reaches the run output / HTTP response with its code,
+    instead of a silent ``ok: false`` result.
+    """
+
+    def __init__(self, result: dict[str, Any]):
+        self.result = dict(result or {})
+        self.error_code = str(self.result.get("error_code") or AUTHZ_OBJECT_NOT_IN_FLOW_CONTEXT)
+        super().__init__(f"{self.error_code}: {self.result.get('message') or 'statement outside the flow context'}")
+
+
+def raise_if_flow_context_denied(result: Any) -> Any:
+    """Return ``result`` unchanged unless it is a flow-context guard refusal, which is raised instead."""
+    if isinstance(result, dict) and result.get("ok") is False and result.get("error_code") == AUTHZ_OBJECT_NOT_IN_FLOW_CONTEXT:
+        raise FlowContextDenied(result)
+    return result
+
+
 class UnverifiableStatement(ValueError):
     """The statement's referenced objects cannot be determined with certainty (fail closed)."""
 

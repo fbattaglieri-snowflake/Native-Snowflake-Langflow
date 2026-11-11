@@ -347,18 +347,12 @@ def refresh(config, protocol):
     return config
 
 
-class ProtectedAnthropic(ChatAnthropic):
-    _transports: dict = PrivateAttr()
-    # Langflow session of the component that built this model (graph.session_id); scopes the replay store.
-    _sflf_session_id: str | None = PrivateAttr(default=None)
+class _SflfReplayMixin:
+    """Cross-turn tool-loop replay (BUG-PROXY-A4-01 Messages, T7 Responses), scoped user|flow|session."""
 
-    @cached_property
-    def _client(self):
-        return anthropic.Anthropic(**self._client_params, http_client=self._transports['http_client'])
-
-    @cached_property
-    def _async_client(self):
-        return anthropic.AsyncAnthropic(**self._client_params, http_client=self._transports['http_async_client'])
+    def _sflf_thinking_on(self):
+        thinking = getattr(self, 'thinking', None)
+        return isinstance(thinking, dict) and thinking.get('type') == 'enabled'
 
     # BUG-PROXY-A4-01: replay signed thinking + tool_use/tool_result of earlier turns of the same conversation.
     def _sflf_scope(self):
@@ -371,10 +365,8 @@ class ProtectedAnthropic(ChatAnthropic):
 
         if not scope:
             return list(messages)
-        thinking = getattr(self, 'thinking', None)
-        thinking_on = isinstance(thinking, dict) and thinking.get('type') == 'enabled'
         return _replay.rehydrate(
-            messages, thinking_enabled=thinking_on, tools_bound=bool(kwargs.get('tools')), scope=scope
+            messages, thinking_enabled=self._sflf_thinking_on(), tools_bound=bool(kwargs.get('tools')), scope=scope
         )
 
     @staticmethod
@@ -441,6 +433,31 @@ class ProtectedAnthropic(ChatAnthropic):
                 _replay.record_turn(prepared, merged, scope=scope)
         except Exception:  # noqa: BLE001
             pass
+
+
+class ProtectedAnthropic(_SflfReplayMixin, ChatAnthropic):
+    _transports: dict = PrivateAttr()
+    # Langflow session of the component that built this model (graph.session_id); scopes the replay store.
+    _sflf_session_id: str | None = PrivateAttr(default=None)
+
+    @cached_property
+    def _client(self):
+        return anthropic.Anthropic(**self._client_params, http_client=self._transports['http_client'])
+
+    @cached_property
+    def _async_client(self):
+        return anthropic.AsyncAnthropic(**self._client_params, http_client=self._transports['http_async_client'])
+
+
+class ProtectedResponses(_SflfReplayMixin, ChatOpenAI):
+    """T7: Responses API model; replays earlier turns' function_call/function_call_output (as AI tool_calls +
+    ToolMessages, which langchain-openai serializes to Responses input items) and reasoning items unchanged."""
+
+    _sflf_session_id: str | None = PrivateAttr(default=None)
+
+    def _sflf_thinking_on(self):
+        # Reasoning items carry encrypted_content and must be re-sent byte-for-byte (store=False contract).
+        return True
 
 
 def resolve_reasoning_options(
@@ -569,12 +586,19 @@ def build(
                 options['temperature'] = float(temperature) if temperature is not None else 0.1
             elif temperature is not None and not resolved.get('extra_body') and protocol == 'chat':
                 options['temperature'] = float(temperature)
-            model = ChatOpenAI(
+            model = (ProtectedResponses if protocol == 'responses' else ChatOpenAI)(
                 **common,
                 **clients,
                 use_responses_api=protocol == 'responses',
                 **options,
             )
+            if protocol == 'responses':
+                try:
+                    from lfx_snowflake.providers.language_models import _bind_component_session  # noqa: PLC0415
+
+                    _bind_component_session(model)
+                except Exception:  # noqa: BLE001
+                    pass
         weakref.finalize(model, close_clients, clients)
         return model
     except BaseException:

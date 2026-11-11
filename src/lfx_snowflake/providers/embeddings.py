@@ -84,7 +84,7 @@ def _official_entry(model_id: str, dim: int) -> dict[str, Any]:
         "dimensions": dim,
         "max_tokens": max_tokens,
         "language": language,
-        "sql_function": f"SNOWFLAKE.CORTEX.AI_EMBED('{model_id}', ?)",
+        "sql_function": f"AI_EMBED('{model_id}', ?)",
         "default": True,
         "deprecated": False,
         "unsupported": False,
@@ -340,7 +340,7 @@ class SnowflakeCortexEmbeddings(_LangChainEmbeddingsBase):
         from lfx_snowflake import sql_safety as _sql_safety
 
         model_lit = _sql_safety.sql_string_literal(_sql_safety.validate_embed_model(self.model))
-        sql = f"SELECT SNOWFLAKE.CORTEX.AI_EMBED({model_lit}, ?) AS EMBEDDING"
+        sql = f"SELECT AI_EMBED({model_lit}, ?) AS EMBEDDING"
         return sql, _sql_safety.to_sql_bindings([("TEXT", str(text or ""))])
 
     def build_ai_embed_sql(self, text: str) -> str:
@@ -374,6 +374,16 @@ class SnowflakeCortexEmbeddings(_LangChainEmbeddingsBase):
                 return None
         return None
 
+    @staticmethod
+    def _sql_error_message(res: Any) -> str | None:
+        if not isinstance(res, dict):
+            return None
+        if res.get("error") or res.get("status") == "error" or res.get("ok") is False or res.get("error_code"):
+            code = res.get("error_code") or res.get("sql_error_code")
+            msg = res.get("error") or res.get("message") or "unknown Snowflake error"
+            return f"[{code}] {msg}" if code else str(msg)
+        return None
+
     def embed_query(self, text: str) -> list[float]:
         """Embed via AI_EMBED; raises ``SnowflakeCortexEmbeddingError`` instead of faking a vector (BUG-MEM-EMB-03)."""
         try:
@@ -391,14 +401,16 @@ class SnowflakeCortexEmbeddings(_LangChainEmbeddingsBase):
             raise SnowflakeCortexEmbeddingError(
                 f"AI_EMBED unavailable (no live Snowflake session) for model '{self.model}'."
             )
-        if isinstance(res, dict) and (res.get("error") or res.get("status") == "error"):
-            raise SnowflakeCortexEmbeddingError(
-                f"AI_EMBED failed for model '{self.model}': {res.get('error') or res.get('message')}"
-            )
+        err = self._sql_error_message(res)
+        if err:
+            # Surface the real Snowflake error (e.g. 002141 unknown function) instead of masking it.
+            raise SnowflakeCortexEmbeddingError(f"AI_EMBED failed for model '{self.model}': {err}")
         vec = self._extract_vector_from_sql_result(res)
         if vec is None:
+            detail = res.get("message") if isinstance(res, dict) else None
             raise SnowflakeCortexEmbeddingError(
-                f"AI_EMBED returned no valid {self.dimension}-dimensional vector for model '{self.model}'."
+                f"AI_EMBED returned no valid {self.dimension}-dimensional vector for model '{self.model}'"
+                + (f": {detail}" if detail else ".")
             )
         return vec
 

@@ -142,7 +142,8 @@ def test_ctx03_components_use_the_flow_component_scope() -> None:
         "native_category_components/data_source/snowflake_iceberg_tables.py",
     ):
         text = (REPO / "src/lfx_snowflake" / rel).read_text(encoding="utf-8")
-        assert "LIVE_BRIDGE.execute_sql(" not in text.replace("return LIVE_BRIDGE.execute_sql(*args, **kwargs)", ""), rel
+        bare = text.replace("return LIVE_BRIDGE.execute_sql(*args, **kwargs)", "").replace(_RAISING_WRAPPER_CALL, "")
+        assert "LIVE_BRIDGE.execute_sql(" not in bare, rel
         assert "with _flow_component_sql():" in text, rel
 
 
@@ -346,10 +347,14 @@ ALL_COMPONENT_FILES = (
 )
 
 
+# E2E T1: the scoped wrapper also turns a guard refusal into a component error.
+_RAISING_WRAPPER_CALL = "return _raise_if_flow_context_denied(LIVE_BRIDGE.execute_sql(*args, **kwargs))"
+
+
 @pytest.mark.parametrize("rel", ALL_COMPONENT_FILES)
 def test_ctx03_followup_every_component_sql_path_is_scoped(rel) -> None:
     text = (REPO / "src/lfx_snowflake" / rel).read_text(encoding="utf-8")
-    bare = text.replace("return LIVE_BRIDGE.execute_sql(*args, **kwargs)", "")
+    bare = text.replace("return LIVE_BRIDGE.execute_sql(*args, **kwargs)", "").replace(_RAISING_WRAPPER_CALL, "")
     assert "LIVE_BRIDGE.execute_sql(" not in bare, rel
     assert "with _flow_component_sql():" in text, rel
 
@@ -358,7 +363,11 @@ def test_ctx03_followup_no_unscoped_component_sql_anywhere() -> None:
     root = REPO / "src/lfx_snowflake/native_category_components"
     offenders = []
     for path in root.rglob("*.py"):
-        text = path.read_text(encoding="utf-8").replace("return LIVE_BRIDGE.execute_sql(*args, **kwargs)", "")
+        text = (
+            path.read_text(encoding="utf-8")
+            .replace("return LIVE_BRIDGE.execute_sql(*args, **kwargs)", "")
+            .replace(_RAISING_WRAPPER_CALL, "")
+        )
         if "LIVE_BRIDGE.execute_sql(" in text:
             offenders.append(str(path.relative_to(root)))
     assert offenders == []

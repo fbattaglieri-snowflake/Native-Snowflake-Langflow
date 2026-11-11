@@ -3,12 +3,109 @@ from __future__ import annotations
 import copy
 from typing import Any, Callable
 
+from . import messages_replay as _replay
+
 from .registry import (
     ERROR_TECHNICAL_EXECUTION_ERROR,
     SnowflakeProviderError,
     SnowflakeProviderRegistry,
     deduplicate_tool_call_ids,
 )
+
+
+# --- T7: cross-turn replay of Responses tool loops (function_call / function_call_output items) ---------------
+# Langflow history keeps only the final assistant text, so turn N+1 never saw turn N's tool calls. Per the
+# Responses contract (store=False) the client re-sends prior output items as input: every ``function_call`` is
+# followed by its ``function_call_output`` with the same ``call_id``; ``reasoning`` items travel with their
+# ``encrypted_content``. Isolated per user|flow|session scope exactly like the Messages replay.
+RESPONSES_REPLAY = _replay.MessagesReplayStore()
+
+
+def _item_text(item: dict[str, Any]) -> str:
+    content = item.get("content")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "".join(
+            str(b.get("text") or "")
+            for b in content
+            if isinstance(b, dict) and b.get("type") in ("input_text", "output_text", "text")
+        )
+    return ""
+
+
+def _is_user(item: dict[str, Any]) -> bool:
+    return item.get("role") == "user" and item.get("type", "message") == "message"
+
+
+def _is_assistant_text(item: dict[str, Any]) -> bool:
+    return item.get("role") == "assistant" and item.get("type", "message") == "message"
+
+
+def _complete_loop(seq: list[dict[str, Any]]) -> bool:
+    calls = {i.get("call_id") for i in seq if i.get("type") == "function_call"}
+    outputs = {i.get("call_id") for i in seq if i.get("type") == "function_call_output"}
+    return bool(calls) and calls <= outputs
+
+
+def _summarize_items(seq: list[dict[str, Any]], final: dict[str, Any]) -> dict[str, Any]:
+    outputs = {i.get("call_id"): i.get("output") for i in seq if i.get("type") == "function_call_output"}
+    lines = [
+        f"- function_call {i.get('name')}({str(i.get('arguments') or '')[:400]})\n  output: {str(outputs.get(i.get('call_id')) or '')[:400]}"
+        for i in seq
+        if i.get("type") == "function_call"
+    ]
+    text = ("[Tool calls made in this turn]\n" + "\n".join(lines))[:2000] + "\n\n" + _item_text(final)
+    return {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": text}]}
+
+
+def record_responses_turn(
+    input_items: list[dict[str, Any]],
+    output_items: list[dict[str, Any]],
+    *,
+    scope: str | None = None,
+    store: _replay.MessagesReplayStore = RESPONSES_REPLAY,
+) -> bool:
+    """Record the items after the last user message plus the final output when the tool loop is complete."""
+    sc = scope if scope is not None else _replay._scope()
+    if not sc:  # no session -> never store (tool outputs must not leak across sessions)
+        return False
+    last_user = max((i for i, it in enumerate(input_items) if isinstance(it, dict) and _is_user(it)), default=-1)
+    finals = [it for it in output_items if isinstance(it, dict) and _is_assistant_text(it)]
+    if last_user < 0 or not finals or any(it.get("type") == "function_call" for it in output_items):
+        return False
+    seq = [copy.deepcopy(it) for it in [*input_items[last_user + 1 :], *output_items] if isinstance(it, dict)]
+    if not _complete_loop(seq):
+        return False
+    store.put(_replay._key(sc, _item_text(input_items[last_user]), _item_text(finals[-1])), seq)
+    return True
+
+
+def rehydrate_responses_history(
+    input_items: list[dict[str, Any]],
+    *,
+    tools_bound: bool,
+    scope: str | None = None,
+    store: _replay.MessagesReplayStore = RESPONSES_REPLAY,
+) -> list[dict[str, Any]]:
+    """Replace earlier plain assistant messages with their recorded reasoning/function_call/output sequence."""
+    sc = scope if scope is not None else _replay._scope()
+    if not sc:
+        return list(input_items)
+    out: list[dict[str, Any]] = []
+    user_text: str | None = None
+    for it in input_items:
+        if isinstance(it, dict) and _is_user(it):
+            user_text = _item_text(it)
+        elif isinstance(it, dict) and user_text is not None and _is_assistant_text(it):
+            seq = store.get(_replay._key(sc, user_text, _item_text(it)))
+            user_text = None
+            if seq:
+                # function_call without a tools definition is rejected: keep the facts as text instead.
+                out.extend(seq if tools_bound else [_summarize_items(seq, seq[-1])])
+                continue
+        out.append(it)
+    return out
 
 
 class SnowflakeProxyResponsesAdapter:
@@ -61,6 +158,7 @@ class SnowflakeProxyResponsesAdapter:
         *,
         stream: bool = False,
         tools: list[dict[str, Any]] | None = None,
+        session_id: str | None = None,
         max_output_tokens: int | None = None,
         store: bool | None = None,
         include: list[str] | None = None,
@@ -74,7 +172,9 @@ class SnowflakeProxyResponsesAdapter:
         self.registry.check_role_authorized("invoke_proxy_responses", "USAGE ON SERVICE LLM_PROXY_STANDARD")
         profile = self.registry.get_model_profile("responses", model)
 
-        deduped_items = deduplicate_tool_call_ids(input_items)
+        # T7: re-inject earlier turns' function_call / function_call_output items (session-isolated).
+        history = rehydrate_responses_history(input_items, tools_bound=bool(tools), scope=_replay._scope(session_id))
+        deduped_items = deduplicate_tool_call_ids(history)
         rehydrated_items = self._rehydrate_encrypted_reasoning(deduped_items)
 
         include_list = list(include) if include else []
@@ -196,6 +296,7 @@ class SnowflakeProxyResponsesAdapter:
             response = self._transport(self.inference_url, payload, headers)
             if isinstance(response.get("output"), list):
                 response["output"] = self.record_response_items(response["output"])
+                record_responses_turn(payload["input"], response["output"], scope=_replay._scope(kwargs.get("session_id")))
             return response
         except SnowflakeProviderError:
             raise

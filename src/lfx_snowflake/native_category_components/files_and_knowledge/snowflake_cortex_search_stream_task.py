@@ -21,13 +21,15 @@ from lfx_snowflake.native_category_components.files_and_knowledge.snowflake_stag
     _resolve_flow_id,
 )
 from lfx_snowflake.flow_context_guard import flow_component_sql as _flow_component_sql
+from lfx_snowflake.flow_context_guard import raise_if_flow_context_denied as _raise_if_flow_context_denied
 from lfx_snowflake.flow_context_guard import register_component_object as _register_component_object
 
 
 def _flow_component_execute_sql(*args, **kwargs):
     """BUG-CTX-03: this component's SQL is checked against the flow's `[ ❄️ Context ]`."""
     with _flow_component_sql():
-        return LIVE_BRIDGE.execute_sql(*args, **kwargs)
+        # E2E T1: a guard refusal surfaces as a component error carrying AUTHZ_OBJECT_NOT_IN_FLOW_CONTEXT.
+        return _raise_if_flow_context_denied(LIVE_BRIDGE.execute_sql(*args, **kwargs))
 
 
 def _database_options(flow_id: str | None = None) -> list[str]:

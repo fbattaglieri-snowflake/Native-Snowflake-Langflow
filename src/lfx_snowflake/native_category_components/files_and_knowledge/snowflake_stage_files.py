@@ -12,12 +12,14 @@ from lfx.schema import Data
 from lfx_snowflake.components.files_and_stage import build_stage_creation_ddl
 from lfx_snowflake.fastapi_live_bridge import LIVE_BRIDGE
 from lfx_snowflake.flow_context_guard import flow_component_sql as _flow_component_sql
+from lfx_snowflake.flow_context_guard import raise_if_flow_context_denied as _raise_if_flow_context_denied
 
 
 def _flow_component_execute_sql(*args, **kwargs):
     """BUG-CTX-03: this component's SQL is checked against the flow's `[ ❄️ Context ]`."""
     with _flow_component_sql():
-        return LIVE_BRIDGE.execute_sql(*args, **kwargs)
+        # E2E T1: a guard refusal surfaces as a component error carrying AUTHZ_OBJECT_NOT_IN_FLOW_CONTEXT.
+        return _raise_if_flow_context_denied(LIVE_BRIDGE.execute_sql(*args, **kwargs))
 
 
 CREATE_INTERNAL_STAGE_OPTION = "+ Create New Internal Stage..."

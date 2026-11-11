@@ -1123,6 +1123,8 @@ class LiveSnowflakeBridge:
         self._schemas_cache: dict[str, tuple[float, list[str]]] = {}
         self._objects_cache: dict[str, tuple[float, dict[str, Any]]] = {}
         self._synced_tx_ids: set[str] = set()
+        # T10: derived RUN rows already written (one per job/execution, never one per span row).
+        self._synced_derived_run_ids: set[str] = set()
         self._synced_vertex_build_ids: set[str] = set()
         self._synced_activity_ids: set[str] = set()
         self._soft_deleted_activity_ids: set[str] = set()
@@ -1288,6 +1290,9 @@ class LiveSnowflakeBridge:
                     except Exception:  # noqa: BLE001
                         parsed_ctx = {}
                     if isinstance(parsed_ctx, dict) and parsed_ctx:
+                        from lfx_snowflake.context_hygiene import drop_phantom_telemetry_objects  # noqa: PLC0415
+
+                        drop_phantom_telemetry_objects(parsed_ctx)  # pre-v0.8.6 phantoms
                         parsed_ctx.setdefault("flow_id", norm_fid)
                         parsed_ctx.setdefault("full_databases", [])
                         parsed_ctx.setdefault("full_schemas", [])
@@ -1794,15 +1799,9 @@ class LiveSnowflakeBridge:
                 matched = entry
                 break
         if matched is None:
-            return {
-                "ok": False,
-                "recalled": False,
-                "error_code": "NOT_FOUND",
-                "message": f"Memory '{short_ref}' is not registered in the current Context.",
-                "memory_ref": short_ref,
-                "query_id": None,
-                "rows": [],
-            }
+            from lfx_snowflake.memories_lf_mem import legacy_memory_not_found  # noqa: PLC0415
+
+            return legacy_memory_not_found(short_ref)
         if isinstance(matched.get("lf_mem"), dict):
             return self._recall_lf_mem(matched, query=query, session_id=session_id, limit=limit)
         fqn = str(matched.get("table_fqn") or "").strip()
@@ -6383,6 +6382,9 @@ class LiveSnowflakeBridge:
                         cur_vis[k] = []
                     else:
                         cur_vis.setdefault(k, [])
+        from lfx_snowflake.context_hygiene import drop_phantom_telemetry_objects  # noqa: PLC0415
+
+        drop_phantom_telemetry_objects(base_ctx)  # pre-v0.8.6 template phantoms (v0.8.6 E2E)
         if has_pg_key and isinstance(raw_pg, list):
             base_ctx.setdefault("visible_objects", {})["postgres_instances"] = list(base_ctx["postgres_instances"])
         elif base_ctx.get("postgres_instances"):
@@ -8860,7 +8862,8 @@ class LiveSnowflakeBridge:
         """Execute a SQL statement via Snowflake SQL REST API (`/api/v2/statements`) using SPCS OAuth.
 
         ``mode="caller"`` runs with restricted caller's rights when SNOWFLAKE_LANGFLOW_CALLERS_RIGHTS=1;
-        the UI role selector is then display-only and only an explicit ``role`` is sent.
+        the role sent is the explicit ``role``, else the caller's own (user, flow) selection, else none
+        (token default role) -- so the SQL API body always carries the reported active role.
         """
         # BUG-CTX-03: SQL issued by a flow component may only touch that flow's `[ ❄️ Context ]`.
         if _flow_guard.FLOW_COMPONENT_SQL.get():
@@ -8884,7 +8887,11 @@ class LiveSnowflakeBridge:
         # Default: the mode bound for this request (caller on user-facing routes, service elsewhere).
         exec_mode = _sf_identity.resolve_mode(mode or _sf_identity.current_request_mode())
         if exec_mode == _sf_identity.MODE_CALLER:
-            effective_role = (role or "").strip()
+            # E2E T2: explicit role > the caller's own (user, flow) selection > token default role.
+            # Never the service base role: it is not the caller's choice.
+            if role is None:
+                role = TRIGGER_RUN_ROLE.get() or self.current_session_role() or ""
+            effective_role = role.strip()
         else:
             # An explicit "" means "token default role"; only ``None`` inherits the session role.
             effective_role = (self.active_role if role is None else role).strip()
@@ -9341,10 +9348,14 @@ class LiveSnowflakeBridge:
         values: list[str] = []
         for _col, val, kind in columns:
             if kind == "NOW":
-                values.append("CURRENT_TIMESTAMP()")
+                # T10: always UTC (+00:00), never the session TIMEZONE (was -08:00 next to +00:00 rows).
+                values.append("CONVERT_TIMEZONE('UTC', CURRENT_TIMESTAMP())")
             elif kind == "TS":
-                # Real event time (ISO-8601 text binding); falls back to now when unknown.
-                values.append(f"COALESCE(TRY_TO_TIMESTAMP_TZ({b.add(val, 'TEXT')}), CURRENT_TIMESTAMP())")
+                # Real event time normalized to an explicit-UTC ISO-8601 binding; falls back to now (UTC).
+                values.append(
+                    f"CONVERT_TIMEZONE('UTC', COALESCE(TRY_TO_TIMESTAMP_TZ({b.add(_telemetry.utc_iso(val), 'TEXT')}), "
+                    f"CURRENT_TIMESTAMP()))"
+                )
             elif kind == "JSON":
                 values.append(f"PARSE_JSON({b.add(val, 'TEXT')})")
             else:
@@ -9403,6 +9414,13 @@ class LiveSnowflakeBridge:
     def _build_activity_merge_sql(self, record: dict[str, Any]) -> str:
         """SQL text of ``_build_activity_merge_request`` (``?`` placeholders; execute with its bindings)."""
         return self._build_activity_merge_request(record)[0]
+
+    def _telemetry_row_pending(self, key: str, ts: Any) -> bool:
+        """T10: an ambiguous span row waits (not marked synced) until it is older than the match grace window."""
+        when = _telemetry._parse_ts(ts)
+        if when is None:
+            return False
+        return (datetime.now(timezone.utc) - when).total_seconds() < _telemetry.RUNS.match_grace_s
 
     def _submit_telemetry(self, request: tuple[str, dict[str, Any]], query_tag: str | None = None) -> None:
         """PASSO 8: telemetry DML runs off the turn's critical path (batched writer) in live mode."""
@@ -9819,6 +9837,10 @@ class LiveSnowflakeBridge:
         if _sf_identity.callers_rights_enabled():
             # W3-R1-10d: display-only. Under caller's rights the shared bridge role is never mutated, so one
             # user's selection cannot change what other users run as; Snowflake enforces the caller's grants.
+            # E2E T2: the selection is still recorded for *this* authenticated user and flow, so caller-mode
+            # execute_sql sends it as the SQL API role (otherwise the token default role ran, e.g. ACCOUNTADMIN).
+            if self._role_session_user():
+                self._set_session_role(clean, self._normalize_flow_id(flow_id or CURRENT_SNOWFLAKE_FLOW_ID.get()))
             return {
                 "ok": True,
                 "display_only": True,
@@ -10134,9 +10156,20 @@ class LiveSnowflakeBridge:
                     )
                     conn.close()
 
+                    _telemetry.install_langflow_row_stamping()
                     spans_by_flow: dict[str, list[dict[str, Any]]] = {}
+                    # T10: (flow, vertex, ts) -> job_id of the vertex_build sibling of a transaction row.
+                    vb_job_by_vertex: dict[str, str] = {}
                     for vb in vb_rows:
                         vb_d = dict(vb)
+                        if vb_d.get("job_id"):
+                            vb_fp = _telemetry.row_fingerprint(
+                                _trace.canonical_flow_id(self._normalize_flow_id(str(vb_d.get("flow_id") or "")) or vb_d.get("flow_id")),
+                                vb_d.get("id"),
+                                vb_d.get("timestamp"),
+                            )
+                            if vb_fp:
+                                vb_job_by_vertex[vb_fp] = str(vb_d["job_id"])
                         raw_fid = str(vb_d.get("flow_id") or "unknown-flow")
                         norm_fid = self._normalize_flow_id(raw_fid) or raw_fid
                         spans_by_flow.setdefault(norm_fid, []).append(
@@ -10158,12 +10191,28 @@ class LiveSnowflakeBridge:
                         # BUG-MCP-02 / BUG-LLMOP-A4-01: canonical flow id + the real run of this execution.
                         flow_id = _trace.canonical_flow_id(norm_fid) or norm_fid
                         tx_ts = row_dict.get("timestamp")
-                        run_rec = _telemetry.RUNS.match(flow_id, tx_ts, row_dict.get("session_id"))
+                        # T10: explicit linkage (row stamped at write time / job id / sibling vertex_build),
+                        # then a unique active run; ambiguous rows are never given a synthetic run.
+                        tx_job = row_dict.get("job_id") or vb_job_by_vertex.get(
+                            _telemetry.row_fingerprint(flow_id, row_dict.get("vertex_id"), tx_ts) or ""
+                        )
+                        run_rec, tx_ambiguous = _telemetry.RUNS.resolve(
+                            flow_id=flow_id,
+                            vertex_id=row_dict.get("vertex_id"),
+                            ts=tx_ts,
+                            row_id=row_dict.get("id"),
+                            job_id=tx_job,
+                            session_id=row_dict.get("session_id"),
+                        )
                         if run_rec is not None:
                             rid, tid, sess = run_rec.run_id, run_rec.trace_id, run_rec.session_id
+                        elif tx_ambiguous:
+                            if self._telemetry_row_pending(f"tx:{tx_id}", tx_ts):
+                                continue  # retry on a later sync: the owning run may still be stamped
+                            rid = tid = sess = None
                         else:
-                            # No single live run: an id unique to this row, never a shared/collapsed one.
-                            rid, tid = _telemetry.derived_run_ids(flow_id, f"tx:{tx_id}")
+                            # No live run at all (e.g. after a restart): one derived run per job, else per row.
+                            rid, tid = _telemetry.derived_run_ids(flow_id, f"job:{tx_job}" if tx_job else f"tx:{tx_id}")
                             sess = None
                         sess = str(row_dict.get("session_id") or sess or "") or None
                         vertex_id = str(row_dict.get("vertex_id") or "vertex")
@@ -10191,8 +10240,8 @@ class LiveSnowflakeBridge:
                                     ("authenticated_user", self.authenticated_user, "TEXT"),
                                     ("effective_role", self.active_role, "TEXT"),
                                     ("execution_mode", exec_mode_v, "TEXT"),
-                                    ("start_ts", str(tx_ts or ""), "TS"),
-                                    ("end_ts", str(tx_ts or ""), "TS"),
+                                    ("start_ts", _telemetry.utc_iso(tx_ts), "TS"),
+                                    ("end_ts", _telemetry.utc_iso(tx_ts), "TS"),
                                     ("status", status_val, "TEXT"),
                                     ("redacted_inputs", inputs_redacted, "JSON"),
                                     ("redacted_outputs", outputs_redacted, "JSON"),
@@ -10202,8 +10251,9 @@ class LiveSnowflakeBridge:
                         )
                         replicated_spans += 1
 
-                        if run_rec is None:
+                        if run_rec is None and rid is not None and rid not in self._synced_derived_run_ids:
                             # Executions without a live run record (e.g. before a restart): one derived run row.
+                            self._synced_derived_run_ids.add(rid)
                             self._execute_bound(
                                 self._merge_insert_request(
                                     self.runs_table,
@@ -10219,8 +10269,8 @@ class LiveSnowflakeBridge:
                                         ("authenticated_user", self.authenticated_user, "TEXT"),
                                         ("effective_role", self.active_role, "TEXT"),
                                         ("execution_mode", exec_mode_v, "TEXT"),
-                                        ("start_ts", str(tx_ts or ""), "TS"),
-                                        ("end_ts", str(tx_ts or ""), "TS"),
+                                        ("start_ts", _telemetry.utc_iso(tx_ts), "TS"),
+                                        ("end_ts", _telemetry.utc_iso(tx_ts), "TS"),
                                         ("status", status_val, "TEXT"),
                                         ("input_payload", inputs_redacted, "JSON"),
                                         ("output_payload", outputs_redacted, "JSON"),
@@ -10285,11 +10335,22 @@ class LiveSnowflakeBridge:
                         norm_fid = self._normalize_flow_id(raw_fid) or raw_fid
                         flow_id = _trace.canonical_flow_id(norm_fid) or norm_fid
                         vb_ts = vb_dict.get("timestamp")
-                        vb_run = _telemetry.RUNS.match(flow_id, vb_ts)
+                        vb_run, vb_ambiguous = _telemetry.RUNS.resolve(
+                            flow_id=flow_id,
+                            vertex_id=vb_dict.get("id") or vb_dict.get("vertex_id"),
+                            ts=vb_ts,
+                            row_id=vb_dict.get("build_id"),
+                            job_id=vb_dict.get("job_id"),
+                        )
                         if vb_run is not None:
                             vb_rid, vb_tid, vb_sess = vb_run.run_id, vb_run.trace_id, vb_run.session_id
+                        elif vb_ambiguous:
+                            if self._telemetry_row_pending(f"vb:{vb_id}", vb_ts):
+                                continue
+                            vb_rid = vb_tid = vb_sess = None
                         else:
-                            vb_rid, vb_tid = _telemetry.derived_run_ids(flow_id, f"vb:{vb_id}")
+                            vb_job = vb_dict.get("job_id")
+                            vb_rid, vb_tid = _telemetry.derived_run_ids(flow_id, f"job:{vb_job}" if vb_job else f"vb:{vb_id}")
                             vb_sess = None
                         vertex_id = str(vb_dict.get("id") or vb_dict.get("vertex_id") or "vertex")
                         valid_flag = vb_dict.get("valid")
@@ -10316,8 +10377,8 @@ class LiveSnowflakeBridge:
                                     ("authenticated_user", self.authenticated_user, "TEXT"),
                                     ("effective_role", self.active_role, "TEXT"),
                                     ("execution_mode", _trace.audit_execution_mode(_sf_identity.origin_mode()), "TEXT"),
-                                    ("start_ts", str(vb_ts or ""), "TS"),
-                                    ("end_ts", str(vb_ts or ""), "TS"),
+                                    ("start_ts", _telemetry.utc_iso(vb_ts), "TS"),
+                                    ("end_ts", _telemetry.utc_iso(vb_ts), "TS"),
                                     ("status", status_val, "TEXT"),
                                     ("redacted_inputs", params_redacted, "JSON"),
                                     ("redacted_outputs", data_redacted, "JSON"),
@@ -10752,6 +10813,10 @@ def register_snowflake_fastapi_routes(app: Any) -> None:
     from fastapi.responses import JSONResponse
 
     ensure_sqlite_wal_and_uv_cache()
+    # E2E stale flows: stored Snowflake component code is built from the installed source (or refused).
+    from lfx_snowflake.stale_flow_guard import install_stale_component_guard
+
+    _trace.log_event("stale_component_guard", patched_bindings=install_stale_component_guard())
     LIVE_BRIDGE.start_auto_sync_daemon(interval_seconds=15.0)
     from fastapi import Depends
 
@@ -11309,6 +11374,8 @@ def register_snowflake_fastapi_routes(app: Any) -> None:
             m_run_path = _FLOW_EXEC_PATH_RE.search(req_path) if run_id else None
             if m_run_path:
                 path_fid = m_run_path.group("b") or m_run_path.group("r") or m_run_path.group("w")
+                # T10: Langflow's transaction/vertex_build writers stamp rows with this run (contextvar).
+                _telemetry.install_langflow_row_stamping()
                 run_rec = _telemetry.RUNS.start(
                     flow_id=LIVE_BRIDGE._normalize_flow_id(path_fid) or path_fid,
                     run_id=run_id,
@@ -13314,7 +13381,7 @@ class SnowflakeVectorStoreBackend(_UpstreamBaseVectorStoreBackend):
                 f"INSERT INTO {self.table_fqn} "
                 f"(CHUNK_ID, SESSION_ID, USER_ID, TEXT_CHUNK, METADATA, EMBEDDING, CREATED_AT) "
                 f"SELECT '{cid}', '{sess}', '{usr}', '{safe_txt}', PARSE_JSON('{meta_json}'), "
-                f"SNOWFLAKE.CORTEX.AI_EMBED({_sql_safety.sql_string_literal(_sql_safety.validate_embed_model(self.embedding_model))}, '{safe_txt}'), CURRENT_TIMESTAMP();"
+                f"AI_EMBED({_sql_safety.sql_string_literal(_sql_safety.validate_embed_model(self.embedding_model))}, '{safe_txt}'), CURRENT_TIMESTAMP();"
             )
         return (
             f"INSERT INTO {self.table_fqn} "
@@ -13354,7 +13421,7 @@ class SnowflakeVectorStoreBackend(_UpstreamBaseVectorStoreBackend):
         if self.enable_embedding:
             return (
                 f"SELECT CHUNK_ID, SESSION_ID, USER_ID, TEXT_CHUNK, METADATA, "
-                f"VECTOR_COSINE_SIMILARITY(EMBEDDING, SNOWFLAKE.CORTEX.AI_EMBED({_sql_safety.sql_string_literal(_sql_safety.validate_embed_model(self.embedding_model))}, '{safe_q}')) AS SCORE "
+                f"VECTOR_COSINE_SIMILARITY(EMBEDDING, AI_EMBED({_sql_safety.sql_string_literal(_sql_safety.validate_embed_model(self.embedding_model))}, '{safe_q}')) AS SCORE "
                 f"FROM {self.table_fqn}{where_sql} ORDER BY SCORE DESC LIMIT {bounded_k};"
             )
         return (
