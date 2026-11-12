@@ -10764,7 +10764,10 @@ class LiveSnowflakeBridge:
                         elif tx_ambiguous:
                             if self._telemetry_row_pending(f"tx:{tx_id}", tx_ts, flow_id):
                                 continue  # retry on a later sync: the owning run may still be stamped
-                            rid = tid = sess = None  # still ambiguous after grace: written, run_id NULL
+                            # Still ambiguous after grace: RUN_ID is NOT NULL in the spans table, and one NULL row
+                            # rejects its whole MERGE chunk on every sync. Attribute it to the derived execution.
+                            rid, tid = _telemetry.RUNS.derived_execution(flow_id=flow_id, ts=tx_ts, job_id=tx_job)
+                            sess = None
                         else:
                             # No live run at all (e.g. after a restart). Rerun-3: one derived run per execution
                             # (job id, else a burst of rows of this flow), never one per row (165 RUNs / 25 runs).
@@ -10899,7 +10902,10 @@ class LiveSnowflakeBridge:
                         elif vb_ambiguous:
                             if self._telemetry_row_pending(f"vb:{vb_id}", vb_ts, flow_id):
                                 continue
-                            vb_rid = vb_tid = vb_sess = None  # still ambiguous after grace: written, run_id NULL
+                            vb_rid, vb_tid = _telemetry.RUNS.derived_execution(
+                                flow_id=flow_id, ts=vb_ts, job_id=vb_dict.get("job_id")
+                            )
+                            vb_sess = None
                         else:
                             vb_rid, vb_tid = _telemetry.RUNS.derived_execution(
                                 flow_id=flow_id, ts=vb_ts, job_id=vb_dict.get("job_id")

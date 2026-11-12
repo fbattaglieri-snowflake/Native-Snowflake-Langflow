@@ -136,7 +136,7 @@ def test_telemetry_writer_service_rows_are_stamped_under_concurrency(tmp_path, b
     assert {rid: sum(s["run_id"] == rid for s in spans) for rid in ids} == {rid: 6 for rid in ids}
 
 
-def test_ambiguous_rows_are_written_with_null_run_after_grace_even_out_of_window(tmp_path, bridge, monkeypatch) -> None:
+def test_ambiguous_rows_are_written_with_a_derived_run_after_grace_even_out_of_window(tmp_path, bridge, monkeypatch) -> None:
     monkeypatch.setattr(tm.RUNS, "match_grace_s", 0.2)
     db = tmp_path / "langflow.db"
     flow = uuid.uuid4()
@@ -157,7 +157,10 @@ def test_ambiguous_rows_are_written_with_null_run_after_grace_even_out_of_window
     bridge.sync_langflow_traces_to_snowflake(limit=25)
     spans = _spans(bridge, str(flow))
     assert sorted(s["span_id"] for s in spans) == sorted(amb_ids)  # never dropped
-    assert all(s["run_id"] is None for s in spans)  # never attributed to a guessed run
+    # RUN_ID / TRACE_ID are NOT NULL in LANGFLOW_FLOW_SPANS: a NULL would reject the whole MERGE chunk on every
+    # sync. The rows get one derived execution id, never the id of one of the candidate live runs.
+    assert len({s["run_id"] for s in spans}) == 1 and all(s["run_id"] and s["trace_id"] for s in spans)
+    assert not {s["run_id"] for s in spans} & {r.run_id for r in runs}
     assert not bridge.__dict__["_telemetry_pending_since"]
     for r in runs:
         tm.RUNS.end(r.run_id, "SUCCESS")
