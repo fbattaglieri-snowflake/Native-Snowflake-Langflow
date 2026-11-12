@@ -38,6 +38,7 @@ from lfx_snowflake.memories_lf_mem import (
     LfMemSpec,
     build_preprocessing_request,
     format_batch,
+    contains_kill_token,
     is_kill_phrase,
     threshold_reached,
 )
@@ -175,6 +176,16 @@ class LfMemIngestionPipeline:
         try:
             messages_fqn = self.bridge._configured_messages_table()
             self._mirror_messages(messages_fqn, fid, sid, job["messages"])
+            turn = [m for m in job["messages"] if m.get("message_id") and str(m.get("text") or "").strip()]
+            if any(contains_kill_token(m.get("text"), job["kill_phrase"]) for m in turn):
+                # Kill-only turn: consume the WHOLE turn (user message + reply) with one tombstone.
+                meta = {
+                    "source_last_created_at": max(iso_timestamp(m.get("created_at")) for m in turn),
+                    "source_message_ids": [str(m["message_id"])[:64] for m in turn],
+                }
+                ssql, sb = spec.build_skip_request(flow_id=fid, session_id=sid, job_id=job_id, metadata=meta)
+                self._exec(ssql, sb, guarded=True, flow_id=fid)
+                return self._done(spec, job_id, "SKIPPED_KILL_PHRASE", sid, pending_count=0, skipped=len(turn))
             csql, cb = spec.build_cursor_request(flow_id=fid, session_id=sid)
             crow = (self._exec(csql, cb, guarded=True, flow_id=fid).get("rows") or [None])[0]
             cursor_ts = _row(crow, "cursor_ts", 0) if crow is not None else None

@@ -147,3 +147,67 @@ def test_batch_merge_keeps_null_literal_and_dedupes_keys() -> None:
     assert sql.count("UNION ALL") == 1 and "NULL AS run_id" in sql and "PARSE_JSON(?)" in sql
     assert sql.count("?") == len(binds) == 7  # (key, span_id, json) x2 + run_id of "b"
     assert all(v["value"] is not None for v in binds.values())
+
+
+def test_spans_written_after_close_land_via_followup_syncs(tmp_path, bridge, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Round-3 repro: Langflow writes an API run's rows 5-25 s AFTER its close (time scaled 1/50 here).
+
+    The debounced close sync sees nothing; the coalesced +10 s / +30 s follow-ups must still land every span
+    within 60 s, with at most one follow-up chain and a bounded number of syncs.
+    """
+    import sqlite3
+    import time
+
+    scale = 1 / 50
+    monkeypatch.setattr(bridge, "CLOSE_SYNC_DEBOUNCE_S", 3.0 * scale)
+    monkeypatch.setattr(bridge, "CLOSE_FOLLOWUP_DELAYS_S", (10.0 * scale, 30.0 * scale))
+    monkeypatch.setitem(bridge.__dict__, "_close_sync_timer_armed", False)
+    monkeypatch.setitem(bridge.__dict__, "_close_followup_armed", False)
+    monkeypatch.setitem(bridge.__dict__, "_close_followup_flows", set())
+    monkeypatch.setitem(bridge.__dict__, "_close_sync_since", {})
+    db = tmp_path / "langflow.db"
+    flow_hex = uuid.uuid4().hex
+    flow_uuid = str(uuid.UUID(flow_hex))
+    _make_db(db, flow_hex, 1, datetime.now(timezone.utc))
+    syncs: list[float] = []
+    orig_sync = bridge.sync_langflow_traces_to_snowflake
+
+    def counting_sync(*a, **kw):
+        syncs.append(time.monotonic())
+        return orig_sync(*a, **kw)
+
+    monkeypatch.setattr(bridge, "sync_langflow_traces_to_snowflake", counting_sync)
+    rec = tm.RUNS.start(flow_id=flow_hex, session_id="s-late")
+    run_ts = rec.start_ts.replace(tzinfo=None)
+    bridge.record_flow_run(tm.RUNS.end(rec.run_id, "SUCCESS"))
+    t_close = time.monotonic()
+    for _ in range(5):  # several closes coalesce into one debounced sync + one follow-up chain
+        bridge.trigger_close_span_sync(flow_hex, since=rec.start_ts)
+
+    def late_writer() -> None:
+        for i, vertex in enumerate(VERTICES):
+            time.sleep((5.0 + 5.0 * i) * scale - (time.monotonic() - t_close) if i else 5.0 * scale)
+            conn = sqlite3.connect(db)
+            ts = (run_ts + timedelta(milliseconds=10 * i)).strftime("%Y-%m-%d %H:%M:%S.%f")
+            conn.execute('INSERT INTO "transaction" VALUES (?,?,?,?,?,?,?,?,?)',
+                         (uuid.uuid4().hex, ts, vertex, None, "{}", "{}", "success", None, flow_hex))
+            conn.execute("INSERT INTO vertex_build VALUES (?,?,?,?,?,?,?,?)",
+                         (uuid.uuid4().hex, vertex, ts, flow_hex, "{}", "{}", "{}", 1))
+            conn.commit()
+            conn.close()
+
+    w = threading.Thread(target=late_writer, daemon=True)
+    w.start()
+    w.join(5.0)
+    rows: list[dict[str, Any]] = []
+    deadline = t_close + 60.0 * scale
+    while time.monotonic() < deadline + 0.5:
+        rows = [b for q, b in _span_merges(bridge) if flow_uuid in {v.get("value") for v in b.values()}]
+        if not bridge.__dict__.get("_close_followup_armed") and time.monotonic() > t_close + 31.0 * scale:
+            break
+        time.sleep(0.02)
+    landed = sum(sum(1 for v in b.values() if v.get("value") == flow_uuid) for _q, b in _span_merges(bridge))
+    assert landed == 2 * len(VERTICES), landed
+    assert syncs and syncs[-1] - t_close <= 60.0 * scale, "all spans land within 60 s of close"
+    assert len(syncs) <= 3, "1 close sync + at most 2 follow-ups"
+    assert not bridge.__dict__.get("_close_followup_armed")

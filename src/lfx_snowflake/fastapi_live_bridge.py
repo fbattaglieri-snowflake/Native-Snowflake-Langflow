@@ -10371,8 +10371,114 @@ class LiveSnowflakeBridge:
         return out
 
     CLOSE_SYNC_DEBOUNCE_S = 3.0
+    # Round-3: Langflow writes vertex_build/transaction rows of API runs after the RUN closes, so the
+    # debounced close sync can miss them. Follow-ups at these offsets (seconds after the close sync).
+    CLOSE_FOLLOWUP_DELAYS_S: tuple[float, ...] = (10.0, 30.0)
+    TARGET_READ_MAX_ROWS = 10000
 
-    def trigger_close_span_sync(self, flow_id: Any, *, delay_s: float | None = None) -> None:
+    def _close_since_for(self, flow_keys: Any) -> float | None:
+        """Oldest just-closed run start (epoch s) among ``flow_keys`` variants, or None when unknown."""
+        since_map: dict[str, float] = self.__dict__.get("_close_sync_since") or {}
+        vals = [
+            since_map[v]
+            for f in flow_keys
+            for v in self._sqlite_flow_id_variants(f)
+            if v in since_map
+        ]
+        return min(vals) if vals else None
+
+    def _note_close_since(self, flow_id: Any, since: Any) -> None:
+        when = _telemetry._parse_ts(since)
+        if not flow_id or when is None:
+            return
+        since_map: dict[str, float] = self.__dict__.setdefault("_close_sync_since", {})
+        t = when.timestamp()
+        for v in self._sqlite_flow_id_variants(flow_id):
+            since_map[v] = min(since_map.get(v, t), t)
+
+    def _followup_flows_have_unreplicated(self, flows: set[str]) -> bool:
+        """Cheap SQLite probe: any row of ``flows`` newer than its close window not yet replicated?"""
+        persist_dir = Path(os.getenv("LANGFLOW_PERSIST_DIR", "/persist"))
+        paths = [persist_dir / "langflow.db", self._resolve_writable_sqlite_db_path()]
+        synced = {
+            "transaction": self.__dict__.get("_synced_tx_ids") or set(),
+            "vertex_build": self.__dict__.get("_synced_vertex_build_ids") or set(),
+        }
+        keys = sorted({v for f in flows for v in self._sqlite_flow_id_variants(f)})
+        if not keys:
+            return False
+        since = self._close_since_for(keys)
+        for db_path in dict.fromkeys(paths):
+            if not db_path.exists():
+                continue
+            try:
+                conn = _open_sqlite_conn(db_path, readonly=True, timeout=5.0)
+                try:
+                    tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+                    for tbl, pk in (("transaction", "id"), ("vertex_build", "build_id")):
+                        if tbl not in tables:
+                            continue
+                        for i in range(0, len(keys), 50):
+                            fk = keys[i : i + 50]
+                            for rid, ts in conn.execute(
+                                f'SELECT {pk}, timestamp FROM "{tbl}" WHERE flow_id IN ({",".join("?" * len(fk))}) '
+                                "ORDER BY timestamp DESC LIMIT ?",
+                                (*fk, int(self.TARGET_READ_MAX_ROWS)),
+                            ):
+                                when = _telemetry._parse_ts(ts)
+                                if since is not None and when is not None and when.timestamp() < since - 1.0:
+                                    break
+                                rid_s = str(rid or "")
+                                if rid_s and rid_s not in synced[tbl]:
+                                    return True
+                finally:
+                    conn.close()
+            except Exception:  # noqa: BLE001
+                return True  # cannot tell: sync (bounded by the follow-up schedule)
+        return False
+
+    def _arm_close_followups(self, flows: set[str]) -> None:
+        """ONE armed follow-up chain (coalesced across closes): sync at each CLOSE_FOLLOWUP_DELAYS_S offset
+        only while the targeted flows still have unreplicated SQLite rows; the chain ends after the last."""
+        if not flows:
+            return
+        guard = self.__dict__.setdefault("_close_sync_guard", threading.Lock())
+        with guard:
+            self.__dict__.setdefault("_close_followup_flows", set()).update(flows)
+            if self.__dict__.get("_close_followup_armed"):
+                return
+            self._close_followup_armed = True
+        delays = list(self.CLOSE_FOLLOWUP_DELAYS_S)
+
+        def _schedule(idx: int, prev: float) -> None:
+            if idx >= len(delays):
+                with guard:
+                    self._close_followup_armed = False
+                    done = set(self.__dict__.get("_close_followup_flows") or set())
+                    self._close_followup_flows = set()
+                since_map: dict[str, float] = self.__dict__.get("_close_sync_since") or {}
+                for f in done:
+                    for v in self._sqlite_flow_id_variants(f):
+                        since_map.pop(v, None)
+                return
+
+            def _fire() -> None:
+                try:
+                    with guard:
+                        targets = set(self.__dict__.get("_close_followup_flows") or set())
+                    if targets and self._followup_flows_have_unreplicated(targets):
+                        self.sync_langflow_traces_to_snowflake(limit=25, replicate_sqlite=True, flow_ids=targets)
+                except Exception:  # noqa: BLE001
+                    pass
+                _schedule(idx + 1, delays[idx])
+
+            t = threading.Timer(max(0.0, delays[idx] - prev), _fire)
+            t.daemon = True
+            t.start()
+
+        _schedule(0, 0.0)
+
+    def trigger_close_span_sync(self, flow_id: Any, *, delay_s: float | None = None, since: Any = None) -> None:
         """Rerun-4: a RUN record closed -> replicate that execution's spans now, not on the next 15 s tick.
 
         Calls coalesce: every close within the debounce window joins one targeted sync (25 concurrent closes ->
@@ -10381,6 +10487,7 @@ class LiveSnowflakeBridge:
         """
         if flow_id:
             self.__dict__.setdefault("_close_sync_flows", set()).add(str(flow_id))
+            self._note_close_since(flow_id, since)
         self._span_backlog_hint = int(self.__dict__.get("_span_backlog_hint", 0)) + 50
         delay = self.CLOSE_SYNC_DEBOUNCE_S if delay_s is None else max(0.0, float(delay_s))
         if delay == 0:
@@ -10395,10 +10502,12 @@ class LiveSnowflakeBridge:
         def _fire() -> None:
             with guard:
                 self._close_sync_timer_armed = False
+            flows = set(self.__dict__.get("_close_sync_flows") or set())
             try:
                 self.sync_langflow_traces_to_snowflake(limit=25, replicate_sqlite=True)
             except Exception:  # noqa: BLE001
                 pass
+            self._arm_close_followups(flows)
 
         timer = threading.Timer(delay, _fire)
         timer.daemon = True
@@ -10486,13 +10595,27 @@ class LiveSnowflakeBridge:
                         seen_t = {str(dict(r).get(pk) or "") for r in rows}
                         for i in range(0, len(flow_keys), 50):
                             fk = flow_keys[i : i + 50]
-                            for r in cur.execute(
-                                f'SELECT * FROM "{tbl}" WHERE flow_id IN ({",".join("?" * len(fk))}) '
-                                "ORDER BY timestamp DESC LIMIT 2000",
-                                tuple(fk),
-                            ).fetchall():
-                                if str(dict(r).get(pk) or "") not in seen_t:
-                                    rows.append(r)
+                            # Round-3: page back until every row newer than the oldest just-closed run start
+                            # is covered (bounded by TARGET_READ_MAX_ROWS), not only the newest page.
+                            since = self._close_since_for(fk)
+                            offset = 0
+                            while True:
+                                page = cur.execute(
+                                    f'SELECT * FROM "{tbl}" WHERE flow_id IN ({",".join("?" * len(fk))}) '
+                                    "ORDER BY timestamp DESC LIMIT 2000 OFFSET ?",
+                                    (*fk, offset),
+                                ).fetchall()
+                                for r in page:
+                                    rid_t = str(dict(r).get(pk) or "")
+                                    if rid_t not in seen_t:
+                                        seen_t.add(rid_t)
+                                        rows.append(r)
+                                offset += len(page)
+                                if since is None or len(page) < 2000 or offset >= self.TARGET_READ_MAX_ROWS:
+                                    break
+                                last = _telemetry._parse_ts(dict(page[-1]).get("timestamp"))
+                                if last is None or last.timestamp() < since:
+                                    break
                     # Pending (ambiguous) rows are always re-read by primary key until written.
                     for tbl, pk, prefix, rows in (
                         ("transaction", "id", "tx:", tx_rows),
@@ -11807,7 +11930,7 @@ def register_snowflake_fastapi_routes(app: Any) -> None:
                     try:
                         LIVE_BRIDGE.record_flow_run(_telemetry.RUNS.end(run_rec.run_id, outcome))
                         if LIVE_BRIDGE.auto_sync_enabled:
-                            LIVE_BRIDGE.trigger_close_span_sync(run_rec.flow_id)  # rerun-4: spans within seconds
+                            LIVE_BRIDGE.trigger_close_span_sync(run_rec.flow_id, since=run_rec.start_ts)  # rerun-4: spans within seconds
                     except Exception:  # noqa: BLE001
                         pass
                 _sf_identity.reset_request_mode(mode_token)

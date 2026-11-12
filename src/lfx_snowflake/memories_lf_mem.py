@@ -157,6 +157,37 @@ def kill_token_sql(text_expr: str, kill_phrase: str = DEFAULT_KILL_PHRASE) -> st
     )
 
 
+def _kill_word_target(kill_phrase: str) -> str:
+    return re.sub(r"[^A-Za-z0-9_]", "", str(kill_phrase or DEFAULT_KILL_PHRASE)).strip("_").upper()
+
+
+def contains_kill_token(text: Any, kill_phrase: str = DEFAULT_KILL_PHRASE) -> bool:
+    """True when the kill phrase appears as a whole token anywhere in ``text`` (``NO_INGEST foo``, ``' NO_INGEST'``)."""
+    target = _kill_word_target(kill_phrase)
+    if not target or not text:
+        return False
+    return re.search(rf"(?<![A-Za-z0-9_]){re.escape(target)}(?![A-Za-z0-9_])", str(text), re.IGNORECASE) is not None
+
+
+def kill_contains_sql(text_expr: str, kill_phrase: str = DEFAULT_KILL_PHRASE) -> str:
+    """SQL twin of :func:`contains_kill_token` (NULL-safe: a NULL text is never a kill)."""
+    target = _kill_word_target(kill_phrase)
+    pattern = f"(^|.*[^A-Z0-9_]){target}([^A-Z0-9_].*|$)"
+    return f"COALESCE(REGEXP_LIKE(UPPER({text_expr}), {sql_safety.sql_string_literal(pattern)}, 's'), FALSE)"
+
+
+def kill_turn_boundary_sql(msg_fqn: str, flow_expr: str, session_expr: str, kill_phrase: str = DEFAULT_KILL_PHRASE) -> str:
+    """Latest ``created_at`` of a kill message (user asked NO_INGEST, or the reply is the kill phrase) in a session.
+
+    Every message at or before it belongs to a killed turn and is never pending nor ingested.
+    """
+    return (
+        f"COALESCE((SELECT MAX(k.created_at) FROM {msg_fqn} k WHERE k.flow_id = {flow_expr} "
+        f"AND k.session_id = {session_expr} AND k.deleted_in_ui_at IS NULL AND {kill_contains_sql('k.text', kill_phrase)}), "
+        "TO_TIMESTAMP_TZ('1970-01-01T00:00:00Z'))"
+    )
+
+
 def threshold_reached(pending_count: int, threshold: int) -> bool:
     """Langflow auto-capture fires ingestion once ``pending >= threshold`` (ingestion.py)."""
     return int(pending_count) >= max(1, int(threshold or 1))
@@ -467,6 +498,7 @@ class LfMemSpec:
             "QUALIFY ROW_NUMBER() OVER (PARTITION BY message_id ORDER BY replicated_at DESC) = 1"
             f") m WHERE m.deleted_in_ui_at IS NULL{msg_owner_pred} AND NOT {kill_token_sql('m.text')} AND m.created_at > "
             f"{self._cursor_subquery('m.session_id')} "
+            f"AND m.created_at > {kill_turn_boundary_sql(msg_fqn, 'm.flow_id', 'm.session_id')} "
             f"AND NOT {self._consumed_subquery('m.message_id', 'm.session_id')} GROUP BY m.session_id"
         )
         return sql, sql_safety.to_sql_bindings(values)
@@ -516,6 +548,7 @@ class LfMemSpec:
             f"SELECT * FROM {msg_fqn} WHERE flow_id = ? AND session_id = ? "
             "QUALIFY ROW_NUMBER() OVER (PARTITION BY message_id ORDER BY replicated_at DESC) = 1"
             f") m WHERE m.deleted_in_ui_at IS NULL AND NOT {kill_token_sql('m.text')} AND m.created_at > TO_TIMESTAMP_TZ(?) "
+            f"AND m.created_at > {kill_turn_boundary_sql(msg_fqn, 'm.flow_id', 'm.session_id')} "
             f"ORDER BY m.created_at ASC, m.message_id ASC LIMIT {k}"
         )
         return sql, sql_safety.to_sql_bindings(values)
