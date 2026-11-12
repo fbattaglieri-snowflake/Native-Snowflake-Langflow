@@ -7,7 +7,7 @@ from typing import Any
 
 import lfx_snowflake._lfx_compat  # noqa: F401
 from lfx.custom import Component
-from lfx.io import DropdownInput, IntInput, MultilineInput, Output, StrInput
+from lfx.io import DropdownInput, HandleInput, IntInput, MultilineInput, Output, StrInput
 from lfx.schema import Data, DataFrame
 from lfx.schema.message import Message
 
@@ -97,6 +97,18 @@ class SnowflakeSQLStatementComponent(Component):
             value="{}",
             advanced=True,
         ),
+        HandleInput(
+            name="bind_values",
+            display_name="Bind Values",
+            input_types=["Message", "Data", "JSON"],
+            is_list=True,
+            required=False,
+            info=(
+                "Upstream values bound to the ? placeholders that follow those of Bind Parameters JSON, in "
+                "connection order. A Message is bound as its text, Data as a JSON string. Values are never "
+                "concatenated into the SQL."
+            ),
+        ),
         DropdownInput(
             name="output_format",
             display_name="Output Format",
@@ -148,15 +160,39 @@ class SnowflakeSQLStatementComponent(Component):
             max_rows=int(self.max_rows or 100),
         )
 
+    def _upstream_bind_values(self) -> list[str]:
+        """Text of every value connected to Bind Values (Message text, Data/JSON as a JSON string)."""
+        values = getattr(self, "bind_values", None)
+        if values is None or values == "":
+            return []
+        out: list[str] = []
+        for val in values if isinstance(values, list) else [values]:
+            if isinstance(val, Message):
+                out.append(str(val.text or ""))
+            elif isinstance(val, Data):
+                out.append(json.dumps(val.data, default=str))
+            elif isinstance(val, (dict, list)):
+                out.append(json.dumps(val, default=str))
+            elif val is not None:
+                out.append(str(val))
+        return out
+
     def _parse_bindings(self) -> dict[str, Any] | None:
         raw = (getattr(self, "bind_parameters_json", "") or "").strip()
-        if not raw or raw == "{}":
-            return None
-        try:
-            parsed = json.loads(raw)
-        except json.JSONDecodeError as exc:
-            raise ValueError("Bind Parameters must be a JSON array or object.") from exc
-        return normalize_bindings(parsed)
+        static: dict[str, dict[str, Any]] = {}
+        if raw and raw != "{}":
+            try:
+                parsed = json.loads(raw)
+            except json.JSONDecodeError as exc:
+                raise ValueError("Bind Parameters must be a JSON array or object.") from exc
+            static = normalize_bindings(parsed) or {}
+        upstream = self._upstream_bind_values()
+        if not upstream:
+            return static or None
+        merged = dict(static)
+        for offset, text in enumerate(upstream, start=len(static) + 1):
+            merged[str(offset)] = _sql_safety.binding_for(text, "TEXT")
+        return merged
 
     def run_dataframe(self) -> DataFrame:
         stmt = self._build_sql()
