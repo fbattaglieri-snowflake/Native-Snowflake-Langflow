@@ -194,16 +194,28 @@ class SnowflakeSQLStatementComponent(Component):
             merged[str(offset)] = _sql_safety.binding_for(text, "TEXT")
         return merged
 
+    def _pre_run_setup(self):
+        # A new run (or loop iteration) starts: forget the result of the previous one.
+        self._run_result = None
+
+    def _execute_once(self, stmt: str) -> dict[str, Any]:
+        """Run the statement once per run: every output port shares the result, so a CALL or DML is not repeated."""
+        cached = getattr(self, "_run_result", None)
+        if cached is None:
+            cached = _flow_component_execute_sql(stmt, bindings=self._parse_bindings())
+            self._run_result = cached
+        return cached
+
     def run_dataframe(self) -> DataFrame:
         stmt = self._build_sql()
-        res = _flow_component_execute_sql(stmt, bindings=self._parse_bindings())
+        res = self._execute_once(stmt)
         if not res.get("ok"):
             raise ValueError(res.get("message", "Snowflake SQL Statement failed"))
         return DataFrame(res.get("rows", []))
 
     def run_json_message(self) -> Message:
         stmt = self._build_sql()
-        res = _flow_component_execute_sql(stmt, bindings=self._parse_bindings())
+        res = self._execute_once(stmt)
         return Message(
             text=json.dumps(
                 {
