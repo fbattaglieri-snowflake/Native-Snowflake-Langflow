@@ -356,6 +356,7 @@ pytest
 - Shared `sql_safety` helper: identifier validation, typed SQL API bindings, and typed `NULL` inlining (null bindings no longer break multi-statement writes).
 - Fail-closed flow `[ ❄️ Context ]` guard for all component SQL.
 - Stale stored component code guard (`SNOWFLAKE_LANGFLOW_STALE_COMPONENT_POLICY=upgrade|refuse`); refresh stored flows with `scripts/refresh_stored_flow_component_code.py`.
+- Canvas edge repair for API-built flows (multi-output `selected_output`, wired field visibility/types, native Tool Mode for data sources): no more edges removed on load.
 - Split Text (LangChain mode) uses a bridge-owned UDF provisioned by `scripts/provision_bridge_routines.py` (see [`docs/DEPLOYMENT_SPCS.md`](docs/DEPLOYMENT_SPCS.md)).
 
 **Components**

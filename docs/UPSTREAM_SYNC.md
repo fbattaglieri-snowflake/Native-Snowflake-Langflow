@@ -123,5 +123,6 @@ flowchart TB
 ## 5. v0.8.6 Upgrade Notes
 
 - After an image upgrade, stored flows may hold older component code. The stale component guard (`SNOWFLAKE_LANGFLOW_STALE_COMPONENT_POLICY`) upgrades or refuses them; run `scripts/refresh_stored_flow_component_code.py` to refresh stored flows explicitly.
+- The same script repairs canvas state of API-built flows (`lfx_snowflake.flow_canvas_repair`): it pins `selected_output` on multi-output nodes, shows wired fields, aligns stale field types and drops stale static `component_as_tool` outputs, so the canvas no longer removes edges with "Some connections were removed because they were invalid". Data source components rely on the native Tool Mode toggle instead of a static Tool output.
 - Re-run `scripts/provision_bridge_routines.py --apply` if the bridge-owned routines change.
 - When rolling out, remove any pinned `sha256:` from a spec copied from `DESCRIBE SERVICE` (see [`DEPLOYMENT_SPCS.md`](DEPLOYMENT_SPCS.md)).
