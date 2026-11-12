@@ -384,6 +384,8 @@ pytest
 - A2A Agent: the internal target list offers only flows served as A2A agents in the same project.
 - Memory Base: the preset instructions (`Session summary`, `Facts & preferences`, `Task outcomes`) drive the preprocessing step, and the `LF_MEM_*` table of a Memory Base attached to a flow stays in that flow's `[ ❄️ Context ]` when the context is saved again. Preprocessed memories are stored as plain text.
 - Stages: a stage selected in the flow `[ ❄️ Context ]` is listed immediately after the context is saved.
+- SQL Statement: a `Bind Values` port binds values coming from other nodes to the `?` placeholders (after the static bind parameters), and the statement runs once per run even when several output ports are connected.
+- Memory Base: created in the configured `LANGFLOW_MEMORY_SCHEMA` location (`DB.SCHEMA`) whatever database the flow context starts with; a duplicate name is refused (`MEMORY_BASE_NAME_TAKEN`) before any table is created; the default preprocessing model is `claude-haiku-5-5` (override with `preproc_model`); delete is evaluated under the role of the owning flow.
 
 **Observability**
 - Unified run/trace telemetry: one RUN row per execution, batched span sync when the run closes, role-switch audit.

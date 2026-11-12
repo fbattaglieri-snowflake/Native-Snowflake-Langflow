@@ -153,4 +153,10 @@ flowchart TB
 | Context | Attached Memory Base | Its `LF_MEM_*` table stays in the flow `[ ❄️ Context ]` across context saves. |
 | Stages & Volumes | Stage listing | A selected stage's type is resolved on demand, so it is listed right after a context save. |
 | Observability | Unlinked spans | Attributed to a derived run id; span batches are never rejected for a missing run id. |
+| LLM Operations | SQL Statement `Bind Values` port | Upstream node values are bound to the `?` placeholders after the static bind parameters; never inlined in the SQL text. |
+| LLM Operations | SQL Statement execution | The statement runs once per run even when several output ports are connected (a `CALL` or DML is not repeated). |
+| Memories | Memory location | A `DB.SCHEMA` value of `LANGFLOW_MEMORY_SCHEMA` names the memory database, so a flow whose context starts with another database can have Memory Bases. |
+| Memories | Duplicate name | Refused with `MEMORY_BASE_NAME_TAKEN` (409) before any table is created. |
+| Memories | Default gate model | `claude-haiku-5-5` when the request names no preprocessing model; pass `preproc_model` to choose another one. |
+| Memories | Delete | Evaluated under the role of the flow that owns the Memory Base. |
 | Showcases | Four reference flows | Multi Cortex Agent chain, Agent with all Snowflake tools (also over MCP), Language Model + Decision routing, A2A forms. |
