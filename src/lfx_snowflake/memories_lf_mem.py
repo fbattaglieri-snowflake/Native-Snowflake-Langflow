@@ -420,13 +420,24 @@ class LfMemSpec:
         )
         return sql, sql_safety.to_sql_bindings(values)
 
-    def _cursor_subquery(self, owner_pred: str, session_expr: str) -> str:
+    # Ingest cursor and pending stats share ONE scope (base + flow + session; LANGFLOW_MEMORY_RAP scopes the owner).
+    # An extra owner filter only on the stats side made the two disagree, leaving a residual pending_count.
+    def _cursor_scope(self, alias: str, session_expr: str) -> str:
+        return f"{alias}.memory_base_id = ? AND {alias}.flow_id = ? AND {alias}.session_id = {session_expr}"
+
+    def _cursor_subquery(self, session_expr: str) -> str:
         """Latest source-message timestamp already covered for a session (live chunks AND kill-phrase tombstones)."""
         return (
             "COALESCE((SELECT MAX(TRY_TO_TIMESTAMP_TZ(l.metadata:source_last_created_at::STRING)) "
-            f"FROM {self.quoted_fqn} l WHERE l.memory_base_id = ? AND l.flow_id = ?"
-            f"{owner_pred.replace('owner_user', 'l.owner_user')} AND l.session_id = {session_expr}"
+            f"FROM {self.quoted_fqn} l WHERE {self._cursor_scope('l', session_expr)}"
             "), TO_TIMESTAMP_TZ('1970-01-01T00:00:00Z'))"
+        )
+
+    def _consumed_subquery(self, msg_expr: str, session_expr: str) -> str:
+        """True when a chunk or tombstone of this session already lists the message in ``source_message_ids``."""
+        return (
+            f"EXISTS (SELECT 1 FROM {self.quoted_fqn} c WHERE {self._cursor_scope('c', session_expr)} "
+            f"AND ARRAY_CONTAINS({msg_expr}::VARIANT, c.metadata:source_message_ids))"
         )
 
     def build_pending_request(
@@ -434,16 +445,17 @@ class LfMemSpec:
     ) -> tuple[str, dict[str, dict[str, Any]]]:
         """Per-session ``pending_count``: governed LANGFLOW_MESSAGES newer than that session's ingestion cursor."""
         msg_fqn = sql_safety.quote_fqn(messages_fqn, "LANGFLOW_MESSAGES_TABLE", min_parts=3, max_parts=3)
-        owner_pred, mem_values = self._owner_scope(flow_id, owner_user)
+        _pred, mem_values = self._owner_scope(flow_id, owner_user)
         msg_owner_pred = " AND " + OWNER_MATCH_SQL.replace("owner_user", "m.owner_user", 1)
         values: list[tuple[str, Any]] = [("TEXT", str(flow_id))]
-        values += mem_values
+        values += mem_values + mem_values
         sql = (
             "SELECT m.session_id, COUNT(*) AS pending_count FROM ("
             f"SELECT * FROM {msg_fqn} WHERE flow_id = ? "
             "QUALIFY ROW_NUMBER() OVER (PARTITION BY message_id ORDER BY replicated_at DESC) = 1"
             f") m WHERE m.deleted_in_ui_at IS NULL{msg_owner_pred} AND m.created_at > "
-            f"{self._cursor_subquery(owner_pred, 'm.session_id')} GROUP BY m.session_id"
+            f"{self._cursor_subquery('m.session_id')} "
+            f"AND NOT {self._consumed_subquery('m.message_id', 'm.session_id')} GROUP BY m.session_id"
         )
         return sql, sql_safety.to_sql_bindings(values)
 
@@ -474,7 +486,7 @@ class LfMemSpec:
         sql = (
             "SELECT TO_VARCHAR(MAX(TRY_TO_TIMESTAMP_TZ(metadata:source_last_created_at::STRING)), "
             "'YYYY-MM-DD\"T\"HH24:MI:SS.FF6TZH:TZM') AS cursor_ts "
-            f"FROM {self.quoted_fqn} WHERE memory_base_id = ? AND flow_id = ? AND session_id = ?"
+            f"FROM {self.quoted_fqn} t WHERE {self._cursor_scope('t', '?')}"
         )
         return sql, sql_safety.to_sql_bindings(values)
 

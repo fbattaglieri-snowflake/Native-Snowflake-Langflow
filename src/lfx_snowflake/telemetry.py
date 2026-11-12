@@ -200,6 +200,15 @@ class RunRegistry:
         t = when.timestamp()
         return [r for r in runs if r.start_ts.timestamp() - 1.0 <= t <= (r.end_ts or _now()).timestamp() + self.match_grace_s]
 
+    def candidates_all_closed(self, flow_id: Any, ts: Any) -> bool:
+        """True when ``ts`` has candidate runs and every one of them has ended.
+
+        A closed run can no longer stamp rows, so waiting out the match grace for an ambiguous row whose
+        candidates are all closed only delays the span (it ends NULL either way).
+        """
+        active = self.candidates(flow_id, ts)
+        return bool(active) and all(r.end_ts is not None for r in active)
+
     def resolve(
         self,
         *,

@@ -256,8 +256,33 @@ def test_bridge_recall_lf_mem_returns_score(monkeypatch):
 
 def test_pending_count_uses_ingestion_cursor():
     sql, b = _spec().build_pending_request(MSG, flow_id="f", owner_user="ALICE")
-    assert "metadata:source_last_created_at" in sql and _vals(b) == ["f", MB_ID, "f"]
+    assert "metadata:source_last_created_at" in sql and _vals(b) == ["f", MB_ID, "f", MB_ID, "f"]
     assert aggregate_memory_stats([], [{"SESSION_ID": "s", "PENDING_COUNT": 2}])["pending_count"] == 2
+
+
+def test_pending_scope_matches_ingest_cursor_and_excludes_consumed_ids():
+    spec = _spec()
+    sql, _ = spec.build_pending_request(MSG, flow_id="f", owner_user="ALICE")
+    csql, cb = spec.build_cursor_request(flow_id="f", session_id="s")
+    # Cursor subquery carries no owner filter (RAP scopes it), exactly like the ingest cursor.
+    assert "l.owner_user" not in sql and "owner_user" not in csql and _vals(cb) == [MB_ID, "f", "s"]
+    # Messages already listed by a chunk/kill-phrase tombstone are never pending again.
+    assert "ARRAY_CONTAINS(m.message_id::VARIANT, c.metadata:source_message_ids)" in sql and "AND NOT EXISTS" in sql
+
+
+def test_kill_phrase_only_batch_leaves_pending_zero():
+    """Emulate the stats SQL predicate: tombstone ids + cursor cover every message of the batch."""
+    spec = _spec()
+    msgs = [{"message_id": f"m{i}", "created_at": f"2026-01-01T00:00:0{i}+00:00"} for i in range(3)]
+    tomb = {"text": "NO_INGEST", "metadata": {"source_last_created_at": msgs[-1]["created_at"],
+                                               "source_message_ids": [m["message_id"] for m in msgs]}}
+    sql, b = spec.build_skip_request(flow_id="f", session_id="s", job_id="j", metadata=tomb["metadata"])
+    assert "CURRENT_TIMESTAMP()" in sql and "source_message_ids" in _vals(b)[5]
+    cursor = tomb["metadata"]["source_last_created_at"]
+    consumed = set(tomb["metadata"]["source_message_ids"])
+    pending = [m for m in msgs if m["created_at"] > cursor and m["message_id"] not in consumed]
+    assert aggregate_memory_stats([], [{"SESSION_ID": "s", "PENDING_COUNT": len(pending)}] if pending else [])[
+        "pending_count"] == 0
 
 
 def test_create_applies_preset_filter_by_session(tmp_path, monkeypatch):

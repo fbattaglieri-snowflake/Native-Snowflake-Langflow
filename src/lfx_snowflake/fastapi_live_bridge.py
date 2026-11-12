@@ -9516,26 +9516,65 @@ class LiveSnowflakeBridge:
             written += len(chunk)
         return written
 
-    def _telemetry_row_pending(self, key: str, ts: Any) -> bool:
+    PENDING_REREAD_CAP = 5000
+
+    def _telemetry_row_pending(self, key: str, ts: Any, flow_id: Any = None) -> bool:
         """T10: an ambiguous span row waits at most one match grace window, then is written with NULL run_id.
 
         The window is measured from when this process first saw the row (monotonic), never from the row's own
         timestamp, so a future-dated or skewed row cannot be held forever. Rows still pending are re-fetched by
         id on the next sync (``_pending_row_ids``), so they cannot fall out of the bounded newest-N fetch.
+        v0.8.6-20261112: the grace ends early once every candidate run of ``flow_id`` is closed (no stamp can
+        arrive any more), so spans land on the close-triggered sync instead of ~120 s later.
         """
         pending: dict[str, float] = self.__dict__.setdefault("_telemetry_pending_since", {})
+        flows: dict[str, str] = self.__dict__.setdefault("_telemetry_pending_flow", {})
         first = pending.setdefault(key, time.monotonic())
-        if time.monotonic() - first < _telemetry.RUNS.match_grace_s:
+        if flow_id:
+            flows[key] = _telemetry.canonical_flow_id(flow_id) or str(flow_id)
+        closed = bool(flow_id) and _telemetry.RUNS.candidates_all_closed(flow_id, ts)
+        if not closed and time.monotonic() - first < _telemetry.RUNS.match_grace_s:
             return True
-        pending.pop(key, None)
+        self._resolve_pending(key)
         return False
 
     def _pending_row_ids(self, prefix: str) -> list[str]:
         pending: dict[str, float] = self.__dict__.get("_telemetry_pending_since") or {}
-        return [k[len(prefix):] for k in list(pending) if k.startswith(prefix)][:500]
+        return [k[len(prefix):] for k in list(pending) if k.startswith(prefix)][: int(self.PENDING_REREAD_CAP)]
 
     def _resolve_pending(self, key: str) -> None:
         (self.__dict__.get("_telemetry_pending_since") or {}).pop(key, None)
+        (self.__dict__.get("_telemetry_pending_flow") or {}).pop(key, None)
+
+    def _pending_flows(self) -> set[str]:
+        pending: dict[str, float] = self.__dict__.get("_telemetry_pending_since") or {}
+        flows: dict[str, str] = self.__dict__.get("_telemetry_pending_flow") or {}
+        return {flows[k] for k in list(pending) if k in flows}
+
+    def _arm_pending_expiry_sync(self) -> None:
+        """After a sync that left rows pending, arm ONE timer for the earliest grace expiry (not the 15 s tick)."""
+        pending: dict[str, float] = self.__dict__.get("_telemetry_pending_since") or {}
+        if not pending:
+            return
+        guard = self.__dict__.setdefault("_close_sync_guard", threading.Lock())
+        with guard:
+            if self.__dict__.get("_pending_expiry_timer_armed"):
+                return
+            self._pending_expiry_timer_armed = True
+        earliest = min(pending.values(), default=time.monotonic())
+        delay = max(0.5, earliest + float(_telemetry.RUNS.match_grace_s) - time.monotonic() + 0.1)
+
+        def _fire() -> None:
+            with guard:
+                self._pending_expiry_timer_armed = False
+            try:
+                self.sync_langflow_traces_to_snowflake(limit=25, replicate_sqlite=True)
+            except Exception:  # noqa: BLE001
+                pass
+
+        timer = threading.Timer(delay, _fire)
+        timer.daemon = True
+        timer.start()
 
     def _submit_telemetry(self, request: tuple[str, dict[str, Any]], query_tag: str | None = None) -> None:
         """PASSO 8: telemetry DML runs off the turn's critical path (batched writer) in live mode."""
@@ -10253,9 +10292,17 @@ class LiveSnowflakeBridge:
             closed.clear()
             hint = int(self.__dict__.get("_span_backlog_hint", 0))
             self._span_backlog_hint = 0
-            return self._sync_langflow_traces_locked(
+            result = self._sync_langflow_traces_locked(
                 limit, replicate_sqlite=replicate_sqlite, target_flows=targets, backlog_hint=hint
             )
+            # v0.8.6-20261112: targeted flows (and the backlog hint) stay armed while their rows are pending.
+            still = self._pending_flows()
+            keep = {f for f in targets if (_telemetry.canonical_flow_id(f) or f) in still}
+            if keep:
+                closed.update(keep)
+                self._span_backlog_hint = max(int(self.__dict__.get("_span_backlog_hint", 0)), hint)
+        self._arm_pending_expiry_sync()
+        return result
 
     @staticmethod
     def _sqlite_flow_id_variants(flow_id: Any) -> set[str]:
@@ -10465,7 +10512,7 @@ class LiveSnowflakeBridge:
                         if run_rec is not None:
                             rid, tid, sess = run_rec.run_id, run_rec.trace_id, run_rec.session_id
                         elif tx_ambiguous:
-                            if self._telemetry_row_pending(f"tx:{tx_id}", tx_ts):
+                            if self._telemetry_row_pending(f"tx:{tx_id}", tx_ts, flow_id):
                                 continue  # retry on a later sync: the owning run may still be stamped
                             rid = tid = sess = None  # still ambiguous after grace: written, run_id NULL
                         else:
@@ -10600,7 +10647,7 @@ class LiveSnowflakeBridge:
                         if vb_run is not None:
                             vb_rid, vb_tid, vb_sess = vb_run.run_id, vb_run.trace_id, vb_run.session_id
                         elif vb_ambiguous:
-                            if self._telemetry_row_pending(f"vb:{vb_id}", vb_ts):
+                            if self._telemetry_row_pending(f"vb:{vb_id}", vb_ts, flow_id):
                                 continue
                             vb_rid = vb_tid = vb_sess = None  # still ambiguous after grace: written, run_id NULL
                         else:
