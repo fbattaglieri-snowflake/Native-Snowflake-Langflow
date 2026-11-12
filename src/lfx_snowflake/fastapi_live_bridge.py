@@ -9498,6 +9498,7 @@ class LiveSnowflakeBridge:
             "act": self._synced_activity_ids,
         }
         written = 0
+        batch = self._drop_existing_keys(table, key_col, batch, marks)
         size = max(1, int(self.SPAN_MERGE_BATCH_ROWS))
         for i in range(0, len(batch), size):
             chunk = batch[i : i + size]
@@ -9517,6 +9518,59 @@ class LiveSnowflakeBridge:
         return written
 
     PENDING_REREAD_CAP = 5000
+    EXISTING_KEY_PROBE_ROWS = 1000
+    NODE_SPANS_PREVIEW_ROWS = 64
+
+    def _drop_existing_keys(
+        self,
+        table: str,
+        key_col: str,
+        batch: list[tuple[str, list[tuple[str, Any, str]], tuple[str, str]]],
+        marks: dict[str, set[str]],
+    ) -> list[tuple[str, list[tuple[str, Any, str]], tuple[str, str]]]:
+        """v0.8.6-20261112b: skip rows already in ``table`` (one keys-only SELECT per 1000 rows).
+
+        After a restart (or a targeted per-flow read of up to 2000 historical rows) the in-memory synced sets are
+        empty, so every old row used to be re-MERGEd 50 at a time (~1.3 s each, 0 rows inserted). That held the
+        sync lock for minutes and pushed the just-closed runs' spans to the 2nd/3rd sync (+100 s / +290 s live).
+        Existing keys are marked synced; on a failed probe the batch is written unchanged (MERGE stays idempotent).
+        """
+        if not batch:
+            return batch
+        existing: set[str] = set()
+        size = max(1, int(self.EXISTING_KEY_PROBE_ROWS))
+        keys = list(dict.fromkeys(str(k) for k, _c, _m in batch))
+        for i in range(0, len(keys), size):
+            part = keys[i : i + size]
+            b = _sql_safety.BindingBuilder()
+            phs = ", ".join(b.add(k, "TEXT") for k in part)
+            try:
+                res = self.execute_sql(
+                    f"SELECT {key_col} FROM {table} WHERE {key_col} IN ({phs})",
+                    role=self._service_role(),
+                    mode=_sf_identity.MODE_SERVICE,
+                    bindings=b.bindings or None,
+                    timeout=30,
+                )
+            except Exception:  # noqa: BLE001
+                return batch
+            if not isinstance(res, dict) or res.get("ok") is False:
+                return batch
+            for row in res.get("data") or []:
+                val = row.get(key_col) or row.get(key_col.upper()) if isinstance(row, dict) else (row[0] if row else None)
+                if val is not None:
+                    existing.add(str(val))
+        if not existing:
+            return batch
+        kept = []
+        for item in batch:
+            if str(item[0]) in existing:
+                kind, rid = item[2]
+                if kind in marks:
+                    marks[kind].add(rid)
+            else:
+                kept.append(item)
+        return kept
 
     def _telemetry_row_pending(self, key: str, ts: Any, flow_id: Any = None) -> bool:
         """T10: an ambiguous span row waits at most one match grace window, then is written with NULL run_id.
@@ -10485,6 +10539,10 @@ class LiveSnowflakeBridge:
                                 "status": "SUCCESS" if vb_d.get("valid") in (True, 1, "1", "true", "TRUE", None) else "ERROR",
                             }
                         )
+                    # v0.8.6-20261112b: node_spans_json is cut to an 8000-char preview (~60 entries) anyway; the
+                    # full per-flow list (thousands after a targeted read) was redacted once per activity row: O(n^2).
+                    for _fid in list(spans_by_flow):
+                        del spans_by_flow[_fid][self.NODE_SPANS_PREVIEW_ROWS :]
 
                     for r in tx_rows:
                         row_dict = dict(r)

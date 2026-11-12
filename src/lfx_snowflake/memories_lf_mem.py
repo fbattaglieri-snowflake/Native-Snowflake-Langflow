@@ -147,6 +147,16 @@ def is_kill_phrase(response: str, kill_phrase: str = DEFAULT_KILL_PHRASE) -> boo
     return any(_normalize_kill_token(line) == target for line in str(response).splitlines())
 
 
+def kill_token_sql(text_expr: str, kill_phrase: str = DEFAULT_KILL_PHRASE) -> str:
+    """SQL twin of ``_normalize_kill_token(text) == kill_phrase``: drop every non ``[A-Za-z0-9_]`` char, trim edge
+    underscores, compare case-insensitively. Catches ``' NO_INGEST'``, quoted/fenced/punctuated variants."""
+    target = re.sub(r"[^A-Za-z0-9_]", "", str(kill_phrase or DEFAULT_KILL_PHRASE)).strip("_").upper()
+    return (
+        f"COALESCE(UPPER(TRIM(REGEXP_REPLACE(COALESCE({text_expr}, ''), '[^A-Za-z0-9_]', ''), '_')) = "
+        f"{sql_safety.sql_string_literal(target)}, FALSE)"
+    )
+
+
 def threshold_reached(pending_count: int, threshold: int) -> bool:
     """Langflow auto-capture fires ingestion once ``pending >= threshold`` (ingestion.py)."""
     return int(pending_count) >= max(1, int(threshold or 1))
@@ -378,7 +388,7 @@ class LfMemSpec:
             f"VECTOR_COSINE_SIMILARITY(embedding, {self._embed_expr('?')}) AS score "
             f"FROM (SELECT * FROM {self.quoted_fqn} WHERE memory_base_id = ? AND flow_id = ?{session_pred} "
             "QUALIFY ROW_NUMBER() OVER (PARTITION BY chunk_id ORDER BY ingested_at DESC) = 1) latest "
-            f"WHERE latest.deleted_at IS NULL ORDER BY score DESC LIMIT {k}"
+            f"WHERE latest.deleted_at IS NULL AND NOT {kill_token_sql('latest.text')} ORDER BY score DESC LIMIT {k}"
         )
         return sql, sql_safety.to_sql_bindings(values)
 
@@ -387,6 +397,8 @@ class LfMemSpec:
         """Rows -> native MemoryBase ``Data`` dicts: ``content``, ``_score`` and (optionally) metadata keys."""
         out: list[dict[str, Any]] = []
         for row in rows or []:
+            if _normalize_kill_token(_row_get(row, "text", 1)) == _normalize_kill_token(DEFAULT_KILL_PHRASE):
+                continue  # legacy ' NO_INGEST' chunks are never memories
             score = _row_get(row, "score", 8)
             item: dict[str, Any] = {
                 "content": str(_row_get(row, "text", 1) or ""),
@@ -453,7 +465,7 @@ class LfMemSpec:
             "SELECT m.session_id, COUNT(*) AS pending_count FROM ("
             f"SELECT * FROM {msg_fqn} WHERE flow_id = ? "
             "QUALIFY ROW_NUMBER() OVER (PARTITION BY message_id ORDER BY replicated_at DESC) = 1"
-            f") m WHERE m.deleted_in_ui_at IS NULL{msg_owner_pred} AND m.created_at > "
+            f") m WHERE m.deleted_in_ui_at IS NULL{msg_owner_pred} AND NOT {kill_token_sql('m.text')} AND m.created_at > "
             f"{self._cursor_subquery('m.session_id')} "
             f"AND NOT {self._consumed_subquery('m.message_id', 'm.session_id')} GROUP BY m.session_id"
         )
@@ -503,7 +515,7 @@ class LfMemSpec:
             "TO_VARCHAR(m.created_at, 'YYYY-MM-DD\"T\"HH24:MI:SS.FF6TZH:TZM') AS created_at FROM ("
             f"SELECT * FROM {msg_fqn} WHERE flow_id = ? AND session_id = ? "
             "QUALIFY ROW_NUMBER() OVER (PARTITION BY message_id ORDER BY replicated_at DESC) = 1"
-            ") m WHERE m.deleted_in_ui_at IS NULL AND m.created_at > TO_TIMESTAMP_TZ(?) "
+            f") m WHERE m.deleted_in_ui_at IS NULL AND NOT {kill_token_sql('m.text')} AND m.created_at > TO_TIMESTAMP_TZ(?) "
             f"ORDER BY m.created_at ASC, m.message_id ASC LIMIT {k}"
         )
         return sql, sql_safety.to_sql_bindings(values)
