@@ -139,6 +139,17 @@ def test_preprocessing_extracted_context_is_one_chunk():
     assert sf.chunks[0]["metadata"]["source_message_ids"] == ["m0", "m1"]
 
 
+def test_preprocessing_json_encoded_completion_is_stored_as_plain_text():
+    """AI_COMPLETE returns its text JSON-encoded; the memory chunk holds the plain text."""
+    sf = FakeSnowflake(complete_response='" User prefers answers in Italian.\\nUser prefers amounts in EUR."')
+    pipe = LfMemIngestionPipeline(sf, background=False)
+    pipe.submit_turn(_spec(), flow_id="f", session_id="s", messages=_msgs("Italian and EUR please"), threshold=1,
+                     preprocessing=True, preproc_model="mistral-large2", preproc_instructions="Extract facts",
+                     kill_phrase="NO_INGEST")
+    assert pipe.status(MB_ID)["state"] == "INGESTED"
+    assert [c["text"] for c in sf.chunks] == ["User prefers answers in Italian.\nUser prefers amounts in EUR."]
+
+
 @pytest.mark.parametrize("model", ["mistral-large2'); DROP TABLE x; --", "Mistral Large", ""])
 def test_t12_preprocessing_model_injection_rejected(model):
     sf = FakeSnowflake()

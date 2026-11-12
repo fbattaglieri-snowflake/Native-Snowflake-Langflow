@@ -30,6 +30,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from lfx_snowflake import sql_safety
+from lfx_snowflake.components.ai_function import plain_text_result
 from lfx_snowflake.memories_lf_mem import (
     iso_timestamp,
     DEFAULT_KILL_PHRASE,
@@ -208,7 +209,8 @@ class LfMemIngestionPipeline:
                     str(job["preproc_model"] or ""), str(job["preproc_instructions"] or ""), format_batch(pending), job["kill_phrase"]
                 )
                 rows = self._exec(psql, pb, guarded=True, flow_id=fid).get("rows") or []
-                response = str(_row(rows[0], "response", 0) or "") if rows else ""
+                # AI_COMPLETE returns its text JSON-encoded ("...", escaped newlines): memories store plain text.
+                response = str(plain_text_result(_row(rows[0], "response", 0)) or "") if rows else ""
                 if not response.strip():
                     raise LfMemError("AI_COMPLETE preprocessing returned no output.", error_code="PREPROCESSING_EMPTY")
                 if is_kill_phrase(response, job["kill_phrase"]):
