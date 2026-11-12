@@ -201,6 +201,23 @@ def _normalize_stage_and_path_unchecked(
     return default_stage, raw_file.lstrip("/")
 
 
+def plain_text_result(val: Any) -> Any:
+    """A text result of an AI_* function arrives JSON-encoded ("...", escaped newlines): return the plain string.
+
+    Anything that is not a JSON string scalar (objects, arrays, plain text) is returned unchanged.
+    """
+    if isinstance(val, str):
+        stripped = val.strip()
+        if len(stripped) >= 2 and stripped[0] == '"' and stripped[-1] == '"':
+            try:
+                decoded = json.loads(stripped)
+            except ValueError:
+                return val
+            if isinstance(decoded, str):
+                return decoded
+    return val
+
+
 def normalize_stage_and_path(
     stage_selector: str = "",
     stage_file_path: str = "",

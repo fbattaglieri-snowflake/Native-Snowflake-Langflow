@@ -13,11 +13,13 @@ from lfx_snowflake.components.ai_function import (
     TASK_SPECIFIC_AI_FUNCTIONS,
     SnowflakeAIFunctionComponent as DomainAIFunctionEngine,
     filter_stage_files_for_function,
+    plain_text_result,
 )
 from lfx_snowflake.context_helpers import _resolve_flow_id
 from lfx_snowflake.fastapi_live_bridge import LIVE_BRIDGE
 from lfx_snowflake.flow_context_guard import flow_component_sql as _flow_component_sql
 from lfx_snowflake.flow_context_guard import raise_if_flow_context_denied as _raise_if_flow_context_denied
+from lfx_snowflake.providers.language_models import AIFunctionToolSchema, build_structured_tool
 
 
 def _flow_component_execute_sql(*args, **kwargs):
@@ -159,6 +161,7 @@ class SnowflakeAIFunctionComponent(Component):
             display_name="Input Text",
             value="Evaluate customer feedback or document content.",
             show=True,
+            tool_mode=True,
         ),
         StrInput(
             name="categories_or_schema",
@@ -420,8 +423,33 @@ class SnowflakeAIFunctionComponent(Component):
         rows = res.get("rows", [])
         if bool(getattr(self, "batch_directory_mode", False)):
             return Message(text=json.dumps({"rows": rows, "count": len(rows)}, indent=2))
-        raw_val = rows[0].get("RESULT") if rows else ""
+        raw_val = plain_text_result(rows[0].get("RESULT") if rows else "")
         return Message(text=str(raw_val) if not isinstance(raw_val, (dict, list)) else json.dumps(raw_val))
+
+    def to_toolkit(self) -> list[Any]:
+        """Tool Mode: one tool named after the configured AI function; the LLM supplies only the input text."""
+        fn = str(self.ai_function or "AI_CLASSIFY").strip().upper()
+        cfg = str(getattr(self, "categories_or_schema", "") or "").strip()
+
+        def _invoke(input_text: str = "", **kwargs: Any) -> str:
+            text = input_text or kwargs.get("tool_input") or kwargs.get("text") or ""
+            if not str(text).strip():
+                raise ValueError(f"{fn} tool call without input_text")
+            self.input_text = str(text)
+            return str(self.run_ai_function().text)
+
+        return [
+            build_structured_tool(
+                name=f"snowflake_{fn.lower()}",
+                description=(
+                    f"Run the Snowflake Cortex AI function {fn} on the given text under the active Snowflake role."
+                    + (f" Configured categories / schema / instruction: {cfg}." if cfg else "")
+                ),
+                func=_invoke,
+                args_schema=AIFunctionToolSchema,
+                metadata={"component": "SnowflakeAIFunction", "ai_function": fn, "tool_mode": True},
+            )
+        ]
 
     def run_telemetry(self) -> Data:
         return Data(

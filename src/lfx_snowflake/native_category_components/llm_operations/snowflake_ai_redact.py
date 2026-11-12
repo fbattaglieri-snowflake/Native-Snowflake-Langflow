@@ -14,6 +14,7 @@ from lfx_snowflake.components.ai_function import (
     SUPPORTED_AI_REDACT_CATEGORIES,
     SnowflakeAIRedactEngine,
     filter_stage_files_for_function,
+    plain_text_result,
 )
 from lfx_snowflake.context_helpers import _resolve_flow_id
 from lfx_snowflake.fastapi_live_bridge import LIVE_BRIDGE
@@ -316,7 +317,7 @@ class SnowflakeAIRedactComponent(Component):
 
         if isinstance(raw_val, (dict, list)):
             return Message(text=json.dumps(raw_val, indent=2))
-        return Message(text=str(raw_val or ""))
+        return Message(text=str(plain_text_result(raw_val) or ""))
 
     def run_telemetry(self) -> Data:
         plan = self._build_plan()

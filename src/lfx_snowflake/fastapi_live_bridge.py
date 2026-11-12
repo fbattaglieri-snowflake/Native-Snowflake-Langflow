@@ -8652,8 +8652,26 @@ class LiveSnowflakeBridge:
                 cur = conn.cursor()
                 tables = {r[0] for r in cur.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
                 if "flow" in tables:
+                    # Only flows served as A2A agents, in the project (folder) of the calling flow: an unpublished
+                    # flow cannot be called, and flows of other projects are not offered.
+                    cols = {r[1] for r in cur.execute("PRAGMA table_info(flow)").fetchall()}
+                    where: list[str] = []
+                    params: list[Any] = []
+                    if "a2a_enabled" in cols:
+                        where.append("a2a_enabled = 1")
+                    if norm_fid and "folder_id" in cols:
+                        own = cur.execute(
+                            "SELECT folder_id FROM flow WHERE REPLACE(LOWER(CAST(id AS TEXT)), '-', '') = ?",
+                            (norm_fid.replace("-", "").lower(),),
+                        ).fetchone()
+                        if own is not None and own[0]:
+                            where.append("folder_id = ?")
+                            params.append(own[0])
                     rows = cur.execute(
-                        "SELECT id, name, updated_at, is_component FROM flow ORDER BY updated_at DESC"
+                        "SELECT id, name, updated_at, is_component FROM flow"
+                        + (" WHERE " + " AND ".join(where) if where else "")
+                        + " ORDER BY updated_at DESC",
+                        params,
                     ).fetchall()
                     for r in rows:
                         d = dict(r)

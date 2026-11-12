@@ -313,6 +313,13 @@ class CortexSearchToolSchema(BaseModel):
     )
 
 
+class AIFunctionToolSchema(BaseModel):
+    input_text: str = Field(
+        default="",
+        description="Text to process with the Snowflake Cortex AI function configured on the component.",
+    )
+
+
 class CortexAgentToolSchema(BaseModel):
     user_message: str = Field(
         default="",

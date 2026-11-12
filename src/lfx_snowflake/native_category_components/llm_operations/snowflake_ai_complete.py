@@ -25,6 +25,7 @@ from lfx_snowflake.components.ai_function import (
     detect_stage_media_kind,
     filter_stage_files_for_function,
     get_compatible_models,
+    plain_text_result,
 )
 from lfx_snowflake.context_helpers import _resolve_flow_id
 from lfx_snowflake.fastapi_live_bridge import LIVE_BRIDGE
@@ -271,7 +272,13 @@ class SnowflakeAICompleteComponent(Component):
         rows = res.get("rows", [])
         if bool(getattr(self, "batch_directory_mode", False)):
             return Message(text=json.dumps({"rows": rows, "count": len(rows)}, indent=2))
-        val = rows[0].get("RESULT") if rows else ""
+        val = plain_text_result(rows[0].get("RESULT") if rows else "")
+        if (val is None or (isinstance(val, str) and not val.strip())) and not bool(getattr(self, "show_details", False)):
+            # A reasoning model can spend all of Max Tokens before it writes any text: never pass "" downstream.
+            raise ValueError(
+                f"AI_COMPLETE returned an empty completion for model {self.model or 'claude-sonnet-5-5'}; "
+                "raise Max Tokens (reasoning tokens count toward the limit)."
+            )
         return Message(text=str(val) if not isinstance(val, (dict, list)) else json.dumps(val, indent=2))
 
     def get_details(self) -> Data:
