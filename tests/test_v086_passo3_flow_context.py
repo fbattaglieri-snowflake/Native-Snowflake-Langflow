@@ -264,6 +264,25 @@ def test_ctx_stg01_only_internal_stages(bridge, monkeypatch) -> None:
     assert json.dumps(names)
 
 
+def test_selected_stage_type_is_resolved_live_when_not_discovered_yet(bridge, monkeypatch) -> None:
+    """Right after a Context save the SHOW STAGES metadata may not be cached: the selected stage is still listed."""
+    calls: list[str] = []
+
+    def fake_sql(sql, *a, **k):
+        calls.append(sql)
+        if sql.startswith("SHOW STAGES LIKE 'STG_A'"):
+            return {"ok": True, "rows": [{"name": "STG_A", "type": "INTERNAL NO CSE", "url": ""}]}
+        return {"ok": True, "rows": []}
+
+    monkeypatch.setattr(bridge, "execute_sql", fake_sql)
+    monkeypatch.setattr(bridge, "is_stage_visible_in_context", lambda *a, **k: True)
+    monkeypatch.setattr(bridge, "list_external_volumes_for_context", lambda **k: {"external_volumes": []})
+    bridge.stages_registry, bridge._stage_meta = [], {}
+    stages = bridge.list_stages_for_context(flow_id=FLOW_A)["stages"]
+    assert [(s["stage_fqn"], s["type"]) for s in stages] == [("@E2E_DB.E2E_SCH.STG_A", "INTERNAL")]
+    assert sum(c.startswith("SHOW STAGES LIKE") for c in calls) == 1
+
+
 # --------------------------------------------------------------------------- PASSO 3 follow-up: full coverage
 
 

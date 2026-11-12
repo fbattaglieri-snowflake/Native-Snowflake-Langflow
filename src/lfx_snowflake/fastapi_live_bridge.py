@@ -1038,6 +1038,8 @@ class MemoryBasePersistenceError(RuntimeError):
         self.http_status = http_status
 
 
+from .memories_lf_mem import DEFAULT_PREPROC_INSTRUCTIONS as LF_MEM_DEFAULT_PREPROC_INSTRUCTIONS  # noqa: E402
+
 class LiveSnowflakeBridge:
     """Executes real SQL against Snowflake via SPCS OAuth token and manages active role & trace replication."""
 
@@ -2699,6 +2701,11 @@ class LiveSnowflakeBridge:
             "tool_mode": tool_mode,
             "kill_phrase": preproc_kill_phrase,
             "llm_preprocessing": llm_preprocessing,
+            "preproc_instructions": str(
+                body.get("preproc_instructions")
+                or (llm_preprocessing.get("custom_instructions") if isinstance(llm_preprocessing, dict) else "")
+                or ""
+            ).strip(),
             "thread_id": body.get("thread_id") or "thr_default",
             "checkpoint_ns": body.get("checkpoint_ns") or "default",
             "ttl_hours": int(body.get("ttl_hours") or 24),
@@ -2902,6 +2909,7 @@ class LiveSnowflakeBridge:
             sql_lookup = str(entry.get("how_to_feed_without_embedding") or "")
             instructions = str(
                 entry.get("preproc_instructions")
+                or (LF_MEM_DEFAULT_PREPROC_INSTRUCTIONS if isinstance(entry.get("lf_mem"), dict) else "")
                 or (
                     f"[{entry.get('label')}] Store: {entry.get('table_fqn')} | "
                     f"Embedding Required: {entry.get('needs_embedding_badge')} | "
@@ -3419,6 +3427,7 @@ class LiveSnowflakeBridge:
         ).strip() or "NO_INGEST"
         instructions = str(
             entry.get("preproc_instructions")
+            or (LF_MEM_DEFAULT_PREPROC_INSTRUCTIONS if isinstance(entry.get("lf_mem"), dict) else "")
             or (
                 f"[{entry.get('label') or type_spec['label']}] Store: {entry.get('table_fqn')} | "
                 f"Embedding Required: {entry.get('needs_embedding_badge') or type_spec['needs_embedding_badge']} | "
@@ -3742,7 +3751,10 @@ class LiveSnowflakeBridge:
                 return {"ok": False, "status_code": 422, "error_code": "UNKNOWN_PRESET",
                         "detail": f"Unknown preset {preset_name!r}; expected one of {sorted(MEMORY_PRESETS)}."}
             preset = MEMORY_PRESETS[preset_name]
-            payload.setdefault("preproc_instructions", preset["preproc_instructions"])
+            if not str(payload.get("preproc_instructions") or "").strip():
+                payload["preproc_instructions"] = preset["preproc_instructions"]
+            if isinstance(payload.get("llm_preprocessing"), dict):
+                payload["llm_preprocessing"]["custom_instructions"] = payload["preproc_instructions"]
             if payload.get("filter_by_session") is None:
                 payload["filter_by_session"] = preset["filter_by_session"]
             payload["preset"] = preset_name
@@ -5116,6 +5128,9 @@ class LiveSnowflakeBridge:
                     fqn_key = f"{p_db}.{p_sch}.{s_nm}"
                     if fqn_key in by_fqn:
                         continue
+                    if fqn_key not in self._stage_meta and re.fullmatch(r"[A-Z0-9_$]+(\.[A-Z0-9_$]+){2}", fqn_key):
+                        # Metadata not discovered yet (e.g. right after a Context save): one live SHOW STAGES LIKE.
+                        self._stage_type(fqn_key)
                     meta = self._stage_meta.get(fqn_key) or {}
                     st_type = str(meta.get("type") or "").upper()
                     is_external = "EXTERNAL" in st_type
@@ -6180,6 +6195,41 @@ class LiveSnowflakeBridge:
 
         return self.update_selected_context(target_ctx, flow_id=norm_fid)
 
+    def _retain_attached_memory_tables(self, flow_id: str, ctx: dict[str, Any]) -> None:
+        """Keep the LF_MEM table of every Memory Base attached to this flow in the flow context.
+
+        The Context dialog saves a full replacement selection; a Memory Base attached to the flow must stay
+        authorized for the flow guard, otherwise its ingestion fails with AUTHZ_OBJECT_NOT_IN_FLOW_CONTEXT.
+        """
+        from .memories_lf_mem import LfMemSpec  # noqa: PLC0415
+
+        try:
+            self._hydrate_lf_mem_registry()
+        except sqlite3.Error:
+            pass
+        for entry in self.memories_registry:
+            cfg = entry.get("lf_mem")
+            if not isinstance(cfg, dict) or self._normalize_flow_id(str(entry.get("flow_id") or "")) != flow_id:
+                continue
+            try:
+                spec = LfMemSpec(**cfg)
+            except (TypeError, ValueError):
+                continue
+            db, sch, table = spec.database.upper(), spec.memory_schema.upper(), spec.table_name
+            if db not in ctx.setdefault("databases", []):
+                ctx["databases"].append(db)
+            if sch not in ctx.setdefault("schemas_by_db", {}).setdefault(db, []):
+                ctx["schemas_by_db"][db].append(sch)
+            targets = [ctx.setdefault("objects_by_db_schema", {}), ctx.setdefault("selected_objects", {})]
+            for target in targets:
+                pair = target.setdefault(f"{db}.{sch}", {}) if isinstance(target, dict) else None
+                bucket = pair.setdefault("memories", []) if isinstance(pair, dict) else None
+                if isinstance(bucket, list) and table not in bucket:
+                    bucket.append(table)
+            visible = ctx.setdefault("visible_objects", {}).setdefault("memories", [])
+            if table not in visible:
+                visible.append(table)
+
     def update_selected_context(
         self,
         payload: dict[str, Any],
@@ -6393,6 +6443,7 @@ class LiveSnowflakeBridge:
         base_ctx["active_role"] = self.active_role
         if effective_flow_id:
             base_ctx["flow_id"] = effective_flow_id
+            self._retain_attached_memory_tables(effective_flow_id, base_ctx)
 
         new_dbs, new_schemas, new_objs = self._extract_context_object_set(base_ctx)
         removed_databases = sorted(prev_dbs - new_dbs) if has_dbs_key else []

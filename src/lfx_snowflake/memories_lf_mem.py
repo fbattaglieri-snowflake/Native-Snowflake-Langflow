@@ -91,6 +91,13 @@ MEMORY_PRESETS: dict[str, dict[str, Any]] = {
 }
 
 
+# Used when a governed Memory Base has preprocessing enabled but neither a preset nor custom instructions.
+DEFAULT_PREPROC_INSTRUCTIONS = (
+    "Extract the information worth remembering from this conversation batch (facts, preferences, decisions "
+    "and outcomes) as short standalone statements. Ignore small talk."
+)
+
+
 class LfMemError(RuntimeError):
     """A governed LF_MEM operation failed; carries an API error code and HTTP status (never faked)."""
 

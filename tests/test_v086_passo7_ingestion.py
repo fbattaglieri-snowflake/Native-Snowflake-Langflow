@@ -312,6 +312,25 @@ def test_create_applies_preset_filter_by_session(tmp_path, monkeypatch):
     assert s["memory"]["filter_by_session"] is True and f["memory"]["filter_by_session"] is False
     bad = bridge.create_native_memory({**base, "name": "x", "preset": "Invented"}, flow_id=str(flow), user_id=str(user))
     assert bad["error_code"] == "UNKNOWN_PRESET"
+    # The preset's instructions are what the preprocessing LLM receives (also from the UI body, which sends
+    # preprocessing=True with blank instructions); a base without a preset gets the neutral default, never
+    # a storage description.
+    from lfx_snowflake.memories_lf_mem import DEFAULT_PREPROC_INSTRUCTIONS, MEMORY_PRESETS
+
+    ui = bridge.create_native_memory(
+        {**base, "name": "ui", "preset": "Task outcomes", "preprocessing": True, "preproc_instructions": ""},
+        flow_id=str(flow), user_id=str(user),
+    )
+    plain = bridge.create_native_memory({**base, "name": "plain", "preprocessing": True}, flow_id=str(flow), user_id=str(user))
+    conn = sqlite3.connect(db)
+    stored = dict(conn.execute("SELECT name, preproc_instructions FROM memory_base").fetchall())
+    conn.close()
+    assert stored["facts"] == MEMORY_PRESETS["Facts & preferences"]["preproc_instructions"]
+    assert stored["sess"] == MEMORY_PRESETS["Session summary"]["preproc_instructions"]
+    assert stored["ui"] == MEMORY_PRESETS["Task outcomes"]["preproc_instructions"]
+    assert stored["plain"] == DEFAULT_PREPROC_INSTRUCTIONS
+    assert bridge._to_langflow_memory_base_read(ui["memory"])["preproc_instructions"] == stored["ui"]
+    assert plain["ok"] and not any("Lookup SQL" in v for v in stored.values())
 
 
 def test_installer_patches_native_auto_capture():
