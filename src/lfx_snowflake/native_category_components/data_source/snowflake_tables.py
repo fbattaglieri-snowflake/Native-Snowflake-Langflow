@@ -11,6 +11,7 @@ from lfx.io import DataInput, DropdownInput, IntInput, MessageTextInput, Output
 from lfx.schema import Data, DataFrame
 
 from lfx_snowflake._lfx_compat import Tool
+from lfx_snowflake.providers.language_models import DataSourceToolSchema, build_structured_tool
 from lfx_snowflake.components.data_sources import filter_business_data_source_objects
 from lfx_snowflake.fastapi_live_bridge import LIVE_BRIDGE
 from lfx_snowflake.flow_context_guard import flow_component_sql as _flow_component_sql
@@ -289,10 +290,11 @@ class SnowflakeTablesComponent(Component):
             return self.run_table_operation().data
 
         return [
-            Tool(
+            build_structured_tool(
                 name=f"snowflake_table_{tbl.lower()}",
                 description=f"Read or write governed Snowflake table {fqn} ({getattr(self, 'table_subtype', 'Standard Table')}) under active role {LIVE_BRIDGE.active_role}.",
                 func=_invoke,
+                args_schema=DataSourceToolSchema,
                 metadata={"qualified_name": fqn, "component": "SnowflakeTables", "tool_mode": True},
             )
         ]

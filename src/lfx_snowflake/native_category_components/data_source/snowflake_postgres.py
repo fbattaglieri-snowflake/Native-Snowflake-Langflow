@@ -8,6 +8,7 @@ from lfx.io import DataInput, DropdownInput, IntInput, MessageTextInput, Output,
 from lfx.schema import Data, DataFrame
 
 from lfx_snowflake._lfx_compat import Tool
+from lfx_snowflake.providers.language_models import DataSourceToolSchema, build_structured_tool
 from lfx_snowflake.components.data_sources import filter_business_data_source_objects
 from lfx_snowflake.fastapi_live_bridge import LIVE_BRIDGE
 
@@ -328,10 +329,11 @@ class SnowflakePostgresComponent(Component):
             return self.run_postgres_operation().data
 
         return [
-            Tool(
+            build_structured_tool(
                 name=f"snowflake_postgres_{tbl.lower()}",
                 description=f"Read or write Snowflake Postgres instance {inst} table {pg_sch}.{tbl} under active role {LIVE_BRIDGE.active_role}.",
                 func=_invoke,
+                args_schema=DataSourceToolSchema,
                 metadata={"postgres_instance": inst, "component": "SnowflakePostgres", "tool_mode": True},
             )
         ]

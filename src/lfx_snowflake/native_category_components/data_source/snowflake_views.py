@@ -10,6 +10,7 @@ from lfx.io import DropdownInput, IntInput, MessageTextInput, Output
 from lfx.schema import Data, DataFrame
 
 from lfx_snowflake._lfx_compat import Tool
+from lfx_snowflake.providers.language_models import DataSourceToolSchema, build_structured_tool
 from lfx_snowflake.components.data_sources import filter_business_data_source_objects
 from lfx_snowflake.fastapi_live_bridge import LIVE_BRIDGE
 from lfx_snowflake.flow_context_guard import flow_component_sql as _flow_component_sql
@@ -249,10 +250,11 @@ class SnowflakeViewsComponent(Component):
             return self.run_view_query().data
 
         return [
-            Tool(
+            build_structured_tool(
                 name=f"snowflake_view_{vw.lower()}",
                 description=f"Query governed Snowflake view {fqn} ({getattr(self, 'view_subtype', 'Standard View')}) under active role {LIVE_BRIDGE.active_role}.",
                 func=_invoke,
+                args_schema=DataSourceToolSchema,
                 metadata={"qualified_name": fqn, "component": "SnowflakeViews", "tool_mode": True},
             )
         ]

@@ -313,6 +313,17 @@ class CortexSearchToolSchema(BaseModel):
     )
 
 
+class DataSourceToolSchema(BaseModel):
+    tool_input: str = Field(
+        default="",
+        description=(
+            "Optional row filter; leave empty to read the first rows. Either a JSON object "
+            '{"COLUMN": value} (equality, list = IN, null = IS NULL) or COLUMN <op> <literal> clauses joined '
+            "by AND, e.g. STATUS = 'RETURNED' AND AMOUNT_EUR > 300. No OR, functions or sub-queries."
+        ),
+    )
+
+
 class AIFunctionToolSchema(BaseModel):
     input_text: str = Field(
         default="",
