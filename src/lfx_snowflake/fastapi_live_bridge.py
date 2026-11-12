@@ -3705,14 +3705,18 @@ class LiveSnowflakeBridge:
 
         flow_ctx = self.get_flow_context(eff_fid, create=False) or {}
         lf_name = re.sub(r"[^A-Za-z0-9_]", "_", mem_name).strip("_")[:200]
+        mem_schema = str(
+            payload.get("memory_schema") or os.getenv("LANGFLOW_MEMORY_SCHEMA") or flow_ctx.get("schema") or self.schema or ""
+        ).strip()
+        # A configured DB.SCHEMA memory location names its own database: it must not depend on which database
+        # happens to be first in the flow context (a flow working on another database can still have memories).
+        mem_schema_db = mem_schema.split(".", 1)[0].strip('"') if "." in mem_schema else ""
         try:
             spec = LfMemSpec(
                 name=lf_name,
                 memory_base_id=str(uuid.uuid4()),
-                database=str(payload.get("database") or flow_ctx.get("database") or self.database or ""),
-                memory_schema=str(
-                    payload.get("memory_schema") or os.getenv("LANGFLOW_MEMORY_SCHEMA") or flow_ctx.get("schema") or self.schema or ""
-                ),
+                database=str(payload.get("database") or mem_schema_db or flow_ctx.get("database") or self.database or ""),
+                memory_schema=mem_schema,
                 embedding_model=clean_model,
                 governance_schema=str(os.getenv("LANGFLOW_GOVERNANCE_SCHEMA") or self.schema or "") or None,
                 filter_by_session=bool(
