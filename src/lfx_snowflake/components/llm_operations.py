@@ -1295,9 +1295,15 @@ class SnowflakeCustomToolEngine:
         if ptype == "boolean" or isinstance(value, bool):
             if isinstance(value, str):
                 value = value.strip().lower() in ("true", "1", "yes")
-            return binder.add(bool(value), "BOOLEAN")
+            # A BOOLEAN binding is rejected for CALL in a multi-statement request ("Unsupported type for
+            # binding argument"): bind the text and cast it.
+            return f"{binder.add('true' if value else 'false', 'TEXT')}::BOOLEAN"
         if ptype in ("integer", "number") and isinstance(value, (int, float)) and not isinstance(value, bool):
-            return binder.add(value, "FIXED" if isinstance(value, int) else "REAL")
+            # The cast gives the placeholder a type, so named arguments resolve the routine signature
+            # (an untyped placeholder fails for table functions: "named arguments do not match any signature").
+            if isinstance(value, int):
+                return f"{binder.add(value, 'FIXED')}::NUMBER"
+            return f"{binder.add(value, 'REAL')}::FLOAT"
         if ptype in ("array", "object") or isinstance(value, (list, tuple, dict)):
             return f"PARSE_JSON({binder.add(json.dumps(list(value) if isinstance(value, tuple) else value), 'TEXT')})"
         return binder.add(str(value), "TEXT")

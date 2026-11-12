@@ -59,7 +59,7 @@ def test_006_named_args_order_independent_and_optional_skipped() -> None:
     sql, binds = SnowflakeCustomToolEngine.build_invocation_request(
         resource_type="procedure", custom_tool_identifier=IDENT, arguments={"qty": 2, "name": "x"}, parameters=_params()
     )
-    assert sql == 'CALL DB.SCH.E2E_A5_PROC("NAME" => ?, "QTY" => ?);'
+    assert sql == 'CALL DB.SCH.E2E_A5_PROC("NAME" => ?, "QTY" => ?::NUMBER);'
     assert binds == {"1": {"type": "TEXT", "value": "x"}, "2": {"type": "FIXED", "value": "2"}}
 
 
@@ -72,12 +72,12 @@ def test_006_named_function_and_udtf_shapes() -> None:
         resource_type="function", custom_tool_identifier="DB.SCH.F(NUMBER, FLOAT)", arguments={"y": 1.5, "x": 2},
         parameters=params,
     )
-    assert sql == 'SELECT DB.SCH.F("X" => ?, "Y" => ?) AS RESULT;'
+    assert sql == 'SELECT DB.SCH.F("X" => ?::NUMBER, "Y" => ?::FLOAT) AS RESULT;'
     sql, _ = SnowflakeCustomToolEngine.build_invocation_request(
         resource_type="table_function", custom_tool_identifier="DB.SCH.U(NUMBER)", arguments=[3],
         parameters=[{"name": "n", "type": "integer", "named": True}],
     )
-    assert sql == 'SELECT * FROM TABLE(DB.SCH.U("N" => ?));'
+    assert sql == 'SELECT * FROM TABLE(DB.SCH.U("N" => ?::NUMBER));'
 
 
 def test_006_missing_required_and_unknown_args_raise() -> None:
@@ -143,7 +143,7 @@ def test_013_to_toolkit_passes_schema_and_drops_omitted_optionals(monkeypatch) -
     (tool,) = comp.to_toolkit()
     assert set(tool.args_schema.model_json_schema()["properties"]) == {"NAME", "QTY", "FLAG"}
     tool.invoke({"NAME": "a", "QTY": 2})
-    assert captured["stmt"] == 'CALL DB.SCH.E2E_A5_PROC("NAME" => ?, "QTY" => ?);'
+    assert captured["stmt"] == 'CALL DB.SCH.E2E_A5_PROC("NAME" => ?, "QTY" => ?::NUMBER);'
     # BUG-LLMOP-007: warehouse + timeout are request-level, no USE / ALTER SESSION
     assert captured["warehouse"] == "COMPUTE_WH" and captured["timeout"] == 300
 
@@ -328,7 +328,7 @@ def test_veto2_dict_args_case_insensitive_named_syntax() -> None:
         sql, _ = SnowflakeCustomToolEngine.build_invocation_request(
             custom_tool_identifier=IDENT, arguments=args, parameters=params
         )
-        assert sql == 'CALL DB.SCH.E2E_A5_PROC("NAME" => ?, "QTY" => ?);'
+        assert sql == 'CALL DB.SCH.E2E_A5_PROC("NAME" => ?, "QTY" => ?::NUMBER);'
     with pytest.raises(ValueError, match="Duplicate"):
         SnowflakeCustomToolEngine.build_invocation_request(
             custom_tool_identifier=IDENT, arguments={"NAME": "a", "name": "b", "QTY": 1}, parameters=params
@@ -340,7 +340,7 @@ def test_veto2_positional_fallback_accepts_dict_in_order() -> None:
     sql, binds = SnowflakeCustomToolEngine.build_invocation_request(
         resource_type="table_function", custom_tool_identifier="DB.S.E2E_A5_UDTF(NUMBER)", arguments={"N": 2}
     )
-    assert sql == "SELECT * FROM TABLE(DB.S.E2E_A5_UDTF(?));" and binds == {"1": {"type": "FIXED", "value": "2"}}
+    assert sql == "SELECT * FROM TABLE(DB.S.E2E_A5_UDTF(?::NUMBER));" and binds == {"1": {"type": "FIXED", "value": "2"}}
 
 
 def test_veto2_args_schema_keeps_uppercase_names() -> None:

@@ -119,3 +119,39 @@ def test_ai_function_text_result_is_plain_text(monkeypatch) -> None:
     comp.input_text = "Hello"
     comp.target_lang = "fr"
     assert comp.run_ai_function().text == "Bonjour"
+
+
+# --- Custom Tool: typed arguments that the SQL API accepts in a multi-statement request ----------------
+def test_custom_tool_boolean_and_numeric_arguments_are_bound_with_a_cast() -> None:
+    from lfx_snowflake.components.llm_operations import SnowflakeCustomToolEngine
+
+    sql, binds = SnowflakeCustomToolEngine.build_invocation_request(
+        resource_type="procedure",
+        custom_tool_identifier="DB.SCH.OPEN_TICKET(NUMBER, VARCHAR, BOOLEAN)",
+        arguments={"ORDER_NUMBER": 1011, "REASON": "torn'); DROP TABLE X; --", "URGENT": True},
+        parameters=[
+            {"name": "ORDER_NUMBER", "type": "integer"},
+            {"name": "REASON", "type": "string"},
+            {"name": "URGENT", "type": "boolean"},
+        ],
+    )
+    assert sql == 'CALL DB.SCH.OPEN_TICKET("ORDER_NUMBER" => ?::NUMBER, "REASON" => ?, "URGENT" => ?::BOOLEAN);'
+    assert binds == {
+        "1": {"type": "FIXED", "value": "1011"},
+        "2": {"type": "TEXT", "value": "torn'); DROP TABLE X; --"},
+        "3": {"type": "TEXT", "value": "true"},
+    }
+    assert not any(b["type"] == "BOOLEAN" for b in binds.values())
+
+
+def test_custom_tool_in_tool_mode_raises_when_the_routine_call_fails(monkeypatch) -> None:
+    from lfx_snowflake.native_category_components.llm_operations import snowflake_custom_tool as ct_mod
+
+    comp = ct_mod.SnowflakeCustomToolComponent()
+    monkeypatch.setattr(
+        comp, "_execute_tool", lambda arguments_override=None: {"result": {"ok": False, "error_code": "TECHNICAL_EXECUTION_ERROR", "message": "boom"}}
+    )
+    with pytest.raises(ValueError, match="TECHNICAL_EXECUTION_ERROR: boom"):
+        comp._execute_tool_or_raise({"A": 1})
+    monkeypatch.setattr(comp, "_execute_tool", lambda arguments_override=None: {"result": {"ok": True, "rows": []}})
+    assert comp._execute_tool_or_raise({"A": 1})["result"]["ok"] is True

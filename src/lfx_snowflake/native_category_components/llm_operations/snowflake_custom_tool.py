@@ -489,6 +489,15 @@ class SnowflakeCustomToolComponent(Component):
             "result": exec_res,
         }
 
+    def _execute_tool_or_raise(self, arguments_override: Any = None) -> dict[str, Any]:
+        """Tool Mode: a failed routine call is a tool error for the Agent, never a normal tool result."""
+        res = self._execute_tool(arguments_override=arguments_override)
+        outcome = res.get("result")
+        if isinstance(outcome, dict) and outcome.get("ok") is False:
+            code = outcome.get("error_code") or "CUSTOM_TOOL_ERROR"
+            raise ValueError(f"{code}: {str(outcome.get('message') or 'routine call failed')[:500]}")
+        return res
+
     def build_tool(self) -> Data:
         payload = self.build_tool_payload()
         t_name = payload["tool_spec"]["name"]
@@ -512,7 +521,7 @@ class SnowflakeCustomToolComponent(Component):
             build_structured_tool(
                 name=t_name,
                 description=t_desc,
-                func=lambda **kwargs: self._execute_tool(
+                func=lambda **kwargs: self._execute_tool_or_raise(
                     arguments_override={k: v for k, v in kwargs.items() if v is not None}
                 ),
                 args_schema=build_args_schema(t_name, self._parsed_parameters()),

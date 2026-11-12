@@ -203,12 +203,12 @@ def test_bug_llmop_004_arguments_are_json_only_and_bound() -> None:
             {"name": "d", "type": "array"},
         ],
     )
-    assert sql == 'CALL DB.SCH.P("A" => ?, "B" => ?, "C" => ?, "D" => PARSE_JSON(?));'  # PASSO6 named args
+    assert sql == 'CALL DB.SCH.P("A" => ?, "B" => ?::NUMBER, "C" => ?::BOOLEAN, "D" => PARSE_JSON(?));'
     assert "DROP" not in sql
     assert binds == {
         "1": {"type": "TEXT", "value": "O'Brien'); DROP TABLE X; --"},
         "2": {"type": "FIXED", "value": "3"},
-        "3": {"type": "BOOLEAN", "value": "true"},
+        "3": {"type": "TEXT", "value": "true"},
         "4": {"type": "TEXT", "value": "[1, 2]"},
     }
 
