@@ -286,6 +286,10 @@ SNOWFLAKE_EMBEDDING_SOURCES: tuple[dict[str, Any], ...] = (
     EXTERNAL_EMBEDDING_PROVIDERS["spcs_llm_proxy"],
 )
 
+# Gate model of governed Memory Bases when the request names none. The previous default (mistral-large2)
+# answered the kill phrase for valid task outcomes, so nothing was ever remembered.
+DEFAULT_MEMORY_PREPROC_MODEL = "claude-haiku-5-5"
+
 LLM_PREPROCESSING_ENGINES: tuple[dict[str, Any], ...] = (
     {
         "id": "cortex_sql",
@@ -3579,6 +3583,27 @@ class LiveSnowflakeBridge:
             "pages": pages,
         }
 
+    @staticmethod
+    def _memory_base_name_owner(name: str, user_id: Any) -> str | None:
+        """Id of the Memory Base of this Langflow user that already has ``name`` (native UNIQUE(user_id, name))."""
+        db_path = Path(os.getenv("LANGFLOW_PERSIST_DIR", "/persist")) / "langflow.db"
+        user_hex = _normalize_sqlite_uuid_val(user_id, use_hex=True)
+        if not user_hex or not db_path.exists():
+            return None
+        try:
+            conn = _open_sqlite_conn(db_path, readonly=True, timeout=30.0)
+        except sqlite3.Error:
+            return None
+        try:
+            row = conn.execute(
+                "SELECT id FROM memory_base WHERE user_id = ? AND name = ?", (user_hex, str(name or ""))
+            ).fetchone()
+        except sqlite3.Error:
+            return None
+        finally:
+            conn.close()
+        return str(row[0]) if row else None
+
     def create_native_memory(
         self,
         body: dict[str, Any],
@@ -3683,7 +3708,7 @@ class LiveSnowflakeBridge:
             payload["llm_preprocessing"] = {
                 "enabled": bool(payload.get("preprocessing")),
                 "engine": "cortex_sql",
-                "model": str(payload.get("preproc_model") or "mistral-large2"),
+                "model": str(payload.get("preproc_model") or DEFAULT_MEMORY_PREPROC_MODEL),
                 "custom_instructions": str(payload.get("preproc_instructions") or ""),
                 "kill_phrase": str(payload.get("preproc_kill_phrase") or "NO_INGEST"),
             }
@@ -3728,6 +3753,12 @@ class LiveSnowflakeBridge:
         except (LfMemError, _sql_safety.SqlSafetyError, ValueError) as exc:
             return {"ok": False, "status_code": 422, "error_code": getattr(exc, "error_code", "INVALID_MEMORY_BASE"), "detail": str(exc)}
 
+        taken = self._memory_base_name_owner(mem_name, user_id)
+        if taken:
+            # Checked before any DDL: a duplicate name must not leave an orphan LF_MEM table behind.
+            return {"ok": False, "status_code": 409, "error_code": "MEMORY_BASE_NAME_TAKEN",
+                    "detail": f"Memory Base name '{mem_name}' is already used by this user (memory_base {taken}); "
+                              "choose a different name."}
         ddl = spec.build_ddl()
         if not payload.get("dry_run"):
             ddl_res = self.execute_sql(ddl, mode="caller")
