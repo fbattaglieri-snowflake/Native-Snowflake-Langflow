@@ -144,3 +144,13 @@ flowchart TB
 | Tools | MCP Tools | Direct streamable project server; `localhost,127.0.0.1` in `LANGFLOW_SSRF_ALLOWED_HOSTS`. |
 | Models & Agents | Snowflake Proxy | `Messages` / `Responses` / `Chat` replay per session. |
 | Observability | Run/trace telemetry | One RUN per execution; batched span sync on run close. |
+| LLM Operations | `AI Function` Tool Mode | One structured tool per function (`snowflake_<function>`), typed `input_text` argument. |
+| LLM Operations | AI text outputs | `AI Complete`, `AI Function`, `AI Redact` return plain text; empty completions raise an explicit error. |
+| LLM Operations | Custom Tool bindings | Booleans and numbers bound with explicit casts; routine failures fail the tool call. |
+| Data Sources | Tool Mode | `Tables`, `Views`, `Iceberg Tables`, `Postgres` return structured tools with a typed input schema. |
+| Models & Agents | A2A internal targets | Only flows served as A2A agents in the caller's project are offered. |
+| Memories | Preset preprocessing | Preset instructions are stored and used by the preprocessing step; neutral default without a preset. |
+| Context | Attached Memory Base | Its `LF_MEM_*` table stays in the flow `[ ❄️ Context ]` across context saves. |
+| Stages & Volumes | Stage listing | A selected stage's type is resolved on demand, so it is listed right after a context save. |
+| Observability | Unlinked spans | Attributed to a derived run id; span batches are never rejected for a missing run id. |
+| Showcases | Four reference flows | Multi Cortex Agent chain, Agent with all Snowflake tools (also over MCP), Language Model + Decision routing, A2A forms. |

@@ -280,6 +280,17 @@ Positioned immediately after `Input & Output`, the **`Triggers`** category provi
 
 ---
 
+### 3.7 Showcase Flows
+
+Four reference flows show the components working together. Build them with the Flows API in any project; object names are placeholders.
+
+| Flow | What it shows |
+|---|---|
+| `SHOWCASE_01_Multi_Cortex_Agents_All_DataSources` | Several `Cortex Agent` nodes in sequence (with and without a thread) fed by `Tables` (standard and dynamic), `Views`, `Iceberg Tables` and a stage listing from `SQL Statement`. |
+| `SHOWCASE_02_Langflow_Agent_All_Snowflake_Tools` | A Langflow `Agent` on a Snowflake Proxy model with every Snowflake component in Tool Mode (`Cortex Analyst`, `Cortex Search`, `Custom Tool`, `AI Function`, `Tables`, `Memory Base`), also exposed by the Project MCP Server. |
+| `SHOWCASE_03_Language_Model_Tools_Analyst_Search_AIFunctions_Decision` | `Language Model`, `Cortex Analyst`, `Cortex Search`, AI functions and a `Decision` node: only the chosen route runs. |
+| `SHOWCASE_04_A2A_All_Forms_Internal_External_And_CortexBridge` | A flow served as an A2A agent that calls three `A2A Agent` nodes (internal flow, internal Cortex Agent, external URL to the Cortex Agent bridge), with authentication, call-chain depth limit and SSRF guard. |
+
 ## 4. Tested Cloud Environment & Parametric Placeholders
 
 **Tested Cloud Environment: AWS — Snowflake on AWS**
@@ -367,9 +378,16 @@ pytest
 - Memories: governed `LF_MEM_*` objects, Message History on Snowflake, single `AI_EMBED` model catalog, kill phrase.
 - MCP Tools: direct streamable connection to the project MCP server (`LANGFLOW_SSRF_ALLOWED_HOSTS` must include `localhost,127.0.0.1`).
 - Snowflake Proxy: `Messages`, `Responses` and `Chat` history replay per session.
+- Tool Mode: `AI Function` (one tool per function, e.g. `snowflake_ai_classify`), `Tables`, `Views`, `Iceberg Tables` and `Postgres` return structured tools with a typed input schema, so a Langflow `Agent` can call them on its `Tools` port.
+- `AI Complete`, `AI Function` and `AI Redact` return plain text on their `Message` output; `AI Complete` raises a clear error when the model returns an empty completion (raise `Max Tokens` for reasoning models).
+- Custom Tool: boolean and numeric arguments are bound with an explicit cast (`?::BOOLEAN`, `?::NUMBER`, `?::FLOAT`); in Tool Mode a failing function or procedure fails the tool call instead of returning an empty result.
+- A2A Agent: the internal target list offers only flows served as A2A agents in the same project.
+- Memory Base: the preset instructions (`Session summary`, `Facts & preferences`, `Task outcomes`) drive the preprocessing step, and the `LF_MEM_*` table of a Memory Base attached to a flow stays in that flow's `[ ❄️ Context ]` when the context is saved again. Preprocessed memories are stored as plain text.
+- Stages: a stage selected in the flow `[ ❄️ Context ]` is listed immediately after the context is saved.
 
 **Observability**
 - Unified run/trace telemetry: one RUN row per execution, batched span sync when the run closes, role-switch audit.
+- Spans that cannot be linked to a single live run are attributed to a derived run id, so a span batch is never rejected for a missing run id.
 
 **Deployment**
 - New environment variables, listed in [`docs/DEPLOYMENT_SPCS.md`](docs/DEPLOYMENT_SPCS.md#6-v086-environment-variables).

@@ -164,3 +164,12 @@ GRANT USAGE ON DATABASE <DATABASE> TO ROLE <FLOW_ROLE>;
 GRANT USAGE ON SCHEMA <DATABASE>.<SCHEMA> TO ROLE <FLOW_ROLE>;
 GRANT USAGE ON ALL FUNCTIONS IN SCHEMA <DATABASE>.<SCHEMA> TO ROLE <FLOW_ROLE>;
 ```
+
+## 7. Post-Deployment Verification
+
+After `ALTER SERVICE <DATABASE>.<SCHEMA>.<SERVICE_NAME> FROM SPECIFICATION ...`:
+
+1. `SHOW SERVICE CONTAINERS IN SERVICE <DATABASE>.<SCHEMA>.<SERVICE_NAME>` reports `READY`, the new image tag and `restart_count = 0`.
+2. Run `scripts/refresh_stored_flow_component_code.py` so stored flows pick up the new component code.
+3. Run one flow per category (data source, LLM operation, Cortex Agent, Memory Base, trigger) and one `tools/call` on the Project MCP Server.
+4. Other services in the account are not touched by the rollout; compare their `spec_digest` and `updated_on` before and after.
