@@ -3288,6 +3288,19 @@ class LiveSnowflakeBridge:
 
     def delete_memory(self, memory_id_or_name: str) -> dict[str, Any]:
         """Delete a Snowflake Memory registration under `CURRENT_ROLE()` RBAC enforcement (`W2-R4-05`, `W2-R4-08G`)."""
+        entry = self._find_memory_entry(str(memory_id_or_name or "").strip())
+        flow_id = str((entry or {}).get("flow_id") or "")
+        if not flow_id or CURRENT_SNOWFLAKE_FLOW_ID.get():
+            return self._delete_memory(memory_id_or_name)
+        # The route carries only the memory id: evaluate the role of the flow that owns the Memory Base,
+        # otherwise no role is active and every delete is denied.
+        token = CURRENT_SNOWFLAKE_FLOW_ID.set(flow_id)
+        try:
+            return self._delete_memory(memory_id_or_name)
+        finally:
+            CURRENT_SNOWFLAKE_FLOW_ID.reset(token)
+
+    def _delete_memory(self, memory_id_or_name: str) -> dict[str, Any]:
         target = str(memory_id_or_name or "").strip()
         entry = self._find_memory_entry(target)
         fqn = str((entry or {}).get("table_fqn") or target)

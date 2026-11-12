@@ -70,3 +70,15 @@ def test_duplicate_name_is_refused_before_any_ddl_and_default_gate_model(tmp_pat
     second = bridge.create_native_memory(dict(body), flow_id=str(flow), user_id=str(user))
     assert second["status_code"] == 409 and second["error_code"] == "MEMORY_BASE_NAME_TAKEN"
     assert len(statements) == created  # no CREATE TABLE for the refused duplicate
+
+
+def test_delete_evaluates_the_role_of_the_owning_flow(monkeypatch) -> None:
+    from lfx_snowflake import fastapi_live_bridge as mod
+
+    bridge = LiveSnowflakeBridge()
+    seen: list[str] = []
+    monkeypatch.setattr(bridge, "_find_memory_entry", lambda _t: {"name": "M", "flow_id": "flow-1", "table_fqn": "A.B.C"})
+    monkeypatch.setattr(bridge, "_delete_memory", lambda _t: seen.append(mod.CURRENT_SNOWFLAKE_FLOW_ID.get()) or {"ok": True})
+
+    assert bridge.delete_memory("M") == {"ok": True}
+    assert seen == ["flow-1"] and not mod.CURRENT_SNOWFLAKE_FLOW_ID.get()
