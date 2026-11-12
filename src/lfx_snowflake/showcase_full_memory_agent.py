@@ -428,6 +428,7 @@ def build_snowflake_full_memory_enterprise_agent_flow() -> dict[str, Any]:
                 "type": "SnowflakeDataSourceCortexAnalyst",
                 "node": {
                     "display_name": "Cortex Analyst (#7 Financial Semantic View)",
+                    "tool_mode": True,
                     "category": "data_source",
                     "icon": "Snowflake",
                     "template": {
@@ -448,6 +449,7 @@ def build_snowflake_full_memory_enterprise_agent_flow() -> dict[str, Any]:
                 "type": "SnowflakeDataSourceCortexSearch",
                 "node": {
                     "display_name": "Cortex Search (#7 Accounting Policy Manuals)",
+                    "tool_mode": True,
                     "category": "data_source",
                     "icon": "Snowflake",
                     "template": {

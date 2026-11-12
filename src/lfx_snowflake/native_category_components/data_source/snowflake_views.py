@@ -142,7 +142,6 @@ class SnowflakeViewsComponent(Component):
     outputs = [
         Output(display_name="View Data", name="data", method="run_view_query"),
         Output(display_name="DataFrame", name="dataframe", method="read_dataframe"),
-        Output(display_name="Tool", name="component_as_tool", method="to_toolkit", types=["Tool"]),
     ]
 
     def update_build_config(

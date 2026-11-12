@@ -13,6 +13,11 @@ Run inside the Langflow container (where ``lfx_snowflake`` and the installed com
 
 Without ``--apply`` it only reports. Without flow ids every flow visible to the API key is checked.
 Only ``template.code.value`` of Snowflake nodes changes; field values, edges and other nodes are kept.
+
+It also applies ``lfx_snowflake.flow_canvas_repair`` against the installed catalog (``GET /api/v1/all``):
+it pins ``selected_output`` on multi-output nodes and shows/aligns wired input fields, so the canvas
+keeps every stored edge instead of dropping it with "Some connections were removed because they were
+invalid". Edges themselves are never rewritten.
 """
 
 from __future__ import annotations
@@ -25,6 +30,7 @@ import urllib.error
 import urllib.request
 from typing import Any
 
+from lfx_snowflake.flow_canvas_repair import flatten_catalog, repair_flow_canvas
 from lfx_snowflake.stale_flow_guard import refresh_flow_data
 
 
@@ -49,13 +55,21 @@ def _flow_ids() -> list[str]:
     return [str(f["id"]) for f in flows if isinstance(f, dict) and f.get("id")]
 
 
-def refresh(flow_id: str, *, apply: bool) -> bool:
+def _catalog() -> dict[str, Any]:
+    status, components = _request("GET", "/api/v1/all")
+    if status != 200 or not isinstance(components, dict):
+        raise SystemExit(f"cannot read the component catalog (http={status})")
+    return flatten_catalog(components)
+
+
+def refresh(flow_id: str, *, apply: bool, catalog: dict[str, Any] | None = None) -> bool:
     status, flow = _request("GET", f"/api/v1/flows/{flow_id}")
     if status != 200 or not isinstance(flow, dict):
         print(f"[skip] {flow_id} http={status}")
         return False
     data = flow.get("data") or {}
-    changed = refresh_flow_data(data)
+    changed: list[str] = list(refresh_flow_data(data))
+    changed += repair_flow_canvas(data, catalog)
     if not changed:
         print(f"[ok] {flow.get('name')} ({flow_id}) already current")
         return True
@@ -72,7 +86,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("flow_ids", nargs="*")
     parser.add_argument("--apply", action="store_true", help="write the refreshed code (default: report only)")
     args = parser.parse_args(argv)
-    results = [refresh(fid, apply=args.apply) for fid in (args.flow_ids or _flow_ids())]
+    catalog = _catalog()
+    results = [refresh(fid, apply=args.apply, catalog=catalog) for fid in (args.flow_ids or _flow_ids())]
     return 0 if all(results) else 1
 
 

@@ -162,7 +162,6 @@ class SnowflakeCortexSearchComponent(Component):
     outputs = [
         Output(display_name="Search Results Message", name="message", method="run_search"),
         Output(display_name="Search Metadata & SQL", name="metadata", method="get_search_metadata"),
-        Output(display_name="Tool", name="component_as_tool", method="to_toolkit", types=["Tool"]),
     ]
 
     def update_build_config(

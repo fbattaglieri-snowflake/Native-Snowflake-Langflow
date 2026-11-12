@@ -149,7 +149,6 @@ class SnowflakeCortexAnalystComponent(Component):
         Output(display_name="Analyst Message", name="message", method="ask_analyst"),
         Output(display_name="SQL Result DataFrame", name="dataframe", method="run_analyst_sql"),
         Output(display_name="Analyst Payload & SQL", name="metadata", method="get_analyst_payload"),
-        Output(display_name="Tool", name="component_as_tool", method="to_toolkit", types=["Tool"]),
     ]
 
     def update_build_config(

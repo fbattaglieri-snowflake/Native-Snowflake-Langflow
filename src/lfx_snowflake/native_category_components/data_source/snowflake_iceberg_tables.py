@@ -169,7 +169,6 @@ class SnowflakeIcebergTablesComponent(Component):
     outputs = [
         Output(display_name="Iceberg Data", name="data", method="run_iceberg_operation"),
         Output(display_name="DataFrame", name="dataframe", method="read_dataframe"),
-        Output(display_name="Tool", name="component_as_tool", method="to_toolkit", types=["Tool"]),
     ]
 
     def update_build_config(
