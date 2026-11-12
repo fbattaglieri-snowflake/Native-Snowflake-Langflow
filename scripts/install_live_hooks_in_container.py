@@ -951,7 +951,8 @@ def _patch_upstream_models_and_agents_files() -> None:
                 raise ValueError(f"AUTHZ_ROLE_DENIED: {_authz_exc}") from _authz_exc
             flow_id = _resolve_flow_id(self)  # BUG-A2A-03: no flow => None (RBAC only), never a pseudo flow id
             sess_id = getattr(getattr(self, "graph", None), "session_id", None) or flow_id or "default"
-            res = LIVE_BRIDGE.invoke_cortex_agent(
+            res = await asyncio.to_thread(
+                LIVE_BRIDGE.invoke_cortex_agent,
                 database=parts[0],
                 schema=parts[1],
                 agent_name=parts[2],
@@ -1022,7 +1023,9 @@ def _patch_upstream_models_and_agents_files() -> None:
                 raise ValueError(f"AUTHZ_ROLE_DENIED: {_authz_exc}") from _authz_exc
             flow_id = _resolve_flow_id(self)  # BUG-A2A-03: no flow => None (RBAC only), never a pseudo flow id
             sess_id = getattr(getattr(self, "graph", None), "session_id", None) or flow_id or "default"
-            res = LIVE_BRIDGE.invoke_cortex_agent(
+            # The Cortex Agent call takes seconds: run it off the event loop (context variables are copied).
+            res = await asyncio.to_thread(
+                LIVE_BRIDGE.invoke_cortex_agent,
                 database=m_run.group(1),
                 schema=m_run.group(2),
                 agent_name=m_run.group(3),
@@ -1056,7 +1059,8 @@ def _patch_upstream_models_and_agents_files() -> None:
                 raise ValueError(f"AUTHZ_ROLE_DENIED: {_authz_exc}") from _authz_exc
             flow_id = _resolve_flow_id(self)  # BUG-A2A-03: no flow => None (RBAC only), never a pseudo flow id
             sess_id = getattr(getattr(self, "graph", None), "session_id", None) or flow_id or "default"
-            rpc = LIVE_BRIDGE.handle_cortex_agent_a2a_jsonrpc(
+            rpc = await asyncio.to_thread(
+                LIVE_BRIDGE.handle_cortex_agent_a2a_jsonrpc,
                 m_bridge.group(1),
                 m_bridge.group(2),
                 m_bridge.group(3),
