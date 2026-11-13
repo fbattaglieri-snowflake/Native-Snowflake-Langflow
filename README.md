@@ -597,6 +597,8 @@ Before rolling out, also rehearse the database migration on a copy of `/persist`
 - Typed memories: a memory created from `Memories ▸ + ❄️ Snowflake` is a real table in the flow context that the new `Agent Memory` node saves to and recalls from (also as agent tools, with the capture instruction written at creation); retention is enforced by a Snowflake task; memories are read back from Snowflake after a restart; unsupported backends are refused.
 - Stages & Volumes: a failed stage or external volume creation returns the Snowflake error and registers nothing.
 - Message History: the `Chat History` output is a plain transcript (`Sender: text`, oldest first) that can be placed in a prompt, and `Stored Message` passes the stored text on; the full record stays on `Table Records`. A `Store` node writes the message once per run, also when it is the last node of a flow. A Language Model output carries no sender: set `Sender` and `Sender Name` on the node that stores it.
+- Message History: `Conversation Name` keeps several conversations apart in one flow and session (for example one per parallel branch); nodes with the same name share a window. Named conversations are not mirrored to the Playground chat.
+- Decision: new `Summary (text)` output with one readable line per question (score with its scale and closest level, chosen option, or probability), for chat messages and prompts.
 - Memories page: the `+ ❄️ Snowflake` menu reopens after the wizard is closed, the wizard closes after a successful create, the menu and wizard describe only what is created, and a typed memory shows the rows of its table.
 
 **Observability**
