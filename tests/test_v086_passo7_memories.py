@@ -479,12 +479,20 @@ def test_native_message_history_component_uses_graph_ids_and_no_demo_defaults(mo
     for i in range(4):
         comp = mh.SnowflakeMessageHistoryNativeComponent(mode="Store", message_text=f"turn {i}", window_k=3)
         comp.graph = graph
-        stored = json.loads(comp.store_message().text)
+        stored_msg = comp.store_message()
+        stored = dict(stored_msg.data)
+    assert stored_msg.text == "turn 3"  # Stored Message passes the stored text on
     assert stored["flow_id"] == "flow-graph" and stored["session_id"] == "graph-sess"
     assert [m["text"] for m in stored["messages"]] == ["turn 1", "turn 2", "turn 3"]  # Store returns window_k
     other = mh.SnowflakeMessageHistoryNativeComponent(mode="Retrieve", window_k=10)
     other.graph = SimpleNamespace(flow_id="flow-other", session_id="graph-sess")
-    assert json.loads(other.retrieve_chat_history().text)["messages"] == []
+    assert other.retrieve_chat_history().text == "" and other.retrieve_history_table().data["messages"] == []
+    reader = mh.SnowflakeMessageHistoryNativeComponent(mode="Retrieve", window_k=2)
+    reader.graph = graph
+    history = reader.retrieve_chat_history()
+    # Chat History is a plain transcript for prompts: no JSON, no SQL, no internal ids.
+    assert history.text == "User: turn 2\nUser: turn 3"
+    assert "history_sql" not in history.text and "LANGFLOW_MESSAGES" not in history.text
 
 
 def test_domain_store_returns_session_window():

@@ -644,9 +644,27 @@ class SnowflakeMessageHistoryNativeComponent(Component):
             "active_role": LIVE_BRIDGE.active_role,
         }
 
+    @staticmethod
+    def _transcript(payload: dict[str, Any]) -> str:
+        """The window as plain `Sender: text` lines, oldest first, ready to be placed in a prompt."""
+        lines = []
+        for msg in payload.get("messages") or []:
+            if not isinstance(msg, dict):
+                continue
+            text = str(msg.get("text") or "").strip()
+            if text:
+                lines.append(f"{str(msg.get('sender_name') or msg.get('sender') or 'User').strip()}: {text}")
+        return "\n".join(lines)
+
+    @staticmethod
+    def _history_message(payload: dict[str, Any], text: str) -> Message:
+        # The text is what a prompt or a model reads; the full record stays available as Message data
+        # and on the Table Records output.
+        return Message(text=text, **{k: v for k, v in payload.items() if k != "text"})
+
     def retrieve_chat_history(self) -> Message:
         payload = self._run_history()
-        return Message(text=json.dumps(payload), **{k: v for k, v in payload.items() if k != "text"})
+        return self._history_message(payload, self._transcript(payload))
 
     def retrieve_messages(self) -> Message:
         return self.retrieve_chat_history()
@@ -673,5 +691,5 @@ class SnowflakeMessageHistoryNativeComponent(Component):
 
     def store_message(self) -> Message:
         payload = self._run_history(mode_override="Store")
-        return Message(text=json.dumps(payload), **{k: v for k, v in payload.items() if k != "text"})
+        return self._history_message(payload, str(payload.get("stored_text") or ""))
 

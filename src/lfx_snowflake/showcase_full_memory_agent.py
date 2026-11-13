@@ -1120,7 +1120,7 @@ def run_full_memory_showcase_simulation(
             mem2_comp.to_build_config(), "MEM_2_CHAT_WINDOW", "memory_base"
         )
         try:
-            mem2_history = json.loads(mem2_comp.retrieve_chat_history().text)
+            mem2_history = dict(mem2_comp.retrieve_history_table().data)
         except MessageHistoryError as mh_exc:
             # BUG-MEM-MH-01: no in-RAM fallback; report the governed table as not reachable.
             mem2_history = {

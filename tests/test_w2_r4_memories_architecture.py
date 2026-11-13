@@ -640,7 +640,7 @@ def test_w2_r4_06_and_06b_dynamic_memory_base_message_history_and_data_sources_p
 
     _fake = FakeGovernedMessagesBridge(_mh_mod.LIVE_BRIDGE)
     monkeypatch.setattr(_mh_mod, "LIVE_BRIDGE", _fake)
-    pg_payload = json.loads(msg_hist_pg.retrieve_chat_history().text)
+    pg_payload = dict(msg_hist_pg.retrieve_history_table().data)
     assert pg_payload["canonical_memory_type"] == "buffer_window_memory"
     assert pg_payload["storage_family"] == "snowflake_postgres"
     assert pg_payload["window_k"] == 8
