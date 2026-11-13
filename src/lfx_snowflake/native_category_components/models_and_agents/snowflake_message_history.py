@@ -148,6 +148,15 @@ class SnowflakeMessageHistoryNativeComponent(Component):
             info="Empty = the running flow's session (graph.session_id), as in Langflow's native Message History.",
             show=True,
         ),
+        StrInput(
+            name="conversation",
+            display_name="Conversation Name",
+            value="",
+            info="Optional. Message History nodes with the same name share one window inside the session; "
+            "use different names to keep several conversations apart in one flow (for example one per "
+            "branch). Empty = the session's main conversation, also shown in the Playground.",
+            show=True,
+        ),
         IntInput(
             name="window_k",
             display_name="Window Size K (Last K Verbatim Turns)",
@@ -534,7 +543,16 @@ class SnowflakeMessageHistoryNativeComponent(Component):
         turn_id = str(getattr(self, "turn_id", "") or "").strip()
 
         mode = str(mode_override or getattr(self, "mode", "Retrieve") or "Retrieve").strip()
-        history = GovernedMessageHistory(LIVE_BRIDGE, flow_id=flow_id, session_id=sess_id)
+        conversation = "".join(
+            ch if ch.isalnum() or ch in "_-" else "_" for ch in str(getattr(self, "conversation", "") or "").strip()
+        )[:64]
+        if conversation:
+            # A named conversation has its own window and is not the Playground chat: no native mirror.
+            history = GovernedMessageHistory(
+                LIVE_BRIDGE, flow_id=flow_id, session_id=f"{sess_id}::{conversation}", native_api=None
+            )
+        else:
+            history = GovernedMessageHistory(LIVE_BRIDGE, flow_id=flow_id, session_id=sess_id)
 
         stored_in_memories: list[str] = []
         if mode == "Store" and msg_str:
@@ -652,6 +670,7 @@ class SnowflakeMessageHistoryNativeComponent(Component):
             "external_memory_names": external_memory_names,
             "stored_in_memories": stored_in_memories,
             "stored_text": msg_str if mode == "Store" else "",
+            "conversation": conversation,
             "messages": resolved_messages,
             "history_sql": list(history.last_sql),
             "replay_state": [],

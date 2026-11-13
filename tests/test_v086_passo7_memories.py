@@ -505,6 +505,19 @@ def test_native_message_history_component_uses_graph_ids_and_no_demo_defaults(mo
     assert last.store_message().data["messages"][-1]["text"] == "only once" and len(last.retrieve_history_table().data["messages"]) == 2
 
 
+    # Named conversations keep separate windows inside one flow and session.
+    for name, text in (("agent", "answer of the agent"), ("llm", "answer of the model"), ("", "main chat")):
+        node = mh.SnowflakeMessageHistoryNativeComponent(mode="Store", message_text=text, window_k=10, conversation=name)
+        node.graph = SimpleNamespace(flow_id="flow-conv", session_id="s1")
+        node.store_message()
+    def window(name):
+        node = mh.SnowflakeMessageHistoryNativeComponent(mode="Retrieve", window_k=10, conversation=name)
+        node.graph = SimpleNamespace(flow_id="flow-conv", session_id="s1")
+        return node.retrieve_chat_history().text
+    assert window("agent") == "User: answer of the agent" and window("llm") == "User: answer of the model"
+    assert window("") == "User: main chat" and window("other") == ""
+
+
 def test_domain_store_returns_session_window():
     from lfx_snowflake.components.message_history import (
         InMemoryMessageHistoryBackend,
