@@ -266,7 +266,7 @@ class TestAC11NoFakeMemorySuccess:
         res = clean_bridge.create_or_register_memory(
             {
                 "name": "FAILING_MEM",
-                "agent_memory_type": "buffer_window_memory",
+                "agent_memory_type": "summary_memory",
                 "database": "SNOWFLAKE_LANGFLOW",
                 "schema": "CORE",
                 "create_new_physical_store": True,

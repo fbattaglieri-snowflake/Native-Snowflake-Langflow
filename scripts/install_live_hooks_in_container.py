@@ -2424,6 +2424,7 @@ def install_all() -> None:
         "SnowflakeAIFunction",
         "SnowflakeAIRedact",
         "SnowflakeSQLStatement",
+        "SnowflakeAgentMemory",
         "SnowflakeLLMNode",
         "SnowflakeDecision",
     ):

@@ -1790,20 +1790,27 @@ class LiveSnowflakeBridge:
         entity_namespace: str = "default",
         topic: str = "",
         limit: int = 10,
+        flow_id: str | None = None,
     ) -> dict[str, Any]:
         """Recall records from a Snowflake Memory across all 5 LangChain/Langflow Memory types (`W2-R2-13`, `W2-R3-05`)."""
         clean_ref = (memory_ref or "").strip()
         if not clean_ref or clean_ref == "None":
             return {"ok": False, "recalled": False, "memory_ref": None, "rows": []}
         short_ref = clean_ref.split(" (")[0].strip()
-        matched: dict[str, Any] | None = None
-        for entry in self.memories_catalog:
-            if short_ref.upper() in {
-                str(entry.get("name") or "").strip().upper(),
-                str(entry.get("table_fqn") or "").strip().upper(),
-            }:
-                matched = entry
-                break
+
+        def _lookup() -> dict[str, Any] | None:
+            # Only memories inside the flow `[ ❄️ Context ]` are candidates.
+            for entry in self.get_memories_for_flow(flow_id=flow_id) if flow_id else self.memories_catalog:
+                if short_ref.upper() in {
+                    str(entry.get("name") or "").strip().upper(),
+                    str(entry.get("table_fqn") or "").strip().upper(),
+                }:
+                    return entry
+            return None
+
+        matched = _lookup()
+        if matched is None and flow_id and self.discover_typed_memories(flow_id, force=True):
+            matched = _lookup()
         if matched is None:
             from lfx_snowflake.memories_lf_mem import legacy_memory_not_found  # noqa: PLC0415
 
@@ -1842,6 +1849,7 @@ class LiveSnowflakeBridge:
         ns = entity_namespace or str(matched.get("entity_namespace") or "default")
         tpc = topic or q or str(matched.get("topic") or "general")
         binds: list[tuple[str, Any]] = []
+        preset_bindings: dict[str, dict[str, Any]] | None = None
 
         def _b(value: Any, typ: str = "TEXT") -> str:
             binds.append((typ, value))
@@ -1889,7 +1897,7 @@ class LiveSnowflakeBridge:
             )
         elif canonical_type == "graph_state_checkpointer":
             recall_sql = (
-                f"SELECT state_blob, checkpoint_ns, step_id FROM {fqn} "
+                f"SELECT state_blob, checkpoint_ns, step_id, created_at FROM {fqn} "
                 f"WHERE thread_id = {_b(thread)} ORDER BY step_id DESC LIMIT 1"
             )
         elif canonical_type == "buffer_window_memory":
@@ -1919,18 +1927,21 @@ class LiveSnowflakeBridge:
                     f"WHERE user_id = {_b(usr)} AND entity_namespace = {_b(ns)} LIMIT 1"
                 )
         elif canonical_type == "episodic_memory":
-            few_shot_k = max(1, min(int(matched.get("few_shot_k") or bounded_limit), 200))
+            from . import memories_typed as _typed  # noqa: PLC0415
+
             min_score = matched.get("outcome_score_threshold")
-            score_filter = f" AND outcome_score >= {_b(float(min_score), 'REAL')}" if min_score is not None else ""
-            recall_sql = (
-                f"SELECT topic, tool_used, outcome_score, episode_text FROM {fqn} "
-                f"WHERE topic = {_b(tpc)}{score_filter} ORDER BY outcome_score DESC, created_at DESC LIMIT {few_shot_k}"
+            recall_sql, preset_bindings = _typed.build_episodic_recall(
+                fqn,
+                query=q,
+                topic=topic or "",
+                min_score=float(min_score) if min_score is not None else None,
+                limit=max(1, min(int(matched.get("few_shot_k") or bounded_limit), 200)),
             )
         else:
             where_clause = f" WHERE text_chunk ILIKE {_b('%' + q + '%')}" if q else ""
             recall_sql = f"SELECT * FROM {fqn}{where_clause} ORDER BY created_at DESC LIMIT {bounded_limit}"
 
-        sql_bindings = {str(i + 1): {"type": t, "value": str(v)} for i, (t, v) in enumerate(binds)}
+        sql_bindings = preset_bindings or {str(i + 1): {"type": t, "value": str(v)} for i, (t, v) in enumerate(binds)}
         res = self.execute_sql(recall_sql, bindings=sql_bindings or None)
         ok = bool(res.get("ok"))
         out: dict[str, Any] = {
@@ -2161,6 +2172,38 @@ class LiveSnowflakeBridge:
             table_type = "HYBRID"
         else:
             table_type = "STANDARD"
+
+        # A typed memory is one real Snowflake table that flows read and write: backends that cannot be
+        # provisioned and written from here are refused instead of being registered as if they existed.
+        # The scripted Full Memory showcase registers simulated memories (dry run only) and is exempt.
+        is_typed_request = not isinstance(body.get("lf_mem"), dict) and not (
+            body.get("_legacy_simulation") and body.get("dry_run")
+        )
+        if is_typed_request:
+            unsupported = ""
+            if is_postgres_branch:
+                unsupported = "Snowflake Postgres is not available as a memory backend; choose Database ▸ Schema."
+            elif canonical_type == "buffer_window_memory":
+                unsupported = "Chat messages are stored by the Message History component; no separate memory is needed."
+            elif table_type in ("DYNAMIC", "INTERACTIVE", "ICEBERG"):
+                unsupported = f"A {table_type.title()} table cannot be written by a flow; choose a Standard or Hybrid table."
+            elif category == "cortex_search" or "CORTEX SEARCH" in backend.upper():
+                unsupported = "Cortex Search is not available as a memory backend; choose a Standard table."
+            elif enable_embedding and canonical_type != "episodic_memory":
+                unsupported = "Embeddings are available for episodic memories only."
+            elif enable_embedding and str(body.get("embedding_provider") or "snowflake_cortex").strip().lower() not in (
+                "snowflake_cortex",
+                "none",
+            ):
+                unsupported = "Episode embeddings are computed by Snowflake AI_EMBED; choose a Snowflake Cortex embedding model."
+            if unsupported:
+                return {
+                    "ok": False,
+                    "status_code": 422,
+                    "error_code": ErrorCode.UNSUPPORTED_CAPABILITY.value,
+                    "message": unsupported,
+                    "active_role": self.active_role,
+                }
 
         semi_type = str(body.get("semi_structured_type") or body.get("payload_column_type") or "").strip().upper()
         embedding_provider = str(
@@ -2601,19 +2644,92 @@ class LiveSnowflakeBridge:
                 f"PRIMARY KEY {sanitized_pk_expr}{sec_idx_ddl}){retention_ddl};"
             )
 
-        if body.get("dry_run") or not create_physical:
+        from . import memories_typed as _typed  # noqa: PLC0415
+
+        typed_kind = canonical_type if is_typed_request and canonical_type in _typed.WRITABLE_KINDS else ""
+        capture_instructions = str(
+            body.get("capture_instructions")
+            or body.get("preproc_instructions")
+            or (llm_preprocessing.get("custom_instructions") if isinstance(llm_preprocessing, dict) else "")
+            or _typed.DEFAULT_CAPTURE_INSTRUCTIONS.get(typed_kind, "")
+        ).strip()
+        cleanup_policy = {
+            "retention_days": int(retention_days) if retention_days is not None else 0,
+            "max_rows": int(body.get("max_rows") or body.get("max_episodes") or 0),
+            "min_outcome_score": body.get("cleanup_min_outcome_score"),
+            "keep_last_steps": int(body.get("keep_last_steps") or 0),
+        }
+        cleanup_statement = _typed.build_cleanup_statement(typed_kind, fqn, cleanup_policy) if typed_kind else None
+        cleanup_enabled = bool(cleanup_statement) and bool(body.get("cleanup_enabled", True))
+        cleanup_schedule = str(body.get("cleanup_schedule") or "0 3 * * *").strip()
+        cleanup_task = _typed.cleanup_task_fqn(fqn) if typed_kind and cleanup_enabled else None
+        typed_meta: dict[str, Any] = {}
+        if typed_kind:
+            typed_meta = {
+                "name": name,
+                "memory_id": str(body.get("memory_id") or compute_deterministic_memory_uuid(name)),
+                "canonical_memory_type": typed_kind,
+                "capture_instructions": capture_instructions,
+                **{k: v for k, v in cleanup_policy.items() if v},
+                "ttl_hours": int(body.get("ttl_hours") or 24) if typed_kind == _typed.CHECKPOINTER else None,
+                "few_shot_k": int(body.get("few_shot_k") or 3) if typed_kind == _typed.EPISODIC else None,
+                "outcome_score_threshold": (
+                    float(body.get("outcome_score_threshold") if body.get("outcome_score_threshold") is not None else 0.7)
+                    if typed_kind == _typed.EPISODIC
+                    else None
+                ),
+                "enable_embedding": True if is_vector else None,
+                "embedding_model": embedding_model.split(" ")[0] if is_vector else None,
+                "dimension": dim if is_vector else None,
+                "cleanup_task": cleanup_task,
+                "cleanup_schedule": cleanup_schedule if cleanup_task else None,
+                "managed": bool(create_physical),
+                "flow_id": norm_fid,
+                "created_by_role": self.active_role,
+            }
+            if create_physical:
+                # Row retention is enforced by the cleanup task, not by Time Travel retention.
+                ddl = ddl.replace(retention_ddl, "") if retention_ddl else ddl
+                ddl = ddl.rstrip().rstrip(";") + f" COMMENT = {_typed.sql_literal(_typed.build_comment(typed_meta))};"
+
+        cleanup_result: dict[str, Any] | None = None
+        if body.get("dry_run"):
             exec_res = {"ok": True, "dry_run": True}
-        elif is_postgres_branch and not self._is_execute_sql_mocked():
-            exec_res = {"ok": True, "postgres_ddl": True}
+        elif not create_physical:
+            exec_res = {"ok": True, "dry_run": True}
+            if typed_kind:
+                # Binding an existing table: it must exist with the columns this memory type reads and writes.
+                cols = ", ".join(_typed.REQUIRED_COLUMNS[typed_kind])
+                probe = self.execute_sql(f"SELECT {cols} FROM {fqn} LIMIT 0")
+                if not probe.get("ok"):
+                    return {
+                        "ok": False,
+                        "status_code": 422,
+                        "error_code": str(probe.get("error_code") or "SNOWFLAKE_ERROR"),
+                        "message": (
+                            f"Table {fqn} cannot be used as a {type_spec['label']} memory: it must exist and expose "
+                            f"the columns {cols}. {probe.get('message') or ''}"
+                        ).strip(),
+                        "active_role": self.active_role,
+                    }
+                tagged = self.execute_sql(
+                    f"COMMENT ON TABLE {fqn} IS {_typed.sql_literal(_typed.build_comment(typed_meta))}"
+                )
+                typed_meta["persistent"] = bool(tagged.get("ok"))
         else:
             exec_res = self.execute_sql(ddl)
-            if (
-                not exec_res.get("ok")
-                and not self._is_execute_sql_mocked()
-                and "CREATE HYBRID TABLE" in ddl
-            ):
-                fallback_std_ddl = ddl.replace("CREATE HYBRID TABLE", "CREATE TABLE")
-                exec_res = self.execute_sql(fallback_std_ddl)
+            if not exec_res.get("ok") and "CREATE HYBRID TABLE" in ddl and not exec_res.get("mode") == "offline":
+                exec_res = {
+                    **exec_res,
+                    "message": (
+                        f"Snowflake did not create the Hybrid table: {exec_res.get('message') or 'unknown error'} "
+                        "Choose a Standard table if Hybrid tables are not available in this account or region."
+                    ),
+                }
+            if exec_res.get("ok") and cleanup_task and cleanup_statement:
+                cleanup_result = self._create_memory_cleanup_task(
+                    fqn, cleanup_statement, cleanup_schedule, str(body.get("warehouse") or flow_ctx.get("warehouse") or self.warehouse or "")
+                )
             if not exec_res.get("ok"):
                 err_code = str(exec_res.get("error_code") or ("NOT_CONFIGURED" if exec_res.get("mode") == "offline" else "SNOWFLAKE_ERROR"))
                 emit_audit(
@@ -2731,9 +2847,14 @@ class LiveSnowflakeBridge:
             "ddl": ddl,
             "created_by_role": self.active_role,
             "created_at": datetime.now(timezone.utc).isoformat(),
-            "snowflake_created": bool(exec_res.get("ok")) and create_physical,
+            "snowflake_created": bool(exec_res.get("ok")) and create_physical and not exec_res.get("dry_run"),
             "stored_records": list(body.get("stored_records") or []),
         }
+        if typed_kind:
+            entry.update({k: v for k, v in typed_meta.items() if v is not None})
+            entry["retention_days"] = cleanup_policy["retention_days"]
+            entry["cleanup"] = cleanup_result or {"enabled": False}
+            entry["cleanup_statement"] = cleanup_statement
         # Replace existing memory entry with same name if present, else append
         # BUG-MEM-API-05: an LF_MEM base is identified by its memory id, never by name (two flows may share a name).
         lf_mem_id = str((body.get("lf_mem") or {}).get("memory_base_id") or "") if isinstance(body.get("lf_mem"), dict) else ""
@@ -2787,7 +2908,7 @@ class LiveSnowflakeBridge:
                     object_name=postgres_instance,
                     flow_id=norm_fid,
                 )
-        elif create_physical and not body.get("_skip_context_auto_register"):
+        elif (create_physical or typed_kind) and not body.get("_skip_context_auto_register"):
             self.register_object_in_context(
                 database=db,
                 schema=sch,
@@ -2835,7 +2956,213 @@ class LiveSnowflakeBridge:
                 },
                 flow_id=norm_fid,
             )
-        return {"ok": True, "status_code": 201, "memory": entry, "ddl": ddl}
+        out = {"ok": True, "status_code": 201, "memory": entry, "ddl": ddl}
+        if cleanup_result is not None:
+            out["cleanup"] = cleanup_result
+            if not cleanup_result.get("ok"):
+                out["warning"] = (
+                    "The memory table was created, but its scheduled cleanup task was not: "
+                    f"{cleanup_result.get('message')} Cleanup can still be run on demand."
+                )
+        return out
+
+    def _create_memory_cleanup_task(self, fqn: str, statement: str, cron: str, warehouse: str) -> dict[str, Any]:
+        """Create and resume the Snowflake task that enforces a typed memory's retention policy."""
+        from . import memories_typed as _typed  # noqa: PLC0415
+
+        task = _typed.cleanup_task_fqn(fqn)
+        try:
+            wh = _sql_safety.validate_identifier(warehouse, "warehouse") if warehouse else ""
+            ddl = _typed.build_cleanup_task_ddl(fqn, statement, warehouse=wh, cron=cron)
+        except (_typed.TypedMemoryError, _sql_safety.SqlSafetyError) as exc:
+            return {"enabled": True, "ok": False, "task": task, "message": str(exc)}
+        res = self.execute_sql(ddl)
+        if res.get("ok"):
+            res = self.execute_sql(f"ALTER TASK {task} RESUME")
+        return {
+            "enabled": True,
+            "ok": bool(res.get("ok")),
+            "task": task,
+            "schedule": f"USING CRON {cron} UTC",
+            "statement": statement,
+            "message": None if res.get("ok") else str(res.get("message") or res.get("error_code") or "Task was not created."),
+        }
+
+    def discover_typed_memories(self, flow_id: str | None = None, *, force: bool = False) -> int:
+        """Load typed memories from the tables of the flow `[ ❄️ Context ]` schemas (configuration lives in the table comment)."""
+        from . import memories_typed as _typed  # noqa: PLC0415
+
+        norm_fid = self._normalize_flow_id(flow_id or CURRENT_SNOWFLAKE_FLOW_ID.get() or self.active_flow_id)
+        ctx = (self.get_flow_context(norm_fid) if norm_fid else self.selected_context) or {}
+        pairs: list[tuple[str, str]] = []
+        schemas_map = ctx.get("schemas_by_db") if isinstance(ctx.get("schemas_by_db"), dict) else {}
+        for db_k, sch_list in schemas_map.items():
+            for sch in sch_list if isinstance(sch_list, list) else []:
+                pairs.append((str(db_k).strip().upper(), str(sch).strip().upper()))
+        if ctx.get("database") and ctx.get("schema"):
+            pairs.append((str(ctx["database"]).strip().upper(), str(ctx["schema"]).strip().upper()))
+        cache: dict[tuple[str, str], float] = self.__dict__.setdefault("_typed_memory_discovery_ts", {})
+        found = 0
+        for db, sch in list(dict.fromkeys(pairs))[:25]:
+            if not force and time.time() - cache.get((db, sch), 0.0) < 120:
+                continue
+            try:
+                _sql_safety.validate_identifier(db, "database")
+                _sql_safety.validate_identifier(sch, "schema")
+            except _sql_safety.SqlSafetyError:
+                continue
+            res = self.execute_sql(f"SHOW TABLES LIKE '{_typed.TABLE_PREFIX}%' IN SCHEMA {db}.{sch}")
+            if not res.get("ok") or res.get("mode") == "offline":
+                continue
+            cache[(db, sch)] = time.time()
+            for row in res.get("rows") or []:
+                if not isinstance(row, dict):
+                    continue
+                low = {str(k).lower(): v for k, v in row.items()}
+                meta = _typed.parse_comment(low.get("comment"))
+                table = str(low.get("name") or "").strip()
+                if not meta or not table:
+                    continue
+                fqn = f"{db}.{sch}.{table}"
+                if any(str(m.get("table_fqn") or "").upper() == fqn.upper() for m in self.memories_registry):
+                    continue
+                self.memories_registry.append(
+                    _typed.entry_from_table(db, sch, table, meta, is_hybrid=str(low.get("is_hybrid") or "").upper() in ("Y", "TRUE"))
+                )
+                found += 1
+        return found
+
+    def _resolve_typed_memory(self, memory_ref: str, flow_id: str | None) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+        """Return ``(entry, None)`` for a typed memory usable by this flow, else ``(None, error)``."""
+        from . import memories_typed as _typed  # noqa: PLC0415
+
+        short_ref = str(memory_ref or "").split(" (")[0].strip()
+        if not short_ref or short_ref == "None":
+            return None, {"ok": False, "status_code": 422, "error_code": "MISSING_MEMORY", "message": "Select a memory."}
+
+        def _match() -> dict[str, Any] | None:
+            for entry in self.memories_registry:
+                if short_ref.upper() in {
+                    str(entry.get("name") or "").strip().upper(),
+                    str(entry.get("table_fqn") or "").strip().upper(),
+                    str(entry.get("memory_id") or "").strip().upper(),
+                }:
+                    return entry
+            return None
+
+        entry = _match()
+        if entry is None and self.discover_typed_memories(flow_id, force=True):
+            entry = _match()
+        if entry is None:
+            return None, {
+                "ok": False,
+                "status_code": 404,
+                "error_code": ErrorCode.OBJECT_NOT_FOUND_OR_UNAUTHORIZED.value,
+                "message": f"Snowflake memory '{short_ref}' was not found in the schemas of this flow's context.",
+            }
+        if not self.is_memory_visible_in_context(entry, flow_id=flow_id):
+            return None, {
+                "ok": False,
+                "status_code": 403,
+                "error_code": _flow_guard.AUTHZ_OBJECT_NOT_IN_FLOW_CONTEXT,
+                "message": f"Memory '{short_ref}' ({entry.get('table_fqn')}) is outside this flow's context.",
+            }
+        kind = str(entry.get("canonical_memory_type") or "")
+        if isinstance(entry.get("lf_mem"), dict) or kind not in _typed.WRITABLE_KINDS:
+            return None, {
+                "ok": False,
+                "status_code": 422,
+                "error_code": ErrorCode.UNSUPPORTED_CAPABILITY.value,
+                "message": f"Memory '{short_ref}' is filled automatically from the conversation and cannot be written by a node.",
+            }
+        return entry, None
+
+    def write_memory(self, memory_ref: str, *, content: Any, flow_id: str | None = None, **fields: Any) -> dict[str, Any]:
+        """Store ``content`` in a typed memory table (checkpoint, summary, profile or episode)."""
+        from . import memories_typed as _typed  # noqa: PLC0415
+
+        entry, err = self._resolve_typed_memory(memory_ref, flow_id)
+        if entry is None:
+            return {**(err or {}), "stored": False}
+        kind = str(entry["canonical_memory_type"])
+        fqn = str(entry.get("table_fqn") or "")
+        embed_lit, embed_fn = "", "AI_EMBED"
+        try:
+            fqn = _sql_safety.validate_fqn(fqn, "table_fqn", min_parts=3, max_parts=3)
+            if kind == _typed.EPISODIC and entry.get("enable_embedding"):
+                embed_model = str(entry.get("embedding_model") or "").split(" ")[0]
+                is_multi = embed_model in _sql_safety.AI_MULTI_EMBED_MODELS
+                embed_fn = "AI_MULTI_EMBED" if is_multi else "AI_EMBED"
+                embed_lit = _sql_safety.sql_string_literal(_sql_safety.validate_embed_model(embed_model, multi=is_multi))
+            if kind == _typed.CHECKPOINTER:
+                fields.setdefault("ttl_hours", int(entry.get("ttl_hours") or 24))
+            sql, bindings = _typed.build_write_request(
+                kind,
+                fqn,
+                memory_name=str(entry.get("name") or ""),
+                role=str(self.active_role or ""),
+                content=content,
+                embed_model_literal=embed_lit,
+                embed_function=embed_fn,
+                **{k: v for k, v in fields.items() if v is not None},
+            )
+        except (_typed.TypedMemoryError, _sql_safety.SqlSafetyError, TypeError, ValueError) as exc:
+            return {"ok": False, "stored": False, "status_code": 422, "error_code": "INVALID_MEMORY_WRITE", "message": str(exc)}
+        res = self.execute_sql(sql, bindings=bindings)
+        ok = bool(res.get("ok")) and res.get("mode") != "offline"
+        out: dict[str, Any] = {
+            "ok": ok,
+            "stored": ok,
+            "status_code": 201 if ok else 422,
+            "memory_ref": entry.get("name"),
+            "canonical_memory_type": kind,
+            "table_fqn": fqn,
+            "query_id": res.get("statement_handle") if ok else None,
+            "active_role": self.active_role,
+        }
+        if not ok:
+            out["error_code"] = str(res.get("error_code") or ("NOT_CONFIGURED" if res.get("mode") == "offline" else "SNOWFLAKE_ERROR"))
+            out["message"] = str(res.get("message") or "Snowflake did not store the memory record.")
+        return out
+
+    def cleanup_memory(self, memory_ref: str, *, flow_id: str | None = None) -> dict[str, Any]:
+        """Run a typed memory's retention policy now (the same statement its scheduled task runs)."""
+        from . import memories_typed as _typed  # noqa: PLC0415
+
+        entry, err = self._resolve_typed_memory(memory_ref, flow_id)
+        if entry is None:
+            return {**(err or {}), "cleaned": False}
+        kind = str(entry["canonical_memory_type"])
+        try:
+            fqn = _sql_safety.validate_fqn(str(entry.get("table_fqn") or ""), "table_fqn", min_parts=3, max_parts=3)
+        except _sql_safety.SqlSafetyError as exc:
+            return {"ok": False, "cleaned": False, "status_code": 422, "error_code": "INVALID_IDENTIFIER", "message": str(exc)}
+        statement = _typed.build_cleanup_statement(kind, fqn, entry)
+        if not statement:
+            return {
+                "ok": False,
+                "cleaned": False,
+                "status_code": 422,
+                "error_code": "NO_CLEANUP_POLICY",
+                "message": f"Memory '{entry.get('name')}' has no retention policy to apply.",
+            }
+        res = self.execute_sql(statement)
+        ok = bool(res.get("ok")) and res.get("mode") != "offline"
+        rows = res.get("rows") or []
+        deleted = None
+        if ok and rows and isinstance(rows[0], dict):
+            deleted = next(iter(rows[0].values()), None)
+        return {
+            "ok": ok,
+            "cleaned": ok,
+            "status_code": 200 if ok else 422,
+            "memory_ref": entry.get("name"),
+            "table_fqn": fqn,
+            "rows_deleted": deleted,
+            "statement": statement,
+            "query_id": res.get("statement_handle") if ok else None,
+            **({} if ok else {"error_code": str(res.get("error_code") or "SNOWFLAKE_ERROR"), "message": str(res.get("message") or "Cleanup failed.")}),
+        }
 
     def _persist_memory_in_langflow_sqlite(
         self, entry: dict[str, Any], flow_id: str | None = None, user_id: str | None = None
@@ -3319,6 +3646,35 @@ class LiveSnowflakeBridge:
         mem_uuid_str = str(entry.get("memory_id") or entry.get("langflow_memory_id") or compute_deterministic_memory_uuid(mem_name))
         mem_hex_str = mem_uuid_str.replace("-", "")
         target_upper = target.upper()
+        dropped: list[str] = []
+        from . import memories_typed as _typed  # noqa: PLC0415
+
+        if (
+            not isinstance(entry.get("lf_mem"), dict)
+            and str(entry.get("canonical_memory_type") or "") in _typed.WRITABLE_KINDS
+            and str(entry.get("storage_family") or "snowflake_sql") == "snowflake_sql"
+            and (entry.get("snowflake_created") or entry.get("discovered_from_snowflake") or entry.get("persistent"))
+        ):
+            try:
+                safe_fqn = _sql_safety.validate_fqn(fqn, "table_fqn", min_parts=3, max_parts=3)
+            except _sql_safety.SqlSafetyError as exc:
+                return {"ok": False, "status_code": 400, "error_code": "INVALID_IDENTIFIER", "message": str(exc)}
+            managed = str(entry.get("storage_mode") or "create_physical") == "create_physical" and entry.get("managed", True)
+            statements = [f"DROP TASK IF EXISTS {_typed.cleanup_task_fqn(safe_fqn)}"]
+            # A table that was only bound keeps its data: just the memory marker is removed.
+            statements.append(f"DROP TABLE IF EXISTS {safe_fqn}" if managed else f"COMMENT ON TABLE {safe_fqn} IS ''")
+            for stmt in statements:
+                res = self.execute_sql(stmt)
+                if not res.get("ok"):
+                    return {
+                        "ok": False,
+                        "status_code": 501 if res.get("mode") == "offline" else 422,
+                        "error_code": str(res.get("error_code") or "SNOWFLAKE_ERROR"),
+                        "message": f"Snowflake did not remove the memory ({stmt.split(' IF ')[0]}): {res.get('message') or ''} "
+                        "Nothing was unregistered.",
+                        "active_role": self.active_role,
+                    }
+                dropped.append(stmt)
         self.memories_registry = [
             m
             for m in self.memories_registry
@@ -3366,6 +3722,7 @@ class LiveSnowflakeBridge:
             "deleted": mem_name,
             "memory_id": mem_uuid_str,
             "table_fqn": fqn,
+            "snowflake_statements": dropped,
             "active_role": self.active_role,
         }
 
@@ -5341,6 +5698,27 @@ class LiveSnowflakeBridge:
         else:
             stage_type = "INTERNAL"
 
+        if stage_type == "EXTERNAL":
+            _creds = payload.get("credentials") if isinstance(payload.get("credentials"), dict) else {}
+            _has_creds = any(
+                str(_creds.get(k) or payload.get(k) or "").strip()
+                for k in ("aws_key_id", "aws_role", "azure_sas_token")
+            )
+            missing_stg = []
+            if not str(payload.get("url") or payload.get("cloud_url") or "").strip():
+                missing_stg.append("url")
+            if not str(payload.get("storage_integration") or "").strip() and not _has_creds:
+                missing_stg.append("storage_integration or credentials")
+            if missing_stg:
+                return {
+                    "ok": False,
+                    "status_code": 422,
+                    "error_code": "MISSING_REQUIRED_FIELD",
+                    "message": f"An External Stage needs: {', '.join(missing_stg)}.",
+                    "missing_fields": missing_stg,
+                    "active_role": self.active_role,
+                }
+
         create_mode = str(payload.get("create_mode") or "CREATE IF NOT EXISTS").strip().upper()
         if payload.get("or_replace") is True or "REPLACE" in create_mode:
             create_prefix = f"CREATE OR REPLACE STAGE {fqn}"
@@ -5449,6 +5827,28 @@ class LiveSnowflakeBridge:
         ddl = " ".join(clauses) + ";"
         dry_run = bool(payload.get("dry_run", False))
         exec_res = {"ok": True, "mode": "dry_run"} if dry_run else self.execute_sql(ddl)
+        if not dry_run and (not exec_res.get("ok") or exec_res.get("mode") == "offline"):
+            # The object does not exist in Snowflake: report the failure and register nothing.
+            err_code = str(exec_res.get("error_code") or ("NOT_CONFIGURED" if exec_res.get("mode") == "offline" else "SNOWFLAKE_ERROR"))
+            msg = str(exec_res.get("message") or "Snowflake did not create the stage.")
+            self.record_audit_event(
+                action="STAGE_CREATE",
+                outcome="FAILED",
+                error_code=err_code,
+                target_object=f"@{fqn}",
+                flow_id=eff_fid,
+                details={"message": msg},
+            )
+            return {
+                "ok": False,
+                "status_code": 501 if err_code == "NOT_CONFIGURED" else 422,
+                "error_code": err_code,
+                "message": msg,
+                "banner": msg,
+                "ddl": ddl,
+                "query_id": exec_res.get("statement_handle"),
+                "active_role": self.active_role,
+            }
 
         stage_entry = {
             "name": safe_name,
@@ -5558,6 +5958,27 @@ class LiveSnowflakeBridge:
         else:
             create_prefix = f"CREATE EXTERNAL VOLUME {safe_name}"
 
+        vol_provider = str(payload.get("storage_provider") or payload.get("cloud_provider") or "S3").strip().upper()
+        missing_vol = [
+            label
+            for label, present in (
+                ("storage_base_url", bool(str(payload.get("storage_base_url") or payload.get("url") or "").strip())),
+                ("storage_aws_role_arn", vol_provider not in ("S3", "S3GOV") or bool(str(payload.get("storage_aws_role_arn") or "").strip())),
+                ("azure_tenant_id", vol_provider != "AZURE" or bool(str(payload.get("azure_tenant_id") or "").strip())),
+                ("storage_endpoint", vol_provider != "S3COMPAT" or bool(str(payload.get("storage_endpoint") or payload.get("endpoint") or "").strip())),
+            )
+            if not present
+        ]
+        if missing_vol:
+            return {
+                "ok": False,
+                "status_code": 422,
+                "error_code": "MISSING_REQUIRED_FIELD",
+                "message": f"An External Volume on {vol_provider} needs: {', '.join(missing_vol)}.",
+                "missing_fields": missing_vol,
+                "active_role": self.active_role,
+            }
+
         allow_writes = bool(payload.get("allow_writes", True))
         loc_name = str(payload.get("location_name") or payload.get("storage_location_name") or f"{safe_name.lower()}_loc").replace("\\", "\\\\").replace("'", "''")
         provider = str(payload.get("storage_provider") or payload.get("cloud_provider") or "S3").strip().upper()
@@ -5607,6 +6028,28 @@ class LiveSnowflakeBridge:
         )
         dry_run = bool(payload.get("dry_run", False))
         exec_res = {"ok": True, "mode": "dry_run"} if dry_run else self.execute_sql(ddl)
+        if not dry_run and (not exec_res.get("ok") or exec_res.get("mode") == "offline"):
+            # The volume does not exist in Snowflake: report the failure and register nothing.
+            err_code = str(exec_res.get("error_code") or ("NOT_CONFIGURED" if exec_res.get("mode") == "offline" else "SNOWFLAKE_ERROR"))
+            msg = str(exec_res.get("message") or "Snowflake did not create the external volume.")
+            self.record_audit_event(
+                action="EXTERNAL_VOLUME_CREATE",
+                outcome="FAILED",
+                error_code=err_code,
+                target_object=safe_name,
+                flow_id=eff_fid,
+                details={"message": msg},
+            )
+            return {
+                "ok": False,
+                "status_code": 501 if err_code == "NOT_CONFIGURED" else 422,
+                "error_code": err_code,
+                "message": msg,
+                "banner": msg,
+                "ddl": ddl,
+                "query_id": exec_res.get("statement_handle"),
+                "active_role": self.active_role,
+            }
 
         vol_entry = {
             "name": safe_name,
@@ -12565,6 +13008,8 @@ def register_snowflake_fastapi_routes(app: Any) -> None:
     @sf_router.get("/memories")
     async def get_memories(request: Request, flow_id: str | None = None) -> JSONResponse:
         req_fid = flow_id or request.query_params.get("flow_id") or request.headers.get("X-Snowflake-Flow-Id")
+        # Typed memories are read back from Snowflake, so they are listed after a restart too.
+        await asyncio.to_thread(LIVE_BRIDGE.discover_typed_memories, req_fid)
         filtered_catalog = LIVE_BRIDGE.get_memories_for_flow(flow_id=req_fid)
         filtered_registry = [
             m
@@ -12589,21 +13034,8 @@ def register_snowflake_fastapi_routes(app: Any) -> None:
                 "supported_backends": [
                     "Standard Table",
                     "Hybrid Table",
-                    "Interactive Table",
-                    "Dynamic Table",
                     "Semi-Structured (VARIANT)",
-                    "Semi-Structured (OBJECT)",
-                    "Semi-Structured (ARRAY)",
-                    "Snowflake Postgres (Relational / JSONB)",
-                    "Snowflake Postgres (PostgresSaver)",
-                    "Snowflake Postgres (PostgresStore)",
-                    "SnowflakeCheckpointer",
                     "Standard Table (VECTOR)",
-                    "Hybrid Table (VECTOR)",
-                    "Interactive Table (VECTOR)",
-                    "Dynamic Table (VECTOR)",
-                    "Snowflake Postgres (pgvector)",
-                    "Cortex Search Service",
                 ],
                 "supported_embeddings": [
                     "snowflake-arctic-embed-m-v1.5 (768d)",
@@ -12654,10 +13086,39 @@ def register_snowflake_fastapi_routes(app: Any) -> None:
                 entity_namespace=str(payload.get("entity_namespace") or "default"),
                 topic=str(payload.get("topic") or ""),
                 limit=int(payload.get("limit") or 10),
+                flow_id=payload.get("flow_id") or request.query_params.get("flow_id") or request.headers.get("X-Snowflake-Flow-Id"),
             )
         )
         status_code = 200 if res.get("ok") else 404
         return JSONResponse(status_code=status_code, content=res)
+
+    @sf_router.post("/memories/write")
+    async def post_write_memory(request: Request) -> JSONResponse:
+        body = await request.json()
+        payload = body if isinstance(body, dict) else {}
+        mem_ref = str(payload.get("memory_ref") or payload.get("memory_name") or payload.get("name") or "").strip()
+        req_fid = payload.get("flow_id") or request.query_params.get("flow_id") or request.headers.get("X-Snowflake-Flow-Id")
+        fields = {
+            k: payload.get(k)
+            for k in (
+                "thread_id", "checkpoint_ns", "ttl_hours", "session_id", "last_turn_id", "user_id",
+                "entity_namespace", "topic", "tool_used", "outcome_score", "metadata",
+            )
+            if payload.get(k) is not None
+        }
+        res = await asyncio.to_thread(
+            lambda: LIVE_BRIDGE.write_memory(mem_ref, content=payload.get("content"), flow_id=req_fid, **fields)
+        )
+        return JSONResponse(status_code=int(res.get("status_code") or (201 if res.get("ok") else 422)), content=res)
+
+    @sf_router.post("/memories/cleanup")
+    async def post_cleanup_memory(request: Request) -> JSONResponse:
+        body = await request.json()
+        payload = body if isinstance(body, dict) else {}
+        mem_ref = str(payload.get("memory_ref") or payload.get("memory_name") or payload.get("name") or "").strip()
+        req_fid = payload.get("flow_id") or request.query_params.get("flow_id") or request.headers.get("X-Snowflake-Flow-Id")
+        res = await asyncio.to_thread(lambda: LIVE_BRIDGE.cleanup_memory(mem_ref, flow_id=req_fid))
+        return JSONResponse(status_code=int(res.get("status_code") or (200 if res.get("ok") else 422)), content=res)
 
     @sf_router.get("/memories/showcase/full-memory-enterprise-agent")
     async def get_full_memory_showcase() -> JSONResponse:

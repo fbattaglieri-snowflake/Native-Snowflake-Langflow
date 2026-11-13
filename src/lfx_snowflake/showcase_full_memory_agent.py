@@ -974,6 +974,7 @@ def bootstrap_full_memory_showcase_flow(
             "create_new_physical_store": not dry_run,
             "dry_run": dry_run,
             "_skip_context_auto_register": True,
+            "_legacy_simulation": True,
         }
         res = bridge.create_or_register_memory(req_body)
         created_memories.append(res)

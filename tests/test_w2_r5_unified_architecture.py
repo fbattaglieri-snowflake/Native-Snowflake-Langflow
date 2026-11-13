@@ -578,6 +578,23 @@ def test_w2_r5_05_stages_and_volumes_backend_and_frontend_bucket_tab() -> None:
     assert "can_create_external_volume" in stg_data["role_privileges"]
 
     # 2. POST /api/v1/snowflake/stages/create (Internal SNOWFLAKE_SSE & External S3)
+    # Without Snowflake the stage is not created: the route reports it and registers nothing.
+    offline_create = client.post(
+        "/api/v1/snowflake/stages/create",
+        json={"database": "SNOWFLAKE_LANGFLOW", "schema": "CORE", "name": "W2_R5_OFFLINE_STAGE"},
+    )
+    assert offline_create.status_code == 501
+    assert offline_create.json()["ok"] is False
+    assert not any(s.get("name") == "W2_R5_OFFLINE_STAGE" for s in LIVE_BRIDGE.stages_registry)
+    missing_url = client.post(
+        "/api/v1/snowflake/stages/create",
+        json={"database": "SNOWFLAKE_LANGFLOW", "schema": "CORE", "name": "W2_R5_NO_URL", "stage_type": "EXTERNAL"},
+    )
+    assert missing_url.status_code == 422
+    assert missing_url.json()["error_code"] == "MISSING_REQUIRED_FIELD"
+
+    _orig_create_sql = LIVE_BRIDGE.execute_sql
+    LIVE_BRIDGE.execute_sql = lambda *a, **k: {"ok": True, "status_code": 200, "rows": []}  # type: ignore[method-assign]
     int_create = client.post(
         "/api/v1/snowflake/stages/create",
         json={
@@ -617,6 +634,7 @@ def test_w2_r5_05_stages_and_volumes_backend_and_frontend_bucket_tab() -> None:
     assert ext_payload["ok"] is True
     assert "URL = 's3://enterprise-analytics-bucket/langflow/'" in ext_payload["ddl"]
     assert "STORAGE_INTEGRATION = S3_ENTERPRISE_INT" in ext_payload["ddl"]
+    LIVE_BRIDGE.execute_sql = _orig_create_sql  # type: ignore[method-assign]
 
     # 3. Upload is rejected honestly (W3-R1-04); list/refresh/delete report the real SQL result
     up_resp = client.post(
@@ -669,6 +687,23 @@ def test_w2_r5_05_stages_and_volumes_backend_and_frontend_bucket_tab() -> None:
     prev_role = LIVE_BRIDGE.active_role
     try:
         LIVE_BRIDGE.active_role = "ACCOUNTADMIN"
+        vol_body = {
+            "name": "W2_R5_ICEBERG_VOL",
+            "storage_provider": "S3",
+            "storage_base_url": "s3://enterprise-iceberg-bucket/warehouse/",
+            "storage_aws_role_arn": "arn:aws:iam::123456789012:role/snowflake-iceberg-role",
+        }
+        # Without Snowflake nothing is created or registered; a missing role ARN is refused, not defaulted.
+        vol_offline = client.post("/api/v1/snowflake/external-volumes/create", json=vol_body)
+        assert vol_offline.status_code == 501 and vol_offline.json()["ok"] is False
+        assert not any(v.get("name") == "W2_R5_ICEBERG_VOL" for v in LIVE_BRIDGE.external_volumes_registry)
+        vol_missing = client.post(
+            "/api/v1/snowflake/external-volumes/create",
+            json={"name": "W2_R5_NO_ARN_VOL", "storage_provider": "S3", "storage_base_url": "s3://bucket/path/"},
+        )
+        assert vol_missing.status_code == 422
+        assert vol_missing.json()["missing_fields"] == ["storage_aws_role_arn"]
+        LIVE_BRIDGE.execute_sql = lambda *a, **k: {"ok": True, "status_code": 200, "rows": []}  # type: ignore[method-assign]
         vol_ok = client.post(
             "/api/v1/snowflake/external-volumes/create",
             json={
@@ -681,6 +716,7 @@ def test_w2_r5_05_stages_and_volumes_backend_and_frontend_bucket_tab() -> None:
         )
         assert vol_ok.status_code in (200, 201)
         assert "CREATE EXTERNAL VOLUME IF NOT EXISTS W2_R5_ICEBERG_VOL" in vol_ok.json()["ddl"]
+        LIVE_BRIDGE.execute_sql = orig_sql  # type: ignore[method-assign]
 
         LIVE_BRIDGE.active_role = "PUBLIC"
         vol_denied = client.post(

@@ -349,93 +349,26 @@ def test_w2_r4_03_and_04_branch_a_vs_branch_b_ddl_and_object_peculiarities() -> 
     assert "INDEX idx_episodic_hybrid_vec (topic)" in res_hybrid_vec["ddl"]
     assert "embedding VECTOR(FLOAT, 1024)" in res_hybrid_vec["ddl"]
 
-    # 2. Branch A Dynamic Table: requires TARGET_LAG, WAREHOUSE, REFRESH_MODE
-    res_dynamic = bridge.create_or_register_memory(
-        {
-            "name": "PROFILE_DYNAMIC_MEM",
-            "agent_memory_type": "user_profile_entity_memory",
-            "storage_family": "snowflake_sql",
-            "database": "SNOWFLAKE_LANGFLOW",
-            "schema": "CORE",
-            "table_type": "DYNAMIC",
-            "target_lag": "5 minutes",
-            "warehouse": "COMPUTE_WH",
-            "refresh_mode": "INCREMENTAL",
-            "source_table": "SNOWFLAKE_LANGFLOW.CORE.RAW_USER_EVENTS",
-            "dry_run": True,
-        }
-    )
-    assert res_dynamic["ok"] is True
-    assert "CREATE OR REPLACE DYNAMIC TABLE SNOWFLAKE_LANGFLOW.CORE.MEM_PROFILE_DYNAMIC_MEM" in res_dynamic["ddl"]
-    assert "TARGET_LAG = '5 minutes' WAREHOUSE = COMPUTE_WH REFRESH_MODE = INCREMENTAL" in res_dynamic["ddl"]
-
-    # 3. Branch A Interactive Table: requires CLUSTER BY (excluding VECTOR), TARGET_LAG, WAREHOUSE
-    res_interactive = bridge.create_or_register_memory(
-        {
-            "name": "EPISODIC_INTERACTIVE_MEM",
-            "agent_memory_type": "episodic_memory",
-            "storage_family": "snowflake_sql",
-            "database": "SNOWFLAKE_LANGFLOW",
-            "schema": "CORE",
-            "table_type": "INTERACTIVE",
-            "cluster_by": "user_id, topic, embedding",
-            "target_lag": "1 minute",
-            "interactive_warehouse": "INTERACTIVE_WH",
-            "enable_embedding": True,
-            "embedding_provider": "snowflake_cortex",
-            "embedding_model": "snowflake-arctic-embed-m-v1.5",
-            "dry_run": True,
-        }
-    )
-    assert res_interactive["ok"] is True
-    assert res_interactive["memory"]["cluster_by"] == "user_id, topic"
-    assert "CLUSTER BY (user_id, topic) TARGET_LAG = '1 minute' WAREHOUSE = INTERACTIVE_WH" in res_interactive["ddl"]
-
-    # 4. Branch B Snowflake Postgres (:5432) for #1 Graph Checkpointer (PostgresSaver) & #5 Episodic (pgvector + GIN)
-    res_pg_ckpt = bridge.create_or_register_memory(
+    # 2. Backends a flow cannot write (Dynamic, Interactive, Snowflake Postgres) and chat-message memories
+    #    are refused instead of being registered as if they existed.
+    for unsupported_body in (
+        {"name": "PROFILE_DYNAMIC_MEM", "agent_memory_type": "user_profile_entity_memory", "table_type": "DYNAMIC"},
+        {"name": "EPISODIC_INTERACTIVE_MEM", "agent_memory_type": "episodic_memory", "table_type": "INTERACTIVE"},
         {
             "name": "PG_GRAPH_CHECKPOINTER",
             "agent_memory_type": "graph_state_checkpointer",
             "storage_family": "snowflake_postgres",
             "postgres_instance": "LANGFLOW_PG_INSTANCE",
-            "pg_database": "postgres",
-            "pg_schema": "public",
-            "pg_table": "langgraph_checkpoints",
-            "pg_table_mode": "PostgresSaver",
-            "enable_embedding": True,  # Must be locked OFF for #1
-            "dry_run": True,
-        }
-    )
-    assert res_pg_ckpt["ok"] is True
-    mem_pg1 = res_pg_ckpt["memory"]
-    assert mem_pg1["storage_family"] == "snowflake_postgres"
-    assert mem_pg1["database"] is None
-    assert mem_pg1["schema"] is None
-    assert mem_pg1["enable_embedding"] is False
-    assert mem_pg1["table_fqn"] == "LANGFLOW_PG_INSTANCE:5432/postgres.public.langgraph_checkpoints"
-    assert "PRIMARY KEY (thread_id, checkpoint_ns, checkpoint_id)" in res_pg_ckpt["ddl"]
-
-    res_pg_vec = bridge.create_or_register_memory(
-        {
-            "name": "PG_EPISODIC_PGVECTOR",
-            "agent_memory_type": "episodic_memory",
-            "storage_family": "snowflake_postgres",
-            "postgres_instance": "LANGFLOW_PG_INSTANCE",
-            "pg_database": "postgres",
-            "pg_schema": "public",
-            "pg_table": "episodic_vectors",
-            "pg_table_mode": "JSONB + pgvector",
-            "gin_index_jsonb": True,
-            "enable_embedding": True,
-            "embedding_provider": "spcs_ollama",
-            "embedding_model": "nomic-embed-text",
-            "dry_run": True,
-        }
-    )
-    assert res_pg_vec["ok"] is True
-    assert "CREATE EXTENSION IF NOT EXISTS vector;" in res_pg_vec["ddl"]
-    assert "embedding vector(768)" in res_pg_vec["ddl"]
-    assert "USING GIN (metadata)" in res_pg_vec["ddl"]
+        },
+        {"name": "CHAT_WINDOW_MEM", "agent_memory_type": "buffer_window_memory"},
+    ):
+        res_unsupported = bridge.create_or_register_memory(
+            {**unsupported_body, "database": "SNOWFLAKE_LANGFLOW", "schema": "CORE", "dry_run": True}
+        )
+        assert res_unsupported["ok"] is False
+        assert res_unsupported["status_code"] == 422
+        assert res_unsupported["error_code"] == "UNSUPPORTED_CAPABILITY"
+    assert bridge._find_memory_entry("PG_GRAPH_CHECKPOINTER") is None
 
     # 5. Verify 3-step Wizard DOM structure in snowflake-ui-integration.js
     ui_js = (REPO_ROOT / "frontend_patches" / "snowflake-ui-integration.js").read_text(encoding="utf-8")
@@ -517,9 +450,9 @@ def test_w2_r4_04_four_snowflake_embedding_sources_and_llm_preprocessing_no_inge
             "dry_run": True,
         }
     )
-    assert res_spcs_reg["ok"] is True
-    assert res_spcs_reg["memory"]["dimension"] == 1536
-    assert "VECTOR(FLOAT, 1536)" in res_spcs_reg["ddl"]
+    # Episode embeddings are computed by Snowflake AI_EMBED at save time: other providers are refused.
+    assert res_spcs_reg["ok"] is False
+    assert res_spcs_reg["error_code"] == "UNSUPPORTED_CAPABILITY"
 
     # Verify SnowflakeKnowledgeComponent.ingest skips storage when preprocessor returns NO_INGEST
     engine = InMemoryVectorStoreEngine(
@@ -1132,7 +1065,7 @@ def test_w2_r4_08g_deterministic_uuidv5_and_native_memories_v1_endpoints() -> No
         "/api/v1/snowflake/memories",
         json={
             "name": mem_name,
-            "agent_memory_type": "buffer_window_memory",
+            "agent_memory_type": "summary_memory",
             "storage_family": "snowflake_sql",
             "database": "SNOWFLAKE_LANGFLOW",
             "schema": "CORE",

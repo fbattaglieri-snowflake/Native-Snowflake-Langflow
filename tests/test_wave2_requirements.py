@@ -520,7 +520,7 @@ def test_fk_w2_01_to_04_files_and_knowledge_and_4_tab_cortex_search_pipeline() -
                                 comp_name = str(stmt.value.value)
                 assert comp_name not in seen_names, f"Duplicate component name {comp_name} in {py_path} and {seen_names[comp_name]}"
                 seen_names[comp_name] = str(py_path)
-    assert len(seen_names) in (26, 28, 32, 34, 36, 38)
+    assert len(seen_names) in (26, 28, 32, 34, 36, 38, 39)
 
 
 def test_wave2_undefined_headers_fetch_intercept_guard() -> None:
@@ -860,10 +860,9 @@ def test_w2_r2_13_memories_plus_snowflake_3_agent_memory_types_and_workflow_reca
             "dry_run": True,
         }
     )
-    assert ep_res["ok"] is True
-    assert ep_res["memory"]["agent_memory_type"] == "episodic_session"
-    assert ep_res["memory"]["canonical_memory_type"] == "buffer_window_memory"
-    assert "HYBRID TABLE" in ep_res["ddl"]
+    # Chat turns belong to the Message History component: a separate chat-window memory is refused.
+    assert ep_res["ok"] is False
+    assert ep_res["error_code"] == "UNSUPPORTED_CAPABILITY"
 
     sem_res = LIVE_BRIDGE.create_or_register_memory(
         {
@@ -896,14 +895,15 @@ def test_w2_r2_13_memories_plus_snowflake_3_agent_memory_types_and_workflow_reca
 
     opts = get_memory_catalog_options(include_none=True)
     assert "None" in opts
-    assert "AGENT_EPISODIC_TURNS" in opts
+    assert "AGENT_EPISODIC_TURNS" not in opts
+    assert "AGENT_SEMANTIC_VEC" in opts
     adapter = SnowflakeMessageHistoryAdapter(memory_catalog_ref="AGENT_SEMANTIC_VEC")
     recalled = adapter.recall(query="governance")
     # W3-R1-01: offline recall fails closed (nothing executed) but still resolves the registered memory
     assert recalled["ok"] is False
     assert recalled["error_code"] == "NOT_CONFIGURED"
     assert recalled["memory"]["name"] == "AGENT_SEMANTIC_VEC"
-    assert recall_memory_from_catalog("AGENT_EPISODIC_TURNS")["memory"]["agent_memory_type"] == "episodic_session"
+    assert recall_memory_from_catalog("AGENT_SEMANTIC_VEC")["memory"]["agent_memory_type"] == "semantic_vector"
 
     modals_tsx = (REPO_ROOT / "frontend_patches" / "settings_and_memories_modals.tsx").read_text(encoding="utf-8")
     assert "+ Snowflake" in modals_tsx
@@ -1100,6 +1100,9 @@ def test_w2_r3_05_06_five_langchain_memory_types_optional_embeddings_and_memorie
                 "dry_run": True,
             }
         )
+        if mem_type_id == "buffer_window_memory":
+            assert res["ok"] is False and res["error_code"] == "UNSUPPORTED_CAPABILITY"
+            continue
         assert res["ok"] is True
         mem = res["memory"]
         assert mem["canonical_memory_type"] == mem_type_id
@@ -1150,10 +1153,9 @@ def test_w2_r3_05_06_five_langchain_memory_types_optional_embeddings_and_memorie
             "dry_run": True,
         }
     )
-    assert vec_ext["ok"] is True
-    assert vec_ext["memory"]["enable_embedding"] is True
-    assert vec_ext["memory"]["embedding_provider"] == "openai"
-    assert vec_ext["memory"]["dimension"] == 1536
+    # Episode embeddings are computed by Snowflake AI_EMBED at save time: external providers are refused.
+    assert vec_ext["ok"] is False
+    assert vec_ext["error_code"] == "UNSUPPORTED_CAPABILITY"
 
     # Component metadata & recall
     comp = SnowflakeMemoryManagerComponent(

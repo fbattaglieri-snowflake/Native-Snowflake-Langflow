@@ -4161,6 +4161,98 @@
       if (nextBtn) nextBtn.style.display = wizardStep < 3 ? "inline-flex" : "none";
       if (submitBtn) submitBtn.style.display = wizardStep === 3 ? "inline-flex" : "none";
       syncStep2DynamicFields();
+      applyTypedMemoryRules();
+    }
+
+    // Typed memories are Snowflake tables that the Agent Memory node reads and writes: only backends a flow
+    // can write are offered, and the settings shown are the ones the backend applies.
+    function applyTypedMemoryRules() {
+      if (storageFamilySel) {
+        Array.from(storageFamilySel.options).forEach(function (o) {
+          if (o.value === "snowflake_postgres") {
+            o.disabled = true;
+            o.hidden = true;
+          }
+        });
+        storageFamilySel.value = "snowflake_sql";
+      }
+      if (branchASqlBox) branchASqlBox.style.display = "grid";
+      if (branchBPgBox) branchBPgBox.style.display = "none";
+      if (typeSel) {
+        Array.from(typeSel.options).forEach(function (o) {
+          if (o.value === "buffer_window_memory") {
+            o.disabled = true;
+            o.textContent = "#2 Buffer / Window — stored by the Message History component";
+          }
+        });
+        if (typeSel.value === "buffer_window_memory") typeSel.value = "episodic_memory";
+      }
+      if (targetObjSel) {
+        Array.from(targetObjSel.options).forEach(function (o) {
+          const unsupported = /dynamic|interactive|iceberg|postgres|cortex search/i.test(`${o.value} ${o.textContent}`);
+          o.disabled = unsupported;
+          o.hidden = unsupported;
+        });
+        const cur = targetObjSel.options[targetObjSel.selectedIndex];
+        if (!cur || cur.disabled) {
+          const firstOk = Array.from(targetObjSel.options).find(function (o) { return !o.disabled; });
+          if (firstOk) targetObjSel.value = firstOk.value;
+        }
+      }
+      ["sflf-light-mem-auto-capture", "sflf-light-mem-preproc-enabled", "sflf-light-mem-preproc-engine", "sflf-light-mem-preproc-model-wrap", "sflf-light-mem-kill-phrase"].forEach(function (id) {
+        const el = document.getElementById(id);
+        const wrap = el && (el.id.endsWith("-wrap") ? el : el.parentElement);
+        if (wrap) wrap.style.display = "none";
+      });
+      // Embeddings are computed by Snowflake (AI_EMBED) when an episode is saved: episodic memories only.
+      if (enableEmbedCb && typeSel && typeSel.value !== "episodic_memory") {
+        enableEmbedCb.checked = false;
+        enableEmbedCb.disabled = true;
+        if (embedBox) embedBox.style.display = "none";
+      }
+      if (providerSel) {
+        Array.from(providerSel.options).forEach(function (o) {
+          const external = o.value !== "snowflake_cortex";
+          o.disabled = external;
+          o.hidden = external;
+        });
+        if (providerSel.value !== "snowflake_cortex") {
+          providerSel.value = "snowflake_cortex";
+          syncLightMemoryEmbeddingProviderModels();
+        }
+      }
+      const step3 = document.getElementById("sflf-mem-wizard-step-3");
+      if (step3 && !document.getElementById("sflf-typed-mem-policy-box")) {
+        const box = document.createElement("div");
+        box.id = "sflf-typed-mem-policy-box";
+        box.setAttribute("data-testid", "snowflake-typed-memory-policy");
+        box.style.cssText = "background:#f8fafc;border:1px solid #bae6fd;border-radius:10px;padding:9px 12px;display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,180px),1fr));gap:8px;";
+        const fieldStyle = "width:100%;box-sizing:border-box;background:#ffffff;color:#0f172a;border:1px solid #cbd5e1;border-radius:8px;padding:5px 8px;font-size:11.5px;";
+        const labelStyle = "display:block;font-size:10px;font-weight:600;color:#475569;margin-bottom:2px;";
+        box.innerHTML = `
+          <div style="grid-column:1/-1;">
+            <label style="${labelStyle}">What to save (instruction given to the agent with the Save tool)</label>
+            <textarea id="sflf-typed-mem-instructions" rows="2" style="${fieldStyle}" placeholder="e.g. Save an episode when a task is finished and its outcome is known."></textarea>
+          </div>
+          <div>
+            <label style="${labelStyle}">Delete records older than (days, 0 = keep)</label>
+            <input id="sflf-typed-mem-retention" type="number" min="0" value="0" style="${fieldStyle}" />
+          </div>
+          <div>
+            <label style="${labelStyle}">Keep at most (records, best outcome first, 0 = no limit)</label>
+            <input id="sflf-typed-mem-max-rows" type="number" min="0" value="0" style="${fieldStyle}" />
+          </div>
+          <div>
+            <label style="${labelStyle}">Checkpoint lifetime (hours)</label>
+            <input id="sflf-typed-mem-ttl" type="number" min="1" value="24" style="${fieldStyle}" />
+          </div>
+          <div>
+            <label style="${labelStyle}">Cleanup schedule (cron, UTC)</label>
+            <input id="sflf-typed-mem-cron" value="0 3 * * *" style="${fieldStyle}" />
+          </div>
+          <div style="grid-column:1/-1;font-size:10.5px;color:#475569;">Cleanup runs as a Snowflake task created next to the table. Use the <strong>Agent Memory</strong> node in a flow to save and recall.</div>`;
+        step3.insertBefore(box, step3.children[1] || null);
+      }
     }
 
     function syncStorageFamilyBoxes() {
@@ -4352,20 +4444,13 @@
       const embProvider = (providerSel && providerSel.value) || "snowflake_cortex";
       const embModel = (modelSel && modelSel.value) || "snowflake-arctic-embed-m-v1.5";
       const embDim = parseInt((dimInput && dimInput.value) || "768", 10);
-      const autoCapture = !!((document.getElementById("sflf-light-mem-auto-capture") || {}).checked !== false);
-      const preprocEnabled = !!(preprocCb && preprocCb.checked);
-      const preprocEngine =
-        chosenType === "running_summary_memory"
-          ? (sumEngineSel && sumEngineSel.value) || (preprocEngineSel && preprocEngineSel.value) || "cortex_sql"
-          : (preprocEngineSel && preprocEngineSel.value) || "cortex_sql";
-      const preprocModel =
-        preprocEngine === "cortex_summarize_agg"
-          ? "AI_SUMMARIZE_AGG"
-          : chosenType === "running_summary_memory"
-          ? (sumModelSel && sumModelSel.value) || "mistral-large2"
-          : (preprocModelSel && preprocModelSel.value) || "mistral-large2";
-      const killPhrase = (document.getElementById("sflf-light-mem-kill-phrase") || {}).value || "NO_INGEST";
       const outEl = document.getElementById("sflf-light-mem-out");
+      const numVal = function (id, dflt) {
+        const n = parseInt((document.getElementById(id) || {}).value || "", 10);
+        return Number.isFinite(n) ? n : dflt;
+      };
+      const isBind = actionMode === "bind_existing";
+      const scoreThreshold = parseFloat((document.getElementById("sflf-light-mem-score-param") || {}).value || "0.7");
 
       const resp = await fetch("/api/v1/snowflake/memories", {
         method: "POST",
@@ -4374,36 +4459,33 @@
           name: nameVal,
           database: dbVal,
           schema: schVal,
-          table_name: physicalTableName,
           flow_id: extractCurrentFlowId(),
-          storage_family: storageFamily,
-          postgres_instance: storageFamily === "snowflake_postgres" ? pgInstance : null,
-          postgres_table: storageFamily === "snowflake_postgres" ? pgTable : null,
-          pg_table_mode: storageFamily === "snowflake_postgres" ? pgMode : null,
-          create_new_physical_store: actionMode !== "bind_existing",
+          storage_family: "snowflake_sql",
+          storage_mode: isBind ? "bind_existing" : "create_physical",
+          create_new_physical_store: !isBind,
+          table_fqn: isBind ? `${dbVal}.${schVal}.${physicalTableName}` : undefined,
           agent_memory_type: chosenType,
-          memory_category: enableEmbedding ? "vector_table" : spec.default_category,
-          vector_database: targetBackend,
+          table_type: /hybrid/i.test(targetBackend) ? "HYBRID" : "STANDARD",
+          vector_database: /hybrid/i.test(targetBackend) ? "Hybrid Table" : enableEmbedding ? "Standard Table (VECTOR)" : "Standard Table",
           enable_embedding: enableEmbedding,
           embedding_provider: enableEmbedding ? embProvider : "none",
           embedding_model: enableEmbedding ? embModel : null,
           dimension: enableEmbedding ? embDim : null,
           vector_dimension: enableEmbedding ? embDim : null,
-          auto_capture: autoCapture,
-          filter_by_session: spec.filter_by_session,
-          llm_preprocessing: {
-            enabled: preprocEnabled,
-            engine: preprocEngine,
-            model: preprocModel,
-            kill_phrase: killPhrase,
-          },
+          capture_instructions: (document.getElementById("sflf-typed-mem-instructions") || {}).value || undefined,
+          retention_days: numVal("sflf-typed-mem-retention", 0) || undefined,
+          max_rows: numVal("sflf-typed-mem-max-rows", 0) || undefined,
+          ttl_hours: numVal("sflf-typed-mem-ttl", 24),
+          cleanup_schedule: (document.getElementById("sflf-typed-mem-cron") || {}).value || undefined,
+          outcome_score_threshold: Number.isFinite(scoreThreshold) ? scoreThreshold : 0.7,
         }),
       });
       const data = await resp.json();
       if (outEl) outEl.textContent = JSON.stringify(data, null, 2);
       if (!resp.ok || data.ok === false) {
-        showDenialOrStatusBanner("error", data.error_code || "AUTHZ_ROLE_DENIED", data.message || "Operation denied");
+        showDenialOrStatusBanner("error", data.error_code || "SNOWFLAKE_ERROR", data.message || "The memory was not created.");
       } else {
+        if (data.warning) showDenialOrStatusBanner("error", "MEMORY_CLEANUP_TASK_NOT_CREATED", data.warning);
         sfState.memories = Array.isArray(sfState.memories) ? sfState.memories : [];
         if (data.memory) {
           const normalizedMem = Object.assign({}, data.memory, {
@@ -6863,7 +6945,7 @@
     });
     const data = await resp.json();
     if (!resp.ok || data.ok === false) {
-      showDenialOrStatusBanner("error", data.error_code || "AUTHZ_ROLE_DENIED", data.message || "Stage creation denied");
+      showDenialOrStatusBanner("error", data.error_code || "SNOWFLAKE_ERROR", data.message || "The stage was not created.");
       return;
     }
 

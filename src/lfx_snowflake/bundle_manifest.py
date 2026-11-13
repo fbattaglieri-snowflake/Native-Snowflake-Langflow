@@ -479,6 +479,14 @@ SNOWFLAKE_BUNDLE_COMPONENTS: tuple[BundleComponentSpec, ...] = (
         description="Official Snowflake AI_COMPLETE decision router (snowflake-decision-fast and snowflake-decision) with choice, score, and noul questions, normalized confidence formula, and high/low confidence routing.",
         required_privileges=("CORTEX AI_COMPLETE",),
     ),
+    BundleComponentSpec(
+        component_id="snowflake_agent_memory",
+        display_name="Agent Memory",
+        category="LLM Operations",
+        release_phase="W3-R2",
+        description="Read and write a typed Snowflake memory (checkpointer, summary, profile, episodic) from a flow or as agent tools.",
+        required_privileges=("SELECT/INSERT/UPDATE/DELETE ON TABLE",),
+    ),
     # Files & Knowledge (6)
     BundleComponentSpec(
         component_id="snowflake_memory_base",

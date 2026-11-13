@@ -477,7 +477,7 @@ def test_w2_r9_live_bridge_custom_tools_stage_files_and_decision_edge_cases() ->
     )
     assert "AI_REDACT" in legacy_redact["plan"].execution_sql
 
-    # Bundle manifest has exact 7 LLM Operations components
+    # Bundle manifest has exact 8 LLM Operations components
     llm_ops = [c for c in SNOWFLAKE_BUNDLE_COMPONENTS if c.category == "LLM Operations"]
     assert {c.component_id for c in llm_ops} == {
         "snowflake_custom_tool",
@@ -485,6 +485,7 @@ def test_w2_r9_live_bridge_custom_tools_stage_files_and_decision_edge_cases() ->
         "snowflake_ai_function",
         "snowflake_ai_redact",
         "snowflake_sql_statement",
+        "snowflake_agent_memory",
         "snowflake_llm_node",
         "snowflake_decision",
     }
