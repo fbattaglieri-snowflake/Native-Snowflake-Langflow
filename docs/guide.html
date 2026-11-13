@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="snowflake-source" content="cortex-agent-authored">
+<meta name="description" content="Native Snowflake Langflow: an unofficial personal fork that runs the Langflow visual editor inside Snowflake, on Snowflake data, under Snowflake roles.">
+<title>Your first ten minutes · Native Snowflake Langflow</title>
+<script type="application/json" id="snowflake-report-metadata">
+{
+  "generated": "2026-11-13",
+  "intent": "Native Snowflake Langflow site: Your first ten minutes",
+  "dataSources": [
+    {
+      "type": "file",
+      "path": "README.md"
+    }
+  ],
+  "sections": [
+    {
+      "id": "guide",
+      "title": "guide",
+      "producerNotes": "Prerequisites and steps follow the editor: role, Context, nodes, Playground, Traces."
+    }
+  ]
+}
+</script>
+<link rel="stylesheet" href="assets/site.css">
+<script src="assets/site.js" defer></script>
+</head>
+<body>
+
+<div class="notice"><div class="wrap"><strong>Unofficial personal fork, under active testing.</strong> A project by Francesco Battaglieri. It is not a product of Snowflake Inc. or of Langflow / DataStax, and neither supports it. Tested on Snowflake on AWS only, with synthetic data.</div></div>
+
+<nav>
+  <div class="wrap">
+    <a class="brand" href="index.html">Native Snowflake Langflow</a>
+    <div class="links"><a href="index.html">Overview</a><a href="benefits.html">Benefits</a><a href="guide.html" aria-current="page">Guide</a><a href="examples.html">Examples</a><a href="models.html">Models and proxy</a><a href="limits.html">Limits</a></div>
+    <a class="btn ghost small" href="https://github.com/fbattaglieri-snowflake/Native-Snowflake-Langflow">GitHub</a>
+  </div>
+</nav>
+
+<section id="guide">
+  <div class="wrap">
+    <div class="head reveal">
+      <h2>Your first ten minutes</h2>
+      <p class="sub">Three things have to be in place before you start.</p>
+    </div>
+    <div class="prereq">
+      <div class="tip reveal" style="--i:0"><b>A running instance</b>To deploy your own, follow the <a href="https://github.com/fbattaglieri-snowflake/Native-Snowflake-Langflow/blob/snowflake/main/docs/DEPLOYMENT_SPCS.md">deployment guide</a>.</div>
+      <div class="tip reveal" style="--i:1"><b>An LLM proxy</b>The Agent node in step 3 needs one. It is a separate service you deploy once. <a href="models.html">See Models and proxy</a>.</div>
+      <div class="tip reveal" style="--i:2"><b>Something to ask about</b>One semantic view and one Cortex Search service that your role can read.</div>
+    </div>
+    <div class="guide">
+      <div class="g reveal"><div><h3>Sign in and pick a role<span class="when">minute 1</span></h3><p>Open the service endpoint, sign in with your Snowflake login and choose a role in the <kbd>Role</kbd> selector. Start with the least powerful role that can read your data.</p></div></div>
+      <div class="g reveal"><div><h3>Create a flow and set its Context<span class="when">minute 2</span></h3><p>Start a new flow, press <kbd>Context</kbd> and tick the objects it needs: for a first try, one semantic view and one Cortex Search service.</p></div></div>
+      <div class="g reveal"><div><h3>Place five nodes<span class="when">minute 4</span></h3><p>Drag in <kbd>Chat Input</kbd>, <kbd>Agent</kbd> and <kbd>Chat Output</kbd>. Add <kbd>Cortex Analyst</kbd> and <kbd>Cortex Search</kbd>, switch both to Tool Mode and connect them to the Agent.</p></div></div>
+      <div class="g reveal"><div><h3>Ask a question in the Playground<span class="when">minute 6</span></h3><p>Ask something that needs a number, then something that needs a document. Watch which tool the agent picks for each.</p></div></div>
+      <div class="g reveal"><div><h3>Give it a memory<span class="when">minute 8</span></h3><p>On the <kbd>Memories</kbd> page create a memory, then add an <kbd>Agent Memory</kbd> node in Tool Mode. Open a new chat and check what it remembers.</p></div></div>
+      <div class="g reveal"><div><h3>Read the trace<span class="when">minute 10</span></h3><p>Open <kbd>Traces</kbd> to see each step of the run, or query the telemetry tables with SQL.</p></div></div>
+    </div>
+    <div class="tips">
+      <div class="tip reveal" style="--i:0"><b>Keep the Context narrow</b>Fewer objects means shorter dropdowns and an agent that is easier to reason about.</div>
+      <div class="tip reveal" style="--i:1"><b>Reselect the role after a restart</b>After the service restarts the role is empty on first load. Pick it again before using a flow.</div>
+      <div class="tip reveal" style="--i:2"><b>Set Sender on Message History</b>A Language Model output has no sender. Set it on the node that stores the turn.</div>
+      <div class="tip reveal" style="--i:3"><b>Load files outside the editor</b>Upload files to a stage with Snowsight or the CLI. The nodes read them from there.</div>
+    </div>
+  </div>
+</section>
+
+<div class="wrap"><div class="pager"><a href="benefits.html"><small>Previous</small>Benefits</a><a href="examples.html" style="text-align:right"><small>Next</small>Examples</a></div></div>
+
+<footer>
+  <div class="wrap">
+    <p>Native Snowflake Langflow is an independent project by Francesco Battaglieri, released under the MIT License. It is not an official product, release or repository of Snowflake Inc., nor an official project of Langflow / DataStax, and it is not supported or warranted by either. Components, SQL schemas and configuration may change without notice.</p>
+    <p>All examples on this site use synthetic data. Role names and ratings shown in previews are illustrative.</p>
+  </div>
+</footer>
+</body>
+</html>

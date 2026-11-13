@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="snowflake-source" content="cortex-agent-authored">
+<meta name="description" content="Native Snowflake Langflow: an unofficial personal fork that runs the Langflow visual editor inside Snowflake, on Snowflake data, under Snowflake roles.">
+<title>Four flows to try · Native Snowflake Langflow</title>
+<script type="application/json" id="snowflake-report-metadata">
+{
+  "generated": "2026-11-13",
+  "intent": "Native Snowflake Langflow site: Four flows to try",
+  "dataSources": [
+    {
+      "type": "file",
+      "path": "README.md"
+    }
+  ],
+  "sections": [
+    {
+      "id": "examples",
+      "title": "examples",
+      "producerNotes": "Demo flow names and test questions. 154 and 441,587 come from synthetic data. Decision scores are illustrative."
+    }
+  ]
+}
+</script>
+<link rel="stylesheet" href="assets/site.css">
+<script src="assets/site.js" defer></script>
+</head>
+<body>
+
+<div class="notice"><div class="wrap"><strong>Unofficial personal fork, under active testing.</strong> A project by Francesco Battaglieri. It is not a product of Snowflake Inc. or of Langflow / DataStax, and neither supports it. Tested on Snowflake on AWS only, with synthetic data.</div></div>
+
+<nav>
+  <div class="wrap">
+    <a class="brand" href="index.html">Native Snowflake Langflow</a>
+    <div class="links"><a href="index.html">Overview</a><a href="benefits.html">Benefits</a><a href="guide.html">Guide</a><a href="examples.html" aria-current="page">Examples</a><a href="models.html">Models and proxy</a><a href="limits.html">Limits</a></div>
+    <a class="btn ghost small" href="https://github.com/fbattaglieri-snowflake/Native-Snowflake-Langflow">GitHub</a>
+  </div>
+</nav>
+
+<section id="examples" class="band">
+  <div class="wrap">
+    <div class="head reveal">
+      <h2>Four flows to try</h2>
+      <p class="sub">Each one starts with a chat input and ends with a chat output. They run on synthetic maintenance and warranty data. Three of them need the <a href="models.html">LLM proxy</a>.</p>
+    </div>
+    <div class="tabs reveal" role="tablist" aria-label="Example flows">
+      <button role="tab" type="button" aria-selected="true" aria-controls="ex1" id="t1">An agent that remembers</button>
+      <button role="tab" type="button" aria-selected="false" aria-controls="ex2" id="t2">Two agents in a row</button>
+      <button role="tab" type="button" aria-selected="false" aria-controls="ex3" id="t3">Model against agent</button>
+      <button role="tab" type="button" aria-selected="false" aria-controls="ex4" id="t4">Three approaches, scored</button>
+    </div>
+
+    <div class="panel on" id="ex1" role="tabpanel" aria-labelledby="t1">
+      <div>
+        <h3>A language model becomes an agent with every memory type</h3>
+        <p>A language model gets Cortex Analyst and Cortex Search as tools, plus summary, profile and episodic memory stored in Snowflake tables.</p>
+        <div class="chain"><span class="pill">Chat Input</span><i></i><span class="pill">Language Model</span><i></i><span class="pill sf">Analyst + Search</span><i></i><span class="pill sf">Agent Memory</span><i></i><span class="pill">Chat Output</span></div>
+        <ul class="look">
+          <li>Turn 1 uses Analyst for a count, turn 2 uses Search for a procedure</li>
+          <li>Turn 3 saves an outcome that worked</li>
+          <li>In a new chat it still knows the site and the fix</li>
+        </ul>
+        <p class="need yes">Needs the LLM proxy: it uses Language Model</p>
+        <p class="mono" style="margin-top:12px">DEMO_Language_Model_As_Agent_With_Every_Memory_Type</p>
+      </div>
+      <div class="chat">
+        <span class="mono">Ask, in this order</span>
+        <div class="q"><small>turn 1</small>I am Marco, maintenance lead at MILANO_PLANT. How many open tickets does my site have?</div>
+        <div class="q"><small>turn 2</small>Chiller C7 is leaking coolant. What does the procedure say?</div>
+        <div class="q"><small>turn 3</small>I replaced the shaft seal kit and the leak test passed. That worked.</div>
+        <div class="q"><small>new chat</small>Which site do I work at, and do we know a fix that worked for a chiller coolant leak?</div>
+      </div>
+    </div>
+
+    <div class="panel" id="ex2" role="tabpanel" aria-labelledby="t2">
+      <div>
+        <h3>Two Cortex Agents in sequence</h3>
+        <p>The first agent answers with numbers from warranty data. Its answer is passed to a second agent that reads the technical documentation.</p>
+        <div class="chain"><span class="pill">Chat Input</span><i></i><span class="pill sf">Cortex Agent · warranty</span><i></i><span class="pill sf">Cortex Agent · tech docs</span><i></i><span class="pill">Chat Output</span></div>
+        <ul class="look">
+          <li>The numbers match a direct SQL query: 154 claims, total cost 441,587</li>
+          <li>The second answer refers to the component named by the first</li>
+          <li>A Cortex Agent response also shows the text it writes before calling tools</li>
+        </ul>
+        <p class="need">Works without the LLM proxy: both steps are Cortex Agents</p>
+        <p class="mono" style="margin-top:12px">DEMO_Two_Cortex_Agents_In_Sequence</p>
+      </div>
+      <div class="chat">
+        <span class="mono">Ask</span>
+        <div class="q">How many warranty claims does the hydraulic pump have and what do they cost? Then tell me what the technical documentation says about that component.</div>
+      </div>
+    </div>
+
+    <div class="panel" id="ex3" role="tabpanel" aria-labelledby="t3">
+      <div>
+        <h3>Language model against Cortex Agent, judged by Decision</h3>
+        <p>A language model with an AI function and a Cortex Agent answer the same question. A Decision node picks one, and a language model explains why.</p>
+        <div class="chain"><span class="pill">Chat Input</span><i></i><span class="pill">Language Model + AI Function</span><i></i><span class="pill sf">Cortex Agent</span><i></i><span class="pill sf">Decision</span><i></i><span class="pill">Chat Output</span></div>
+        <ul class="look">
+          <li>Which of the two answers Decision chose</li>
+          <li>The explanation the language model gives for that choice</li>
+        </ul>
+        <p class="need yes">Needs the LLM proxy: it uses Language Model</p>
+        <p class="mono" style="margin-top:12px">DEMO_Language_Model_Vs_Cortex_Agent_Judged_By_Decision</p>
+      </div>
+      <div class="chat">
+        <span class="mono">Ask</span>
+        <div class="q">Chiller C7 at MILANO_PLANT is leaking coolant and the line is stopped. What should the technician do?</div>
+      </div>
+    </div>
+
+    <div class="panel" id="ex4" role="tabpanel" aria-labelledby="t4">
+      <div>
+        <h3>Cortex Agent, Agent with tools and Language Model, rated 0 to 4</h3>
+        <p>One question goes to three approaches at once. Each keeps its own memory, and a Decision node rates every answer.</p>
+        <div class="chain"><span class="pill">Chat Input</span><i></i><span class="pill sf">Cortex Agent</span><span class="pill">Agent</span><span class="pill">Language Model</span><i></i><span class="pill sf">Decision</span><i></i><span class="pill">Chat Output</span></div>
+        <ul class="look">
+          <li>Three answers with a rating each</li>
+          <li>The follow-up shows that all three remember the first turn</li>
+          <li>Ratings sit close together and change between runs: read them as a hint, not a measure</li>
+        </ul>
+        <p class="need yes">Needs the LLM proxy: it uses Agent and Language Model</p>
+        <p class="mono" style="margin-top:12px">DEMO_Cortex_Agent_Vs_Agent_Vs_Language_Model_Rated_By_Decision</p>
+      </div>
+      <div class="chat">
+        <span class="mono">Ask, in this order</span>
+        <div class="q"><small>turn 1</small>Chiller C7 at MILANO_PLANT is leaking coolant and the line is stopped. What should the technician do?</div>
+        <div class="q"><small>turn 2</small>The test failed: pressure dropped 0.3 bar. What now?</div>
+        <span class="mono" style="margin-top:12px">What a rating looks like · illustrative values</span>
+        <div class="scores">
+          <div class="score lead-s" style="--v:.75"><span style="text-align:left">Cortex Agent</span><div><i></i></div><span>3</span></div>
+          <div class="score" style="--v:.75"><span style="text-align:left">Agent with tools</span><div><i></i></div><span>3</span></div>
+          <div class="score" style="--v:.5"><span style="text-align:left">Language Model</span><div><i></i></div><span>2</span></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<div class="wrap"><div class="pager"><a href="guide.html"><small>Previous</small>Guide</a><a href="models.html" style="text-align:right"><small>Next</small>Models and proxy</a></div></div>
+
+<footer>
+  <div class="wrap">
+    <p>Native Snowflake Langflow is an independent project by Francesco Battaglieri, released under the MIT License. It is not an official product, release or repository of Snowflake Inc., nor an official project of Langflow / DataStax, and it is not supported or warranted by either. Components, SQL schemas and configuration may change without notice.</p>
+    <p>All examples on this site use synthetic data. Role names and ratings shown in previews are illustrative.</p>
+  </div>
+</footer>
+</body>
+</html>

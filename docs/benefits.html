@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="snowflake-source" content="cortex-agent-authored">
+<meta name="description" content="Native Snowflake Langflow: an unofficial personal fork that runs the Langflow visual editor inside Snowflake, on Snowflake data, under Snowflake roles.">
+<title>Benefits · Native Snowflake Langflow</title>
+<script type="application/json" id="snowflake-report-metadata">
+{
+  "generated": "2026-11-13",
+  "intent": "Native Snowflake Langflow site: Benefits",
+  "dataSources": [
+    {
+      "type": "file",
+      "path": "README.md"
+    }
+  ],
+  "sections": [
+    {
+      "id": "business",
+      "title": "business",
+      "producerNotes": "From README sections 1, 2, 4 and 5. No performance or adoption claims."
+    },
+    {
+      "id": "technical",
+      "title": "technical",
+      "producerNotes": "From README sections 1, 2, 4 and 5. No performance or adoption claims."
+    }
+  ]
+}
+</script>
+<link rel="stylesheet" href="assets/site.css">
+<script src="assets/site.js" defer></script>
+</head>
+<body>
+
+<div class="notice"><div class="wrap"><strong>Unofficial personal fork, under active testing.</strong> A project by Francesco Battaglieri. It is not a product of Snowflake Inc. or of Langflow / DataStax, and neither supports it. Tested on Snowflake on AWS only, with synthetic data.</div></div>
+
+<nav>
+  <div class="wrap">
+    <a class="brand" href="index.html">Native Snowflake Langflow</a>
+    <div class="links"><a href="index.html">Overview</a><a href="benefits.html" aria-current="page">Benefits</a><a href="guide.html">Guide</a><a href="examples.html">Examples</a><a href="models.html">Models and proxy</a><a href="limits.html">Limits</a></div>
+    <a class="btn ghost small" href="https://github.com/fbattaglieri-snowflake/Native-Snowflake-Langflow">GitHub</a>
+  </div>
+</nav>
+
+<section id="business">
+  <div class="wrap">
+    <div class="head reveal">
+      <h2>Why it matters to the business</h2>
+      <p class="sub">For people who decide what gets built, and want to see it working before anyone writes code.</p>
+    </div>
+    <div class="grid3">
+      <div class="benefit reveal" style="--i:0"><svg viewBox="0 0 24 24"><path d="M12 3v18M3 12h18"/><circle cx="12" cy="12" r="9"/></svg><h3>An idea becomes something you can try</h3><p>A use case is drawn on a canvas and tested in a chat in the same sitting. The conversation moves from slides to a working flow.</p></div>
+      <div class="benefit reveal" style="--i:1"><svg viewBox="0 0 24 24"><rect x="4" y="10" width="16" height="10" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></svg><h3>Data stays in the account</h3><p>The editor runs as a container in Snowpark Container Services, next to the data. Nothing is copied to an outside tool to build a prototype.</p></div>
+      <div class="benefit reveal" style="--i:2"><svg viewBox="0 0 24 24"><path d="M12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6z"/><path d="M9 12l2 2 4-4"/></svg><h3>Governance you can show</h3><p>The role is visible in the top bar and each flow lists the objects it may touch. Security teams see the same rules they already manage.</p></div>
+      <div class="benefit reveal" style="--i:0"><svg viewBox="0 0 24 24"><path d="M6 20V10M12 20V4M18 20v-7"/></svg><h3>Compare approaches before choosing</h3><p>Send one question to a Cortex Agent, an agent with tools and a plain language model, side by side, and look at the answers together.</p></div>
+      <div class="benefit reveal" style="--i:1"><svg viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h10"/></svg><h3>Every run leaves a record</h3><p>Runs, steps and audit events are written to Snowflake tables. Anyone with access can review what a flow did using SQL.</p></div>
+      <div class="benefit reveal" style="--i:2"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg><h3>Workflows that start from the data</h3><p>A flow can begin on a schedule, when a table changes, when a file lands on a stage or when an alert fires. No one has to press run.</p></div>
+    </div>
+  </div>
+</section>
+
+<section id="technical" class="band">
+  <div class="wrap">
+    <div class="head reveal">
+      <h2>What is in the box, technically</h2>
+      <p class="sub">For people who will open the editor. Snowflake nodes sit in the standard Langflow sidebar categories.</p>
+    </div>
+    <div class="tech">
+      <dl class="reveal">
+        <div><dt>Cortex AI as nodes</dt><dd>Call existing services and functions without writing the request.</dd>
+          <div class="tags"><span class="tag">Cortex Agent</span><span class="tag">Cortex Search</span><span class="tag">Cortex Analyst</span><span class="tag">AI_COMPLETE</span><span class="tag">AI_REDACT</span><span class="tag">Decision</span><span class="tag">14 AI_* functions</span></div></div>
+        <div><dt>Your own logic as tools</dt><dd>Stored procedures, functions and table functions become tools an agent can call. Data nodes switch to Tool Mode the same way.</dd></div>
+        <div><dt>Triggers</dt><dd>Each one creates a real Snowflake object that starts the flow.</dd>
+          <div class="tags"><span class="tag">Schedule</span><span class="tag">Table change</span><span class="tag">Stage file</span><span class="tag">Condition alert</span></div></div>
+        <div><dt>Memory on Snowflake tables</dt><dd>Agents save and recall from tables in the flow Context. A task cleans up old rows on a schedule.</dd>
+          <div class="tags"><span class="tag">Checkpointer</span><span class="tag">Summary</span><span class="tag">User profile</span><span class="tag">Episodic</span><span class="tag">Message History</span></div></div>
+        <div><dt>Models through an LLM proxy</dt><dd>Language Model and Agent reach models through a separate LLM proxy service, or Ollama, hosted in SPCS. No API keys are stored in the interface. <a href="models.html">How the proxy works</a></dd></div>
+        <div><dt>Files on stages</dt><dd>AI Complete and AI Function read images, audio, video and documents from internal and external stages.</dd></div>
+      </dl>
+      <div class="reveal" style="--i:1">
+        <div class="layers" aria-label="Architecture in three layers">
+          <div class="layer"><span class="mono">Browser</span><b>Langflow editor</b><p>Role selector, Context button, and the Memories, Stages &amp; Volumes and Traces pages</p></div>
+          <span class="down"></span>
+          <div class="layer"><span class="mono">Container in SPCS</span><b>Guard and Snowflake bridge</b><p>Checks each call against the active role and the flow Context, then runs it. Fails closed</p></div>
+          <span class="down"></span>
+          <div class="layer"><span class="mono">Snowflake account</span><b>Cortex, data and telemetry</b><p>Tables, views, stages, procedures, Cortex services, and the tables that record every run</p></div>
+        </div>
+        <p class="mono" style="margin-top:16px">All Snowflake code lives in one package added to the official Langflow image at build time. The installer stops the build if Langflow changed in a way it does not expect. The LLM proxy is a separate service and is not in this picture.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<div class="wrap"><div class="pager"><a href="index.html"><small>Previous</small>Overview</a><a href="guide.html" style="text-align:right"><small>Next</small>Guide</a></div></div>
+
+<footer>
+  <div class="wrap">
+    <p>Native Snowflake Langflow is an independent project by Francesco Battaglieri, released under the MIT License. It is not an official product, release or repository of Snowflake Inc., nor an official project of Langflow / DataStax, and it is not supported or warranted by either. Components, SQL schemas and configuration may change without notice.</p>
+    <p>All examples on this site use synthetic data. Role names and ratings shown in previews are illustrative.</p>
+  </div>
+</footer>
+</body>
+</html>

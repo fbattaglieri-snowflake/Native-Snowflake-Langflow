@@ -1,0 +1,209 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="snowflake-source" content="cortex-agent-authored">
+<meta name="description" content="Native Snowflake Langflow: an unofficial personal fork that runs the Langflow visual editor inside Snowflake, on Snowflake data, under Snowflake roles.">
+<title>Models and the LLM proxy · Native Snowflake Langflow</title>
+<script type="application/json" id="snowflake-report-metadata">
+{
+  "generated": "2026-11-13",
+  "intent": "Native Snowflake Langflow site: Models and the LLM proxy",
+  "dataSources": [
+    {
+      "type": "file",
+      "path": "README.md"
+    }
+  ],
+  "sections": [
+    {
+      "id": "route",
+      "title": "route",
+      "producerNotes": "From the READMEs of snowflake-proxy-cortexrestapi and snowflake-proxy-cortex-aigateway, and README section 4.3 of this repository."
+    },
+    {
+      "id": "editions",
+      "title": "editions",
+      "producerNotes": "From the READMEs of snowflake-proxy-cortexrestapi and snowflake-proxy-cortex-aigateway, and README section 4.3 of this repository."
+    },
+    {
+      "id": "why",
+      "title": "why",
+      "producerNotes": "From the READMEs of snowflake-proxy-cortexrestapi and snowflake-proxy-cortex-aigateway, and README section 4.3 of this repository."
+    },
+    {
+      "id": "scouting",
+      "title": "scouting",
+      "producerNotes": "From the READMEs of snowflake-proxy-cortexrestapi and snowflake-proxy-cortex-aigateway, and README section 4.3 of this repository."
+    },
+    {
+      "id": "connect",
+      "title": "connect",
+      "producerNotes": "From the READMEs of snowflake-proxy-cortexrestapi and snowflake-proxy-cortex-aigateway, and README section 4.3 of this repository."
+    }
+  ]
+}
+</script>
+<link rel="stylesheet" href="assets/site.css">
+<script src="assets/site.js" defer></script>
+</head>
+<body>
+
+<div class="notice"><div class="wrap"><strong>Unofficial personal fork, under active testing.</strong> A project by Francesco Battaglieri. It is not a product of Snowflake Inc. or of Langflow / DataStax, and neither supports it. Tested on Snowflake on AWS only, with synthetic data.</div></div>
+
+<nav>
+  <div class="wrap">
+    <a class="brand" href="index.html">Native Snowflake Langflow</a>
+    <div class="links"><a href="index.html">Overview</a><a href="benefits.html">Benefits</a><a href="guide.html">Guide</a><a href="examples.html">Examples</a><a href="models.html" aria-current="page">Models and proxy</a><a href="limits.html">Limits</a></div>
+    <a class="btn ghost small" href="https://github.com/fbattaglieri-snowflake/Native-Snowflake-Langflow">GitHub</a>
+  </div>
+</nav>
+
+<section id="route" class="band">
+  <div class="wrap">
+    <div class="head reveal">
+      <h2>Where the model calls go</h2>
+      <p class="sub">Language Model and Agent do not call a model directly. They talk to an LLM proxy, a separate service that runs next to Langflow in Snowpark Container Services. It is not part of this repository: you deploy it once and point Langflow at it.</p>
+    </div>
+    <div class="window reveal">
+      <div class="bar">
+        <span class="title">Two paths out of a flow</span>
+        <div class="seg" role="group" aria-label="Proxy edition">
+          <button type="button" data-ed="rest" aria-pressed="true">Cortex REST API</button>
+          <button type="button" data-ed="gateway" aria-pressed="false">Cortex AI Gateway</button>
+        </div>
+      </div>
+      <div class="route">
+        <div class="lane" style="margin-top:0">
+          <span class="mono">Through the proxy</span>
+          <div class="flowd hot reveal">
+            <div class="fbox" style="--k:0"><span class="mono">Langflow nodes</span><b>Language Model, Agent</b><p>Pick a provider: Snowflake Proxy Chat, Responses or Messages</p></div>
+            <i class="fline" style="--k:0"></i>
+            <div class="fbox" style="--k:1"><span class="mono">Separate service in SPCS</span><b>LLM proxy</b><p>Lists the models that work, adjusts the request, signs it with its own service token</p></div>
+            <i class="fline" style="--k:1"></i>
+            <div class="fbox" style="--k:2"><span class="mono" id="upPath">/api/v2/cortex/v1</span><b id="upName">Cortex REST API</b><p>The model answers. The reply streams back the same way</p></div>
+          </div>
+        </div>
+        <div class="lane">
+          <span class="mono">Without the proxy</span>
+          <div class="flowd reveal">
+            <div class="fbox"><span class="mono">Langflow nodes</span><b>Cortex Agent, AI functions, Embedding Model</b><p>Also Cortex Search, Cortex Analyst and the data nodes</p></div>
+            <i class="fline"></i>
+            <div class="fbox"><span class="mono">Snowflake account</span><b>Cortex services and SQL</b><p>Called by Langflow itself, under the role selected in the top bar</p></div>
+          </div>
+        </div>
+        <p class="edtext" id="edText" role="status" aria-live="polite">Requests go straight from the proxy to the Cortex REST API.</p>
+        <p class="mono">Repository for this edition: <span id="edRepo">snowflake-proxy-cortexrestapi</span></p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="editions">
+  <div class="wrap">
+    <div class="head reveal">
+      <h2>Two editions, one interface</h2>
+      <p class="sub">Both are public, MIT licensed and kept in step with each other. Langflow is configured the same way for either: the endpoints, the model list and the request handling are identical.</p>
+    </div>
+    <div class="two">
+      <article class="ed reveal" style="--i:0">
+        <span class="mono">snowflake-proxy-cortexrestapi</span>
+        <h3>Proxy for the Cortex REST API</h3>
+        <ul>
+          <li>Forwards to the Cortex REST API</li>
+          <li>Chat, Responses and Messages endpoints</li>
+          <li>Daily check for new and retired models</li>
+        </ul>
+        <a class="btn ghost small" href="https://github.com/fbattaglieri-snowflake/snowflake-proxy-cortexrestapi">Open the repository</a>
+      </article>
+      <article class="ed reveal" style="--i:1">
+        <span class="mono">snowflake-proxy-cortex-aigateway</span>
+        <h3>Proxy for Cortex AI Gateway</h3>
+        <ul>
+          <li>Everything in the other edition</li>
+          <li>Traces you can query with SQL, joined across client and server</li>
+          <li>Usage history per user and per model</li>
+          <li>Token quotas per user and a model allowlist</li>
+        </ul>
+        <a class="btn ghost small" href="https://github.com/fbattaglieri-snowflake/snowflake-proxy-cortex-aigateway">Open the repository</a>
+      </article>
+    </div>
+  </div>
+</section>
+
+<section id="why" class="band">
+  <div class="wrap">
+    <div class="head reveal">
+      <h2>Why there is a proxy at all</h2>
+      <p class="sub">Tools like Langflow send requests the way the OpenAI and Anthropic libraries do. Cortex is stricter about some details and rejects them. The proxy rewrites those details on the way through, so the flow keeps working.</p>
+    </div>
+    <div class="diff">
+      <div class="drow reveal" style="--i:0"><span class="mono">Responses</span><code>store: true</code><i></i><code class="ok">store: false</code></div>
+      <div class="drow reveal" style="--i:1"><span class="mono">Chat</span><code>max_tokens</code><i></i><code class="ok">max_completion_tokens</code></div>
+      <div class="drow reveal" style="--i:2"><span class="mono">Messages</span><code>tool_choice: "auto"</code><i></i><code class="ok">tool_choice: {"type": "auto"}</code></div>
+      <div class="drow reveal" style="--i:3"><span class="mono">Tool loops</span><code>call_0 reused in a later turn</code><i></i><code class="ok">call_0_r2</code></div>
+      <div class="drow reveal" style="--i:4"><span class="mono">Tool loops</span><code>reasoning block dropped by the client</code><i></i><code class="ok">restored from the proxy cache</code></div>
+    </div>
+    <p class="mono" style="margin-top:12px">Left: what the client sends. Right: what Cortex receives. Examples from the proxy README</p>
+    <div class="grid3" style="margin-top:48px">
+      <div class="benefit reveal" style="--i:0"><h3 style="margin-top:0">No API keys in Langflow</h3><p>The proxy signs each request with the service token that SPCS rotates for it.</p></div>
+      <div class="benefit reveal" style="--i:1"><h3 style="margin-top:0">Only models that passed</h3><p>Each endpoint lists the models qualified for that protocol, so the dropdown in the node shows what works.</p></div>
+      <div class="benefit reveal" style="--i:2"><h3 style="margin-top:0">Streams in a stable order</h3><p>Streaming events on the Responses endpoint are put in order before they reach the client.</p></div>
+    </div>
+  </div>
+</section>
+
+<section id="scouting">
+  <div class="wrap">
+    <div class="head reveal">
+      <h2>New models arrive on their own</h2>
+      <p class="sub">A daily task compares the models in the account with the day before. A new one is tested before anyone can pick it, and a retired one is withdrawn.</p>
+    </div>
+    <div class="flowd hot reveal">
+      <div class="fbox" style="--k:0"><span class="mono">Every day</span><b>List the models</b><p>Compare the account with yesterday's snapshot</p></div>
+      <i class="fline" style="--k:0"></i>
+      <div class="fbox" style="--k:1"><span class="mono">New model</span><b>Test it</b><p>13 cases, 3 times each: text, streaming, tools, structured output</p></div>
+      <i class="fline" style="--k:1"></i>
+      <div class="fbox" style="--k:2"><span class="mono">All passed</span><b>Publish it</b><p>A signed profile goes to the model registry</p></div>
+      <i class="fline" style="--k:2"></i>
+      <div class="fbox" style="--k:3"><span class="mono">About a minute later</span><b>It is in the node</b><p>The Language Model dropdown shows it, with no restart</p></div>
+    </div>
+    <div class="tips">
+      <div class="tip reveal" style="--i:0"><b>If a test fails</b>The model is recorded as blocked and is not offered.</div>
+      <div class="tip reveal" style="--i:1"><b>If a model disappears</b>It is revoked and removed from every model list.</div>
+      <div class="tip reveal" style="--i:2"><b>Notifications</b>An email goes out only on days when something changed.</div>
+    </div>
+  </div>
+</section>
+
+<section id="connect" class="band">
+  <div class="wrap">
+    <div class="head reveal">
+      <h2>Connect Langflow to the proxy</h2>
+      <p class="sub">Deploy one edition from its repository, then set two values in the Langflow service specification.</p>
+    </div>
+    <div class="guide">
+      <div class="g reveal"><div><h3>Deploy the proxy</h3><p>Follow the README of the edition you chose. It runs as its own service in Snowpark Container Services.</p></div></div>
+      <div class="g reveal"><div><h3>Point Langflow at it</h3><p>Set the proxy address and allow its host name.</p>
+<pre class="cfg">LLM_PROXY_BASE_URL: "http://&lt;PROXY_SERVICE&gt;.&lt;DNS_NAMESPACE&gt;:8080"
+LANGFLOW_SSRF_ALLOWED_HOSTS: "&lt;LLM_PROXY_HOST&gt;,localhost,127.0.0.1"</pre></div></div>
+      <div class="g reveal"><div><h3>Pick a model</h3><p>Open a <kbd>Language Model</kbd> or <kbd>Agent</kbd> node and choose a Snowflake Proxy provider. The model list is read from the proxy.</p></div></div>
+    </div>
+    <div class="tips">
+      <div class="tip reveal" style="--i:0"><b>Private models</b>Ollama hosted in SPCS is a second provider for the same two nodes, set with OLLAMA_BASE_URL.</div>
+      <div class="tip reveal" style="--i:1"><b>Same status as this project</b>Both proxies are independent community projects. They are not Snowflake products and Snowflake does not support them.</div>
+    </div>
+  </div>
+</section>
+
+<div class="wrap"><div class="pager"><a href="examples.html"><small>Previous</small>Examples</a><a href="limits.html" style="text-align:right"><small>Next</small>Limits</a></div></div>
+
+<footer>
+  <div class="wrap">
+    <p>Native Snowflake Langflow is an independent project by Francesco Battaglieri, released under the MIT License. It is not an official product, release or repository of Snowflake Inc., nor an official project of Langflow / DataStax, and it is not supported or warranted by either. Components, SQL schemas and configuration may change without notice.</p>
+    <p>All examples on this site use synthetic data. Role names and ratings shown in previews are illustrative.</p>
+  </div>
+</footer>
+</body>
+</html>

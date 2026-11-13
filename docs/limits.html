@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="snowflake-source" content="cortex-agent-authored">
+<meta name="description" content="Native Snowflake Langflow: an unofficial personal fork that runs the Langflow visual editor inside Snowflake, on Snowflake data, under Snowflake roles.">
+<title>What it does not do yet · Native Snowflake Langflow</title>
+<script type="application/json" id="snowflake-report-metadata">
+{
+  "generated": "2026-11-13",
+  "intent": "Native Snowflake Langflow site: What it does not do yet",
+  "dataSources": [
+    {
+      "type": "file",
+      "path": "README.md"
+    }
+  ],
+  "sections": [
+    {
+      "id": "limits",
+      "title": "limits",
+      "producerNotes": "From README section 14, Known limitations. Update when a limit is fixed."
+    },
+    {
+      "id": "feedback",
+      "title": "feedback",
+      "producerNotes": "From README section 14, Known limitations. Update when a limit is fixed."
+    }
+  ]
+}
+</script>
+<link rel="stylesheet" href="assets/site.css">
+<script src="assets/site.js" defer></script>
+</head>
+<body>
+
+<div class="notice"><div class="wrap"><strong>Unofficial personal fork, under active testing.</strong> A project by Francesco Battaglieri. It is not a product of Snowflake Inc. or of Langflow / DataStax, and neither supports it. Tested on Snowflake on AWS only, with synthetic data.</div></div>
+
+<nav>
+  <div class="wrap">
+    <a class="brand" href="index.html">Native Snowflake Langflow</a>
+    <div class="links"><a href="index.html">Overview</a><a href="benefits.html">Benefits</a><a href="guide.html">Guide</a><a href="examples.html">Examples</a><a href="models.html">Models and proxy</a><a href="limits.html" aria-current="page">Limits</a></div>
+    <a class="btn ghost small" href="https://github.com/fbattaglieri-snowflake/Native-Snowflake-Langflow">GitHub</a>
+  </div>
+</nav>
+
+<section id="limits">
+  <div class="wrap">
+    <div class="head reveal">
+      <h2>What it does not do yet</h2>
+      <p class="sub">Better to read this before you plan a demo than to find out during one. The full list is in the <a href="https://github.com/fbattaglieri-snowflake/Native-Snowflake-Langflow#14-known-limitations">README</a>.</p>
+    </div>
+    <div class="limits">
+      <div class="limit reveal"><b>Language Model and Agent need an LLM proxy</b><p>It is a separate service, not part of this repository. Cortex Agent and the AI function nodes do not use it. <a href="models.html">Details</a></p></div>
+      <div class="limit reveal"><b>Not ready for production</b><p>It is under active testing. Run your own qualification and security review first.</p></div>
+      <div class="limit reveal"><b>Tested on AWS only</b><p>Other clouds have not been tried.</p></div>
+      <div class="limit reveal"><b>No file upload from the browser</b><p>Load files on a stage with Snowsight or the CLI.</p></div>
+      <div class="limit reveal"><b>External Volumes are untested</b><p>Creation is implemented but has never run against a real bucket.</p></div>
+      <div class="limit reveal"><b>Queries run as the service</b><p>They are limited to the role you select. Running as the signed-in user exists but is off by default.</p></div>
+      <div class="limit reveal"><b>One instance</b><p>The Langflow database sits on a block volume, so the service runs a single replica.</p></div>
+      <div class="limit reveal"><b>Cortex Analyst returns the full record</b><p>Outside Tool Mode the node gives back the API response as JSON, which uses more tokens in a prompt.</p></div>
+      <div class="limit reveal"><b>Decision ratings vary</b><p>In comparisons they are close to each other and change from one run to the next.</p></div>
+    </div>
+  </div>
+</section>
+
+<section id="feedback" class="band">
+  <div class="wrap cta">
+    <div class="reveal">
+      <h2>Try it, then say what broke</h2>
+      <p class="sub">The most useful feedback right now is a flow that did not behave the way you expected, with the question you asked and the role you used.</p>
+    </div>
+    <div class="actions reveal" style="--i:1;margin-top:0">
+      <a class="btn primary" href="https://github.com/fbattaglieri-snowflake/Native-Snowflake-Langflow">Open the repository</a>
+      <a class="btn ghost" href="https://github.com/fbattaglieri-snowflake/Native-Snowflake-Langflow/blob/snowflake/main/docs/CAPABILITY_MATRIX.md">Capability matrix</a>
+    </div>
+  </div>
+</section>
+
+<div class="wrap"><div class="pager"><a href="models.html"><small>Previous</small>Models and proxy</a><span></span></div></div>
+
+<footer>
+  <div class="wrap">
+    <p>Native Snowflake Langflow is an independent project by Francesco Battaglieri, released under the MIT License. It is not an official product, release or repository of Snowflake Inc., nor an official project of Langflow / DataStax, and it is not supported or warranted by either. Components, SQL schemas and configuration may change without notice.</p>
+    <p>All examples on this site use synthetic data. Role names and ratings shown in previews are illustrative.</p>
+  </div>
+</footer>
+</body>
+</html>
