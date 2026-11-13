@@ -77,6 +77,7 @@
           <div class="tags"><span class="tag">Schedule</span><span class="tag">Table change</span><span class="tag">Stage file</span><span class="tag">Condition alert</span></div></div>
         <div><dt>Memory on Snowflake tables</dt><dd>Agents save and recall from tables in the flow Context. A task cleans up old rows on a schedule.</dd>
           <div class="tags"><span class="tag">Checkpointer</span><span class="tag">Summary</span><span class="tag">User profile</span><span class="tag">Episodic</span><span class="tag">Message History</span></div></div>
+        <div><dt>MCP and A2A</dt><dd>Agents can use MCP tools and call other agents over A2A. Flows can be offered to others the same way. <a href="#protocols">See below</a></dd></div>
         <div><dt>Models through an LLM proxy</dt><dd>Language Model and Agent reach models through a separate LLM proxy service, or Ollama, hosted in SPCS. No API keys are stored in the interface. <a href="models.html">How the proxy works</a></dd></div>
         <div><dt>Files on stages</dt><dd>AI Complete and AI Function read images, audio, video and documents from internal and external stages.</dd></div>
       </dl>
@@ -94,12 +95,40 @@
   </div>
 </section>
 
+<section id="protocols">
+  <div class="wrap">
+    <div class="head reveal">
+      <h2>Works with MCP and A2A</h2>
+      <p class="sub">Two open protocols let a flow use tools and agents that live outside the canvas, and let other clients use the flow.</p>
+    </div>
+    <div class="two">
+      <article class="ed reveal" style="--i:0">
+        <div class="proto"><img src="assets/logos/mcp.svg" alt="Model Context Protocol logo" width="28" height="28"><h3>Model Context Protocol</h3></div>
+        <ul>
+          <li>The MCP Tools node gives an Agent the tools of an MCP server</li>
+          <li>Each Langflow project has its own MCP server, so its flows can be called as tools by MCP clients</li>
+          <li>A call the active role may not make is refused and written to the audit log</li>
+        </ul>
+      </article>
+      <article class="ed reveal" style="--i:1">
+        <div class="proto"><picture><source srcset="assets/logos/a2a-white.svg" media="(prefers-color-scheme: dark)"><img src="assets/logos/a2a-black.svg" alt="Agent2Agent protocol logo" width="28" height="28"></picture><h3>Agent2Agent protocol</h3></div>
+        <ul>
+          <li>The A2A Agent node calls another flow, a Cortex Agent or an external A2A address</li>
+          <li>A flow can be served as an A2A agent, with its own agent card</li>
+          <li>Call chains have a limit, so agents cannot call each other without end</li>
+        </ul>
+      </article>
+    </div>
+  </div>
+</section>
+
 <div class="wrap"><div class="pager"><a href="index.html"><small>Previous</small>Overview</a><a href="guide.html" style="text-align:right"><small>Next</small>Guide</a></div></div>
 
 <footer>
   <div class="wrap">
     <p>Native Snowflake Langflow is an independent project by Francesco Battaglieri, released under the MIT License. It is not an official product, release or repository of Snowflake Inc., nor an official project of Langflow / DataStax, and it is not supported or warranted by either. Components, SQL schemas and configuration may change without notice.</p>
     <p>All examples on this site use synthetic data. Role names and ratings shown in previews are illustrative.</p>
+    <p>The MCP and A2A logos belong to their respective projects and are used only to identify the protocols.</p>
   </div>
 </footer>
 </body>

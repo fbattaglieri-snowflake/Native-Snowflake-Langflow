@@ -59,6 +59,8 @@ This project keeps the Langflow editor as it is and adds what is needed to use i
 | Per-flow Context | Limits each flow to the objects selected for it | `Context` button in the flow editor | Live |
 | Cortex AI nodes | Cortex Agent, Search, Analyst, `AI_COMPLETE`, `AI_REDACT`, Decision models, 14 `AI_*` functions, files on stages | Sidebar categories | Live |
 | Model providers | `Language Model` and `Agent` use models served by an LLM proxy or by Ollama, both hosted in SPCS | `Models & Agents` | Live |
+| MCP | An agent can use the tools of an MCP server, and the flows of a project can be called as tools through the project MCP server | `MCP Tools` node | Live |
+| A2A | A flow can call other agents, and be served as an agent, over the Agent2Agent protocol | `A2A Agent` node | Live |
 | Triggers | Start a flow from a schedule, a table change, a new file on a stage, or an alert | `Triggers` category | Live |
 | Memory | Tables in Snowflake that agents save to and recall from, with automatic cleanup | `Memories` page, `Agent Memory` node | Live |
 | Chat history | Conversation turns stored in a Snowflake table | `Message History` node | Live |
@@ -327,6 +329,17 @@ Two ways to pick files: one file with `TO_FILE('@<DATABASE>.<SCHEMA>.<STAGE_NAME
 | Memory Base | Memory fed automatically from chat turns; stored in `LF_MEM_*` tables | Live |
 
 "In progress" means the node exists but has not been fully verified end to end.
+
+### 4.7 MCP and A2A
+
+Two open protocols connect a flow to tools and agents outside the canvas.
+
+| | Protocol | In this project |
+|---|---|---|
+| <img src="docs/assets/logos/mcp.svg" alt="MCP logo" width="24"> | [Model Context Protocol](https://modelcontextprotocol.io) (MCP) | The `MCP Tools` node gives an `Agent` the tools of an MCP server. Each Langflow project also has its own MCP server, so its flows can be called as tools by MCP clients. A call the active role may not make is refused and recorded in the audit log as `AUTHZ_ROLE_DENIED`. |
+| <img src="docs/assets/logos/a2a-black.svg" alt="A2A logo" width="24"> | [Agent2Agent](https://a2a-protocol.org) (A2A) | The `A2A Agent` node calls another flow served as an A2A agent, a Cortex Agent, or an external A2A URL. A flow can itself be served as an A2A agent with an agent card. Call chains are limited. |
+
+`SHOWCASE_02` uses the project MCP server and `SHOWCASE_04` uses every form of A2A; see [section 8](#8-showcase-flows). The logos belong to their respective projects; sources are listed in [`docs/assets/logos/`](docs/assets/logos/README.md).
 
 ---
 

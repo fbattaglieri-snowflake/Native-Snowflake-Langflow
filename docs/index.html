@@ -59,33 +59,51 @@
       </ul>
     </div>
 
-    <figure class="window" id="heroWin" style="margin:0" aria-label="Animated preview of a flow: a chat input, an agent with Cortex Analyst and Cortex Search as tools, a memory and a chat output">
+    <figure class="window" id="heroWin" style="margin:0" aria-label="Animated preview of an example flow: a question is classified by an AI function, an agent calls Cortex Analyst, Cortex Search and an MCP tool, a Decision node rates the answer, and on low confidence a Cortex Agent and an A2A agent are asked before the answer is sent and saved to memory">
       <div class="bar">
-        <span class="title">Maintenance assistant</span>
+        <span class="title">Maintenance assistant · example flow</span>
         <span class="chip role">Role <b>MAINTENANCE_ANALYST</b></span>
         <span class="chip">Context <b>4 objects</b></span>
       </div>
-      <svg class="canvas" viewBox="0 0 640 400" role="img" aria-hidden="true">
-        <path class="wire" id="w1" pathLength="1" d="M170 68 C210 68 205 166 245 166"/>
-        <path class="wire" id="w2" pathLength="1" d="M170 248 C210 248 205 190 245 190"/>
-        <path class="wire" id="w3" pathLength="1" d="M170 338 C215 338 200 210 245 210"/>
-        <path class="wire" id="w4" pathLength="1" d="M395 166 C435 166 430 68 470 68"/>
-        <path class="wire" id="w5" pathLength="1" d="M395 200 C435 200 430 298 470 298"/>
-        <g class="node" id="nIn" style="transition-delay:0ms"><rect x="20" y="40" width="150" height="56" rx="10"/><circle class="pip" cx="38" cy="60" r="3"/><text x="48" y="64">Chat Input</text><text class="kind" x="38" y="82">input</text></g>
-        <g class="node sf" id="nAn" style="transition-delay:60ms"><rect x="20" y="220" width="150" height="56" rx="10"/><circle class="pip" cx="38" cy="240" r="3"/><text x="48" y="244">Cortex Analyst</text><text class="kind" x="38" y="262">tool · numbers</text></g>
-        <g class="node sf" id="nSe" style="transition-delay:120ms"><rect x="20" y="310" width="150" height="56" rx="10"/><circle class="pip" cx="38" cy="330" r="3"/><text x="48" y="334">Cortex Search</text><text class="kind" x="38" y="352">tool · documents</text></g>
-        <g class="node" id="nAg" style="transition-delay:180ms"><rect x="245" y="140" width="150" height="90" rx="10"/><circle class="pip" cx="263" cy="166" r="3"/><text x="273" y="170">Agent</text><text class="kind" x="263" y="190">decides which tool</text><text class="kind" x="263" y="206">to call</text></g>
-        <g class="node" id="nOut" style="transition-delay:240ms"><rect x="470" y="40" width="150" height="56" rx="10"/><circle class="pip" cx="488" cy="60" r="3"/><text x="498" y="64">Chat Output</text><text class="kind" x="488" y="82">output</text></g>
-        <g class="node sf" id="nMem" style="transition-delay:300ms"><rect x="470" y="270" width="150" height="56" rx="10"/><circle class="pip" cx="488" cy="290" r="3"/><text x="498" y="294">Agent Memory</text><text class="kind" x="488" y="312">Snowflake table</text></g>
+      <div class="scroll">
+      <svg class="canvas" viewBox="0 0 880 356" role="img" aria-hidden="true">
+        <path class="wire" id="w1" pathLength="1" d="M200 52 L240 52"/>
+        <path class="wire" id="w2" pathLength="1" d="M420 52 L460 52"/>
+        <path class="wire" id="t1" pathLength="1" d="M110 150 C110 108 500 124 500 80"/>
+        <path class="wire" id="t2" pathLength="1" d="M330 150 C330 114 525 118 525 80"/>
+        <path class="wire" id="t3" pathLength="1" d="M550 150 L550 80"/>
+        <path class="wire" id="w3" pathLength="1" d="M640 52 L680 52"/>
+        <path class="wire" id="wHigh" pathLength="1" d="M700 80 C700 118 660 112 660 150 L660 232 C660 258 620 250 620 276"/>
+        <path class="wire" id="wLow" pathLength="1" d="M770 80 L770 150"/>
+        <path class="wire" id="w5" pathLength="1" d="M770 206 L770 276"/>
+        <path class="wire" id="w6" pathLength="1" d="M680 304 L640 304"/>
+        <path class="wire" id="w7" pathLength="1" d="M460 304 L420 304"/>
+        <text class="wlabel" x="778" y="120">low confidence</text>
+        <text class="wlabel" x="652" y="246" text-anchor="end">high</text>
+        <circle class="pip key-sf" cx="26" cy="296" r="3"/><text class="wlabel" x="36" y="300">added by this project</text>
+        <circle class="pip" cx="26" cy="316" r="3"/><text class="wlabel" x="36" y="320">standard Langflow</text>
+        <g class="node" id="nIn" style="transition-delay:0ms"><rect x="20" y="24" width="180" height="56" rx="10"/><circle class="pip" cx="38" cy="45" r="3"/><text x="52" y="49">Chat Input</text><text class="kind" x="38" y="67">input</text></g>
+        <g class="node sf" id="nAif" style="transition-delay:50ms"><rect x="240" y="24" width="180" height="56" rx="10"/><circle class="pip" cx="258" cy="45" r="3"/><text x="272" y="49">AI Function</text><text class="kind" x="258" y="67">AI_CLASSIFY · urgency</text></g>
+        <g class="node" id="nAg" style="transition-delay:100ms"><rect x="460" y="24" width="180" height="56" rx="10"/><circle class="pip" cx="478" cy="45" r="3"/><text x="492" y="49">Agent</text><text class="kind" x="478" y="67">picks the tools to call</text></g>
+        <g class="node sf" id="nDec" style="transition-delay:150ms"><rect x="680" y="24" width="180" height="56" rx="10"/><circle class="pip" cx="698" cy="45" r="3"/><text x="712" y="49">Decision</text><text class="kind" x="698" y="67">rates the answer</text></g>
+        <g class="node sf" id="nAn" style="transition-delay:200ms"><rect x="20" y="150" width="180" height="56" rx="10"/><circle class="pip" cx="38" cy="171" r="3"/><text x="52" y="175">Cortex Analyst</text><text class="kind" x="38" y="193">tool · numbers</text></g>
+        <g class="node sf" id="nSe" style="transition-delay:250ms"><rect x="240" y="150" width="180" height="56" rx="10"/><circle class="pip" cx="258" cy="171" r="3"/><text x="272" y="175">Cortex Search</text><text class="kind" x="258" y="193">tool · documents</text></g>
+        <g class="node" id="nMcp" style="transition-delay:300ms"><rect x="460" y="150" width="180" height="56" rx="10"/><image href="assets/logos/mcp.svg" x="471" y="163" width="16" height="16"/><text x="492" y="175">MCP Tools</text><text class="kind" x="478" y="193">tool · over MCP</text></g>
+        <g class="node sf" id="nCa" style="transition-delay:350ms"><rect x="680" y="150" width="180" height="56" rx="10"/><circle class="pip" cx="698" cy="171" r="3"/><text x="712" y="175">Cortex Agent</text><text class="kind" x="698" y="193">warranty specialist</text></g>
+        <g class="node sf" id="nMem" style="transition-delay:400ms"><rect x="240" y="276" width="180" height="56" rx="10"/><circle class="pip" cx="258" cy="297" r="3"/><text x="272" y="301">Agent Memory</text><text class="kind" x="258" y="319">Snowflake table</text></g>
+        <g class="node" id="nOut" style="transition-delay:450ms"><rect x="460" y="276" width="180" height="56" rx="10"/><circle class="pip" cx="478" cy="297" r="3"/><text x="492" y="301">Chat Output</text><text class="kind" x="478" y="319">output</text></g>
+        <g class="node" id="nA2a" style="transition-delay:500ms"><rect x="680" y="276" width="180" height="56" rx="10"/><image class="lg-light" href="assets/logos/a2a-black.svg" x="691" y="289" width="16" height="16"/><image class="lg-dark" href="assets/logos/a2a-white.svg" x="691" y="289" width="16" height="16"/><text x="712" y="301">A2A Agent</text><text class="kind" x="698" y="319">supplier agent · A2A</text></g>
         <circle id="dot" r="5"/>
       </svg>
+      </div>
       <div class="trace">
         <ol id="log">
           <li><span>1</span> question received</li>
-          <li><span>2</span> tool call · Cortex Analyst</li>
-          <li><span>3</span> tool call · Cortex Search</li>
-          <li><span>4</span> memory saved to a table</li>
-          <li><span>5</span> answer sent · run recorded in LANGFLOW_FLOW_RUNS</li>
+          <li><span>2</span> AI function · urgency classified</li>
+          <li><span>3</span> agent · Cortex Analyst, Cortex Search and an MCP tool</li>
+          <li><span>4</span> Decision · low confidence, ask the specialists</li>
+          <li><span>5</span> Cortex Agent, then a supplier agent over A2A</li>
+          <li><span>6</span> answer sent · memory saved · run recorded in LANGFLOW_FLOW_RUNS</li>
         </ol>
         <button class="btn ghost small" id="rerun" type="button">Run again</button>
       </div>
@@ -158,7 +176,7 @@
       <h2>Where to go next</h2>
     </div>
     <div class="cards">
-      <a class="card reveal" style="--i:0" href="benefits.html"><b>Benefits</b><span>What the business gets and what is in the box</span></a>
+      <a class="card reveal" style="--i:0" href="benefits.html"><b>Benefits</b><span>What the business gets, what is in the box, MCP and A2A</span></a>
       <a class="card reveal" style="--i:1" href="guide.html"><b>Guide</b><span>Your first ten minutes, step by step</span></a>
       <a class="card reveal" style="--i:2" href="examples.html"><b>Examples</b><span>Four flows with the questions to ask</span></a>
       <a class="card reveal" style="--i:3" href="models.html"><b>Models and proxy</b><span>Where model calls go and what you need to deploy</span></a>
@@ -173,6 +191,7 @@
   <div class="wrap">
     <p>Native Snowflake Langflow is an independent project by Francesco Battaglieri, released under the MIT License. It is not an official product, release or repository of Snowflake Inc., nor an official project of Langflow / DataStax, and it is not supported or warranted by either. Components, SQL schemas and configuration may change without notice.</p>
     <p>All examples on this site use synthetic data. Role names and ratings shown in previews are illustrative.</p>
+    <p>The MCP and A2A logos belong to their respective projects and are used only to identify the protocols.</p>
   </div>
 </footer>
 </body>

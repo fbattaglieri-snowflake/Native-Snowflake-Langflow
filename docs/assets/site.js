@@ -34,7 +34,7 @@
     var wait = function (ms) { return new Promise(function (r) { setTimeout(r, ms); }); };
     var travel = function (path, reverse, id) {
       return new Promise(function (resolve) {
-        var len = path.getTotalLength(), dur = 620, t0 = performance.now();
+        var len = path.getTotalLength(), dur = Math.max(260, Math.min(620, len * 2.2)), t0 = performance.now();
         path.classList.add('on');
         dot.style.opacity = 1;
         (function frame(now) {
@@ -53,20 +53,28 @@
     var run = async function () {
       var id = ++runId;
       setAll(false); dot.style.opacity = 0;
-      if (reduce) { setAll(true); return; }
+      if (reduce) { setAll(true); $('wHigh').classList.remove('on'); return; }
       var ok = function () { return id === runId; };
       var on = function (n) { $(n).classList.add('on'); };
       var log = function (i) { logItems[i].classList.add('on'); };
+      var go = async function (w, reverse) { await travel($(w), reverse, id); return ok(); };
+      var tool = async function (w, n) {
+        if (!(await go(w, true))) return false;
+        on(n); await wait(160);
+        return go(w, false);
+      };
       await wait(300); if (!ok()) return;
       on('nIn'); log(0);
-      await travel($('w1'), false, id); if (!ok()) return; on('nAg');
-      await travel($('w2'), true, id); if (!ok()) return; on('nAn'); log(1);
-      await wait(260); await travel($('w2'), false, id); if (!ok()) return;
-      await travel($('w3'), true, id); if (!ok()) return; on('nSe'); log(2);
-      await wait(260); await travel($('w3'), false, id); if (!ok()) return;
-      await travel($('w5'), false, id); if (!ok()) return; on('nMem'); log(3);
-      await wait(260); await travel($('w5'), true, id); if (!ok()) return;
-      await travel($('w4'), false, id); if (!ok()) return; on('nOut'); log(4);
+      if (!(await go('w1'))) return; on('nAif'); log(1); await wait(200);
+      if (!(await go('w2'))) return; on('nAg'); log(2);
+      if (!(await tool('t1', 'nAn'))) return;
+      if (!(await tool('t2', 'nSe'))) return;
+      if (!(await tool('t3', 'nMcp'))) return;
+      if (!(await go('w3'))) return; on('nDec'); log(3); await wait(300);
+      if (!(await go('wLow'))) return; on('nCa'); log(4); await wait(200);
+      if (!(await go('w5'))) return; on('nA2a'); await wait(200);
+      if (!(await go('w6'))) return; on('nOut'); log(5);
+      if (!(await go('w7'))) return; on('nMem');
       dot.style.opacity = 0;
     };
     requestAnimationFrame(function () {
