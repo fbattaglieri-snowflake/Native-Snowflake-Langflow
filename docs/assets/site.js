@@ -156,40 +156,6 @@
     });
   }
 
-  // What we added: sidebar tour.
-  var side = $('sideWin');
-  if (side) {
-    var auto = !reduce, timer;
-    var pick = function (row) {
-      side.querySelectorAll('button.srow').forEach(function (r) { r.classList.toggle('sel', r === row); });
-      $('nodeTag').textContent = row.dataset.tag;
-      $('nodeName').textContent = row.textContent;
-      $('nodeDesc').textContent = row.dataset.desc;
-    };
-    var rows = function () { return side.querySelectorAll('.slist.on button.srow'); };
-    var openCat = function (cat, first) {
-      side.querySelectorAll('[data-cat]').forEach(function (el) {
-        if (el.classList.contains('slist')) { el.classList.toggle('on', el.dataset.cat === cat); }
-        else { el.setAttribute('aria-pressed', String(el.dataset.cat === cat)); }
-      });
-      pick(first || rows()[0]);
-    };
-    side.querySelectorAll('button[data-cat]').forEach(function (b) {
-      b.addEventListener('click', function () { openCat(b.dataset.cat); });
-    });
-    side.querySelectorAll('button.srow').forEach(function (r) {
-      r.addEventListener('click', function () { auto = false; clearInterval(timer); pick(r); });
-    });
-    openCat('models', side.querySelector('.slist.on .srow.sf'));
-    if (auto) {
-      timer = setInterval(function () {
-        var list = Array.prototype.slice.call(rows());
-        var i = list.findIndex(function (r) { return r.classList.contains('sel'); });
-        pick(list[(i + 1) % list.length]);
-      }, 3200);
-    }
-  }
-
   // Examples: tabs.
   var tabs = document.querySelectorAll('[role=tab]');
   tabs.forEach(function (tab) {

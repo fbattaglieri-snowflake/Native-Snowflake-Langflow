@@ -261,20 +261,3 @@ pre.cfg{margin:16px 0 0;padding:16px;border-radius:12px;background:var(--bg);bor
 .proto img{width:28px;height:28px;flex:none}
 .scene{display:none}
 .scene.on{display:block}
-
-/* what we added */
-.side{display:grid;grid-template-columns:minmax(0,260px) minmax(0,1fr)}
-.slist{display:none;padding:12px;border-right:1px solid var(--line);gap:2px;align-content:start}
-.slist.on{display:grid}
-.srow{display:flex;align-items:center;gap:10px;width:100%;height:34px;padding:0 10px;border:0;border-radius:8px;background:none;font:400 14px var(--sans);color:var(--muted);text-align:left}
-button.srow{cursor:pointer;color:var(--text);transition:background-color .15s var(--ease)}
-button.srow:hover{background:var(--raised)}
-.srow::before,.key{content:"";display:inline-block;width:6px;height:6px;border-radius:50%;background:var(--line2);flex:none}
-.srow.sf::before,.key.k1{background:var(--accent)}
-.srow.ext::before,.key.k2{background:var(--muted)}
-.key{margin:0 6px 1px 12px}.key.k1{margin-left:0}
-button.srow.sel{background:var(--accent-soft)}
-.sdetail{display:grid;align-content:center;gap:8px;padding:clamp(20px,4vw,40px);min-height:220px}
-.sdetail h3{font-size:22px;line-height:28px}
-.sdetail p{color:var(--text2);max-width:34rem}
-@media (max-width:700px){.side{grid-template-columns:minmax(0,1fr)}.slist{border-right:0;border-bottom:1px solid var(--line)}}
