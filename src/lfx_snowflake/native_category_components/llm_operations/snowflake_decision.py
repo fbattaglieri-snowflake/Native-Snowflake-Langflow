@@ -267,6 +267,11 @@ class SnowflakeDecisionComponent(Component):
             group_outputs=True,
         ),
         Output(
+            display_name="Summary (text)",
+            name="summary",
+            method="run_summary",
+        ),
+        Output(
             display_name="Table Decisions (DataFrame)",
             name="table_decisions",
             method="run_table_decisions",
@@ -404,6 +409,34 @@ class SnowflakeDecisionComponent(Component):
 
     def run_decision(self) -> Data:
         return Data(data=dict(self._compute()))
+
+    @staticmethod
+    def summarize_answers(answers: dict[str, Any]) -> str:
+        """One readable line per question, for a prompt or a chat message."""
+        lines = []
+        for qid, ans in (answers or {}).items():
+            if not isinstance(ans, dict):
+                lines.append(f"{qid}: {ans}")
+                continue
+            conf = ans.get("confidence")
+            tail = f" (confidence {float(conf):.2f})" if isinstance(conf, (int, float)) else ""
+            if isinstance(ans.get("score"), (int, float)):
+                legend = ans.get("legend") if isinstance(ans.get("legend"), dict) else {}
+                top = max(len(legend) - 1, 0)
+                level = legend.get(str(int(round(float(ans["score"])))))
+                scale = f" out of {top}" if top else ""
+                closest = f' - closest level: "{level}"' if level else ""
+                lines.append(f"{qid}: {float(ans['score']):.2f}{scale}{closest}{tail}")
+            elif "choice" in ans:
+                lines.append(f"{qid}: {ans.get('choice')}{tail}")
+            elif isinstance(ans.get("noul"), (int, float)):
+                lines.append(f"{qid}: probability {float(ans['noul']):.2f}")
+            else:
+                lines.append(f"{qid}: {json.dumps(ans, default=str)}")
+        return "\n".join(lines)
+
+    def run_summary(self) -> Message:
+        return Message(text=self.summarize_answers(dict(self._compute().get("answers") or {})))
 
     def _stop_route(self, output_name: str) -> None:
         """BUG-LLMOP-002/003: Langflow If-Else pattern; only the active branch's downstream runs.

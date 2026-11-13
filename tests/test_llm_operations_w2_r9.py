@@ -216,7 +216,17 @@ def test_w2_r9_02_decision_official_ai_complete_models_and_question_types(monkey
 
     monkeypatch.setattr(dec_mod, "_flow_component_execute_sql", _fake_exec)
     comp = SnowflakeDecisionComponent()
-    assert len(comp.outputs) == 4
+    assert len(comp.outputs) == 5
+    summary = type(comp).summarize_answers({
+        "rating": {"type": "score", "score": 3.4, "confidence": 0.61, "legend": {"0": "bad", "1": "poor", "2": "fair", "3": "good", "4": "best"}},
+        "path": {"type": "choice", "choice": "refund", "confidence": 0.9},
+        "routine": {"type": "noul", "noul": 0.84},
+    })
+    assert summary.splitlines() == [
+        'rating: 3.40 out of 4 - closest level: "good" (confidence 0.61)',
+        "path: refund (confidence 0.90)",
+        "routine: probability 0.84",
+    ]
     out_data = comp.run_decision()
     assert out_data.data["answers"]["department"]["choice"] == "billing"
     assert out_data.data["answers_source"] == "snowflake_ai_complete"
