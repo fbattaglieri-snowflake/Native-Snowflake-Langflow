@@ -171,6 +171,7 @@ flowchart TB
 | Memories | Unsupported backends | Snowflake Postgres, Dynamic, Interactive, Iceberg, Cortex Search, chat-window memories and non-Cortex embeddings are refused (422) instead of registered. A Hybrid table that cannot be created is an error. |
 | Memories | Episodic scope | Episodes saved under a node `Key` are recalled only for that key; without a key an episodic memory is shared by all sessions. |
 | Memories | Memories page | The `+ ❄️ Snowflake` menu lists only what is created (chat-window type points to `Message History`), reopens after the wizard is closed, the wizard closes after a successful create, and the detail view lists the rows read from the memory table. |
+| Models & Agents | Message History outputs | `Chat History` returns a plain transcript for prompts, `Stored Message` the stored text; the full record is on `Table Records`. A `Store` node writes once per run whatever the number of outputs evaluated. |
 | Stages & Volumes | Creation outcome | A failed `CREATE STAGE` / `CREATE EXTERNAL VOLUME` returns the Snowflake error and registers nothing; URL, integration or role ARN are required, never defaulted. |
 | Memories | Default gate model | `claude-haiku-5-5` when the request names no preprocessing model; pass `preproc_model` to choose another one. |
 | Memories | Delete | Evaluated under the role of the flow that owns the Memory Base. |
