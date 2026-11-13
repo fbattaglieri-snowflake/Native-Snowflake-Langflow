@@ -3125,6 +3125,54 @@ class LiveSnowflakeBridge:
             out["message"] = str(res.get("message") or "Snowflake did not store the memory record.")
         return out
 
+    @staticmethod
+    def _is_typed_memory(entry: dict[str, Any] | None) -> bool:
+        from . import memories_typed as _typed  # noqa: PLC0415
+
+        return bool(
+            isinstance(entry, dict)
+            and not isinstance(entry.get("lf_mem"), dict)
+            and str(entry.get("canonical_memory_type") or "") in _typed.WRITABLE_KINDS
+            and (entry.get("snowflake_created") or entry.get("discovered_from_snowflake") or entry.get("persistent"))
+        )
+
+    def typed_memory_records(self, entry: dict[str, Any], *, limit: int = 200) -> list[dict[str, Any]]:
+        """Rows of a typed memory table, shaped like the records the Memories page lists (read from Snowflake)."""
+        from . import memories_typed as _typed  # noqa: PLC0415
+        from .memories_lf_mem import iso_timestamp as _lf_mem_iso_timestamp  # noqa: PLC0415
+
+        try:
+            fqn = _sql_safety.validate_fqn(str(entry.get("table_fqn") or ""), "table_fqn", min_parts=3, max_parts=3)
+        except _sql_safety.SqlSafetyError:
+            return []
+        cache: dict[str, tuple[float, list[dict[str, Any]]]] = self.__dict__.setdefault("_typed_memory_rows_cache", {})
+        hit = cache.get(fqn)
+        if hit and time.time() - hit[0] < 8:
+            return list(hit[1])
+        sql = _typed.build_browse_statement(str(entry["canonical_memory_type"]), fqn, limit=limit)
+        res = self.execute_sql(sql)
+        records: list[dict[str, Any]] = []
+        if res.get("ok") and res.get("mode") != "offline":
+            for row in res.get("rows") or []:
+                if not isinstance(row, dict):
+                    continue
+                low = {str(k).lower(): v for k, v in row.items()}
+                ts = _lf_mem_iso_timestamp(low.get("ts"), default_now=False)
+                records.append(
+                    {
+                        "session_id": str(low.get("session_key") or "default"),
+                        "sender": str(low.get("label") or "Memory"),
+                        "sender_name": str(low.get("label") or "Memory"),
+                        "text": str(low.get("body") or ""),
+                        "timestamp": ts,
+                        "ingested_at": ts,
+                        "status": "Ingested",
+                        "outcome_score": low.get("outcome_score"),
+                    }
+                )
+        cache[fqn] = (time.time(), records)
+        return list(records)
+
     def cleanup_memory(self, memory_ref: str, *, flow_id: str | None = None) -> dict[str, Any]:
         """Run a typed memory's retention policy now (the same statement its scheduled task runs)."""
         from . import memories_typed as _typed  # noqa: PLC0415
@@ -3556,7 +3604,7 @@ class LiveSnowflakeBridge:
             "ddl": entry.get("ddl"),
         }
 
-        records = list(entry.get("stored_records") or [])
+        records = self.typed_memory_records(entry) if self._is_typed_memory(entry) else list(entry.get("stored_records") or [])
 
         sessions = sorted({str(r.get("session_id") or "default") for r in records})
         clean_filter = str(session_filter or "").strip()
@@ -3810,7 +3858,9 @@ class LiveSnowflakeBridge:
         )
         threshold_val = max(1, int(entry.get("threshold") or entry.get("ingestion_threshold") or 1))
         detail_res = self.get_memory_detail(mem_name)
-        stored_recs = list(detail_res.get("stored_records") or [])
+        stored_recs = (
+            self.typed_memory_records(entry) if self._is_typed_memory(entry) else list(detail_res.get("stored_records") or [])
+        )
         governed = self.governed_memory_stats(entry)
         if governed is not None:
             processed_cnt = governed["total_processed"]
@@ -4246,8 +4296,9 @@ class LiveSnowflakeBridge:
                 "stats_status": governed["status"],
             }
         records = list(
-            (entry or {}).get("stored_records")
-            or []
+            self.typed_memory_records(entry)
+            if self._is_typed_memory(entry)
+            else (entry or {}).get("stored_records") or []
         )
         grouped: dict[str, list[dict[str, Any]]] = {}
         for r in records:
@@ -4306,8 +4357,9 @@ class LiveSnowflakeBridge:
             or compute_deterministic_memory_uuid(memory_id)
         )
         records = list(
-            (entry or {}).get("stored_records")
-            or []
+            self.typed_memory_records(entry)
+            if self._is_typed_memory(entry)
+            else (entry or {}).get("stored_records") or []
         )
         clean_sess = str(session_id or "").strip()
         if clean_sess and clean_sess.upper() not in ("ALL", "ALL SESSIONS", "ALL SESSIONS (CROSS-SESSION)"):

@@ -239,3 +239,37 @@ def test_checkpointer_cleanup_keeps_last_steps_and_expires_by_ttl() -> None:
     assert ttl_only == (
         "DELETE FROM D.S.MEM_RUN t WHERE t.created_at < DATEADD(hour, -COALESCE(t.ttl_hours, 24), CURRENT_TIMESTAMP())"
     )
+
+
+def test_memories_page_lists_rows_read_from_the_typed_table(bridge, monkeypatch) -> None:
+    sf = _FakeSnowflake()
+    monkeypatch.setattr(bridge, "execute_sql", sf)
+    _create(bridge)
+    entry = bridge.memories_registry[0]
+    rows = [{"SESSION_KEY": "ops-team", "LABEL": "refunds", "BODY": "Escalation worked", "TS": "2026-11-13T10:00:00.000+00:00",
+             "OUTCOME_SCORE": 0.9}]
+    monkeypatch.setattr(bridge, "execute_sql", lambda stmt, **k: sf.statements.append(stmt) or {"ok": True, "rows": rows})
+    page = bridge.list_native_memory_messages(entry["memory_id"])
+    assert page["total"] == 1
+    item = page["items"][0]
+    assert item["text"] == "Escalation worked" and item["session_id"] == "ops-team" and item["sender"] == "refunds"
+    assert item["timestamp"].startswith("2026-11-13T10:00:00")
+    assert sf.statements[-1].startswith("SELECT user_id AS session_key, COALESCE(topic, 'episode') AS label, episode_text AS body")
+    sessions = bridge.list_native_memory_sessions(entry["memory_id"])
+    assert [s["session_id"] for s in sessions["items"]] == ["ops-team"] and sessions["items"][0]["total_processed"] == 1
+
+
+def test_type_menu_offers_only_backends_a_flow_can_write() -> None:
+    from pathlib import Path
+
+    js = (Path(__file__).resolve().parents[1] / "frontend_patches" / "snowflake-ui-integration.js").read_text(encoding="utf-8")
+    start = js.index("const AGENT_MEMORY_TYPES = [")
+    specs = js[start : js.index("];", start)]
+    for block in specs.split("\n    {")[1:]:
+        objs = block.split("recommended_snowflake_objects:")[1].split("]")[0]
+        assert "Postgres" not in objs and "Dynamic" not in objs and "Interactive" not in objs, objs
+        assert 'default_storage_family: "snowflake_sql"' in block
+    assert 'badge: "Use Message History"' in specs
+    assert "Branch B: <code>Snowflake Postgres" not in js
+    # A closed Snowflake modal stays in the DOM: it must not count as an open dialog (the + Snowflake menu reopens).
+    assert 'if (d.id && d.id.indexOf("sflf-") === 0) return false;' in js

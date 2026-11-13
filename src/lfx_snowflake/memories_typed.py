@@ -339,3 +339,18 @@ def build_cleanup_task_ddl(table_fqn: str, statement: str, *, warehouse: str = "
         f"CREATE OR REPLACE TASK {cleanup_task_fqn(table_fqn)}{wh} "
         f"SCHEDULE = 'USING CRON {clean_cron} UTC' AS {statement}"
     )
+
+
+def build_browse_statement(kind: str, table_fqn: str, *, limit: int = 200) -> str:
+    """Latest rows of a typed memory as (session_key, label, body, ts, outcome_score) for the Memories page."""
+    key, label, body, ts_col, score = {
+        CHECKPOINTER: ("thread_id", "'Step ' || step_id", "TO_VARCHAR(state_blob)", "created_at", "NULL"),
+        SUMMARY: ("session_id", "'Summary'", "running_summary", "updated_at", "NULL"),
+        PROFILE: ("user_id", "entity_namespace", "TO_VARCHAR(profile_json)", "created_at", "NULL"),
+        EPISODIC: ("user_id", "COALESCE(topic, 'episode')", "episode_text", "created_at", "outcome_score"),
+    }[kind]
+    return (
+        f"SELECT {key} AS session_key, {label} AS label, {body} AS body, "
+        f"TO_VARCHAR({ts_col}, 'YYYY-MM-DD\"T\"HH24:MI:SS.FF3TZH:TZM') AS ts, {score} AS outcome_score "
+        f"FROM {table_fqn} ORDER BY {ts_col} DESC LIMIT {max(1, min(int(limit or 200), 1000))}"
+    )

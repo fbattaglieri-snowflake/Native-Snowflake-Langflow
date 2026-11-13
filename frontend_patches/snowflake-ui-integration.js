@@ -161,9 +161,9 @@
       label: "#1 Short-Term: Graph State & Checkpointer",
       short_label: "#1 Graph State & Checkpointer",
       category: "short_term",
-      default_category: "postgres_non_vector",
-      default_storage_family: "snowflake_postgres",
-      default_backend: "Snowflake Postgres (PostgresSaver)",
+      default_category: "structured",
+      default_storage_family: "snowflake_sql",
+      default_backend: "Hybrid Table",
       default_table_type: "HYBRID",
       default_table_name: "AGENT_CHECKPOINTS",
       default_hybrid_pk: "(thread_id, checkpoint_ns, step_id)",
@@ -173,18 +173,13 @@
       filter_by_session: true,
       embedding_locked_off: true,
       default_llm_preprocessing: false,
-      recommended_snowflake_objects: [
-        "Snowflake Postgres (PostgresSaver)",
-        "Hybrid Table",
-        "SnowflakeCheckpointer",
-      ],
+      recommended_snowflake_objects: ["Hybrid Table", "Standard Table"],
       needs_embedding_badge: "NO (Never)",
       how_to_feed_without_embedding:
         "SELECT state_blob, checkpoint_ns, step_id FROM <fqn> WHERE thread_id = :thread_id ORDER BY step_id DESC LIMIT 1",
       when_embedding_useful:
         "Never: graph execution state is always retrieved by primary key thread_id.",
-      purpose:
-        "Saves and restores LangGraph/A2A execution state (steps, visited nodes, Human-in-the-Loop interrupts) indexed by thread_id and checkpoint_ns.",
+      purpose: "Saves the state of a run step by step, keyed by thread, so a flow can pass it on and resume from the latest step. Written and read by the Agent Memory node.",
       required_inputs: ["thread_id", "checkpoint_ns", "ttl_hours"],
       default_enable_embedding: false,
       description:
@@ -194,6 +189,8 @@
       id: "buffer_window_memory",
       label: "#2 Short-Term: Buffer / Window Memory (Chat History)",
       short_label: "#2 Buffer / Window Memory (Chat History)",
+      enabled: false,
+      badge: "Use Message History",
       category: "short_term",
       default_category: "structured",
       default_storage_family: "snowflake_sql",
@@ -207,18 +204,13 @@
       filter_by_session: true,
       embedding_locked_off: false,
       default_llm_preprocessing: false,
-      recommended_snowflake_objects: [
-        "Snowflake Postgres (Relational / JSONB)",
-        "Hybrid Table",
-        "Standard Table",
-      ],
-      needs_embedding_badge: "NO",
+      recommended_snowflake_objects: ["Message History component"],
+      needs_embedding_badge: "Use Message History",
       how_to_feed_without_embedding:
         "SELECT sender, message_text, created_at FROM <fqn> WHERE session_id = :session_id ORDER BY created_at DESC LIMIT :window_k",
       when_embedding_useful:
         "Only useful when retrieving messages from 500+ turns ago outside the sliding K window.",
-      purpose:
-        "Keeps the last K conversational turns ordered chronologically by session_id to populate the Agent's Chat History without vector search latency.",
+      purpose: "Chat turns are already stored by the Message History component, so no separate memory is created for them.",
       required_inputs: ["session_id", "window_k", "retention_days"],
       default_enable_embedding: false,
       description:
@@ -241,18 +233,13 @@
       filter_by_session: true,
       embedding_locked_off: true,
       default_llm_preprocessing: true,
-      recommended_snowflake_objects: [
-        "Hybrid Table + AI_COMPLETE / AI_SUMMARIZE_AGG",
-        "Standard Table + AI_COMPLETE",
-        "Snowflake Postgres",
-      ],
+      recommended_snowflake_objects: ["Hybrid Table", "Standard Table"],
       needs_embedding_badge: "NO (Never)",
       how_to_feed_without_embedding:
         "SELECT running_summary, last_turn_id FROM <fqn> WHERE session_id = :session_id LIMIT 1 -- injected into the System Prompt",
       when_embedding_useful:
         "Never: a compact rolling summary read directly and updated in the background via AI_COMPLETE / AI_SUMMARIZE_AGG.",
-      purpose:
-        "Maintains a compact rolling summary of the session updated via AI_COMPLETE / AI_SUMMARIZE_AGG and injected into the Agent's System Message.",
+      purpose: "Keeps one running summary per session. A flow writes the updated summary with the Agent Memory node (for example the output of a Language Model) and reads it back into the next prompt.",
       required_inputs: ["session_id", "summarizer_model", "max_summary_tokens"],
       default_enable_embedding: false,
       description:
@@ -274,19 +261,14 @@
       default_pg_mode: "PostgresStore JSONB",
       filter_by_session: false,
       embedding_locked_off: false,
-      default_llm_preprocessing: true,
-      recommended_snowflake_objects: [
-        "Snowflake Postgres (PostgresStore)",
-        "Hybrid Table (VARIANT)",
-        "Standard Table (VARIANT)",
-      ],
-      needs_embedding_badge: "OPTIONAL (Default OFF)",
+      default_llm_preprocessing: false,
+      recommended_snowflake_objects: ["Hybrid Table", "Standard Table"],
+      needs_embedding_badge: "NO",
       how_to_feed_without_embedding:
         "SELECT profile_json FROM <fqn> WHERE user_id = :user_id AND entity_namespace = :entity_namespace LIMIT 1 -- loaded at session start",
       when_embedding_useful:
         "Only when a user accumulates hundreds of distinct facts that no longer fit in the prompt.",
-      purpose:
-        "Stores persistent user preferences, facts, and entity attributes (VARIANT/JSONB) across sessions with LLM distillation and Kill Phrase NO_INGEST.",
+      purpose: "Stores one profile (JSON) per user or entity across sessions. Written and read by the Agent Memory node.",
       required_inputs: ["user_id", "entity_namespace", "schema_keys"],
       default_enable_embedding: false,
       description:
@@ -299,7 +281,7 @@
       category: "long_term_semantic",
       default_category: "structured",
       default_storage_family: "snowflake_sql",
-      default_backend: "Hybrid Table",
+      default_backend: "Standard Table",
       default_table_type: "HYBRID",
       default_table_name: "AGENT_EPISODIC_MEMORY",
       default_hybrid_pk: "(user_id, chunk_id)",
@@ -309,19 +291,13 @@
       filter_by_session: false,
       embedding_locked_off: false,
       default_llm_preprocessing: false,
-      recommended_snowflake_objects: [
-        "Hybrid Table",
-        "Standard Table",
-        "Interactive / Dynamic Table",
-        "Snowflake Postgres",
-      ],
+      recommended_snowflake_objects: ["Standard Table", "Standard Table + VECTOR (AI_EMBED)"],
       needs_embedding_badge: "OPTIONAL (Default OFF)",
       how_to_feed_without_embedding:
         "SELECT topic, tool_used, outcome_score, episode_text FROM <fqn> WHERE topic = :topic ORDER BY outcome_score DESC, created_at DESC LIMIT :few_shot_k",
       when_embedding_useful:
         "Useful when past tasks do not share fixed categories and vector similarity search (VECTOR_COSINE_SIMILARITY) is needed to find similar episodes.",
-      purpose:
-        "Stores past tasks successfully solved by the agent (outcome_score >= threshold) to provide dynamic few-shot examples or a Toolset to the Agent.",
+      purpose: "Stores how past cases were handled and how well it went. An agent saves and recalls episodes through the Agent Memory tools, following the instruction written here; a Snowflake task keeps only the best and most recent ones.",
       required_inputs: ["topic_column", "tool_used_column", "outcome_score_threshold", "few_shot_k"],
       default_enable_embedding: false,
       description:
@@ -889,10 +865,17 @@
     if (stgModal && stgModal.style && stgModal.style.display && stgModal.style.display !== "none") {
       return true;
     }
-    const nativeDialog = document.querySelector(
-      '[role="dialog"]:not([aria-hidden="true"]), [data-state="open"][role="dialog"], [data-radix-Collection-item][data-state="open"]'
+    // Only dialogs that are actually displayed count: the Snowflake modals stay in the DOM when closed
+    // (handled above by their display), and a hidden dialog must not keep the Memories controls inert.
+    const nativeDialogs = Array.from(
+      document.querySelectorAll(
+        '[role="dialog"]:not([aria-hidden="true"]), [data-state="open"][role="dialog"], [data-radix-Collection-item][data-state="open"]'
+      )
     );
-    return !!nativeDialog;
+    return nativeDialogs.some(function (d) {
+      if (d.id && d.id.indexOf("sflf-") === 0) return false;
+      return typeof d.getClientRects !== "function" || d.getClientRects().length > 0;
+    });
   }
 
   function isStrictMemoriesView() {
@@ -3458,12 +3441,13 @@
     const itemsHtml = allItems
       .map(function (item) {
         const isDisabled = item.enabled === false || item.id === "business_ontology_cortex_sense";
+        const isChatWindow = item.id === "buffer_window_memory";
         const badgeText = isDisabled ? item.badge || "Coming Soon" : item.needs_embedding_badge || "NO";
         return `<button type="button"
           class="sflf-mem-type-dd-item"
           data-testid="snowflake-memory-type-item-${item.id}"
           data-memory-type-id="${item.id}"
-          ${isDisabled ? 'disabled aria-disabled="true"' : ""}
+          ${isDisabled && !isChatWindow ? "disabled" : ""} ${isDisabled ? 'aria-disabled="true"' : ""}
           style="display:flex;align-items:center;justify-content:space-between;gap:8px;width:100%;text-align:left;padding:8px 10px;border-radius:8px;border:1px solid ${
             isDisabled ? "#e2e8f0" : "#bae6fd"
           };background:${isDisabled ? "#f8fafc" : "#ffffff"};color:${
@@ -3495,7 +3479,7 @@
           <div style="font-size:11px;color:#334155;"><strong>Embedding Required?:</strong> <span id="sflf-dd-hover-embed" style="color:#0369a1;font-weight:700;"></span></div>
         </div>
         <div style="font-size:10px;color:#64748b;border-top:1px solid #e2e8f0;padding-top:6px;">
-          Branch A: <code>Database ▸ Schema ▸ Table</code> · Branch B: <code>Snowflake Postgres (:5432)</code>
+          Created as a table in <code>Database ▸ Schema</code> of the flow context · used in flows by the <code>Agent Memory</code> node
         </div>
       </div>
     `;
@@ -3523,7 +3507,7 @@
         updateHoverTooltip(tid);
       });
       btnEl.addEventListener("click", function () {
-        if (tid === "business_ontology_cortex_sense" || btnEl.disabled) {
+        if (tid === "business_ontology_cortex_sense" || btnEl.disabled || btnEl.getAttribute("aria-disabled") === "true") {
           return;
         }
         closeSnowflakeMemoryTypeDropdown();
@@ -3708,7 +3692,7 @@
       const helperCaptionStyle = "display:block;font-size:10px;color:#64748b;margin-top:2px;line-height:1.3;";
 
       const typeOptionsHtml = AGENT_MEMORY_TYPES.map(function (t) {
-        return `<option value="${t.id}">${t.label}</option>`;
+        return `<option value="${t.id}"${t.enabled === false ? " disabled" : ""}>${t.label}</option>`;
       }).join("");
 
       const providerOptionsHtml = Object.keys(EMBEDDING_PROVIDERS_CATALOG)
