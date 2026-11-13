@@ -390,6 +390,7 @@ pytest
 - Memory Base: created in the configured `LANGFLOW_MEMORY_SCHEMA` location (`DB.SCHEMA`) whatever database the flow context starts with; a duplicate name is refused (`MEMORY_BASE_NAME_TAKEN`) before any table is created; the default preprocessing model is `claude-haiku-5-5` (override with `preproc_model`); delete is evaluated under the role of the owning flow.
 - Typed memories: a memory created from `Memories ▸ + ❄️ Snowflake` is a real table in the flow context that the new `Agent Memory` node saves to and recalls from (also as agent tools, with the capture instruction written at creation); retention is enforced by a Snowflake task; memories are read back from Snowflake after a restart; unsupported backends are refused.
 - Stages & Volumes: a failed stage or external volume creation returns the Snowflake error and registers nothing.
+- Memories page: the `+ ❄️ Snowflake` menu reopens after the wizard is closed, the wizard closes after a successful create, the menu and wizard describe only what is created, and a typed memory shows the rows of its table.
 
 **Observability**
 - Unified run/trace telemetry: one RUN row per execution, batched span sync when the run closes, role-switch audit.

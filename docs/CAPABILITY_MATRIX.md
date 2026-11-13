@@ -161,6 +161,8 @@ flowchart TB
 | Memories | Typed memories (`+ ❄️ Snowflake`) | One Standard or Hybrid table `MEM_<NAME>` in the flow context; configuration stored in the table comment and read back from Snowflake, so memories are listed after a restart. Delete drops the table and its task. |
 | Memories | Capture instruction and cleanup | The instruction written at creation becomes the description of the agent's save tool. Retention (age, row cap by outcome score, checkpoint lifetime) is enforced by a Snowflake task and can be run on demand. |
 | Memories | Unsupported backends | Snowflake Postgres, Dynamic, Interactive, Iceberg, Cortex Search, chat-window memories and non-Cortex embeddings are refused (422) instead of registered. A Hybrid table that cannot be created is an error. |
+| Memories | Episodic scope | Episodes saved under a node `Key` are recalled only for that key; without a key an episodic memory is shared by all sessions. |
+| Memories | Memories page | The `+ ❄️ Snowflake` menu lists only what is created (chat-window type points to `Message History`), reopens after the wizard is closed, the wizard closes after a successful create, and the detail view lists the rows read from the memory table. |
 | Stages & Volumes | Creation outcome | A failed `CREATE STAGE` / `CREATE EXTERNAL VOLUME` returns the Snowflake error and registers nothing; URL, integration or role ARN are required, never defaulted. |
 | Memories | Default gate model | `claude-haiku-5-5` when the request names no preprocessing model; pass `preproc_model` to choose another one. |
 | Memories | Delete | Evaluated under the role of the flow that owns the Memory Base. |
