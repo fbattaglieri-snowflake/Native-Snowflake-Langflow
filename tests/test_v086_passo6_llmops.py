@@ -16,7 +16,7 @@ from lfx_snowflake.native_category_components.llm_operations import snowflake_de
 from lfx_snowflake.native_category_components.llm_operations.snowflake_ai_complete import _optional_number
 from lfx_snowflake.native_category_components.llm_operations.snowflake_sql_statement import normalize_bindings
 
-# Live DESCRIBE output shape (LF_E2E_TEST_20261110.E2E_A5_PROC).
+# Live DESCRIBE output shape (a procedure with typed arguments).
 DESCRIBE_ROWS = [
     {"property": "signature", "value": "(NAME VARCHAR, QTY NUMBER, FLAG BOOLEAN DEFAULT FALSE)"},
     {"property": "returns", "value": "VARCHAR"},

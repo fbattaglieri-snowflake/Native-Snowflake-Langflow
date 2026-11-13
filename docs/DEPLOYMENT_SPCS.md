@@ -79,9 +79,9 @@ SPCS requires `linux/amd64` images running as a non-root user (`UID 1000`):
 
 ```bash
 docker build --platform linux/amd64 \
-  -t <SNOWFLAKE_ACCOUNT>.registry.snowflakecomputing.com/<DATABASE>/<SCHEMA>/<IMAGE_REPOSITORY>/snowflake-langflow:0.1.0 .
+  -t <SNOWFLAKE_ACCOUNT>.registry.snowflakecomputing.com/<DATABASE>/<SCHEMA>/<IMAGE_REPOSITORY>/snowflake-langflow:<VERSION> .
 
-docker push <SNOWFLAKE_ACCOUNT>.registry.snowflakecomputing.com/<DATABASE>/<SCHEMA>/<IMAGE_REPOSITORY>/snowflake-langflow:0.1.0
+docker push <SNOWFLAKE_ACCOUNT>.registry.snowflakecomputing.com/<DATABASE>/<SCHEMA>/<IMAGE_REPOSITORY>/snowflake-langflow:<VERSION>
 ```
 
 
@@ -165,7 +165,7 @@ GRANT USAGE ON SCHEMA <DATABASE>.<SCHEMA> TO ROLE <FLOW_ROLE>;
 GRANT USAGE ON ALL FUNCTIONS IN SCHEMA <DATABASE>.<SCHEMA> TO ROLE <FLOW_ROLE>;
 ```
 
-## 7. Post-Deployment Verification
+## 8. Post-Deployment Verification
 
 After `ALTER SERVICE <DATABASE>.<SCHEMA>.<SERVICE_NAME> FROM SPECIFICATION ...`:
 

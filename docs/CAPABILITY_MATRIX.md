@@ -1,4 +1,4 @@
-# ❄️ Native Snowflake Langflow — Capability & Component Matrix
+# Native Snowflake Langflow — Capability & Component Matrix
 
 **Tested Cloud Environment: AWS — Snowflake on AWS**  
 **Upstream Baseline:** official image `langflowai/langflow:1.13.1@sha256:643d78228cd148be70e52a860dd3456c834a070c98c81b354f713908d40949f8` (MIT License; extension code only, no upstream source in this repository)
@@ -6,32 +6,40 @@
 ---
 
 > [!NOTE]
-> Status values: **Live** (deployed and verified), **In progress** (partially implemented or on a development branch, not deployed), **Planned** (not implemented). W3-R1 Phase 0 changes are on a branch and not deployed.
+> Status values: **Live** (deployed and verified), **In progress** (the node exists but is not fully verified end to end), **Planned** (not implemented). For a plain-language overview start from the [README](../README.md).
 
 ## Executive Summary & Visual Capability Map
 
 ```mermaid
 flowchart TB
-    subgraph Governance["1. Governance & Per-Flow Context"]
-        Role["❄️ Role Selector<br/>(CURRENT_ROLE + Session Pool)"]
-        Context["[ ❄️ Context ] Per-Flow Scope<br/>(Databases ▸ Schemas ▸ Objects + Postgres)"]
+    subgraph Governance["Governance"]
+        Role["Role selector<br/>every call runs under the selected role"]
+        Context["Per-flow Context<br/>databases, schemas and objects the flow may use"]
     end
 
-    subgraph Sidebar["2. Sidebar Categories (36 Total Components — 1 Class = 1 File)"]
-        TRG["Triggers (5)<br/>Schedule | Table Change | Stage File | Alert | Webhook"]
-        DS["Data Sources (6)<br/>Tables | Views | Iceberg | Postgres | Search | Analyst"]
-        MA["Models & Agents (7)<br/>Language Model | Agent | Cortex Agent | A2A | Embedding | History | Prompt"]
-        LLM["LLM Operations (7 [ ❄️ ] + 5 Native)<br/>Custom Tool | Decision | AI Redact | AI Complete | AI Function | SQL Statement | Operations"]
-        FK["Files & Knowledge (5)<br/>File System | Knowledge | Memory Base | Read File | Write File"]
+    subgraph Sidebar["Canvas nodes by sidebar category"]
+        TRG["Triggers: 5<br/>Schedule, Table Change, Stage File, Alert, Webhook"]
+        DS["Data Sources: 6<br/>Tables, Views, Iceberg, Postgres, Cortex Search, Cortex Analyst"]
+        MA["Models and Agents: 7<br/>Language Model, Agent, Cortex Agent, A2A Agent, Embedding Model, Message History, Prompt Template"]
+        LLM["LLM Operations: 8 Snowflake nodes and 5 Langflow nodes<br/>Custom Tool, Decision, AI Redact, AI Complete, AI Function, SQL Statement, Agent Memory, Operations"]
+        FK["Files and Knowledge: 5<br/>File System, Knowledge, Memory Base, Read File, Write File"]
     end
 
-    subgraph Rail["3. Left Rail Views & Persistence"]
-        Mem["Memories (#1..#5)<br/>+ ❄️ Snowflake Wizard"]
-        Stages["Stages & Volumes<br/>Internal & External Buckets"]
-        Traces["Flow Activity Traces<br/><DATABASE>.<SCHEMA>.LANGFLOW_FLOW_ACTIVITY"]
+    subgraph Rail["Left rail pages"]
+        Mem["Memories<br/>typed memories created as Snowflake tables"]
+        Stages["Stages and Volumes<br/>internal and external stages"]
+        Traces["Traces<br/>flow activity stored in Snowflake tables"]
     end
 
-    Role --> Context --> TRG & DS & MA & LLM & FK & Mem & Stages & Traces
+    Role --> Context
+    Context --> TRG
+    Context --> DS
+    Context --> MA
+    Context --> LLM
+    Context --> FK
+    Context --> Mem
+    Context --> Stages
+    Context --> Traces
 ```
 
 ### Complete Component Inventory by Category
@@ -54,7 +62,7 @@ flowchart TB
 | **Models & Agents** | `[ ❄️ ] Cortex Agent` | `SnowflakeCortexAgentComponent` | Invokes Snowflake Cortex Agents with 2-level `Threads API` continuity | Live |
 | **Models & Agents** | `A2A Agent` | `SnowflakeA2AAgentComponent` | Internal (`[Langflow Flow]` / `[Cortex Agent]`) and External A2A v0.3.0 bridge | Live |
 | **Models & Agents** | `Embedding Model` | `EmbeddingModelComponent` | Includes `Snowflake Cortex` (`AI_EMBED` 6 models: `768d` & `1024d`) | Live |
-| **Models & Agents** | `[ ❄️ ] Message History` | `SnowflakeMessageHistoryComponent` | Conversation history; current backend is in-memory per role. Snowflake Tables and `<POSTGRES_INSTANCE>` persistence are not live | In progress |
+| **Models & Agents** | `[ ❄️ ] Message History` | `SnowflakeMessageHistoryComponent` | Stores and reads chat turns in the governed Snowflake table set in `LANGFLOW_MESSAGES_TABLE`, scoped to the active role | Live |
 | **Models & Agents** | `Prompt Template` | `PromptComponent` | Native Langflow prompt templating | Live |
 | **LLM Operations** | **`[ ❄️ ] Custom Tool`** | `SnowflakeCustomTool` | Snowsight-aligned custom tool (`procedure`, `function`, `table_function`) with `DESCRIBE` auto-discovery, manual parameter editor (blocking `OBJECT`), and `tool_spec` + SQL execution | Live |
 | **LLM Operations** | **`[ ❄️ ] Decision`** | `SnowflakeDecision` | Official `AI_COMPLETE` decision models (`snowflake-decision-fast` & `snowflake-decision`) supporting `choice`, `score` (`0..n-1`), and `noul` (`1..32` questions, max `256` options) + confidence routing | Live |
@@ -66,7 +74,7 @@ flowchart TB
 | **LLM Operations** | **`[ ❄️ ] Operations`** | `SnowflakeLLMNode` | Multi-operation Snowflake Cortex helper node | Live |
 | **Files & Knowledge** | `File System` | `FileSystemTool` | Stage file browsing and governed Internal/External stage management | In progress |
 | **Files & Knowledge** | `Knowledge` | `KnowledgeComponent` | Vector knowledge base over Snowflake `VECTOR` tables, Cortex Search, or `pgvector` | In progress |
-| **Files & Knowledge** | `Memory Base` | `MemoryBaseComponent` | Canvas adapter for Snowflake memories; under redesign (W3-R1), real Snowflake objects only | Planned |
+| **Files & Knowledge** | `Memory Base` | `MemoryBaseComponent` | Memory fed from chat turns with optional LLM preprocessing; stored in governed `LF_MEM_*` tables | Live |
 | **Files & Knowledge** | `Read File` | `FileComponent` | Stage file reader integrated with `AI_PARSE_DOCUMENT` (`LAYOUT` / `OCR`) | In progress |
 | **Files & Knowledge** | `Write File` | `SaveToFileComponent` | Safe atomic write/append to `@<DATABASE>.<SCHEMA>.<STAGE_NAME>` | In progress |
 
@@ -94,9 +102,9 @@ flowchart TB
 | **REQ-05** | Structured `Data Sources` + `Cortex Analyst` in Unified Session (`[G-A5]`) | `lfx_snowflake/components/data_sources.py` | Separates visibility, `SELECT`, and semantic readiness (`Semantic View` / YAML). No auto Semantic View creation, no Analyst-on-Postgres, no cross-engine implicit joins, bounded SQL results across turns. |
 | **REQ-06** | 3 Native Proxy Standard Protocols + `Ollama` | `lfx_snowflake/providers/registry.py` | `/chat/v1`, `/responses/v1` (`ordered-items`, `store=False`, `include=["reasoning.encrypted_content"]`), `/messages` (inference `/messages/v1/messages`, `thinking.signature`, `redacted_thinking`), `<OLLAMA_BASE_URL>`, `call_0..call_N` deduplication, 0 silent retries. |
 | **REQ-07** | Snowflake `Embedding Model` | `lfx_snowflake/providers/registry.py` | Separate catalog (`/api/v2/cortex/inference:embed` / `AI_EMBED` + verified Ollama embedders) with `(model_id, dimension, space_fingerprint)` guard. |
-| **REQ-08** | `Message History` on Snowflake Postgres & Standard Tables (**Planned** — current backend is in-memory) | `lfx_snowflake/components/utilities_a2a.py` | Store/Retrieve (`Messages`/`Table`), separating visible UI messages, signed protocol replay state, and Cortex Agent thread references. |
+| **REQ-08** | `Message History` on a governed Snowflake table (`LANGFLOW_MESSAGES_TABLE`) | `lfx_snowflake/components/utilities_a2a.py` | Store/Retrieve (`Messages`/`Table`), separating visible UI messages, signed protocol replay state, and Cortex Agent thread references. |
 | **REQ-09** | `LLM Operations` + `Custom Tool`, `Decision`, `AI Redact` & `AI Function` (`[G-A2]`, `W2-R9-01..04`) | `lfx_snowflake/components/llm_operations.py`, `lfx_snowflake/components/ai_function.py`, `native_category_components/llm_operations/` | `Batch Run`, `Guardrails`, `Smart Router`, `Smart Transform`, `Structured Output` (`LLM Selector` unchanged) + `[ ❄️ ] Custom Tool` (`procedure`/`function`/`table_function`), `[ ❄️ ] Decision` (`snowflake-decision-fast` / `snowflake-decision`), `[ ❄️ ] AI Redact` (13 official PII categories, 4,096-token limit + auto-chunking), `[ ❄️ ] AI Complete`, and `[ ❄️ ] AI Function` (14 `AI_*` functions with Internal Stage `@<DATABASE>.<SCHEMA>.<STAGE_NAME>` & External Bucket multimodal `TO_FILE` / `DIRECTORY`). |
-| **REQ-10** | `Files & Knowledge` & `Memories / Create Memory` (`[G-A3]`, `[G-A4]`) (**Under redesign, W3-R1**: real objects only; upload to internal stages only) | `lfx_snowflake/components/files_knowledge.py` | `File System` (stage creation), `Read File`, `Write File` (safe atomic `Append`, internal vs external stages), `Knowledge` & `Create Memory` (optional `LLM Preprocessing`, separated `CREATE` vs use permissions, cross-session isolation) across 4 vector backends. |
+| **REQ-10** | `Files & Knowledge` & `Memories / Create Memory` (`[G-A3]`, `[G-A4]`) (real Snowflake objects only; browser upload to stages is not available) | `lfx_snowflake/components/files_knowledge.py` | `File System` (stage creation), `Read File`, `Write File` (safe atomic `Append`, internal vs external stages), `Knowledge` & `Create Memory` (optional `LLM Preprocessing`, separated `CREATE` vs use permissions, cross-session isolation) across 4 vector backends. |
 | **REQ-11** | Unchanged Core Categories | `lfx_snowflake/bundle_manifest.py`, `frontend_patches/` | `Input & Output`, `Prompt Template`, `Processing`, `Flow Control` (with `[Beta]` badges on `Listen`, `Notify`, `Run Flow`), `LLM Selector`, `Calculator`, `Current Date` 100% unchanged. |
 | **REQ-12** | `Utilities`: `Python Interpreter` with Snowflake PyPI | `lfx_snowflake/components/utilities_a2a.py` | Uses `snowflake.snowpark.pypi_shared_repository` (`SNOWFLAKE.PYPI_REPOSITORY_USER`) with zero fallback to public PyPI. |
 | **REQ-13** | `ToolGuard / Policies` (ALTK Beta, `[G-A6]`) | `lfx_snowflake/components/utilities_a2a.py` | 3 Proxy protocols + Ollama in `Policies`, fail-closed on error, other `Discover more components` bundles untouched. |
@@ -115,7 +123,7 @@ flowchart TB
 | **HUB-W2-01** & **HUB-W2-FIX-FETCH** | Topbar Alignment & JSON Content-Type | Right-aligned `Role: <select>` and `[ ❄️ Context ]` button via `alignTopbarControls()`; explicit `Content-Type: application/json` header on `POST /api/v1/snowflake/traces/sync`. |
 | **HUB-W2-02** & **W2-R3-03..04** | Per-Flow `[ ❄️ Context ]` — Snowsight Hierarchical Tree & Fluid Responsive CSS | Snowsight Database Explorer hierarchical tree (`data-testid="snowsight-hierarchy-tree"`, `data-testid="snowsight-hierarchy-search"`, tri-state cascading checkboxes with `data-indeterminate`), lazy-loaded `/api/v1/snowflake/schemas` and `/api/v1/snowflake/objects`, and fluid `clamp(320px, 94vw, 980px)` / `min(90dvh, 90vh)` layout. |
 | **HUB-W2-03** & **HUB-W2-04** | Hierarchical Provisioning & Routine Exclusion | Enforces `1. Database -> 2. Schema -> 3. Object` with active-role grey-out warnings (`role_privileges`). Strictly rejects `FUNCTION`/`PROCEDURE`/`MEMORY` creation from Object Provisioner (`HTTP 422 UNSUPPORTED_CAPABILITY`). |
-| **HUB-W2-05** & **W2-R3-05..06** | Memories (`+ ❄️ Snowflake`) — 5 LangChain/Langflow Memory Types & Optional Embeddings | Scopes `+ ❄️ Snowflake` toolbar button strictly to `Memories` (`z-index: 10`, hidden behind modals), opens light-themed `Create a Snowflake Memory` modal (`data-testid="create-snowflake-memory-modal"`), and supports all 5 LangChain/Langflow Memory Types (`graph_state_checkpointer`, `buffer_window_memory`, `summary_memory`, `user_profile_entity_memory`, `episodic_memory`) with non-embedding SQL lookup by default and optional `Snowflake Cortex (AI_EMBED)` or external embedding providers. |
+| **HUB-W2-05** & **W2-R3-05..06** | Memories (`+ ❄️ Snowflake`) — typed memories as Snowflake tables | The `+ ❄️ Snowflake` button is shown only on `Memories` and opens the `Create a Snowflake Memory` wizard (`data-testid="create-snowflake-memory-modal"`). Four types are created as real `MEM_<NAME>` tables (Standard or Hybrid) in the flow context: `graph_state_checkpointer`, `summary_memory`, `user_profile_entity_memory`, `episodic_memory` (optional `AI_EMBED` similarity). `buffer_window_memory` is refused and points to `Message History`; other backends and non-Cortex embeddings are refused with `422 UNSUPPORTED_CAPABILITY`. |
 | **W2-R3-07** | SPCS Runtime Stability (SQLite WAL & Writable `UV_CACHE_DIR`) | Configures `PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA busy_timeout=30000; PRAGMA temp_store=MEMORY;` on `/persist/langflow.db` and SQLAlchemy connections, and sets writable `UV_CACHE_DIR=/tmp/uv-cache`. |
 | **DS-W2-01** & **W2-R9-03** | `Data Sources` Hierarchy & `Object Provisioner` Removal from Workflows | `SnowflakeDataSourceComponent` ordered `Engine -> Database -> Schema -> Object Type -> Table / View Name`. `Object Provisioner` removed from workflow node categories (`Data Sources`, `LLM Operations`, `Files & Knowledge`) and retained exclusively as the backend wizard service (`src/lfx_snowflake/governance/provisioner.py`), with shared helpers in `src/lfx_snowflake/context_helpers.py`. |
 | **MA-W2-01** | `Models & Agents` Cascading Cortex Agent | `SnowflakeCortexAgentComponent` cascades `Database -> Schema -> Cortex Agent` (`SHOW AGENTS IN SCHEMA`). |
