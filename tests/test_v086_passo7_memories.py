@@ -494,6 +494,16 @@ def test_native_message_history_component_uses_graph_ids_and_no_demo_defaults(mo
     assert history.text == "User: turn 2\nUser: turn 3"
     assert "history_sql" not in history.text and "LANGFLOW_MESSAGES" not in history.text
 
+    # A Store node whose outputs are all evaluated (a node at the end of a flow) writes the message once.
+    last = mh.SnowflakeMessageHistoryNativeComponent(mode="Store", message_text="only once", window_k=10)
+    last.graph = SimpleNamespace(flow_id="flow-once", session_id="graph-sess")
+    last._pre_run_setup()
+    for output in (last.retrieve_chat_history, last.retrieve_history_table, last.retrieve_replay_state, last.store_message):
+        output()
+    assert last.retrieve_chat_history().text == "User: only once"
+    last._pre_run_setup()  # next run of the same node stores again
+    assert last.store_message().data["messages"][-1]["text"] == "only once" and len(last.retrieve_history_table().data["messages"]) == 2
+
 
 def test_domain_store_returns_session_window():
     from lfx_snowflake.components.message_history import (

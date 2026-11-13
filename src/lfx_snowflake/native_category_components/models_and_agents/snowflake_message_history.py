@@ -470,7 +470,21 @@ class SnowflakeMessageHistoryNativeComponent(Component):
             )
         return (str(raw or ""), None, None, None)
 
+    def _pre_run_setup(self):
+        self._history_results = {}
+
     def _run_history(self, *, mode_override: str | None = None) -> dict[str, Any]:
+        """One execution per run and mode: every output of the node reads the same result, so a Store
+        writes the message once even when several outputs are evaluated."""
+        mode = str(mode_override or getattr(self, "mode", "Retrieve") or "Retrieve").strip()
+        cache = getattr(self, "_history_results", None)
+        if not isinstance(cache, dict):
+            cache = self._history_results = {}
+        if mode not in cache:
+            cache[mode] = self._run_history_once(mode_override=mode_override)
+        return cache[mode]
+
+    def _run_history_once(self, *, mode_override: str | None = None) -> dict[str, Any]:
         explicit = getattr(self, "_explicit_kwargs", set())
         ext_memories = self._resolve_external_memories()
         ext_mem = ext_memories[0] if ext_memories else None
