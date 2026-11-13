@@ -243,6 +243,11 @@ def build_write_request(
     return sql, b.to_api()
 
 
+def is_scoped_key(key: Any) -> bool:
+    """True when ``key`` names a specific owner; empty and ``default`` mean the shared scope."""
+    return str(key or "").strip().lower() not in ("", "default")
+
+
 def keyword_terms(text: str, *, limit: int = 5) -> list[str]:
     """Distinct search words of a free-text query, longest first."""
     words = {w.lower() for w in re.findall(r"[A-Za-z0-9_]{4,}", str(text or ""))} - _STOP_WORDS
@@ -256,10 +261,16 @@ def build_episodic_recall(
     topic: str = "",
     min_score: float | None = None,
     limit: int = 3,
+    user_id: str = "",
 ) -> tuple[str, dict[str, dict[str, Any]]]:
-    """Recall the best past episodes by topic and keywords, highest outcome first."""
+    """Recall the best past episodes by topic and keywords, highest outcome first.
+
+    ``user_id`` scopes the recall to the episodes saved under that key; empty or ``default`` reads them all.
+    """
     b = _Binds()
     conds: list[str] = []
+    if is_scoped_key(user_id):
+        conds.append(f"user_id = {b.add(str(user_id).strip())}")
     clean_topic = str(topic or "").strip()
     if clean_topic and clean_topic.lower() != "general" and clean_topic != str(query or "").strip():
         conds.append(f"topic ILIKE {b.add('%' + clean_topic + '%')}")

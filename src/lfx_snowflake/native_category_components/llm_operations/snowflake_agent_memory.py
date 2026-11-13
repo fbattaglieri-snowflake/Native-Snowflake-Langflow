@@ -138,7 +138,8 @@ class SnowflakeAgentMemoryComponent(Component):
             name="key",
             display_name="Key",
             value="",
-            info="Thread (checkpointer), session (summary) or user (profile, episodic). Empty uses the run session.",
+            info="Thread (checkpointer), session (summary), user (profile) or owner of the episodes (episodic). "
+            "Empty uses the run session; for episodic memories empty means shared by all sessions.",
         ),
         MessageTextInput(name="topic", display_name="Topic", value="", info="Topic of the episode (episodic)."),
         FloatInput(
@@ -170,10 +171,17 @@ class SnowflakeAgentMemoryComponent(Component):
     def _flow_id(self) -> str | None:
         return _resolve_flow_id(self)
 
+    def _kind(self) -> str:
+        entry, _err = LIVE_BRIDGE._resolve_typed_memory(str(getattr(self, "memory", "") or ""), self._flow_id())
+        return str((entry or {}).get("canonical_memory_type") or "")
+
     def _key(self) -> str:
-        key = str(getattr(self, "key", "") or "").strip()
+        key = self._text("key")
         if key:
             return key
+        if self._kind() == _typed.EPISODIC:
+            # Episodes are meant to be found again in later sessions: without a key they are shared.
+            return "default"
         graph = getattr(self, "graph", None)
         return str(getattr(graph, "session_id", "") or "default")
 

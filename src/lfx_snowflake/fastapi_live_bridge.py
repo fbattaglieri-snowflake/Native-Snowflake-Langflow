@@ -1891,9 +1891,17 @@ class LiveSnowflakeBridge:
                         "rows": [],
                     }
                 score_expr = f"VECTOR_COSINE_SIMILARITY(embedding, CAST(:query_embedding_vec AS VECTOR(FLOAT, {dim})))"
+            from . import memories_typed as _typed_scope  # noqa: PLC0415
+
+            # Episodes saved under a specific key are recalled only for that key; `default` is the shared scope.
+            scope_sql = (
+                f" WHERE user_id = {_b(usr)}"
+                if canonical_type == "episodic_memory" and self._is_typed_memory(matched) and _typed_scope.is_scoped_key(usr)
+                else ""
+            )
             recall_sql = (
                 f"SELECT chunk_id, memory_name, text_chunk, metadata, {score_expr} AS score "
-                f"FROM {fqn} ORDER BY score DESC LIMIT {bounded_limit}"
+                f"FROM {fqn}{scope_sql} ORDER BY score DESC LIMIT {bounded_limit}"
             )
         elif canonical_type == "graph_state_checkpointer":
             recall_sql = (
@@ -1936,6 +1944,7 @@ class LiveSnowflakeBridge:
                 topic=topic or "",
                 min_score=float(min_score) if min_score is not None else None,
                 limit=max(1, min(int(matched.get("few_shot_k") or bounded_limit), 200)),
+                user_id=usr if self._is_typed_memory(matched) else "",
             )
         else:
             where_clause = f" WHERE text_chunk ILIKE {_b('%' + q + '%')}" if q else ""

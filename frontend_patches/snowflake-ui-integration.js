@@ -4493,7 +4493,8 @@
         }
         showDenialOrStatusBanner("ok", "MEMORY_CREATED", `Snowflake Memory ${nameVal} (${chosenType}) created.`);
         ensureSnowflakeMemoriesSearchableCards();
-        syncNodesToCurrentContext(sfState);
+        // The new memory joins the flow context: refresh the node dropdowns that list context objects.
+        syncCanvasNodesWithSnowflakeContext(sfState);
         window.dispatchEvent(new Event("focus"));
         setTimeout(function () {
           closeLightModal();

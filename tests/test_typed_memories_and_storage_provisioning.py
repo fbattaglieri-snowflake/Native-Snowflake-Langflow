@@ -273,3 +273,21 @@ def test_type_menu_offers_only_backends_a_flow_can_write() -> None:
     assert "Branch B: <code>Snowflake Postgres" not in js
     # A closed Snowflake modal stays in the DOM: it must not count as an open dialog (the + Snowflake menu reopens).
     assert 'if (d.id && d.id.indexOf("sflf-") === 0) return false;' in js
+
+
+def test_episodic_recall_is_scoped_to_the_key_and_default_is_shared() -> None:
+    scoped, bindings = typed.build_episodic_recall(FQN, query="refund dispute", user_id="ops-team")
+    assert " WHERE user_id = ? AND (" in scoped and _values(bindings)[0] == "ops-team"
+    shared, _b = typed.build_episodic_recall(FQN, query="refund dispute", user_id="default")
+    assert "user_id" not in shared
+
+
+def test_ui_script_calls_only_functions_it_defines() -> None:
+    """A call to an undefined function after a successful create left the wizard open (uncaught ReferenceError)."""
+    import re
+    from pathlib import Path
+
+    js = (Path(__file__).resolve().parents[1] / "frontend_patches" / "snowflake-ui-integration.js").read_text(encoding="utf-8")
+    defined = set(re.findall(r"function\s+([A-Za-z_$][\w$]*)\s*\(", js)) | set(re.findall(r"(?:const|let|var)\s+([A-Za-z_$][\w$]*)", js))
+    called = set(re.findall(r"(?<![.\w$])((?:sync|ensure|render|open|close|fetch|apply|build|resolve|show|dismiss)[A-Z][A-Za-z]+)\(", js))
+    assert called - defined == set()
