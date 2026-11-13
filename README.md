@@ -543,7 +543,8 @@ Before rolling out, also rehearse the database migration on a copy of `/persist`
 - **File upload to stages** from the browser is not available (see [section 6](#6-stages--volumes)).
 - **Caller's rights** (queries run as the signed-in user) is implemented but off by default (`SNOWFLAKE_LANGFLOW_CALLERS_RIGHTS`). By default queries run through the service identity, restricted to the selected role.
 - **Role selection after a restart.** The selected role is kept in the container's memory. After a service restart, select the role again.
-- **External volumes.** Creation is implemented but has not been verified against a real cloud bucket.
+- **External volumes have not been tested.** Creating an external volume is implemented, but it has never been run against a real cloud bucket.
+- **Cortex Analyst output.** Cortex Analyst is called through its REST API. Outside Tool Mode, the node's `Message` output is the full API record (request, generated SQL, result rows) as JSON, not only the answer. This is expected. A prompt that receives it gets the whole record, which uses more tokens; in Tool Mode an agent receives the result of the tool call.
 - **User profile memory** is implemented and unit-tested, but has not yet been exercised in an end-to-end flow.
 - **Single replica.** With the Langflow database on the block volume, run one instance. For more, use Snowflake Postgres as described in the deployment guide.
 - **Only AWS has been tested.**

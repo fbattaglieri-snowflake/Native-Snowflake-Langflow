@@ -36,6 +36,8 @@ This repository contains only the Snowflake extension code (`src/lfx_snowflake/`
 
 The former `sync/upstream-<version>` merge branches are obsolete because the repository no longer carries upstream history.
 
+Only this project's own release tags (`v0.x.y-<date>`) are pushed to `origin`. Upstream Langflow tags are never pushed: they would bring the upstream history into this repository.
+
 ---
 
 ## 2. Strict Isolation: `lfx_snowflake` Bundle vs Tracked Core Patches

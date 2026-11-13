@@ -174,6 +174,8 @@ flowchart TB
 | Models & Agents | Message History outputs | `Chat History` returns a plain transcript for prompts, `Stored Message` the stored text; the full record is on `Table Records`. A `Store` node writes once per run whatever the number of outputs evaluated. |
 | Models & Agents | Message History conversations | `Conversation Name` gives a node its own window inside the session, so parallel branches of one flow do not read each other's messages. |
 | LLM Operations | Decision `Summary (text)` output | One readable line per question instead of the full decision object. |
+| Data Sources | Cortex Analyst output | Called through the REST API. Outside Tool Mode the `Message` output is the full API record as JSON (request, generated SQL, result rows); this is expected. |
+| Stages & Volumes | External volumes | Creation is implemented but **not tested** against a real cloud bucket. |
 | Stages & Volumes | Creation outcome | A failed `CREATE STAGE` / `CREATE EXTERNAL VOLUME` returns the Snowflake error and registers nothing; URL, integration or role ARN are required, never defaulted. |
 | Memories | Default gate model | `claude-haiku-5-5` when the request names no preprocessing model; pass `preproc_model` to choose another one. |
 | Memories | Delete | Evaluated under the role of the flow that owns the Memory Base. |
