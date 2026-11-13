@@ -232,24 +232,26 @@ The left navigation rail includes dedicated views for **`Memories`** (with the *
 ```mermaid
 flowchart LR
     subgraph Wizard["Memories Page (+ ❄️ Snowflake)"]
-        M1["#1 Graph Checkpointer<br/>(LangGraph State)"]
-        M2["#2 Buffer Window<br/>(Short-Term K Turns)"]
-        M3["#3 Summary Memory<br/>(Rolling Compression)"]
-        M4["#4 User Profile / Entity<br/>(Cross-Session Facts)"]
-        M5["#5 Episodic Few-Shot<br/>(Past Successful Runs)"]
+        M1["#1 Graph Checkpointer<br/>(state of a run, step by step)"]
+        M3["#3 Summary Memory<br/>(one running summary per session)"]
+        M4["#4 User Profile / Entity<br/>(cross-session facts)"]
+        M5["#5 Episodic<br/>(past outcomes, optional AI_EMBED)"]
     end
 
-    subgraph Storage["Snowflake Storage Backends"]
-        SFTable["Snowflake Tables<br/>(Standard | Hybrid | Dynamic | Interactive | Iceberg)<br/>Optional VECTOR(FLOAT, 768|1024) + AI_EMBED"]
-        PG["Snowflake Postgres (:5432)<br/>(<POSTGRES_INSTANCE> Relational / JSONB / pgvector)"]
+    subgraph Storage["Snowflake objects in the flow context"]
+        SFTable["Table MEM_NAME<br/>(Standard | Hybrid)<br/>configuration in the table comment"]
+        Task["Task MEM_NAME_CLEANUP<br/>(retention policy)"]
     end
 
     subgraph Canvas["Workflow Canvas"]
-        MB["Memory Base Node<br/>(Adapts ports to #1..#5)"]
+        AM["Agent Memory node<br/>Save | Recall | Clean up<br/>or save/recall tools for an agent"]
     end
 
-    M1 & M2 & M3 & M4 & M5 --> SFTable & PG --> MB
+    M1 & M3 & M4 & M5 --> SFTable --> AM
+    SFTable --- Task
 ```
+
+Chat turns (#2 Buffer / Window) are stored by `Message History`; conversation-fed memories use `Memory Base` (`LF_MEM_*`).
 
 ---
 
@@ -386,6 +388,8 @@ pytest
 - Stages: a stage selected in the flow `[ ❄️ Context ]` is listed immediately after the context is saved.
 - SQL Statement: a `Bind Values` port binds values coming from other nodes to the `?` placeholders (after the static bind parameters), and the statement runs once per run even when several output ports are connected.
 - Memory Base: created in the configured `LANGFLOW_MEMORY_SCHEMA` location (`DB.SCHEMA`) whatever database the flow context starts with; a duplicate name is refused (`MEMORY_BASE_NAME_TAKEN`) before any table is created; the default preprocessing model is `claude-haiku-5-5` (override with `preproc_model`); delete is evaluated under the role of the owning flow.
+- Typed memories: a memory created from `Memories ▸ + ❄️ Snowflake` is a real table in the flow context that the new `Agent Memory` node saves to and recalls from (also as agent tools, with the capture instruction written at creation); retention is enforced by a Snowflake task; memories are read back from Snowflake after a restart; unsupported backends are refused.
+- Stages & Volumes: a failed stage or external volume creation returns the Snowflake error and registers nothing.
 
 **Observability**
 - Unified run/trace telemetry: one RUN row per execution, batched span sync when the run closes, role-switch audit.

@@ -62,6 +62,7 @@ flowchart TB
 | **LLM Operations** | **`[ ❄️ ] AI Complete`** | `SnowflakeAIComplete` | Text, JSON schema, and Internal/External Stage multimodal (`TO_FILE` / `DIRECTORY`) completion (`Images`, `.mp3/Audio`, `Video`, `Documents`) | Live |
 | **LLM Operations** | **`[ ❄️ ] AI Function`** | `SnowflakeAIFunction` | 14 task-specific `AI_*` functions (`AI_CLASSIFY`, `AI_FILTER`, `AI_EXTRACT`, `AI_SENTIMENT`, `AI_SUMMARIZE`, `AI_SUMMARIZE_AGG`, `AI_AGG`, `AI_TRANSLATE`, `AI_SIMILARITY`, `AI_TRANSCRIBE`, `AI_PARSE_DOCUMENT`, `AI_EMBED`, `AI_MULTI_EMBED`, `AI_COUNT_TOKENS`) with Internal & External Stage multimodal support | Live |
 | **LLM Operations** | **`[ ❄️ ] SQL Statement`** | `SnowflakeSQLStatement` | Governed parameterized SQL statement execution under `CURRENT_ROLE()` | Live |
+| **LLM Operations** | **`[ ❄️ ] Agent Memory`** | `SnowflakeAgentMemory` | Save, recall and clean up a typed Snowflake memory (checkpointer, summary, profile, episodic); in Tool Mode exposes `save_*` and `recall_*` tools to an agent | Live |
 | **LLM Operations** | **`[ ❄️ ] Operations`** | `SnowflakeLLMNode` | Multi-operation Snowflake Cortex helper node | Live |
 | **Files & Knowledge** | `File System` | `FileSystemTool` | Stage file browsing and governed Internal/External stage management | In progress |
 | **Files & Knowledge** | `Knowledge` | `KnowledgeComponent` | Vector knowledge base over Snowflake `VECTOR` tables, Cortex Search, or `pgvector` | In progress |
@@ -157,6 +158,10 @@ flowchart TB
 | LLM Operations | SQL Statement execution | The statement runs once per run even when several output ports are connected (a `CALL` or DML is not repeated). |
 | Memories | Memory location | A `DB.SCHEMA` value of `LANGFLOW_MEMORY_SCHEMA` names the memory database, so a flow whose context starts with another database can have Memory Bases. |
 | Memories | Duplicate name | Refused with `MEMORY_BASE_NAME_TAKEN` (409) before any table is created. |
+| Memories | Typed memories (`+ ❄️ Snowflake`) | One Standard or Hybrid table `MEM_<NAME>` in the flow context; configuration stored in the table comment and read back from Snowflake, so memories are listed after a restart. Delete drops the table and its task. |
+| Memories | Capture instruction and cleanup | The instruction written at creation becomes the description of the agent's save tool. Retention (age, row cap by outcome score, checkpoint lifetime) is enforced by a Snowflake task and can be run on demand. |
+| Memories | Unsupported backends | Snowflake Postgres, Dynamic, Interactive, Iceberg, Cortex Search, chat-window memories and non-Cortex embeddings are refused (422) instead of registered. A Hybrid table that cannot be created is an error. |
+| Stages & Volumes | Creation outcome | A failed `CREATE STAGE` / `CREATE EXTERNAL VOLUME` returns the Snowflake error and registers nothing; URL, integration or role ARN are required, never defaulted. |
 | Memories | Default gate model | `claude-haiku-5-5` when the request names no preprocessing model; pass `preproc_model` to choose another one. |
 | Memories | Delete | Evaluated under the role of the flow that owns the Memory Base. |
 | Showcases | Four reference flows | Multi Cortex Agent chain, Agent with all Snowflake tools (also over MCP), Language Model + Decision routing, A2A forms. |
