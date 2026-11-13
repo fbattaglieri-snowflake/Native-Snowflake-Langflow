@@ -26,60 +26,96 @@
     });
   }
 
-  // Home: one run of the flow, replayable.
+  // Home: two example flows that play in a loop.
   var win = $('heroWin');
   if (win) {
-    var dot = $('dot'), logItems = $('log').children, runId = 0;
-    var all = win.querySelectorAll('.node, .wire');
-    var wait = function (ms) { return new Promise(function (r) { setTimeout(r, ms); }); };
-    var travel = function (path, reverse, id) {
-      return new Promise(function (resolve) {
-        var len = path.getTotalLength(), dur = Math.max(260, Math.min(620, len * 2.2)), t0 = performance.now();
-        path.classList.add('on');
-        dot.style.opacity = 1;
-        (function frame(now) {
-          if (id !== runId) { resolve(); return; }
-          var p = Math.min(1, (now - t0) / dur);
-          var pt = path.getPointAtLength((reverse ? 1 - p : p) * len);
-          dot.setAttribute('cx', pt.x); dot.setAttribute('cy', pt.y);
-          if (p < 1) { requestAnimationFrame(frame); } else { resolve(); }
-        })(t0);
-      });
+    var scenes = {
+      agent: {
+        title: 'Maintenance assistant · example flow', role: 'MAINTENANCE_ANALYST', ctx: '4 objects',
+        steps: [['on', 'nIn', 0], ['go', 'w1'], ['on', 'nAif', 1], ['go', 'w2'], ['on', 'nAg', 2],
+          ['tool', 't1', 'nAn'], ['tool', 't2', 'nSe'], ['tool', 't3', 'nMcp'],
+          ['go', 'w3'], ['on', 'nDec', 3], ['go', 'wLow'], ['on', 'nCa', 4], ['go', 'w5'], ['on', 'nA2a'],
+          ['go', 'w6'], ['on', 'nOut', 5], ['go', 'w7'], ['on', 'nMem']]
+      },
+      data: {
+        title: 'Invoice loader · example flow', role: 'DATA_ENGINEER', ctx: '5 objects',
+        steps: [['on', 'dTrig', 0], ['go', 'd1'], ['on', 'dAif', 1], ['go', 'd2'], ['on', 'dUdf'],
+          ['tool', 'dr', 'dRef'], ['log', 2], ['go', 'd3'], ['on', 'dDec', 3],
+          ['go', 'dPass'], ['on', 'dSql', 4], ['go', 'd5'], ['on', 'dLoad'],
+          ['go', 'd6'], ['on', 'dSum'], ['go', 'd7'], ['on', 'dOut', 5]]
+      }
     };
-    var setAll = function (on) {
-      all.forEach(function (el) { el.classList.toggle('on', on); });
-      Array.prototype.forEach.call(logItems, function (li) { li.classList.toggle('on', on); });
+    var current = location.hash === '#data-engineering' ? 'data' : 'agent', runId = 0;
+    var wait = function (ms) { return new Promise(function (r) { setTimeout(r, ms); }); };
+    var show = function () {
+      win.querySelectorAll('[data-scene]').forEach(function (el) {
+        if (el.tagName === 'BUTTON') { el.setAttribute('aria-pressed', String(el.dataset.scene === current)); }
+        else { el.classList.toggle('on', el.dataset.scene === current); }
+      });
+      $('heroTitle').textContent = scenes[current].title;
+      $('heroRole').textContent = scenes[current].role;
+      $('heroCtx').textContent = scenes[current].ctx;
     };
     var run = async function () {
-      var id = ++runId;
-      setAll(false); dot.style.opacity = 0;
-      if (reduce) { setAll(true); $('wHigh').classList.remove('on'); return; }
+      var id = ++runId, name = current;
+      var svg = win.querySelector('svg[data-scene="' + name + '"]');
+      var dot = svg.querySelector('.dot');
+      var parts = svg.querySelectorAll('.node, .wire');
+      var lines = win.querySelector('ol[data-scene="' + name + '"]').children;
       var ok = function () { return id === runId; };
-      var on = function (n) { $(n).classList.add('on'); };
-      var log = function (i) { logItems[i].classList.add('on'); };
-      var go = async function (w, reverse) { await travel($(w), reverse, id); return ok(); };
-      var tool = async function (w, n) {
-        if (!(await go(w, true))) return false;
-        on(n); await wait(160);
-        return go(w, false);
+      var setAll = function (on) {
+        parts.forEach(function (el) { el.classList.toggle('on', on && !el.classList.contains('alt')); });
+        Array.prototype.forEach.call(lines, function (li) { li.classList.toggle('on', on); });
       };
-      await wait(300); if (!ok()) return;
-      on('nIn'); log(0);
-      if (!(await go('w1'))) return; on('nAif'); log(1); await wait(200);
-      if (!(await go('w2'))) return; on('nAg'); log(2);
-      if (!(await tool('t1', 'nAn'))) return;
-      if (!(await tool('t2', 'nSe'))) return;
-      if (!(await tool('t3', 'nMcp'))) return;
-      if (!(await go('w3'))) return; on('nDec'); log(3); await wait(300);
-      if (!(await go('wLow'))) return; on('nCa'); log(4); await wait(200);
-      if (!(await go('w5'))) return; on('nA2a'); await wait(200);
-      if (!(await go('w6'))) return; on('nOut'); log(5);
-      if (!(await go('w7'))) return; on('nMem');
-      dot.style.opacity = 0;
+      var travel = function (wire, reverse) {
+        var path = $(wire);
+        return new Promise(function (resolve) {
+          var len = path.getTotalLength(), dur = Math.max(260, Math.min(620, len * 2.2)), t0 = performance.now();
+          path.classList.add('on');
+          dot.style.opacity = 1;
+          (function frame(now) {
+            if (!ok()) { resolve(); return; }
+            var p = Math.min(1, (now - t0) / dur);
+            var pt = path.getPointAtLength((reverse ? 1 - p : p) * len);
+            dot.setAttribute('cx', pt.x); dot.setAttribute('cy', pt.y);
+            if (p < 1) { requestAnimationFrame(frame); } else { resolve(); }
+          })(t0);
+        });
+      };
+      if (reduce) { setAll(true); return; }
+      while (ok()) {
+        setAll(false); dot.style.opacity = 0;
+        await wait(500);
+        for (var i = 0; i < scenes[name].steps.length && ok(); i++) {
+          var s = scenes[name].steps[i];
+          if (s[0] === 'on') {
+            $(s[1]).classList.add('on');
+            if (s[2] !== undefined) { lines[s[2]].classList.add('on'); }
+            await wait(200);
+          } else if (s[0] === 'log') {
+            lines[s[1]].classList.add('on');
+          } else if (s[0] === 'go') {
+            await travel(s[1], false);
+          } else {
+            await travel(s[1], true);
+            if (!ok()) { break; }
+            $(s[2]).classList.add('on');
+            await wait(160);
+            await travel(s[1], false);
+          }
+        }
+        if (!ok()) { return; }
+        dot.style.opacity = 0;
+        await wait(2800);
+      }
     };
+    show();
     requestAnimationFrame(function () {
       win.classList.add('ready');
-      setTimeout(run, reduce ? 0 : 1500);
+      setTimeout(run, reduce ? 0 : 1400);
+    });
+    win.querySelectorAll('button[data-scene]').forEach(function (b) {
+      b.addEventListener('click', function () { current = b.dataset.scene; show(); run(); });
     });
     $('rerun').addEventListener('click', run);
   }
