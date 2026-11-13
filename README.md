@@ -575,6 +575,15 @@ Before rolling out, also rehearse the database migration on a copy of `/persist`
 
 ---
 
+## Feedback and bug reports
+
+- **Bugs, missing features, questions:** [open an issue](https://github.com/fbattaglieri-snowflake/Native-Snowflake-Langflow/issues/new). Issues are public, so leave out account names, endpoints, secrets and real data.
+- **Anything private, including security problems:** write to [f.battaglieri@snowflake.com](mailto:f.battaglieri@snowflake.com).
+
+Say what you were doing, what you expected, what happened (with the error code), which role and Context were active, and which version you run. This is a personal project: replies are best effort and there is no support commitment.
+
+---
+
 ## Changelog
 
 ### v0.8.6

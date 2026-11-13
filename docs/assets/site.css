@@ -59,7 +59,7 @@ nav .wrap{display:flex;align-items:center;flex-wrap:wrap;gap:0 24px;min-height:6
 
 /* hero */
 .hero{padding:clamp(48px,7vw,88px) 0 clamp(56px,7vw,88px)}
-.hero-grid{display:grid;grid-template-columns:minmax(0,1fr);gap:clamp(32px,4vw,48px)}
+.hero-grid{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:clamp(32px,4vw,56px);align-items:center}
 .hero .lead{margin-top:20px}
 .actions{display:flex;flex-wrap:wrap;gap:12px;margin-top:32px}
 .facts{display:flex;flex-wrap:wrap;gap:8px 20px;margin-top:28px;padding:0;list-style:none}
@@ -251,7 +251,7 @@ pre.cfg{margin:16px 0 0;padding:16px;border-radius:12px;background:var(--bg);bor
 
 /* hero canvas, protocols */
 .scroll{overflow-x:auto}
-.canvas{min-width:720px;max-width:none}
+.canvas{min-width:440px;max-width:none}
 .wlabel{font:400 11px var(--mono);fill:var(--muted)}
 .canvas .pip{fill:var(--muted)}
 .canvas .pip.key-sf{fill:var(--accent)}

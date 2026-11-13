@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="snowflake-source" content="cortex-agent-authored">
+<meta name="description" content="Native Snowflake Langflow: an unofficial personal fork that runs the Langflow visual editor inside Snowflake, on Snowflake data, under Snowflake roles.">
+<title>Feedback and bug reports · Native Snowflake Langflow</title>
+<script type="application/json" id="snowflake-report-metadata">
+{
+  "generated": "2026-11-13",
+  "intent": "Native Snowflake Langflow site: how to give feedback and report bugs",
+  "dataSources": [
+    {
+      "type": "file",
+      "path": "README.md"
+    }
+  ],
+  "sections": [
+    {
+      "id": "channels",
+      "title": "channels",
+      "producerNotes": "Channels: GitHub issues and the author's email. No support commitment."
+    },
+    {
+      "id": "report",
+      "title": "report",
+      "producerNotes": "Channels: GitHub issues and the author's email. No support commitment."
+    },
+    {
+      "id": "next",
+      "title": "next",
+      "producerNotes": "Channels: GitHub issues and the author's email. No support commitment."
+    }
+  ]
+}
+</script>
+<link rel="stylesheet" href="assets/site.css">
+<script src="assets/site.js" defer></script>
+</head>
+<body>
+
+<div class="notice"><div class="wrap"><strong>Unofficial personal fork, under active testing.</strong> A project by Francesco Battaglieri. It is not a product of Snowflake Inc. or of Langflow / DataStax, and neither supports it. Tested on Snowflake on AWS only, with synthetic data.</div></div>
+
+<nav>
+  <div class="wrap">
+    <a class="brand" href="index.html">Native Snowflake Langflow</a>
+    <div class="links"><a href="index.html">Overview</a><a href="benefits.html">Benefits</a><a href="guide.html">Guide</a><a href="examples.html">Examples</a><a href="models.html">Models and proxy</a><a href="limits.html">Limits</a><a href="feedback.html" aria-current="page">Feedback</a></div>
+    <a class="btn ghost small" href="https://github.com/fbattaglieri-snowflake/Native-Snowflake-Langflow">GitHub</a>
+  </div>
+</nav>
+
+<section id="channels" class="band">
+  <div class="wrap">
+    <div class="head reveal">
+      <h2>Report a bug or share feedback</h2>
+      <p class="sub">Two ways to reach the author. This is a personal project, so replies are best effort and there is no support commitment.</p>
+    </div>
+    <div class="two">
+      <article class="ed reveal" style="--i:0">
+        <span class="mono">Public</span>
+        <h3>Open an issue on GitHub</h3>
+        <ul>
+          <li>Best for bugs, missing features and questions others may have too</li>
+          <li>Anyone can read it, so leave out account names, endpoints and real data</li>
+          <li>You need a GitHub account</li>
+        </ul>
+        <a class="btn primary small" href="https://github.com/fbattaglieri-snowflake/Native-Snowflake-Langflow/issues/new">Open an issue</a>
+        <a class="btn ghost small" href="https://github.com/fbattaglieri-snowflake/Native-Snowflake-Langflow/issues" style="margin-left:8px">See open issues</a>
+      </article>
+      <article class="ed reveal" style="--i:1">
+        <span class="mono">Private</span>
+        <h3>Write an email</h3>
+        <ul>
+          <li>Best for anything you would rather not post in public</li>
+          <li>Use it for security problems, so they are not disclosed before a fix</li>
+          <li>Also fine for general impressions after a demo</li>
+        </ul>
+        <a class="btn ghost small" href="mailto:f.battaglieri@snowflake.com?subject=Native%20Snowflake%20Langflow%20feedback">f.battaglieri@snowflake.com</a>
+      </article>
+    </div>
+  </div>
+</section>
+
+<section id="report">
+  <div class="wrap">
+    <div class="head reveal">
+      <h2>What makes a report easy to act on</h2>
+      <p class="sub">Five lines are enough. The more of them you can fill in, the faster the problem can be reproduced.</p>
+    </div>
+    <div class="guide">
+      <div class="g reveal"><div><h3>What you were doing</h3><p>The flow, the node and the question or input you gave it.</p></div></div>
+      <div class="g reveal"><div><h3>What you expected</h3><p>One sentence is fine.</p></div></div>
+      <div class="g reveal"><div><h3>What happened instead</h3><p>The message on the node, including the error code if there is one, for example <kbd>AUTHZ_ROLE_DENIED</kbd>.</p></div></div>
+      <div class="g reveal"><div><h3>The role and the Context</h3><p>Which role was selected in the top bar, and whether the object was ticked in the flow Context. Use a placeholder for names you cannot share.</p></div></div>
+      <div class="g reveal"><div><h3>The version</h3><p>The project version or image tag you are running, and the cloud your Snowflake account is on.</p></div></div>
+    </div>
+    <div class="tips">
+      <div class="tip reveal" style="--i:0"><b>Check the limits first</b>Some behaviour is already known and listed on the <a href="limits.html">Limits</a> page.</div>
+      <div class="tip reveal" style="--i:1"><b>Never paste secrets</b>No tokens, passwords or keys, in an issue or in an email.</div>
+      <div class="tip reveal" style="--i:2"><b>Screenshots help</b>Crop them so account names and real data are not visible.</div>
+    </div>
+  </div>
+</section>
+
+<section id="next" class="band">
+  <div class="wrap">
+    <div class="head reveal">
+      <h2>What happens to a report</h2>
+    </div>
+    <div class="flowd hot reveal">
+      <div class="fbox" style="--k:0"><span class="mono">You</span><b>Send the report</b><p>An issue or an email</p></div>
+      <i class="fline" style="--k:0"></i>
+      <div class="fbox" style="--k:1"><span class="mono">Author</span><b>Reproduce it</b><p>On a test environment with synthetic data</p></div>
+      <i class="fline" style="--k:1"></i>
+      <div class="fbox" style="--k:2"><span class="mono">Repository</span><b>Fix and test</b><p>The change is committed with its tests</p></div>
+      <i class="fline" style="--k:2"></i>
+      <div class="fbox" style="--k:3"><span class="mono">Release</span><b>Noted in the changelog</b><p>Listed under the version that contains it</p></div>
+    </div>
+    <p class="mono" style="margin-top:16px">This is the intended path, not a promise of timing. Some reports will end as a documented limit instead of a fix.</p>
+  </div>
+</section>
+
+<div class="wrap"><div class="pager"><a href="limits.html"><small>Previous</small>Limits</a><span></span></div></div>
+
+<footer>
+  <div class="wrap">
+    <p>Native Snowflake Langflow is an independent project by Francesco Battaglieri, released under the MIT License. It is not an official product, release or repository of Snowflake Inc., nor an official project of Langflow / DataStax, and it is not supported or warranted by either. Components, SQL schemas and configuration may change without notice.</p>
+    <p>All examples on this site use synthetic data. Role names and ratings shown in previews are illustrative.</p>
+  </div>
+</footer>
+</body>
+</html>

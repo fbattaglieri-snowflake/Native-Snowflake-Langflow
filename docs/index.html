@@ -40,7 +40,7 @@
 <nav>
   <div class="wrap">
     <a class="brand" href="index.html">Native Snowflake Langflow</a>
-    <div class="links"><a href="index.html" aria-current="page">Overview</a><a href="benefits.html">Benefits</a><a href="guide.html">Guide</a><a href="examples.html">Examples</a><a href="models.html">Models and proxy</a><a href="limits.html">Limits</a></div>
+    <div class="links"><a href="index.html" aria-current="page">Overview</a><a href="benefits.html">Benefits</a><a href="guide.html">Guide</a><a href="examples.html">Examples</a><a href="models.html">Models and proxy</a><a href="limits.html">Limits</a><a href="feedback.html">Feedback</a></div>
     <a class="btn ghost small" href="https://github.com/fbattaglieri-snowflake/Native-Snowflake-Langflow">GitHub</a>
   </div>
 </nav>
@@ -71,59 +71,59 @@
         <span class="chip">Context <b id="heroCtx">4 objects</b></span>
       </div>
       <div class="scroll">
-      <svg class="canvas scene on" data-scene="agent" viewBox="0 0 880 356" role="img" aria-hidden="true">
-        <path class="wire" id="w1" pathLength="1" d="M200 52 L240 52"/>
-        <path class="wire" id="w2" pathLength="1" d="M420 52 L460 52"/>
-        <path class="wire" id="t1" pathLength="1" d="M110 150 C110 108 500 124 500 80"/>
-        <path class="wire" id="t2" pathLength="1" d="M330 150 C330 114 525 118 525 80"/>
-        <path class="wire" id="t3" pathLength="1" d="M550 150 L550 80"/>
-        <path class="wire" id="w3" pathLength="1" d="M640 52 L680 52"/>
-        <path class="wire alt" id="wHigh" pathLength="1" d="M700 80 C700 118 660 112 660 150 L660 232 C660 258 620 250 620 276"/>
-        <path class="wire" id="wLow" pathLength="1" d="M770 80 L770 150"/>
-        <path class="wire" id="w5" pathLength="1" d="M770 206 L770 276"/>
-        <path class="wire" id="w6" pathLength="1" d="M680 304 L640 304"/>
-        <path class="wire" id="w7" pathLength="1" d="M460 304 L420 304"/>
-        <text class="wlabel" x="778" y="120">low confidence</text>
-        <text class="wlabel" x="652" y="246" text-anchor="end">high</text>
-        <circle class="pip key-sf" cx="26" cy="296" r="3"/><text class="wlabel" x="36" y="300">added by this project</text>
-        <circle class="pip" cx="26" cy="316" r="3"/><text class="wlabel" x="36" y="320">standard Langflow</text>
+      <svg class="canvas scene on" data-scene="agent" viewBox="0 0 640 434" role="img" aria-hidden="true">
+        <path class="wire" id="w1" pathLength="1" d="M200 52 L230 52"/>
+        <path class="wire" id="w2" pathLength="1" d="M410 52 L440 52"/>
+        <path class="wire" id="t1" pathLength="1" d="M110 134 C110 98 480 116 480 80"/>
+        <path class="wire" id="t2" pathLength="1" d="M320 134 C320 104 505 112 505 80"/>
+        <path class="wire" id="t3" pathLength="1" d="M530 134 L530 80"/>
+        <path class="wire" id="w3" pathLength="1" d="M620 52 Q632 52 632 64 L632 260 Q632 272 620 272"/>
+        <path class="wire alt" id="wHigh" pathLength="1" d="M500 300 C500 330 350 324 350 354"/>
+        <path class="wire" id="wLow" pathLength="1" d="M440 272 L410 272"/>
+        <path class="wire" id="w5" pathLength="1" d="M230 272 L200 272"/>
+        <path class="wire" id="w6" pathLength="1" d="M190 300 C190 356 200 382 230 382"/>
+        <path class="wire" id="w7" pathLength="1" d="M410 382 L440 382"/>
+        <text class="wlabel" x="425" y="234" text-anchor="middle">low confidence</text>
+        <text class="wlabel" x="436" y="342">high</text>
+        <circle class="pip key-sf" cx="30" cy="398" r="3"/><text class="wlabel" x="40" y="402">added by this project</text>
+        <circle class="pip" cx="30" cy="416" r="3"/><text class="wlabel" x="40" y="420">standard Langflow</text>
         <g class="node" id="nIn" style="transition-delay:0ms"><rect x="20" y="24" width="180" height="56" rx="10"/><circle class="pip" cx="38" cy="45" r="3"/><text x="52" y="49">Chat Input</text><text class="kind" x="38" y="67">input</text></g>
-        <g class="node sf" id="nAif" style="transition-delay:50ms"><rect x="240" y="24" width="180" height="56" rx="10"/><circle class="pip" cx="258" cy="45" r="3"/><text x="272" y="49">AI Function</text><text class="kind" x="258" y="67">AI_CLASSIFY · urgency</text></g>
-        <g class="node" id="nAg" style="transition-delay:100ms"><rect x="460" y="24" width="180" height="56" rx="10"/><circle class="pip" cx="478" cy="45" r="3"/><text x="492" y="49">Agent</text><text class="kind" x="478" y="67">picks the tools to call</text></g>
-        <g class="node sf" id="nDec" style="transition-delay:150ms"><rect x="680" y="24" width="180" height="56" rx="10"/><circle class="pip" cx="698" cy="45" r="3"/><text x="712" y="49">Decision</text><text class="kind" x="698" y="67">rates the answer</text></g>
-        <g class="node sf" id="nAn" style="transition-delay:200ms"><rect x="20" y="150" width="180" height="56" rx="10"/><circle class="pip" cx="38" cy="171" r="3"/><text x="52" y="175">Cortex Analyst</text><text class="kind" x="38" y="193">tool · numbers</text></g>
-        <g class="node sf" id="nSe" style="transition-delay:250ms"><rect x="240" y="150" width="180" height="56" rx="10"/><circle class="pip" cx="258" cy="171" r="3"/><text x="272" y="175">Cortex Search</text><text class="kind" x="258" y="193">tool · documents</text></g>
-        <g class="node" id="nMcp" style="transition-delay:300ms"><rect x="460" y="150" width="180" height="56" rx="10"/><image href="assets/logos/mcp.svg" x="471" y="163" width="16" height="16"/><text x="492" y="175">MCP Tools</text><text class="kind" x="478" y="193">tool · over MCP</text></g>
-        <g class="node sf" id="nCa" style="transition-delay:350ms"><rect x="680" y="150" width="180" height="56" rx="10"/><circle class="pip" cx="698" cy="171" r="3"/><text x="712" y="175">Cortex Agent</text><text class="kind" x="698" y="193">warranty specialist</text></g>
-        <g class="node sf" id="nMem" style="transition-delay:400ms"><rect x="240" y="276" width="180" height="56" rx="10"/><circle class="pip" cx="258" cy="297" r="3"/><text x="272" y="301">Agent Memory</text><text class="kind" x="258" y="319">Snowflake table</text></g>
-        <g class="node" id="nOut" style="transition-delay:450ms"><rect x="460" y="276" width="180" height="56" rx="10"/><circle class="pip" cx="478" cy="297" r="3"/><text x="492" y="301">Chat Output</text><text class="kind" x="478" y="319">output</text></g>
-        <g class="node" id="nA2a" style="transition-delay:500ms"><rect x="680" y="276" width="180" height="56" rx="10"/><image class="lg-light" href="assets/logos/a2a-black.svg" x="691" y="289" width="16" height="16"/><image class="lg-dark" href="assets/logos/a2a-white.svg" x="691" y="289" width="16" height="16"/><text x="712" y="301">A2A Agent</text><text class="kind" x="698" y="319">supplier agent · A2A</text></g>
+        <g class="node sf" id="nAif" style="transition-delay:50ms"><rect x="230" y="24" width="180" height="56" rx="10"/><circle class="pip" cx="248" cy="45" r="3"/><text x="262" y="49">AI Function</text><text class="kind" x="248" y="67">AI_CLASSIFY · urgency</text></g>
+        <g class="node" id="nAg" style="transition-delay:100ms"><rect x="440" y="24" width="180" height="56" rx="10"/><circle class="pip" cx="458" cy="45" r="3"/><text x="472" y="49">Agent</text><text class="kind" x="458" y="67">picks the tools to call</text></g>
+        <g class="node sf" id="nAn" style="transition-delay:150ms"><rect x="20" y="134" width="180" height="56" rx="10"/><circle class="pip" cx="38" cy="155" r="3"/><text x="52" y="159">Cortex Analyst</text><text class="kind" x="38" y="177">tool · numbers</text></g>
+        <g class="node sf" id="nSe" style="transition-delay:200ms"><rect x="230" y="134" width="180" height="56" rx="10"/><circle class="pip" cx="248" cy="155" r="3"/><text x="262" y="159">Cortex Search</text><text class="kind" x="248" y="177">tool · documents</text></g>
+        <g class="node" id="nMcp" style="transition-delay:250ms"><rect x="440" y="134" width="180" height="56" rx="10"/><image href="assets/logos/mcp.svg" x="451" y="147" width="16" height="16"/><text x="472" y="159">MCP Tools</text><text class="kind" x="458" y="177">tool · over MCP</text></g>
+        <g class="node" id="nA2a" style="transition-delay:300ms"><rect x="20" y="244" width="180" height="56" rx="10"/><image class="lg-light" href="assets/logos/a2a-black.svg" x="31" y="257" width="16" height="16"/><image class="lg-dark" href="assets/logos/a2a-white.svg" x="31" y="257" width="16" height="16"/><text x="52" y="269">A2A Agent</text><text class="kind" x="38" y="287">supplier agent · A2A</text></g>
+        <g class="node sf" id="nCa" style="transition-delay:350ms"><rect x="230" y="244" width="180" height="56" rx="10"/><circle class="pip" cx="248" cy="265" r="3"/><text x="262" y="269">Cortex Agent</text><text class="kind" x="248" y="287">warranty specialist</text></g>
+        <g class="node sf" id="nDec" style="transition-delay:400ms"><rect x="440" y="244" width="180" height="56" rx="10"/><circle class="pip" cx="458" cy="265" r="3"/><text x="472" y="269">Decision</text><text class="kind" x="458" y="287">rates the answer</text></g>
+        <g class="node" id="nOut" style="transition-delay:450ms"><rect x="230" y="354" width="180" height="56" rx="10"/><circle class="pip" cx="248" cy="375" r="3"/><text x="262" y="379">Chat Output</text><text class="kind" x="248" y="397">output</text></g>
+        <g class="node sf" id="nMem" style="transition-delay:500ms"><rect x="440" y="354" width="180" height="56" rx="10"/><circle class="pip" cx="458" cy="375" r="3"/><text x="472" y="379">Agent Memory</text><text class="kind" x="458" y="397">Snowflake table</text></g>
         <circle class="dot" r="5"/>
       </svg>
-      <svg class="canvas scene" data-scene="data" viewBox="0 0 880 356" role="img" aria-hidden="true">
-        <path class="wire" id="d1" pathLength="1" d="M200 52 L240 52"/>
-        <path class="wire" id="d2" pathLength="1" d="M420 52 L460 52"/>
-        <path class="wire" id="dr" pathLength="1" d="M330 150 C330 112 520 120 520 80"/>
-        <path class="wire" id="d3" pathLength="1" d="M640 52 L680 52"/>
-        <path class="wire alt" id="dFail" pathLength="1" d="M700 80 C700 112 620 118 620 150"/>
-        <path class="wire" id="dPass" pathLength="1" d="M770 80 L770 150"/>
-        <path class="wire" id="d5" pathLength="1" d="M770 206 L770 276"/>
-        <path class="wire" id="d6" pathLength="1" d="M680 304 L640 304"/>
-        <path class="wire" id="d7" pathLength="1" d="M460 304 L420 304"/>
-        <text class="wlabel" x="778" y="120">valid</text>
-        <text class="wlabel" x="612" y="140" text-anchor="end">not valid</text>
-        <circle class="pip key-sf" cx="26" cy="296" r="3"/><text class="wlabel" x="36" y="300">added by this project</text>
-        <circle class="pip" cx="26" cy="316" r="3"/><text class="wlabel" x="36" y="320">standard Langflow</text>
+      <svg class="canvas scene" data-scene="data" viewBox="0 0 640 434" role="img" aria-hidden="true">
+        <path class="wire" id="d1" pathLength="1" d="M200 52 L230 52"/>
+        <path class="wire" id="d2" pathLength="1" d="M410 52 L440 52"/>
+        <path class="wire" id="dr" pathLength="1" d="M530 134 L530 80"/>
+        <path class="wire" id="d3" pathLength="1" d="M620 52 Q632 52 632 64 L632 260 Q632 272 620 272"/>
+        <path class="wire alt" id="dFail" pathLength="1" d="M500 244 C500 214 320 220 320 190"/>
+        <path class="wire" id="dPass" pathLength="1" d="M440 272 L410 272"/>
+        <path class="wire" id="d5" pathLength="1" d="M230 272 L200 272"/>
+        <path class="wire" id="d6" pathLength="1" d="M190 300 C190 356 200 382 230 382"/>
+        <path class="wire" id="d7" pathLength="1" d="M410 382 L440 382"/>
+        <text class="wlabel" x="425" y="318" text-anchor="middle">valid</text>
+        <text class="wlabel" x="404" y="230" text-anchor="end">not valid</text>
+        <circle class="pip key-sf" cx="30" cy="398" r="3"/><text class="wlabel" x="40" y="402">added by this project</text>
+        <circle class="pip" cx="30" cy="416" r="3"/><text class="wlabel" x="40" y="420">standard Langflow</text>
         <g class="node sf" id="dTrig" style="transition-delay:0ms"><rect x="20" y="24" width="180" height="56" rx="10"/><circle class="pip" cx="38" cy="45" r="3"/><text x="52" y="49">Stage File Trigger</text><text class="kind" x="38" y="67">new file on a stage</text></g>
-        <g class="node sf" id="dAif" style="transition-delay:50ms"><rect x="240" y="24" width="180" height="56" rx="10"/><circle class="pip" cx="258" cy="45" r="3"/><text x="272" y="49">AI Function</text><text class="kind" x="258" y="67">AI_EXTRACT · fields</text></g>
-        <g class="node sf" id="dUdf" style="transition-delay:100ms"><rect x="460" y="24" width="180" height="56" rx="10"/><circle class="pip" cx="478" cy="45" r="3"/><text x="492" y="49">Custom Tool</text><text class="kind" x="478" y="67">UDF · normalize units</text></g>
-        <g class="node sf" id="dDec" style="transition-delay:150ms"><rect x="680" y="24" width="180" height="56" rx="10"/><circle class="pip" cx="698" cy="45" r="3"/><text x="712" y="49">Decision</text><text class="kind" x="698" y="67">is the record valid?</text></g>
-        <g class="node sf" id="dRef" style="transition-delay:200ms"><rect x="240" y="150" width="180" height="56" rx="10"/><circle class="pip" cx="258" cy="171" r="3"/><text x="272" y="175">Tables</text><text class="kind" x="258" y="193">reference data</text></g>
-        <g class="node sf alt" id="dQuar" style="transition-delay:250ms"><rect x="460" y="150" width="180" height="56" rx="10"/><circle class="pip" cx="478" cy="171" r="3"/><text x="492" y="175">Custom Tool</text><text class="kind" x="478" y="193">procedure · quarantine</text></g>
-        <g class="node sf" id="dSql" style="transition-delay:300ms"><rect x="680" y="150" width="180" height="56" rx="10"/><circle class="pip" cx="698" cy="171" r="3"/><text x="712" y="175">SQL Statement</text><text class="kind" x="698" y="193">SELECT · duplicate?</text></g>
-        <g class="node" id="dOut" style="transition-delay:350ms"><rect x="240" y="276" width="180" height="56" rx="10"/><circle class="pip" cx="258" cy="297" r="3"/><text x="272" y="301">Text Output</text><text class="kind" x="258" y="319">run summary</text></g>
-        <g class="node sf" id="dSum" style="transition-delay:400ms"><rect x="460" y="276" width="180" height="56" rx="10"/><circle class="pip" cx="478" cy="297" r="3"/><text x="492" y="301">SQL Statement</text><text class="kind" x="478" y="319">CALL · refresh summary</text></g>
-        <g class="node sf" id="dLoad" style="transition-delay:450ms"><rect x="680" y="276" width="180" height="56" rx="10"/><circle class="pip" cx="698" cy="297" r="3"/><text x="712" y="301">Custom Tool</text><text class="kind" x="698" y="319">procedure · load row</text></g>
+        <g class="node sf" id="dAif" style="transition-delay:50ms"><rect x="230" y="24" width="180" height="56" rx="10"/><circle class="pip" cx="248" cy="45" r="3"/><text x="262" y="49">AI Function</text><text class="kind" x="248" y="67">AI_EXTRACT · fields</text></g>
+        <g class="node sf" id="dUdf" style="transition-delay:100ms"><rect x="440" y="24" width="180" height="56" rx="10"/><circle class="pip" cx="458" cy="45" r="3"/><text x="472" y="49">Custom Tool</text><text class="kind" x="458" y="67">UDF · normalize units</text></g>
+        <g class="node sf alt" id="dQuar" style="transition-delay:150ms"><rect x="230" y="134" width="180" height="56" rx="10"/><circle class="pip" cx="248" cy="155" r="3"/><text x="262" y="159">Custom Tool</text><text class="kind" x="248" y="177">procedure · quarantine</text></g>
+        <g class="node sf" id="dRef" style="transition-delay:200ms"><rect x="440" y="134" width="180" height="56" rx="10"/><circle class="pip" cx="458" cy="155" r="3"/><text x="472" y="159">Tables</text><text class="kind" x="458" y="177">reference data</text></g>
+        <g class="node sf" id="dLoad" style="transition-delay:250ms"><rect x="20" y="244" width="180" height="56" rx="10"/><circle class="pip" cx="38" cy="265" r="3"/><text x="52" y="269">Custom Tool</text><text class="kind" x="38" y="287">procedure · load row</text></g>
+        <g class="node sf" id="dSql" style="transition-delay:300ms"><rect x="230" y="244" width="180" height="56" rx="10"/><circle class="pip" cx="248" cy="265" r="3"/><text x="262" y="269">SQL Statement</text><text class="kind" x="248" y="287">SELECT · duplicate?</text></g>
+        <g class="node sf" id="dDec" style="transition-delay:350ms"><rect x="440" y="244" width="180" height="56" rx="10"/><circle class="pip" cx="458" cy="265" r="3"/><text x="472" y="269">Decision</text><text class="kind" x="458" y="287">is the record valid?</text></g>
+        <g class="node sf" id="dSum" style="transition-delay:400ms"><rect x="230" y="354" width="180" height="56" rx="10"/><circle class="pip" cx="248" cy="375" r="3"/><text x="262" y="379">SQL Statement</text><text class="kind" x="248" y="397">CALL · refresh summary</text></g>
+        <g class="node" id="dOut" style="transition-delay:450ms"><rect x="440" y="354" width="180" height="56" rx="10"/><circle class="pip" cx="458" cy="375" r="3"/><text x="472" y="379">Text Output</text><text class="kind" x="458" y="397">run summary</text></g>
         <circle class="dot" r="5"/>
       </svg>
       </div>
@@ -220,6 +220,7 @@
       <a class="card reveal" style="--i:2" href="examples.html"><b>Examples</b><span>Four flows with the questions to ask</span></a>
       <a class="card reveal" style="--i:3" href="models.html"><b>Models and proxy</b><span>Where model calls go and what you need to deploy</span></a>
       <a class="card reveal" style="--i:4" href="limits.html"><b>Limits</b><span>What it does not do yet</span></a>
+      <a class="card reveal" style="--i:5" href="feedback.html"><b>Feedback</b><span>Report a bug or say what you think</span></a>
     </div>
   </div>
 </section>
