@@ -1,5 +1,6 @@
 from __future__ import annotations
 from lfx_snowflake import dropdown_selection as _sel
+from lfx_snowflake import list_input_order as _order
 
 import json
 
@@ -105,8 +106,8 @@ class SnowflakeSQLStatementComponent(Component):
             is_list=True,
             required=False,
             info=(
-                "Upstream values bound to the ? placeholders that follow those of Bind Parameters JSON, in "
-                "connection order. A Message is bound as its text, Data as a JSON string. Values are never "
+                "Upstream values bound to the ? placeholders that follow those of Bind Parameters JSON, in the "
+                "order the connections were drawn on the canvas. A Message is bound as its text, Data as a JSON string. Values are never "
                 "concatenated into the SQL."
             ),
         ),
@@ -167,7 +168,8 @@ class SnowflakeSQLStatementComponent(Component):
         if values is None or values == "":
             return []
         out: list[str] = []
-        for val in values if isinstance(values, list) else [values]:
+        ordered = _order.in_canvas_order(self, "bind_values", values) if isinstance(values, list) else [values]
+        for val in ordered:
             if isinstance(val, Message):
                 out.append(str(val.text or ""))
             elif isinstance(val, Data):
