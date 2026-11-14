@@ -51,6 +51,9 @@ This project keeps the Langflow editor as it is and adds what is needed to use i
 - The canvas gets **Snowflake nodes**: tables, views, Cortex Search, Cortex Analyst, Cortex Agents, the `AI_*` functions, stored procedures and functions as tools, triggers, and memory.
 - Flow runs are written to **Snowflake tables**, so they can be queried with SQL.
 
+> [!IMPORTANT]
+> **You also need an LLM proxy.** The `Language Model` and `Agent` nodes reach models through a separate LLM proxy service hosted in SPCS. It is not part of this repository. Two public editions exist: [`snowflake-proxy-cortexrestapi`](https://github.com/fbattaglieri-snowflake/snowflake-proxy-cortexrestapi) and [`snowflake-proxy-cortex-aigateway`](https://github.com/fbattaglieri-snowflake/snowflake-proxy-cortex-aigateway). `Cortex Agent`, the AI function nodes, `Embedding Model`, Cortex Search and Cortex Analyst do not use it. See [section 4.3](#43-models--agents).
+
 ### What you get
 
 | Area | What it does | Where you see it | Status |
@@ -260,6 +263,15 @@ flowchart LR
 
 The LLM proxy and Ollama are separate services. They are not part of this repository; you point this project at them with the two base URLs.
 
+The LLM proxy is published in two editions with the same endpoints, so this project is configured the same way for either:
+
+| Edition | Forwards to | Adds |
+|---|---|---|
+| [`snowflake-proxy-cortexrestapi`](https://github.com/fbattaglieri-snowflake/snowflake-proxy-cortexrestapi) | Cortex REST API | Model discovery, request normalization, daily model qualification |
+| [`snowflake-proxy-cortex-aigateway`](https://github.com/fbattaglieri-snowflake/snowflake-proxy-cortex-aigateway) | Cortex AI Gateway | The same, plus gateway traces, usage history, per-user token quotas and a model allowlist |
+
+Without a proxy (or Ollama), `Language Model` and `Agent` have no model to call. `Cortex Agent`, `A2A Agent` and `Embedding Model` do not depend on it.
+
 ### 4.4 LLM Operations
 
 ```mermaid
@@ -453,6 +465,7 @@ Four reference flows show the nodes working together. Build them with the Langfl
 
 The full procedure is in [`docs/DEPLOYMENT_SPCS.md`](docs/DEPLOYMENT_SPCS.md). In short:
 
+0. **Deploy the LLM proxy first** if you want to use `Language Model` and `Agent`. Follow the README of one of the two proxy repositories listed in [section 4.3](#43-models--agents) and note its base URL.
 1. **Prepare Snowflake.** Run the scripts in `sql/` to create roles, grants and the telemetry tables.
 2. **Build the image.** `Dockerfile.release` starts from the official Langflow image and runs the installer once.
 3. **Push the image** to your SPCS image repository.
@@ -553,6 +566,7 @@ Before rolling out, also rehearse the database migration on a copy of `/persist`
 
 ## 14. Known limitations
 
+- **`Language Model` and `Agent` need an LLM proxy.** It is a separate service that you deploy yourself; see [section 4.3](#43-models--agents). Without it (or Ollama) only the nodes that call Cortex directly work.
 - **File upload to stages** from the browser is not available (see [section 6](#6-stages--volumes)).
 - **Caller's rights** (queries run as the signed-in user) is implemented but off by default (`SNOWFLAKE_LANGFLOW_CALLERS_RIGHTS`). By default queries run through the service identity, restricted to the selected role.
 - **Role selection after a restart.** The selected role is kept in the container's memory. After a service restart, select the role again.

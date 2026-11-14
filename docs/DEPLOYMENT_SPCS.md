@@ -8,6 +8,13 @@ This guide describes how to deploy SnowflakeLangflow on **Snowflake on AWS** usi
 
 ## 1. Prerequisites & Required Placeholders
 
+**Deploy the LLM proxy before this project.** The `Language Model` and `Agent` nodes reach models through the LLM proxy, a separate SPCS service that is not part of this repository. Deploy one of the two public editions first and keep its base URL for `<LLM_PROXY_BASE_URL>`:
+
+- [`snowflake-proxy-cortexrestapi`](https://github.com/fbattaglieri-snowflake/snowflake-proxy-cortexrestapi) forwards to the Cortex REST API.
+- [`snowflake-proxy-cortex-aigateway`](https://github.com/fbattaglieri-snowflake/snowflake-proxy-cortex-aigateway) forwards to Cortex AI Gateway.
+
+Both expose the same `Chat`, `Responses` and `Messages` endpoints. Without a proxy (or Ollama) the service still starts, but only the nodes that call Cortex directly (`Cortex Agent`, the AI function nodes, `Embedding Model`, Cortex Search, Cortex Analyst) have a model to use.
+
 Replace the following placeholders with your target environment values during deployment:
 
 - `<SNOWFLAKE_ACCOUNT>` — Snowflake account identifier on AWS
