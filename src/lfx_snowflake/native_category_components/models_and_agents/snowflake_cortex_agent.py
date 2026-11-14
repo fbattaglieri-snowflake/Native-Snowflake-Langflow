@@ -203,7 +203,10 @@ class SnowflakeCortexAgentComponent(Component):
             cur_sch = build_config["schema_name"].get("value")
             if field_name == "schema_name" and isinstance(field_value, str):
                 build_config["schema_name"]["value"] = field_value
-            elif schemas and cur_sch not in schemas:
+            elif schemas and (not cur_sch or (field_name == "database" and cur_sch not in schemas)):
+                # Default only an empty field or after the database changed. A stored schema that is not
+                # listed now (role or Context changed) is kept, so the run fails clearly instead of
+                # silently using another schema.
                 build_config["schema_name"]["value"] = schemas[0]
         sch = (
             field_value
@@ -212,11 +215,19 @@ class SnowflakeCortexAgentComponent(Component):
         )
         if "cortex_agent" in build_config:
             agent_opts = _cortex_agents(db, sch, flow_id=flow_id)
-            build_config["cortex_agent"]["options"] = agent_opts
+            cur_agent = str(build_config["cortex_agent"].get("value") or "").strip()
             if field_name == "cortex_agent" and isinstance(field_value, str):
                 build_config["cortex_agent"]["value"] = field_value
-            elif agent_opts and build_config["cortex_agent"].get("value") not in agent_opts:
-                build_config["cortex_agent"]["value"] = agent_opts[0]
+            else:
+                listed = cur_agent.split(".")[-1].upper() in {str(o).split(".")[-1].upper() for o in agent_opts}
+                if agent_opts and (not cur_agent or (field_name in ("database", "schema_name") and not listed)):
+                    # Default an empty field, or one whose database or schema was just changed by the user.
+                    build_config["cortex_agent"]["value"] = agent_opts[0]
+                elif cur_agent and not listed:
+                    # Never replace a stored agent with the first option. An agent that is not listed now
+                    # (role or Context changed) stays selected and visible, and the run reports the denial.
+                    agent_opts = [*agent_opts, cur_agent]
+            build_config["cortex_agent"]["options"] = agent_opts
         selected_agent = (
             field_value
             if field_name == "cortex_agent" and isinstance(field_value, str)

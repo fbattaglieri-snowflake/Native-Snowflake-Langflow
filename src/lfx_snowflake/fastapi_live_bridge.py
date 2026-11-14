@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any
 
 _CATALOG_EXECUTOR = ThreadPoolExecutor(max_workers=8, thread_name_prefix="sflf-catalog")
+_TYPED_MEMORY_REGISTRY_LOCK = threading.Lock()
 _AUDIT_EXECUTOR = ThreadPoolExecutor(max_workers=2, thread_name_prefix="sflf-audit")
 
 os.environ.setdefault("LANGFLOW_A2A_ENABLED", "true")
@@ -1809,7 +1810,10 @@ class LiveSnowflakeBridge:
             return None
 
         matched = _lookup()
-        if matched is None and flow_id and self.discover_typed_memories(flow_id, force=True):
+        if matched is None and flow_id:
+            # Look again whatever the discovery count says: a node running in parallel may have registered
+            # the memory first, in which case this call finds nothing new but the memory is there.
+            self.discover_typed_memories(flow_id, force=True)
             matched = _lookup()
         if matched is None:
             from lfx_snowflake.memories_lf_mem import legacy_memory_not_found  # noqa: PLC0415
@@ -3033,11 +3037,12 @@ class LiveSnowflakeBridge:
                 if not meta or not table:
                     continue
                 fqn = f"{db}.{sch}.{table}"
-                if any(str(m.get("table_fqn") or "").upper() == fqn.upper() for m in self.memories_registry):
-                    continue
-                self.memories_registry.append(
-                    _typed.entry_from_table(db, sch, table, meta, is_hybrid=str(low.get("is_hybrid") or "").upper() in ("Y", "TRUE"))
-                )
+                with _TYPED_MEMORY_REGISTRY_LOCK:  # check and append together: parallel nodes discover at the same time
+                    if any(str(m.get("table_fqn") or "").upper() == fqn.upper() for m in self.memories_registry):
+                        continue
+                    self.memories_registry.append(
+                        _typed.entry_from_table(db, sch, table, meta, is_hybrid=str(low.get("is_hybrid") or "").upper() in ("Y", "TRUE"))
+                    )
                 found += 1
         return found
 
@@ -3060,7 +3065,9 @@ class LiveSnowflakeBridge:
             return None
 
         entry = _match()
-        if entry is None and self.discover_typed_memories(flow_id, force=True):
+        if entry is None:
+            # Same as recall_memory: the discovery count is not a reason to skip the second lookup.
+            self.discover_typed_memories(flow_id, force=True)
             entry = _match()
         if entry is None:
             return None, {
