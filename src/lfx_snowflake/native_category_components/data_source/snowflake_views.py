@@ -1,4 +1,5 @@
 from __future__ import annotations
+from lfx_snowflake import dropdown_selection as _sel
 
 from lfx_snowflake import sql_safety as _sql_safety
 
@@ -164,8 +165,8 @@ class SnowflakeViewsComponent(Component):
             cur_sch = build_config["schema_name"].get("value")
             if field_name == "schema_name" and isinstance(field_value, str):
                 build_config["schema_name"]["value"] = field_value
-            elif schemas and cur_sch not in schemas:
-                build_config["schema_name"]["value"] = schemas[0]
+            else:
+                _sel.keep_or_default(build_config, "schema_name", schemas, field_name)
         sch = (
             field_value
             if field_name == "schema_name" and isinstance(field_value, str)
@@ -174,8 +175,7 @@ class SnowflakeViewsComponent(Component):
         if "view_name" in build_config:
             vw_opts = _view_objects(db, sch, flow_id=flow_id)
             build_config["view_name"]["options"] = vw_opts
-            if vw_opts and build_config["view_name"].get("value") not in vw_opts:
-                build_config["view_name"]["value"] = vw_opts[0]
+            _sel.keep_or_default(build_config, "view_name", vw_opts, field_name)
         if "memory_catalog_ref" in build_config:
             build_config["memory_catalog_ref"]["options"] = _memory_catalog_options()
         return build_config

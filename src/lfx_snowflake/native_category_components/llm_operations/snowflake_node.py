@@ -1,4 +1,5 @@
 from __future__ import annotations
+from lfx_snowflake import dropdown_selection as _sel
 
 from lfx_snowflake import sql_safety as _sql_safety
 
@@ -128,8 +129,8 @@ class SnowflakeLLMOperationComponent(Component):
             cur_sch = build_config["schema_name"].get("value")
             if field_name == "schema_name" and isinstance(field_value, str):
                 build_config["schema_name"]["value"] = field_value
-            elif schemas and cur_sch not in schemas:
-                build_config["schema_name"]["value"] = schemas[0]
+            else:
+                _sel.keep_or_default(build_config, "schema_name", schemas, field_name)
         sch = (
             field_value
             if field_name == "schema_name" and isinstance(field_value, str)
@@ -138,8 +139,7 @@ class SnowflakeLLMOperationComponent(Component):
         if "target_object" in build_config:
             tgt_opts = _node_targets(db, sch, flow_id=flow_id)
             build_config["target_object"]["options"] = tgt_opts
-            if tgt_opts and build_config["target_object"].get("value") not in tgt_opts:
-                build_config["target_object"]["value"] = tgt_opts[0]
+            _sel.keep_or_default(build_config, "target_object", tgt_opts, field_name)
         return build_config
 
     def _build_sql(self) -> str:

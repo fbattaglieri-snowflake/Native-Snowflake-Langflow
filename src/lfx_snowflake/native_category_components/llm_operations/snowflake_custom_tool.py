@@ -1,4 +1,5 @@
 from __future__ import annotations
+from lfx_snowflake import dropdown_selection as _sel
 
 from lfx_snowflake import sql_safety as _sql_safety
 
@@ -316,8 +317,10 @@ class SnowflakeCustomToolComponent(Component):
             cur_id = build_config["custom_tool_identifier"].get("value")
             if field_name == "custom_tool_identifier" and isinstance(field_value, str):
                 build_config["custom_tool_identifier"]["value"] = field_value
-            elif id_options and (field_name in ("resource_type", "database_schema") or cur_id not in id_options):
+            elif id_options and field_name in ("resource_type", "database_schema"):
                 build_config["custom_tool_identifier"]["value"] = id_options[0]
+            else:
+                _sel.keep_or_default(build_config, "custom_tool_identifier", id_options, field_name)
 
         selected_id = (
             field_value

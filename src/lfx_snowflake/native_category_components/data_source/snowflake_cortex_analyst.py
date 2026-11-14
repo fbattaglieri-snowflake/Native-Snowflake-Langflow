@@ -1,4 +1,5 @@
 from __future__ import annotations
+from lfx_snowflake import dropdown_selection as _sel
 
 import json
 from typing import Any
@@ -170,8 +171,8 @@ class SnowflakeCortexAnalystComponent(Component):
             cur_sch = build_config["schema_name"].get("value")
             if field_name == "schema_name" and isinstance(field_value, str):
                 build_config["schema_name"]["value"] = field_value
-            elif schemas and cur_sch not in schemas:
-                build_config["schema_name"]["value"] = schemas[0]
+            else:
+                _sel.keep_or_default(build_config, "schema_name", schemas, field_name)
         sch = (
             field_value
             if field_name == "schema_name" and isinstance(field_value, str)
@@ -185,8 +186,7 @@ class SnowflakeCortexAnalystComponent(Component):
         src_opts = _analyst_sources(db, sch, mode, flow_id=flow_id)
         if "semantic_source" in build_config:
             build_config["semantic_source"]["options"] = src_opts
-            if src_opts and build_config["semantic_source"].get("value") not in src_opts:
-                build_config["semantic_source"]["value"] = src_opts[0]
+            _sel.keep_or_default(build_config, "semantic_source", src_opts, field_name)
         build_config["semantic_view"] = {
             "name": "semantic_view",
             "options": src_opts,

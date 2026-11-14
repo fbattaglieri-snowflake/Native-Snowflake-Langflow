@@ -1,4 +1,5 @@
 from __future__ import annotations
+from lfx_snowflake import dropdown_selection as _sel
 
 from typing import Any
 
@@ -231,8 +232,8 @@ class SnowflakePostgresComponent(Component):
             build_config["postgres_instance"]["options"] = pg_opts
             if field_name == "postgres_instance" and isinstance(field_value, str):
                 build_config["postgres_instance"]["value"] = field_value
-            elif pg_opts and build_config["postgres_instance"].get("value") not in pg_opts:
-                build_config["postgres_instance"]["value"] = pg_opts[0]
+            else:
+                _sel.keep_or_default(build_config, "postgres_instance", pg_opts, field_name)
 
         inst = (
             field_value
@@ -259,8 +260,8 @@ class SnowflakePostgresComponent(Component):
             build_config["table_name"]["options"] = tbl_opts
             if field_name == "table_name" and isinstance(field_value, str):
                 build_config["table_name"]["value"] = field_value
-            elif tbl_opts and build_config["table_name"].get("value") not in tbl_opts:
-                build_config["table_name"]["value"] = tbl_opts[0]
+            else:
+                _sel.keep_or_default(build_config, "table_name", tbl_opts, field_name)
         if "memory_catalog_ref" in build_config:
             build_config["memory_catalog_ref"]["options"] = _memory_catalog_options()
         return build_config

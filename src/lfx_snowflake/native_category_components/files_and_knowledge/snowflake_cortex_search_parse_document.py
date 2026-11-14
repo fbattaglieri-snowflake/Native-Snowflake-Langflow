@@ -1,4 +1,5 @@
 from __future__ import annotations
+from lfx_snowflake import dropdown_selection as _sel
 
 from typing import Any
 
@@ -165,8 +166,8 @@ class SnowflakeCortexSearchParseDocumentComponent(Component):
             cur_sch = build_config["schema_name"].get("value")
             if field_name == "schema_name" and isinstance(field_value, str):
                 build_config["schema_name"]["value"] = field_value
-            elif schemas and cur_sch not in schemas:
-                build_config["schema_name"]["value"] = schemas[0]
+            else:
+                _sel.keep_or_default(build_config, "schema_name", schemas, field_name)
         sch_val = (
             field_value
             if field_name == "schema_name" and isinstance(field_value, str)
@@ -175,8 +176,7 @@ class SnowflakeCortexSearchParseDocumentComponent(Component):
         if "stage_name" in build_config:
             stg_opts = _stage_options(db_val, sch_val, flow_id=flow_id)
             build_config["stage_name"]["options"] = stg_opts
-            if stg_opts and build_config["stage_name"].get("value") not in stg_opts:
-                build_config["stage_name"]["value"] = stg_opts[0]
+            _sel.keep_or_default(build_config, "stage_name", stg_opts, field_name)
         return build_config
 
     def _build_spec_and_builder(self) -> tuple[CortexSearchParseDocumentSpec, CortexSearchParseDocumentBuilder]:

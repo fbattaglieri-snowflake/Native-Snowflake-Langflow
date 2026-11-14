@@ -1,4 +1,5 @@
 from __future__ import annotations
+from lfx_snowflake import dropdown_selection as _sel
 
 from typing import Any
 
@@ -187,8 +188,8 @@ class SnowflakeScheduleTrigger(Component):
             cur_sch = build_config["schema"].get("value")
             if field_name == "schema" and isinstance(field_value, str):
                 build_config["schema"]["value"] = field_value
-            elif schemas and cur_sch not in schemas:
-                build_config["schema"]["value"] = schemas[0]
+            else:
+                _sel.keep_or_default(build_config, "schema", schemas, field_name)
 
         stype = (
             field_value

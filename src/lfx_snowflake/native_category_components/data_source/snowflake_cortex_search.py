@@ -1,4 +1,5 @@
 from __future__ import annotations
+from lfx_snowflake import dropdown_selection as _sel
 
 import json
 from typing import Any
@@ -183,8 +184,8 @@ class SnowflakeCortexSearchComponent(Component):
             cur_sch = build_config["schema_name"].get("value")
             if field_name == "schema_name" and isinstance(field_value, str):
                 build_config["schema_name"]["value"] = field_value
-            elif schemas and cur_sch not in schemas:
-                build_config["schema_name"]["value"] = schemas[0]
+            else:
+                _sel.keep_or_default(build_config, "schema_name", schemas, field_name)
         sch = (
             field_value
             if field_name == "schema_name" and isinstance(field_value, str)
@@ -193,8 +194,7 @@ class SnowflakeCortexSearchComponent(Component):
         if "search_service" in build_config:
             svc_opts = _search_services(db, sch, flow_id=flow_id)
             build_config["search_service"]["options"] = svc_opts
-            if svc_opts and build_config["search_service"].get("value") not in svc_opts:
-                build_config["search_service"]["value"] = svc_opts[0]
+            _sel.keep_or_default(build_config, "search_service", svc_opts, field_name)
         if "memory_catalog_ref" in build_config:
             build_config["memory_catalog_ref"]["options"] = _memory_catalog_options(flow_id=flow_id)
         return build_config

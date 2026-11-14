@@ -21,6 +21,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from . import dropdown_selection as _sel  # noqa: E402
+
 _CATALOG_EXECUTOR = ThreadPoolExecutor(max_workers=8, thread_name_prefix="sflf-catalog")
 _TYPED_MEMORY_REGISTRY_LOCK = threading.Lock()
 _AUDIT_EXECUTOR = ThreadPoolExecutor(max_workers=2, thread_name_prefix="sflf-audit")
@@ -1413,10 +1415,9 @@ class LiveSnowflakeBridge:
                         node_changes: dict[str, Any] = {}
                         if "database" in tmpl and isinstance(tmpl["database"], dict):
                             tmpl["database"]["options"] = list(dbs)
-                            if tmpl["database"].get("value") not in dbs:
-                                tmpl["database"]["value"] = dbs[0] if dbs else ""
+                            _sel.keep_or_default(tmpl, "database", list(dbs))
                             node_changes["database"] = {
-                                "options": list(dbs),
+                                "options": list(tmpl["database"].get("options") or []),
                                 "value": tmpl["database"].get("value"),
                             }
                         sel_db = str((tmpl.get("database") or {}).get("value") or (dbs[0] if dbs else self.database)).strip().upper()
@@ -1424,10 +1425,9 @@ class LiveSnowflakeBridge:
                         for sch_k in ("schema_name", "schema"):
                             if sch_k in tmpl and isinstance(tmpl[sch_k], dict) and ("options" in tmpl[sch_k] or sch_k == "schema_name"):
                                 tmpl[sch_k]["options"] = list(schemas)
-                                if tmpl[sch_k].get("value") not in schemas:
-                                    tmpl[sch_k]["value"] = schemas[0] if schemas else ""
+                                _sel.keep_or_default(tmpl, sch_k, list(schemas))
                                 node_changes[sch_k] = {
-                                    "options": list(schemas),
+                                    "options": list(tmpl[sch_k].get("options") or []),
                                     "value": tmpl[sch_k].get("value"),
                                 }
                         sel_sch = str(
@@ -1437,10 +1437,9 @@ class LiveSnowflakeBridge:
 
                         if "postgres_instance" in tmpl and isinstance(tmpl["postgres_instance"], dict):
                             tmpl["postgres_instance"]["options"] = list(pg_insts)
-                            if tmpl["postgres_instance"].get("value") not in pg_insts:
-                                tmpl["postgres_instance"]["value"] = pg_insts[0] if pg_insts else ""
+                            _sel.keep_or_default(tmpl, "postgres_instance", list(pg_insts))
                             node_changes["postgres_instance"] = {
-                                "options": list(pg_insts),
+                                "options": list(tmpl["postgres_instance"].get("options") or []),
                                 "value": tmpl["postgres_instance"].get("value"),
                             }
                             if "table_name" in tmpl and isinstance(tmpl["table_name"], dict):
@@ -1449,10 +1448,9 @@ class LiveSnowflakeBridge:
                                     flow_id=norm_fid,
                                 )
                                 tmpl["table_name"]["options"] = list(pg_tbls)
-                                if pg_tbls and tmpl["table_name"].get("value") not in pg_tbls:
-                                    tmpl["table_name"]["value"] = pg_tbls[0]
+                                _sel.keep_or_default(tmpl, "table_name", list(pg_tbls))
                                 node_changes["table_name"] = {
-                                    "options": list(pg_tbls),
+                                    "options": list(tmpl["table_name"].get("options") or []),
                                     "value": tmpl["table_name"].get("value"),
                                 }
 
@@ -1474,10 +1472,9 @@ class LiveSnowflakeBridge:
                             if f_key in tmpl and isinstance(tmpl[f_key], dict) and "options" in tmpl[f_key]:
                                 opts = self.get_context_objects(sel_db, sel_sch, cat_key, flow_id=norm_fid)
                                 tmpl[f_key]["options"] = list(opts)
-                                if tmpl[f_key].get("value") not in opts:
-                                    tmpl[f_key]["value"] = opts[0] if opts else ""
+                                _sel.keep_or_default(tmpl, f_key, list(opts))
                                 node_changes[f_key] = {
-                                    "options": list(opts),
+                                    "options": list(tmpl[f_key].get("options") or []),
                                     "value": tmpl[f_key].get("value"),
                                 }
                         if node_id and node_changes:

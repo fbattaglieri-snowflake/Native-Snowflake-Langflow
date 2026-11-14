@@ -1,4 +1,5 @@
 from __future__ import annotations
+from lfx_snowflake import dropdown_selection as _sel
 
 from lfx_snowflake import sql_safety as _sql_safety
 
@@ -178,8 +179,8 @@ class SnowflakeTablesComponent(Component):
             cur_sch = build_config["schema_name"].get("value")
             if field_name == "schema_name" and isinstance(field_value, str):
                 build_config["schema_name"]["value"] = field_value
-            elif schemas and cur_sch not in schemas:
-                build_config["schema_name"]["value"] = schemas[0]
+            else:
+                _sel.keep_or_default(build_config, "schema_name", schemas, field_name)
         sch = (
             field_value
             if field_name == "schema_name" and isinstance(field_value, str)
@@ -188,8 +189,7 @@ class SnowflakeTablesComponent(Component):
         if "table_name" in build_config:
             tbl_opts = _table_objects(db, sch, flow_id=flow_id)
             build_config["table_name"]["options"] = tbl_opts
-            if tbl_opts and build_config["table_name"].get("value") not in tbl_opts:
-                build_config["table_name"]["value"] = tbl_opts[0]
+            _sel.keep_or_default(build_config, "table_name", tbl_opts, field_name)
         if "memory_catalog_ref" in build_config:
             build_config["memory_catalog_ref"]["options"] = _memory_catalog_options()
         return build_config

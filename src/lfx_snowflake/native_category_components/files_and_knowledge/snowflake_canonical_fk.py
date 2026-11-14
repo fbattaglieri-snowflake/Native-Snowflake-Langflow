@@ -1,4 +1,5 @@
 from __future__ import annotations
+from lfx_snowflake import dropdown_selection as _sel
 
 from lfx_snowflake import sql_safety as _sql_safety
 
@@ -195,8 +196,8 @@ class SnowflakeFileSystemToolComponent(Component):
             build_config["database"]["options"] = dbs
             if field_name == "database" and isinstance(field_value, str):
                 build_config["database"]["value"] = field_value
-            elif dbs and build_config["database"].get("value") not in dbs:
-                build_config["database"]["value"] = dbs[0]
+            else:
+                _sel.keep_or_default(build_config, "database", dbs, field_name)
         db_val = (
             field_value
             if field_name == "database" and isinstance(field_value, str)
@@ -207,8 +208,8 @@ class SnowflakeFileSystemToolComponent(Component):
             build_config["schema_name"]["options"] = schemas
             if field_name == "schema_name" and isinstance(field_value, str):
                 build_config["schema_name"]["value"] = field_value
-            elif schemas and build_config["schema_name"].get("value") not in schemas:
-                build_config["schema_name"]["value"] = schemas[0]
+            else:
+                _sel.keep_or_default(build_config, "schema_name", schemas, field_name)
         sch_val = (
             field_value
             if field_name == "schema_name" and isinstance(field_value, str)
@@ -219,8 +220,8 @@ class SnowflakeFileSystemToolComponent(Component):
             build_config["stage_name"]["options"] = stages
             if field_name == "stage_name" and isinstance(field_value, str):
                 build_config["stage_name"]["value"] = field_value
-            elif stages and build_config["stage_name"].get("value") not in stages:
-                build_config["stage_name"]["value"] = stages[0]
+            else:
+                _sel.keep_or_default(build_config, "stage_name", stages, field_name)
         stg_val = (
             field_value
             if field_name == "stage_name" and isinstance(field_value, str)
@@ -396,8 +397,8 @@ class SnowflakeKnowledgeComponent(Component):
             build_config["database"]["options"] = dbs
             if field_name == "database" and isinstance(field_value, str):
                 build_config["database"]["value"] = field_value
-            elif dbs and build_config["database"].get("value") not in dbs:
-                build_config["database"]["value"] = dbs[0]
+            else:
+                _sel.keep_or_default(build_config, "database", dbs, field_name)
         db_val = (
             field_value
             if field_name == "database" and isinstance(field_value, str)
@@ -408,8 +409,8 @@ class SnowflakeKnowledgeComponent(Component):
             build_config["schema_name"]["options"] = schemas
             if field_name == "schema_name" and isinstance(field_value, str):
                 build_config["schema_name"]["value"] = field_value
-            elif schemas and build_config["schema_name"].get("value") not in schemas:
-                build_config["schema_name"]["value"] = schemas[0]
+            else:
+                _sel.keep_or_default(build_config, "schema_name", schemas, field_name)
         sch_val = (
             field_value
             if field_name == "schema_name" and isinstance(field_value, str)
@@ -422,8 +423,8 @@ class SnowflakeKnowledgeComponent(Component):
             build_config["knowledge_base"]["options"] = tables
             if field_name == "knowledge_base" and isinstance(field_value, str):
                 build_config["knowledge_base"]["value"] = field_value
-            elif tables and build_config["knowledge_base"].get("value") not in tables:
-                build_config["knowledge_base"]["value"] = tables[0]
+            else:
+                _sel.keep_or_default(build_config, "knowledge_base", tables, field_name)
         return build_config
 
     def _run_knowledge(self) -> dict[str, Any]:
@@ -679,8 +680,8 @@ class SnowflakeReadFileComponent(Component):
             build_config["database"]["options"] = dbs
             if field_name == "database" and isinstance(field_value, str):
                 build_config["database"]["value"] = field_value
-            elif dbs and build_config["database"].get("value") not in dbs:
-                build_config["database"]["value"] = dbs[0]
+            else:
+                _sel.keep_or_default(build_config, "database", dbs, field_name)
         db_val = (
             field_value
             if field_name == "database" and isinstance(field_value, str)
@@ -691,8 +692,8 @@ class SnowflakeReadFileComponent(Component):
             build_config["schema_name"]["options"] = schemas
             if field_name == "schema_name" and isinstance(field_value, str):
                 build_config["schema_name"]["value"] = field_value
-            elif schemas and build_config["schema_name"].get("value") not in schemas:
-                build_config["schema_name"]["value"] = schemas[0]
+            else:
+                _sel.keep_or_default(build_config, "schema_name", schemas, field_name)
         sch_val = (
             field_value
             if field_name == "schema_name" and isinstance(field_value, str)
@@ -703,8 +704,8 @@ class SnowflakeReadFileComponent(Component):
             build_config["stage_name"]["options"] = stages
             if field_name == "stage_name" and isinstance(field_value, str):
                 build_config["stage_name"]["value"] = field_value
-            elif stages and build_config["stage_name"].get("value") not in stages:
-                build_config["stage_name"]["value"] = stages[0]
+            else:
+                _sel.keep_or_default(build_config, "stage_name", stages, field_name)
         stg_val = (
             field_value
             if field_name == "stage_name" and isinstance(field_value, str)
@@ -716,8 +717,8 @@ class SnowflakeReadFileComponent(Component):
             build_config["stage_file_path"]["options"] = file_opts
             if field_name == "stage_file_path" and isinstance(field_value, str):
                 build_config["stage_file_path"]["value"] = field_value
-            elif file_opts and build_config["stage_file_path"].get("value") not in file_opts:
-                build_config["stage_file_path"]["value"] = file_opts[0]
+            else:
+                _sel.keep_or_default(build_config, "stage_file_path", file_opts, field_name)
         return build_config
 
     def _read_impl(self) -> dict[str, Any]:
@@ -890,8 +891,8 @@ class SnowflakeWriteFileComponent(Component):
             build_config["database"]["options"] = dbs
             if field_name == "database" and isinstance(field_value, str):
                 build_config["database"]["value"] = field_value
-            elif dbs and build_config["database"].get("value") not in dbs:
-                build_config["database"]["value"] = dbs[0]
+            else:
+                _sel.keep_or_default(build_config, "database", dbs, field_name)
         db_val = (
             field_value
             if field_name == "database" and isinstance(field_value, str)
@@ -902,8 +903,8 @@ class SnowflakeWriteFileComponent(Component):
             build_config["schema_name"]["options"] = schemas
             if field_name == "schema_name" and isinstance(field_value, str):
                 build_config["schema_name"]["value"] = field_value
-            elif schemas and build_config["schema_name"].get("value") not in schemas:
-                build_config["schema_name"]["value"] = schemas[0]
+            else:
+                _sel.keep_or_default(build_config, "schema_name", schemas, field_name)
         sch_val = (
             field_value
             if field_name == "schema_name" and isinstance(field_value, str)
@@ -914,8 +915,8 @@ class SnowflakeWriteFileComponent(Component):
             build_config["stage_name"]["options"] = stages
             if field_name == "stage_name" and isinstance(field_value, str):
                 build_config["stage_name"]["value"] = field_value
-            elif stages and build_config["stage_name"].get("value") not in stages:
-                build_config["stage_name"]["value"] = stages[0]
+            else:
+                _sel.keep_or_default(build_config, "stage_name", stages, field_name)
         return build_config
 
     def _serialize_payload(self) -> str:

@@ -604,6 +604,7 @@ Say what you were doing, what you expected, what happened (with the error code),
 
 **Fixes of 2026-11-14 (full regression)**
 - Agent Memory: after a service restart, several memory nodes running at the same time could fail with "memory not found" on the first run. The lookup is now repeated regardless of how many memories the discovery added, and registration is locked.
+- All Snowflake dropdowns (tables, views, stages, search services, semantic sources, triggers, Postgres, custom tools): a stored selection is no longer replaced by the first option when the role or the flow Context changes. It stays selected and visible, and the run is refused with a clear error. A node gets a default only when the field is empty or when you change its database or schema. Changing the Context of a flow therefore no longer repoints its nodes: pick the new object in each node.
 - Cortex Agent: a stored agent or schema that was not in the refreshed dropdown list was replaced by the first option, so a flow could call a different agent without any error. The stored value is now kept and shown; only an empty field, or a field whose database or schema the user just changed, gets a default.
 
 **Security & RBAC**

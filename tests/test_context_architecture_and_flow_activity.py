@@ -349,22 +349,18 @@ def test_ctx_arch_05b_and_07_3_sqlite_node_template_sync_and_export_import_persi
 
     assert "SnowflakeTables-node1" in upd_res["updated_node_templates"]
     assert "SnowflakePostgres-node2" in upd_res["updated_node_templates"]
+    # A Context change offers the new objects but never repoints a node by itself: the stored selection
+    # stays selected and visible, and a run on it is refused because it is outside the flow Context.
     assert upd_res["updated_node_templates"]["SnowflakeTables-node1"]["database"] == {
-        "options": ["NEW_DB"],
-        "value": "NEW_DB",
+        "options": ["NEW_DB", "OLD_DB"],
+        "value": "OLD_DB",
     }
-    assert upd_res["updated_node_templates"]["SnowflakeTables-node1"]["table_name"] == {
-        "options": ["NEW_FACT_ORDERS"],
-        "value": "NEW_FACT_ORDERS",
-    }
+    assert upd_res["updated_node_templates"]["SnowflakeTables-node1"]["table_name"]["value"] == "OLD_TABLE"
     assert upd_res["updated_node_templates"]["SnowflakePostgres-node2"]["postgres_instance"] == {
-        "options": ["PG_NEW_INST"],
-        "value": "PG_NEW_INST",
+        "options": ["PG_NEW_INST", "OLD_PG"],
+        "value": "OLD_PG",
     }
-    assert upd_res["updated_node_templates"]["SnowflakePostgres-node2"]["table_name"] == {
-        "options": ["pg_live_orders"],
-        "value": "pg_live_orders",
-    }
+    assert upd_res["updated_node_templates"]["SnowflakePostgres-node2"]["table_name"]["value"] == "old_pg_tbl"
 
     # Verify SQLite flow.data now embeds snowflake_context for JSON Export/Import/Duplicate
     conn = sqlite3.connect(str(db_file))
