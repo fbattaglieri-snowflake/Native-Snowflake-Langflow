@@ -602,6 +602,10 @@ Say what you were doing, what you expected, what happened (with the error code),
 
 ### v0.8.6
 
+**Fixes of 2026-11-14 (full regression)**
+- Agent Memory: after a service restart, several memory nodes running at the same time could fail with "memory not found" on the first run. The lookup is now repeated regardless of how many memories the discovery added, and registration is locked.
+- Cortex Agent: a stored agent or schema that was not in the refreshed dropdown list was replaced by the first option, so a flow could call a different agent without any error. The stored value is now kept and shown; only an empty field, or a field whose database or schema the user just changed, gets a default.
+
 **Security & RBAC**
 - `/api/v1/snowflake/*` is protected by Langflow-native authentication (API key or browser session). Only the A2A agent card can be public (`SNOWFLAKE_LANGFLOW_PUBLIC_AGENT_CARD`, default on).
 - Every SQL session runs `USE SECONDARY ROLES NONE` (`LANGFLOW_SECONDARY_ROLES_MODE`). If the statement fails, the request fails closed; there is no silent fallback.
