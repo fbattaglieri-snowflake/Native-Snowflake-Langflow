@@ -450,6 +450,14 @@ Secrets and personal data are redacted before a row is written. Every HTTP respo
 
 ## 8. Showcase flows
 
+**Start here:** [`examples/maintenance/`](examples/maintenance/README.md) has three small flows you can rebuild in your account: a SQL script creates the sample objects, and the flows are importable `.json` files.
+
+| Example | Pattern | Needs the LLM proxy |
+|---|---|---|
+| Two helpers, one Cortex Agent | Parallel: a `Language Model` fed by Cortex Analyst and an `Agent` with Cortex Search as a tool, on two different models, hand their work to a `Cortex Agent` | Yes |
+| Redact, classify, answer | Sequential: `AI Redact`, `AI Function` (`AI_CLASSIFY`), `Cortex Agent` | No |
+| Inbox to tickets | Data engineering: `Table Change Trigger`, `SQL Statement`, `AI_EXTRACT`, `Decision`, a stored procedure and a SQL function | No |
+
 Four reference flows show the nodes working together. Build them with the Langflow Flows API in any project; object names are placeholders.
 
 | Flow | What it shows |
@@ -524,6 +532,7 @@ Nothing in this repository names a specific account. Every file uses these place
 | `scripts/install_live_hooks_in_container.py` | Installer run at image build time; fails if a patch does not apply exactly |
 | `scripts/verify_public_repo_sanitization.py` | Scanner that blocks secrets and account identifiers |
 | `sql/` | Setup scripts: roles, telemetry tables, service, triggers, memories |
+| `examples/maintenance/` | Three starter flows with the SQL script that creates their sample objects |
 | `Dockerfile.release`, `service-spec.template.yaml` | Image and service definition |
 | `docs/` | Deployment guide, capability matrix, upgrade guide, decision records |
 | `tests/` | Test suite (`pytest`) |
@@ -603,6 +612,7 @@ Say what you were doing, what you expected, what happened (with the error code),
 ### v0.8.6
 
 **Fixes of 2026-11-14 (full regression)**
+- SQL Statement: with two or more nodes connected to `Bind Values`, the `?` placeholders could receive the values in a different order on each run (Langflow keeps the edges of a running graph in a set). The values now follow the order the connections were drawn on the canvas.
 - Agent Memory: after a service restart, several memory nodes running at the same time could fail with "memory not found" on the first run. The lookup is now repeated regardless of how many memories the discovery added, and registration is locked.
 - All Snowflake dropdowns (tables, views, stages, search services, semantic sources, triggers, Postgres, custom tools): a stored selection is no longer replaced by the first option when the role or the flow Context changes. It stays selected and visible, and the run is refused with a clear error. A node gets a default only when the field is empty or when you change its database or schema. Changing the Context of a flow therefore no longer repoints its nodes: pick the new object in each node.
 - Cortex Agent: a stored agent or schema that was not in the refreshed dropdown list was replaced by the first option, so a flow could call a different agent without any error. The stored value is now kept and shown; only an empty field, or a field whose database or schema the user just changed, gets a default.

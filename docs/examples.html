@@ -5,18 +5,27 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="snowflake-source" content="cortex-agent-authored">
 <meta name="description" content="Native Snowflake Langflow: an unofficial personal fork that runs the Langflow visual editor inside Snowflake, on Snowflake data, under Snowflake roles.">
-<title>Four flows to try · Native Snowflake Langflow</title>
+<title>Examples · Native Snowflake Langflow</title>
 <script type="application/json" id="snowflake-report-metadata">
 {
   "generated": "2026-11-13",
-  "intent": "Native Snowflake Langflow site: Four flows to try",
+  "intent": "Native Snowflake Langflow site: starter examples and larger demo flows",
   "dataSources": [
     {
       "type": "file",
       "path": "README.md"
+    },
+    {
+      "type": "file",
+      "path": "examples/maintenance/README.md"
     }
   ],
   "sections": [
+    {
+      "id": "starter",
+      "title": "starter examples",
+      "producerNotes": "Three flows in examples/maintenance of the repository, run on 2026-11-14 on synthetic data. Results shown are from those runs; model-chosen values (severity, wording) can vary."
+    },
     {
       "id": "examples",
       "title": "examples",
@@ -40,11 +49,103 @@
   </div>
 </nav>
 
+<section id="starter">
+  <div class="wrap">
+    <div class="head reveal">
+      <h2>Three starter examples you can rebuild</h2>
+      <p class="sub">Small flows on the same sample data: a maintenance team with tickets, procedures and a Cortex Agent. One SQL script creates every object they need.</p>
+    </div>
+    <div class="steps reveal">
+      <div class="step"><span class="n">01</span><h3>Run one SQL script</h3><p>It creates a schema with tables, a semantic view, a Cortex Search service, a Cortex Agent, a function and a procedure. Run it again to start over.</p><a class="xfile" href="https://github.com/fbattaglieri-snowflake/Native-Snowflake-Langflow/blob/snowflake/main/examples/maintenance/00_setup.sql">00_setup.sql</a></div>
+      <div class="step"><span class="n">02</span><h3>Import the flows</h3><p>Upload the three flow files in Langflow. Each one opens ready to run, with its nodes already configured.</p><a class="xfile" href="https://github.com/fbattaglieri-snowflake/Native-Snowflake-Langflow/blob/snowflake/main/examples/maintenance/README.md">examples/maintenance</a></div>
+      <div class="step"><span class="n">03</span><h3>Pick a role and a Context</h3><p>Select a role that can read the schema, then select the schema <code>EXAMPLES</code> in the flow Context. Run.</p></div>
+    </div>
+
+    <div class="xgrid" style="margin-top:40px">
+      <article class="xcard reveal">
+        <span class="mono">Example 1 · parallel</span>
+        <h3>Two helpers, one Cortex Agent</h3>
+        <p>Two helpers work on the same question at the same time, each in its own way and on its own model. A Cortex Agent reads both results and writes the answer.</p>
+        <div class="xd"><svg viewBox="0 0 848 256" role="img" aria-label="Chat Input feeds two helpers in parallel: Cortex Analyst then a Language Model, and an Agent that uses Cortex Search as a tool. Both results go to a Cortex Agent, then to Chat Output."><rect x="10" y="96" width="96" height="48" rx="9"/><text x="58.0" y="124.0">Chat Input</text><rect x="150" y="20" width="140" height="48" rx="9" class="sf"/><text x="220.0" y="41.0" class="sf">Cortex Analyst</text><text class="s" x="220.0" y="57.0">ticket figures</text><rect x="334" y="20" width="170" height="48" rx="9"/><text x="419.0" y="41.0">Language Model</text><text class="s" x="419.0" y="57.0">Helper A · claude-haiku-5-5</text><rect x="150" y="172" width="140" height="48" rx="9" class="sf"/><text x="220.0" y="193.0" class="sf">Cortex Search</text><text class="s" x="220.0" y="209.0">procedures · tool</text><rect x="334" y="172" width="170" height="48" rx="9"/><text x="419.0" y="193.0">Agent</text><text class="s" x="419.0" y="209.0">Helper B · openai-gpt-6-luna</text><rect x="548" y="96" width="150" height="48" rx="9" class="sf"/><text x="623.0" y="117.0" class="sf">Cortex Agent</text><text class="s" x="623.0" y="133.0">MAINTENANCE_ADVISOR</text><rect x="742" y="96" width="96" height="48" rx="9"/><text x="790.0" y="124.0">Chat Output</text><path class="go" d="M58 96 V44 H150"/><path class="go" d="M290 44 H334"/><path class="go" d="M504 44 H623 V96"/><path class="go" d="M58 144 V240 H419 V220"/><path class="tool" d="M290 196 H334"/><path class="go" d="M504 196 H623 V144"/><path class="go" d="M698 120 H742"/></svg></div>
+        <div class="xcols">
+          <div>
+            <table class="xtable">
+              <thead><tr><th></th><th>Helper A</th><th>Helper B</th></tr></thead>
+              <tbody>
+                <tr><td>Node</td><td>Language Model</td><td>Agent</td></tr>
+                <tr><td>Data</td><td>The flow runs Cortex Analyst first and hands over the result</td><td>It decides by itself when to call Cortex Search</td></tr>
+                <tr><td>Job</td><td>What the ticket history tells</td><td>The procedure and its steps</td></tr>
+              </tbody>
+            </table>
+            <p class="need yes">Needs the LLM proxy: it uses Language Model and Agent</p>
+          </div>
+          <div class="chat">
+            <span class="mono">Ask</span>
+            <div class="q">Chiller C7 at MILANO_PLANT is leaking coolant and the line is stopped. What should the technician do?</div>
+            <span class="mono" style="margin-top:8px">You should see</span>
+            <ul class="look" style="margin-top:0"><li>Severity, likely cause and ordered steps</li><li>How many tickets that chiller has in Milan</li><li>The title of the procedure used</li></ul>
+          </div>
+        </div>
+      </article>
+
+      <article class="xcard reveal">
+        <span class="mono">Example 2 · sequential</span>
+        <h3>Redact, classify, answer</h3>
+        <p>One step after the other. Each node does one thing and passes its result on. The agent never sees the name, the email or the phone number.</p>
+        <div class="xd"><svg viewBox="0 0 826 88" role="img" aria-label="Chat Input, then AI Redact, then AI Function AI_CLASSIFY, then Cortex Agent, then Chat Output."><rect x="10" y="20" width="96" height="48" rx="9"/><text x="58.0" y="48.0">Chat Input</text><rect x="150" y="20" width="140" height="48" rx="9" class="sf"/><text x="220.0" y="41.0" class="sf">AI Redact</text><text class="s" x="220.0" y="57.0">personal data out</text><rect x="330" y="20" width="150" height="48" rx="9" class="sf"/><text x="405.0" y="41.0" class="sf">AI Function</text><text class="s" x="405.0" y="57.0">AI_CLASSIFY the fault</text><rect x="520" y="20" width="160" height="48" rx="9" class="sf"/><text x="600.0" y="41.0" class="sf">Cortex Agent</text><text class="s" x="600.0" y="57.0">MAINTENANCE_ADVISOR</text><rect x="720" y="20" width="96" height="48" rx="9"/><text x="768.0" y="48.0">Chat Output</text><path class="go" d="M106 44 H150"/><path class="go" d="M290 44 H330"/><path class="go" d="M480 44 H520"/><path class="go" d="M680 44 H720"/></svg></div>
+        <div class="xcols">
+          <div>
+            <table class="xtable">
+              <thead><tr><th>Step</th><th>Result</th></tr></thead>
+              <tbody>
+                <tr><td>AI Redact</td><td>Hi, this is [NAME] ([EMAIL], [PHONE_NUMBER]) from the Milan plant...</td></tr>
+                <tr><td>AI_CLASSIFY</td><td>cooling</td></tr>
+                <tr><td>Cortex Agent</td><td>The advice for the technician</td></tr>
+              </tbody>
+            </table>
+            <p class="need">Works without the LLM proxy</p>
+          </div>
+          <div class="chat">
+            <span class="mono">Ask</span>
+            <div class="q">Hi, this is Marco Bianchi (marco.bianchi@example.com, +39 333 1234567) from the Milan plant. Chiller C7 is leaking coolant and line 2 is stopped. What do we do?</div>
+          </div>
+        </div>
+      </article>
+
+      <article class="xcard reveal">
+        <span class="mono">Example 3 · data engineering</span>
+        <h3>Inbox to tickets</h3>
+        <p>No chat. Raw messages land in a table and each run turns the oldest one into a clean ticket, using SQL, an AI function, a Decision, a stored procedure and a SQL function.</p>
+        <div class="xd"><svg viewBox="0 0 958 240" role="img" aria-label="Table Change Trigger, then a SQL Statement that reads the next message. AI_EXTRACT and Decision work on it in parallel. A SQL Statement calls the procedure LOAD_TICKET, another one counts open tickets per site, then Text Output."><rect x="10" y="96" width="150" height="48" rx="9" class="sf"/><text x="85.0" y="117.0" class="sf">Table Change Trigger</text><text class="s" x="85.0" y="133.0">TICKET_INBOX</text><rect x="190" y="96" width="120" height="48" rx="9" class="sf"/><text x="250.0" y="117.0" class="sf">SQL Statement</text><text class="s" x="250.0" y="133.0">next message</text><rect x="346" y="20" width="140" height="48" rx="9" class="sf"/><text x="416.0" y="41.0" class="sf">AI Function</text><text class="s" x="416.0" y="57.0">AI_EXTRACT</text><rect x="346" y="172" width="140" height="48" rx="9" class="sf"/><text x="416.0" y="193.0" class="sf">Decision</text><text class="s" x="416.0" y="209.0">how severe?</text><rect x="522" y="96" width="130" height="48" rx="9" class="sf"/><text x="587.0" y="117.0" class="sf">SQL Statement</text><text class="s" x="587.0" y="133.0">CALL LOAD_TICKET</text><rect x="682" y="96" width="140" height="48" rx="9" class="sf"/><text x="752.0" y="117.0" class="sf">SQL Statement</text><text class="s" x="752.0" y="133.0">open tickets per site</text><rect x="852" y="96" width="96" height="48" rx="9"/><text x="900.0" y="124.0">Text Output</text><path class="go" d="M160 120 H190"/><path class="go" d="M310 120 H522"/><path class="go" d="M250 96 V44 H346"/><path class="go" d="M250 144 V196 H346"/><path class="go" d="M486 44 H587 V96"/><path class="go" d="M486 196 H587 V144"/><path class="go" d="M652 120 H682"/><path class="go" d="M822 120 H852"/></svg></div>
+        <div class="xcols">
+          <div>
+            <span class="mono">A raw message</span>
+            <div class="q" style="margin-top:8px">TORINO - the light curtain on press A12 did not react twice this morning. Operators are worried.</div>
+            <p class="need">Works without the LLM proxy</p>
+          </div>
+          <div>
+            <span class="mono">The ticket it becomes</span>
+            <table class="xtable" style="margin-top:8px">
+              <tbody>
+                <tr><td>Site</td><td><code>TORINO_PLANT</code> · function NORMALIZE_SITE</td></tr>
+                <tr><td>Asset</td><td><code>PRESS_A12</code> · AI_EXTRACT</td></tr>
+                <tr><td>Severity</td><td>high · Decision</td></tr>
+                <tr><td>Written by</td><td>procedure LOAD_TICKET</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+        <p style="font-size:14px;margin-top:20px">One message per run: run it four times to empty the sample inbox. The trigger is saved paused, so nothing runs on its own until you activate it.</p>
+      </article>
+    </div>
+  </div>
+</section>
+
 <section id="examples" class="band">
   <div class="wrap">
     <div class="head reveal">
-      <h2>Four flows to try</h2>
-      <p class="sub">Each one starts with a chat input and ends with a chat output. They run on synthetic maintenance and warranty data. Three of them need the <a href="models.html">LLM proxy</a>.</p>
+      <h2>Four larger flows, as ideas</h2>
+      <p class="sub">Richer flows from my own tests: memory, agents in a row, approaches compared by a Decision node. They are not shipped with a setup script. They run on synthetic maintenance and warranty data, and three of them need the <a href="models.html">LLM proxy</a>.</p>
     </div>
     <div class="tabs reveal" role="tablist" aria-label="Example flows">
       <button role="tab" type="button" aria-selected="true" aria-controls="ex1" id="t1">An agent that remembers</button>

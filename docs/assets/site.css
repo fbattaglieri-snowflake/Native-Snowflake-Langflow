@@ -261,3 +261,32 @@ pre.cfg{margin:16px 0 0;padding:16px;border-radius:12px;background:var(--bg);bor
 .proto img{width:28px;height:28px;flex:none}
 .scene{display:none}
 .scene.on{display:block}
+
+/* Examples: starter flows drawn as small diagrams */
+.xgrid{display:grid;gap:24px}
+.xcard{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:clamp(20px,3vw,32px)}
+.band .xcard{background:var(--bg)}
+.xcard h3{font-size:20px;line-height:28px;margin-top:4px}
+.xcard>p{color:var(--text2);font-size:15px;margin-top:8px;max-width:46rem}
+.xcols{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:clamp(20px,3vw,40px);margin-top:20px}
+@media (max-width:860px){.xcols{grid-template-columns:minmax(0,1fr)}}
+.xd{margin-top:20px;overflow-x:auto;border:1px solid var(--line);border-radius:12px;background:var(--card)}
+.band .xd{background:var(--card)}
+.xd svg{display:block;width:100%;min-width:640px;height:auto}
+.xd rect{fill:var(--bg);stroke:var(--line2);stroke-width:1.2}
+.xd rect.sf{stroke:var(--accent)}
+.xd text{font:500 12px var(--sans);fill:var(--text);text-anchor:middle}
+.xd text.s{font:11px var(--sans);fill:var(--muted)}
+.xd text.sf{fill:var(--accent)}
+.xd text.lab{font:11px var(--mono);fill:var(--muted);text-anchor:start}
+.xd path{fill:none;stroke:var(--line2);stroke-width:1.5}
+.xd path.tool{stroke-dasharray:3 4}
+.xd path.go{stroke:var(--accent);stroke-dasharray:5 7;animation:xflow 1.4s linear infinite}
+@keyframes xflow{to{stroke-dashoffset:-24}}
+@media (prefers-reduced-motion:reduce){.xd path.go{animation:none}}
+.xtable{width:100%;border-collapse:collapse;font-size:14px;margin-top:4px}
+.xtable th{font:11px var(--mono);color:var(--muted);text-align:left;font-weight:400;padding:6px 10px 6px 0;border-bottom:1px solid var(--line2)}
+.xtable td{padding:8px 10px 8px 0;border-bottom:1px solid var(--line);color:var(--text2);vertical-align:top}
+.xtable td:first-child{color:var(--text)}
+.xfile{display:inline-flex;margin-top:16px;font:12px var(--mono);color:var(--accent);text-decoration:none;border-bottom:1px solid transparent}
+.xfile:hover{border-bottom-color:var(--accent)}

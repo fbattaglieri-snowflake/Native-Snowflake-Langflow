@@ -1,0 +1,3352 @@
+{
+ "name": "EXAMPLE_3_Data_Engineering_Inbox_To_Tickets",
+ "description": "Example 3 - data engineering, no chat: each run takes the oldest unprocessed message of TICKET_INBOX, AI_EXTRACT reads site, asset and problem, Decision sets the severity, the procedure LOAD_TICKET (which uses the function NORMALIZE_SITE) writes the ticket, and a SELECT reports open tickets per site. No LLM proxy needed. Objects: examples/maintenance/00_setup.sql",
+ "data": {
+  "nodes": [
+   {
+    "id": "SnowflakeTableChangeTrigger-X301",
+    "type": "genericNode",
+    "position": {
+     "x": 0,
+     "y": 0
+    },
+    "data": {
+     "id": "SnowflakeTableChangeTrigger-X301",
+     "type": "SnowflakeTableChangeTrigger",
+     "node": {
+      "base_classes": [
+       "JSON",
+       "Message",
+       "Table"
+      ],
+      "beta": false,
+      "conditional_paths": [],
+      "custom_fields": {},
+      "description": "Trigger this flow when rows change in a Snowflake table",
+      "display_name": "Table Change Trigger \u00b7 new rows in TICKET_INBOX (paused)",
+      "documentation": "",
+      "edited": false,
+      "field_order": [
+       "status_mode",
+       "database",
+       "schema",
+       "source_object",
+       "trigger_on",
+       "max_batch_rows",
+       "show_initial_rows",
+       "compute_mode",
+       "warehouse",
+       "retry_attempts",
+       "suspend_after_failures",
+       "timeout_ms"
+      ],
+      "frozen": false,
+      "icon": "Snowflake",
+      "legacy": false,
+      "metadata": {
+       "code_hash": "feb394b9895b",
+       "component_class_name": "SnowflakeTableChangeTrigger",
+       "dependencies": {
+        "dependencies": [
+         {
+          "name": "lfx_snowflake",
+          "version": null
+         },
+         {
+          "name": "lfx",
+          "version": "1.13.1"
+         }
+        ],
+        "total_dependencies": 2
+       },
+       "module": "lfx.components.triggers.snowflake_table_change_trigger.SnowflakeTableChangeTrigger"
+      },
+      "minimized": false,
+      "output_types": [],
+      "outputs": [
+       {
+        "allows_loop": false,
+        "cache": true,
+        "display_name": "Changed Rows",
+        "group_outputs": false,
+        "method": "build_changed_rows",
+        "name": "changed_rows",
+        "selected": "Table",
+        "tool_mode": true,
+        "types": [
+         "Table"
+        ],
+        "value": "__UNDEFINED__"
+       },
+       {
+        "allows_loop": false,
+        "cache": true,
+        "display_name": "Trigger Message",
+        "group_outputs": false,
+        "method": "build_trigger_message",
+        "name": "trigger_message_out",
+        "selected": "Message",
+        "tool_mode": true,
+        "types": [
+         "Message"
+        ],
+        "value": "__UNDEFINED__"
+       },
+       {
+        "allows_loop": false,
+        "cache": true,
+        "display_name": "Stream Metadata",
+        "group_outputs": false,
+        "method": "build_stream_metadata",
+        "name": "stream_metadata",
+        "selected": "JSON",
+        "tool_mode": true,
+        "types": [
+         "JSON"
+        ],
+        "value": "__UNDEFINED__"
+       }
+      ],
+      "pinned": false,
+      "template": {
+       "_type": "Component",
+       "code": {
+        "advanced": true,
+        "api_editable": false,
+        "dynamic": true,
+        "fileTypes": [],
+        "file_path": "",
+        "info": "",
+        "list": false,
+        "load_from_db": false,
+        "multiline": true,
+        "name": "code",
+        "password": false,
+        "placeholder": "",
+        "required": true,
+        "show": true,
+        "title_case": false,
+        "type": "code",
+        "value": "from __future__ import annotations\nfrom lfx_snowflake import dropdown_selection as _sel\n\nfrom typing import Any\n\nimport lfx_snowflake._lfx_compat  # noqa: F401\nfrom lfx.custom import Component\nfrom lfx.io import BoolInput, DropdownInput, IntInput, Output, TabInput\nfrom lfx.schema import Data, DataFrame, Message\n\nfrom lfx_snowflake.fastapi_live_bridge import LIVE_BRIDGE\nfrom lfx_snowflake.triggers_manager import (\n    active_trigger_run,\n    COMPUTE_MODE_OPTIONS,\n    STATUS_MODE_OPTIONS,\n    TABLE_TRIGGER_ON_OPTIONS,\n    build_table_change_trigger_ddl,\n    detect_source_object_kind,\n    get_trigger_databases,\n    get_trigger_schemas,\n    get_trigger_table_or_view_objects,\n    get_trigger_warehouses,\n    get_triggers_manager,\n    resolve_trigger_flow_id,\n)\nfrom lfx_snowflake.flow_context_guard import flow_component_sql as _flow_component_sql\nfrom lfx_snowflake.flow_context_guard import raise_if_flow_context_denied as _raise_if_flow_context_denied\nfrom lfx_snowflake.flow_context_guard import register_component_object as _register_component_object\n\n\ndef _flow_component_execute_sql(*args, **kwargs):\n    \"\"\"BUG-CTX-03: this component's SQL is checked against the flow's `[ \u2744\ufe0f Context ]`.\"\"\"\n    with _flow_component_sql():\n        # E2E T1: a guard refusal surfaces as a component error carrying AUTHZ_OBJECT_NOT_IN_FLOW_CONTEXT.\n        return _raise_if_flow_context_denied(LIVE_BRIDGE.execute_sql(*args, **kwargs))\n\n\nclass SnowflakeTableChangeTrigger(Component):\n    display_name = \"Table Change Trigger\"\n    description = \"Trigger this flow when rows change in a Snowflake table\"\n    icon = \"Snowflake\"\n    name = \"SnowflakeTableChangeTrigger\"\n\n    inputs = [\n        TabInput(\n            name=\"status_mode\",\n            display_name=\"Status\",\n            options=STATUS_MODE_OPTIONS,\n            value=\"Active\",\n            real_time_refresh=True,\n        ),\n        DropdownInput(\n            name=\"database\",\n            display_name=\"Database\",\n            options=get_trigger_databases(),\n            value=\"SNOWFLAKE_LANGFLOW\",\n            real_time_refresh=True,\n            combobox=True,\n        ),\n        DropdownInput(\n            name=\"schema\",\n            display_name=\"Schema\",\n            options=get_trigger_schemas(\"SNOWFLAKE_LANGFLOW\"),\n            value=\"CORE\",\n            real_time_refresh=True,\n            combobox=True,\n        ),\n        DropdownInput(\n            name=\"source_object\",\n            display_name=\"Table or View\",\n            options=get_trigger_table_or_view_objects(\"SNOWFLAKE_LANGFLOW\", \"CORE\"),\n            value=\"CUSTOMER_ORDERS\",\n            real_time_refresh=True,\n            combobox=True,\n        ),\n        DropdownInput(\n            name=\"trigger_on\",\n            display_name=\"Trigger On\",\n            options=TABLE_TRIGGER_ON_OPTIONS,\n            value=\"New Rows Only (Insert)\",\n        ),\n        IntInput(\n            name=\"max_batch_rows\",\n            display_name=\"Max Batch Rows\",\n            value=100,\n            advanced=True,\n        ),\n        BoolInput(\n            name=\"show_initial_rows\",\n            display_name=\"Show Initial Rows\",\n            value=False,\n            advanced=True,\n        ),\n        DropdownInput(\n            name=\"compute_mode\",\n            display_name=\"Compute Mode\",\n            options=COMPUTE_MODE_OPTIONS,\n            value=\"Serverless (Managed)\",\n            real_time_refresh=True,\n            advanced=True,\n        ),\n        DropdownInput(\n            name=\"warehouse\",\n            display_name=\"Warehouse\",\n            options=get_trigger_warehouses(),\n            value=\"COMPUTE_WH\",\n            combobox=True,\n            advanced=True,\n            show=False,\n        ),\n        IntInput(\n            name=\"retry_attempts\",\n            display_name=\"Task Auto Retry Attempts\",\n            value=3,\n            advanced=True,\n        ),\n        IntInput(\n            name=\"suspend_after_failures\",\n            display_name=\"Suspend After Failures\",\n            value=5,\n            advanced=True,\n        ),\n        IntInput(\n            name=\"timeout_ms\",\n            display_name=\"Timeout (ms)\",\n            value=3600000,\n            advanced=True,\n        ),\n    ]\n\n    outputs = [\n        Output(\n            display_name=\"Changed Rows\",\n            name=\"changed_rows\",\n            method=\"build_changed_rows\",\n        ),\n        Output(\n            display_name=\"Trigger Message\",\n            name=\"trigger_message_out\",\n            method=\"build_trigger_message\",\n        ),\n        Output(\n            display_name=\"Stream Metadata\",\n            name=\"stream_metadata\",\n            method=\"build_stream_metadata\",\n        ),\n    ]\n\n    def update_build_config(\n        self, build_config: dict[str, Any], field_value: Any, field_name: str | None = None\n    ) -> dict[str, Any]:\n        flow_id = resolve_trigger_flow_id(self, build_config)\n        if \"database\" in build_config:\n            build_config[\"database\"][\"options\"] = get_trigger_databases(flow_id=flow_id)\n            if field_name == \"database\" and isinstance(field_value, str):\n                build_config[\"database\"][\"value\"] = field_value\n\n        db_val = (\n            field_value\n            if field_name == \"database\" and isinstance(field_value, str)\n            else build_config.get(\"database\", {}).get(\"value\") or \"SNOWFLAKE_LANGFLOW\"\n        )\n        schemas = get_trigger_schemas(db_val, flow_id=flow_id)\n        if \"schema\" in build_config:\n            build_config[\"schema\"][\"options\"] = schemas\n            cur_sch = build_config[\"schema\"].get(\"value\")\n            if field_name == \"schema\" and isinstance(field_value, str):\n                build_config[\"schema\"][\"value\"] = field_value\n            else:\n                _sel.keep_or_default(build_config, \"schema\", schemas, field_name)\n\n        sch_val = (\n            field_value\n            if field_name == \"schema\" and isinstance(field_value, str)\n            else build_config.get(\"schema\", {}).get(\"value\") or (schemas[0] if schemas else \"CORE\")\n        )\n        if \"source_object\" in build_config:\n            obj_opts = get_trigger_table_or_view_objects(db_val, sch_val, flow_id=flow_id)\n            cur_src = build_config[\"source_object\"].get(\"value\")\n            if field_name == \"source_object\" and isinstance(field_value, str):\n                build_config[\"source_object\"][\"value\"] = field_value\n                if field_value and field_value not in obj_opts:\n                    obj_opts = [field_value, *obj_opts]\n            elif (field_name in (\"database\", \"schema\") or not cur_src) and obj_opts and cur_src not in obj_opts:\n                build_config[\"source_object\"][\"value\"] = obj_opts[0]\n            build_config[\"source_object\"][\"options\"] = obj_opts\n\n        cmode = (\n            field_value\n            if field_name == \"compute_mode\" and isinstance(field_value, str)\n            else build_config.get(\"compute_mode\", {}).get(\"value\") or \"Serverless (Managed)\"\n        )\n        if \"warehouse\" in build_config:\n            build_config[\"warehouse\"][\"options\"] = get_trigger_warehouses(flow_id=flow_id)\n            build_config[\"warehouse\"][\"show\"] = cmode == \"Warehouse\"\n        get_triggers_manager().sync_trigger_from_build_config(\n            component_type=self.name,\n            component=self,\n            build_config=build_config,\n            field_name=field_name,\n            field_value=field_value,\n            bridge=LIVE_BRIDGE,\n        )\n        return build_config\n\n    def _provision_and_get_spec(self) -> dict[str, Any]:\n        flow_id = resolve_trigger_flow_id(self)\n        db = str(getattr(self, \"database\", \"SNOWFLAKE_LANGFLOW\") or \"SNOWFLAKE_LANGFLOW\").strip()\n        sch = str(getattr(self, \"schema\", \"CORE\") or \"CORE\").strip()\n        src = str(getattr(self, \"source_object\", \"CUSTOMER_ORDERS\") or \"CUSTOMER_ORDERS\").strip()\n        obj_kind = getattr(self, \"object_kind\", None) or detect_source_object_kind(db, sch, src, flow_id=flow_id)\n        ddl_spec = build_table_change_trigger_ddl(\n            flow_id=flow_id,\n            database=db,\n            schema=sch,\n            source_object=src,\n            object_kind=str(obj_kind),\n            status_mode=getattr(self, \"status_mode\", \"Active\"),\n            trigger_on=getattr(self, \"trigger_on\", \"New Rows Only (Insert)\"),\n            max_batch_rows=int(getattr(self, \"max_batch_rows\", 100) or 100),\n            show_initial_rows=bool(getattr(self, \"show_initial_rows\", False)),\n            compute_mode=getattr(self, \"compute_mode\", \"Serverless (Managed)\"),\n            warehouse=getattr(self, \"warehouse\", \"COMPUTE_WH\"),\n            retry_attempts=int(getattr(self, \"retry_attempts\", 3) if getattr(self, \"retry_attempts\", None) is not None else 3),\n            suspend_after_failures=int(\n                getattr(self, \"suspend_after_failures\", 5)\n                if getattr(self, \"suspend_after_failures\", None) is not None\n                else 5\n            ),\n            timeout_ms=int(getattr(self, \"timeout_ms\", 3600000) or 3600000),\n        )\n        node_id = str(getattr(self, \"_id\", None) or getattr(self, \"id\", None) or \"SnowflakeTableChangeTrigger\")\n        run = active_trigger_run(flow_id)\n        if run is not None:\n            # BUG-TRG-04: Snowflake fired this run, so the trigger already exists: never re-provision it,\n            # expose the incoming RUN_LANGFLOW_FLOW payload as this component's outputs instead.\n            rows = run[\"payload\"].get(\"rows\")\n            self._trigger_rows = list(rows) if isinstance(rows, list) else []\n            return {**ddl_spec, \"provision_result\": {\"ok\": True, \"skipped\": \"trigger_run\"}, \"trigger_payload\": run[\"payload\"]}\n        prov = get_triggers_manager().provision_trigger(\n            ddl_spec=ddl_spec,\n            node_id=node_id,\n            bridge=LIVE_BRIDGE,\n            config={\n                \"compute_mode\": getattr(self, \"compute_mode\", \"Serverless (Managed)\"),\n                \"warehouse\": getattr(self, \"warehouse\", \"COMPUTE_WH\"),\n                \"source_object\": src,\n                \"trigger_on\": getattr(self, \"trigger_on\", \"New Rows Only (Insert)\"),\n            },\n        )\n        return {**ddl_spec, \"provision_result\": prov}\n\n    def build_changed_rows(self) -> DataFrame:\n        spec = self._provision_and_get_spec()\n        injected_rows = getattr(self, \"_trigger_rows\", None)\n        if isinstance(injected_rows, list):\n            return DataFrame(injected_rows)\n        limit = max(1, min(1000, int(getattr(self, \"max_batch_rows\", 100) or 100)))\n        # PASSO3: the stream this trigger provisioned is usable by the flow when its schema is in context.\n        _register_component_object(spec[\"stream_fqn\"], \"streams\")\n        res = _flow_component_execute_sql(f\"SELECT * FROM {spec['stream_fqn']} LIMIT {limit}\")\n        return DataFrame(res.get(\"rows\", []))\n\n    def build_trigger_message(self) -> Message:\n        spec = self._provision_and_get_spec()\n        rows = getattr(self, \"_trigger_rows\", None)\n        cnt = len(rows) if isinstance(rows, list) else 0\n        text = (\n            f\"Snowflake Stream '{spec['stream_fqn']}' detected {cnt} changed row(s) on {spec['source_object_fqn']}.\"\n        )\n        return Message(\n            text=text,\n            trigger_type=\"STREAM_TRIGGER_RUN\",\n            source_object=spec[\"source_object_fqn\"],\n            stream_fqn=spec[\"stream_fqn\"],\n            task_fqn=spec[\"task_fqn\"],\n            row_count=cnt,\n        )\n\n    def build_stream_metadata(self) -> Data:\n        spec = self._provision_and_get_spec()\n        return Data(\n            data={\n                \"trigger_component\": \"SnowflakeTableChangeTrigger\",\n                \"trigger_type\": \"STREAM_TRIGGER_RUN\",\n                \"flow_id\": spec[\"flow_id\"],\n                \"flow_short_id\": spec[\"flow_short_id\"],\n                \"database\": spec[\"database\"],\n                \"schema\": spec[\"schema\"],\n                \"source_object\": spec[\"source_object\"],\n                \"source_object_fqn\": spec[\"source_object_fqn\"],\n                \"stream_name\": spec[\"stream_name\"],\n                \"stream_fqn\": spec[\"stream_fqn\"],\n                \"task_name\": spec[\"task_name\"],\n                \"task_fqn\": spec[\"task_fqn\"],\n                \"temp_batch_fqn\": spec[\"temp_batch_fqn\"],\n                \"status_mode\": spec[\"status_mode\"],\n                \"active_role\": LIVE_BRIDGE.active_role,\n                \"create_stream_sql\": spec[\"create_stream_sql\"],\n                \"create_task_sql\": spec[\"create_task_sql\"],\n                \"alter_state_sql\": spec[\"alter_state_sql\"],\n                \"ddl\": spec[\"ddl\"],\n                \"statements\": spec[\"statements\"],\n            }\n        )\n"
+       },
+       "compute_mode": {
+        "_input_type": "DropdownInput",
+        "advanced": true,
+        "api_editable": false,
+        "combobox": false,
+        "dialog_inputs": {},
+        "display_name": "Compute Mode",
+        "dynamic": false,
+        "external_options": {},
+        "info": "",
+        "name": "compute_mode",
+        "options": [
+         "Serverless (Managed)",
+         "Warehouse"
+        ],
+        "options_metadata": [],
+        "override_skip": false,
+        "placeholder": "",
+        "real_time_refresh": true,
+        "required": false,
+        "show": true,
+        "title_case": false,
+        "toggle": false,
+        "tool_mode": false,
+        "trace_as_metadata": true,
+        "track_in_telemetry": true,
+        "type": "str",
+        "value": "Serverless (Managed)"
+       },
+       "database": {
+        "_input_type": "DropdownInput",
+        "advanced": false,
+        "api_editable": false,
+        "combobox": true,
+        "dialog_inputs": {},
+        "display_name": "Database",
+        "dynamic": false,
+        "external_options": {},
+        "info": "",
+        "name": "database",
+        "options": [
+         "SNOWFLAKE_LANGFLOW"
+        ],
+        "options_metadata": [],
+        "override_skip": false,
+        "placeholder": "",
+        "real_time_refresh": true,
+        "required": false,
+        "show": true,
+        "title_case": false,
+        "toggle": false,
+        "tool_mode": false,
+        "trace_as_metadata": true,
+        "track_in_telemetry": true,
+        "type": "str",
+        "value": "SNOWFLAKE_LANGFLOW"
+       },
+       "max_batch_rows": {
+        "_input_type": "IntInput",
+        "advanced": true,
+        "api_editable": false,
+        "display_name": "Max Batch Rows",
+        "dynamic": false,
+        "info": "",
+        "list": false,
+        "list_add_label": "Add More",
+        "name": "max_batch_rows",
+        "override_skip": false,
+        "placeholder": "",
+        "required": false,
+        "show": true,
+        "title_case": false,
+        "tool_mode": false,
+        "trace_as_metadata": true,
+        "track_in_telemetry": true,
+        "type": "int",
+        "value": 100
+       },
+       "retry_attempts": {
+        "_input_type": "IntInput",
+        "advanced": true,
+        "api_editable": false,
+        "display_name": "Task Auto Retry Attempts",
+        "dynamic": false,
+        "info": "",
+        "list": false,
+        "list_add_label": "Add More",
+        "name": "retry_attempts",
+        "override_skip": false,
+        "placeholder": "",
+        "required": false,
+        "show": true,
+        "title_case": false,
+        "tool_mode": false,
+        "trace_as_metadata": true,
+        "track_in_telemetry": true,
+        "type": "int",
+        "value": 3
+       },
+       "schema": {
+        "_input_type": "DropdownInput",
+        "advanced": false,
+        "api_editable": false,
+        "combobox": true,
+        "dialog_inputs": {},
+        "display_name": "Schema",
+        "dynamic": false,
+        "external_options": {},
+        "info": "",
+        "name": "schema",
+        "options": [
+         "EXAMPLES"
+        ],
+        "options_metadata": [],
+        "override_skip": false,
+        "placeholder": "",
+        "real_time_refresh": true,
+        "required": false,
+        "show": true,
+        "title_case": false,
+        "toggle": false,
+        "tool_mode": false,
+        "trace_as_metadata": true,
+        "track_in_telemetry": true,
+        "type": "str",
+        "value": "EXAMPLES"
+       },
+       "show_initial_rows": {
+        "_input_type": "BoolInput",
+        "advanced": true,
+        "api_editable": false,
+        "display_name": "Show Initial Rows",
+        "dynamic": false,
+        "info": "",
+        "list": false,
+        "list_add_label": "Add More",
+        "name": "show_initial_rows",
+        "override_skip": false,
+        "placeholder": "",
+        "required": false,
+        "show": true,
+        "title_case": false,
+        "tool_mode": false,
+        "trace_as_metadata": true,
+        "track_in_telemetry": true,
+        "type": "bool",
+        "value": false
+       },
+       "source_object": {
+        "_input_type": "DropdownInput",
+        "advanced": false,
+        "api_editable": false,
+        "combobox": true,
+        "dialog_inputs": {},
+        "display_name": "Table or View",
+        "dynamic": false,
+        "external_options": {},
+        "info": "",
+        "name": "source_object",
+        "options": [
+         "CUSTOMER_ORDERS",
+         "LANGFLOW_FLOW_RUNS",
+         "LANGFLOW_FLOW_ACTIVITY",
+         "TICKET_INBOX"
+        ],
+        "options_metadata": [],
+        "override_skip": false,
+        "placeholder": "",
+        "real_time_refresh": true,
+        "required": false,
+        "show": true,
+        "title_case": false,
+        "toggle": false,
+        "tool_mode": false,
+        "trace_as_metadata": true,
+        "track_in_telemetry": true,
+        "type": "str",
+        "value": "TICKET_INBOX"
+       },
+       "status_mode": {
+        "_input_type": "TabInput",
+        "advanced": false,
+        "api_editable": false,
+        "display_name": "Status",
+        "dynamic": false,
+        "info": "",
+        "name": "status_mode",
+        "options": [
+         "Active",
+         "Paused"
+        ],
+        "override_skip": false,
+        "placeholder": "",
+        "real_time_refresh": true,
+        "required": false,
+        "show": true,
+        "title_case": false,
+        "tool_mode": false,
+        "trace_as_metadata": true,
+        "track_in_telemetry": true,
+        "type": "tab",
+        "value": "Paused"
+       },
+       "suspend_after_failures": {
+        "_input_type": "IntInput",
+        "advanced": true,
+        "api_editable": false,
+        "display_name": "Suspend After Failures",
+        "dynamic": false,
+        "info": "",
+        "list": false,
+        "list_add_label": "Add More",
+        "name": "suspend_after_failures",
+        "override_skip": false,
+        "placeholder": "",
+        "required": false,
+        "show": true,
+        "title_case": false,
+        "tool_mode": false,
+        "trace_as_metadata": true,
+        "track_in_telemetry": true,
+        "type": "int",
+        "value": 5
+       },
+       "timeout_ms": {
+        "_input_type": "IntInput",
+        "advanced": true,
+        "api_editable": false,
+        "display_name": "Timeout (ms)",
+        "dynamic": false,
+        "info": "",
+        "list": false,
+        "list_add_label": "Add More",
+        "name": "timeout_ms",
+        "override_skip": false,
+        "placeholder": "",
+        "required": false,
+        "show": true,
+        "title_case": false,
+        "tool_mode": false,
+        "trace_as_metadata": true,
+        "track_in_telemetry": true,
+        "type": "int",
+        "value": 3600000
+       },
+       "trigger_on": {
+        "_input_type": "DropdownInput",
+        "advanced": false,
+        "api_editable": false,
+        "combobox": false,
+        "dialog_inputs": {},
+        "display_name": "Trigger On",
+        "dynamic": false,
+        "external_options": {},
+        "info": "",
+        "name": "trigger_on",
+        "options": [
+         "New Rows Only (Insert)",
+         "All Changes (Insert / Update / Delete)"
+        ],
+        "options_metadata": [],
+        "override_skip": false,
+        "placeholder": "",
+        "required": false,
+        "show": true,
+        "title_case": false,
+        "toggle": false,
+        "tool_mode": false,
+        "trace_as_metadata": true,
+        "track_in_telemetry": true,
+        "type": "str",
+        "value": "New Rows Only (Insert)"
+       },
+       "warehouse": {
+        "_input_type": "DropdownInput",
+        "advanced": true,
+        "api_editable": false,
+        "combobox": true,
+        "dialog_inputs": {},
+        "display_name": "Warehouse",
+        "dynamic": false,
+        "external_options": {},
+        "info": "",
+        "name": "warehouse",
+        "options": [
+         "COMPUTE_WH"
+        ],
+        "options_metadata": [],
+        "override_skip": false,
+        "placeholder": "",
+        "required": false,
+        "show": false,
+        "title_case": false,
+        "toggle": false,
+        "tool_mode": false,
+        "trace_as_metadata": true,
+        "track_in_telemetry": true,
+        "type": "str",
+        "value": "COMPUTE_WH"
+       }
+      },
+      "tool_mode": false
+     },
+     "selected_output": "trigger_message_out"
+    }
+   },
+   {
+    "id": "SnowflakeSQLStatement-X302",
+    "type": "genericNode",
+    "position": {
+     "x": 500,
+     "y": 0
+    },
+    "data": {
+     "id": "SnowflakeSQLStatement-X302",
+     "type": "SnowflakeSQLStatement",
+     "node": {
+      "base_classes": [
+       "JSON",
+       "Message",
+       "Table"
+      ],
+      "beta": false,
+      "conditional_paths": [],
+      "custom_fields": {},
+      "description": "Execute a governed Snowflake SQL statement (SELECT / CALL / SHOW) within context <Database>.<Schema> under the active role with DataFrame or JSON Object (OBJECT_CONSTRUCT) output.",
+      "display_name": "1 \u00b7 SQL Statement \u00b7 next message to process",
+      "documentation": "",
+      "edited": false,
+      "field_order": [
+       "database",
+       "schema_name",
+       "sql_statement",
+       "bind_parameters_json",
+       "bind_values",
+       "output_format",
+       "max_rows"
+      ],
+      "frozen": false,
+      "icon": "Snowflake",
+      "legacy": false,
+      "metadata": {
+       "code_hash": "a96823bc6028",
+       "component_class_name": "SnowflakeSQLStatementComponent",
+       "dependencies": {
+        "dependencies": [
+         {
+          "name": "lfx_snowflake",
+          "version": null
+         },
+         {
+          "name": "lfx",
+          "version": "1.13.1"
+         }
+        ],
+        "total_dependencies": 2
+       },
+       "module": "lfx.components.llm_operations.snowflake_sql_statement.SnowflakeSQLStatementComponent"
+      },
+      "minimized": false,
+      "output_types": [],
+      "outputs": [
+       {
+        "allows_loop": false,
+        "cache": true,
+        "display_name": "Result DataFrame",
+        "group_outputs": false,
+        "method": "run_dataframe",
+        "name": "dataframe",
+        "selected": "Table",
+        "tool_mode": true,
+        "types": [
+         "Table"
+        ],
+        "value": "__UNDEFINED__"
+       },
+       {
+        "allows_loop": false,
+        "cache": true,
+        "display_name": "JSON Message",
+        "group_outputs": false,
+        "method": "run_json_message",
+        "name": "message",
+        "selected": "Message",
+        "tool_mode": true,
+        "types": [
+         "Message"
+        ],
+        "value": "__UNDEFINED__"
+       },
+       {
+        "allows_loop": false,
+        "cache": true,
+        "display_name": "Execution Metadata",
+        "group_outputs": false,
+        "method": "run_metadata",
+        "name": "metadata",
+        "selected": "JSON",
+        "tool_mode": true,
+        "types": [
+         "JSON"
+        ],
+        "value": "__UNDEFINED__"
+       }
+      ],
+      "pinned": false,
+      "template": {
+       "_type": "Component",
+       "bind_parameters_json": {
+        "_input_type": "StrInput",
+        "advanced": true,
+        "api_editable": false,
+        "display_name": "Bind Parameters JSON (optional)",
+        "dynamic": false,
+        "info": "",
+        "list": false,
+        "list_add_label": "Add More",
+        "load_from_db": false,
+        "name": "bind_parameters_json",
+        "override_skip": false,
+        "placeholder": "",
+        "required": false,
+        "show": true,
+        "title_case": false,
+        "tool_mode": false,
+        "trace_as_metadata": true,
+        "track_in_telemetry": false,
+        "type": "str",
+        "value": "{}"
+       },
+       "bind_values": {
+        "_input_type": "HandleInput",
+        "advanced": false,
+        "api_editable": false,
+        "display_name": "Bind Values",
+        "dynamic": false,
+        "info": "Upstream values bound to the ? placeholders that follow those of Bind Parameters JSON, in the order the connections were drawn on the canvas. A Message is bound as its text, Data as a JSON string. Values are never concatenated into the SQL.",
+        "input_types": [
+         "Message",
+         "Data",
+         "JSON"
+        ],
+        "list": true,
+        "list_add_label": "Add More",
+        "name": "bind_values",
+        "override_skip": false,
+        "placeholder": "",
+        "required": false,
+        "show": true,
+        "title_case": false,
+        "trace_as_metadata": true,
+        "track_in_telemetry": false,
+        "type": "other",
+        "value": ""
+       },
+       "code": {
+        "advanced": true,
+        "api_editable": false,
+        "dynamic": true,
+        "fileTypes": [],
+        "file_path": "",
+        "info": "",
+        "list": false,
+        "load_from_db": false,
+        "multiline": true,
+        "name": "code",
+        "password": false,
+        "placeholder": "",
+        "required": true,
+        "show": true,
+        "title_case": false,
+        "type": "code",
+        "value": "from __future__ import annotations\nfrom lfx_snowflake import dropdown_selection as _sel\nfrom lfx_snowflake import list_input_order as _order\n\nimport json\n\nfrom lfx_snowflake import sql_safety as _sql_safety\nfrom typing import Any\n\nimport lfx_snowflake._lfx_compat  # noqa: F401\nfrom lfx.custom import Component\nfrom lfx.io import DropdownInput, HandleInput, IntInput, MultilineInput, Output, StrInput\nfrom lfx.schema import Data, DataFrame\nfrom lfx.schema.message import Message\n\nfrom lfx_snowflake.components.llm_operations import SnowflakeSQLStatementEngine\nfrom lfx_snowflake.context_helpers import _resolve_flow_id\nfrom lfx_snowflake.fastapi_live_bridge import LIVE_BRIDGE\nfrom lfx_snowflake.flow_context_guard import flow_component_sql as _flow_component_sql\nfrom lfx_snowflake.flow_context_guard import raise_if_flow_context_denied as _raise_if_flow_context_denied\n\n\ndef _flow_component_execute_sql(*args, **kwargs):\n    \"\"\"BUG-CTX-03: this component's SQL is checked against the flow's `[ \u2744\ufe0f Context ]`.\"\"\"\n    with _flow_component_sql():\n        # E2E T1: a guard refusal surfaces as a component error carrying AUTHZ_OBJECT_NOT_IN_FLOW_CONTEXT.\n        return _raise_if_flow_context_denied(LIVE_BRIDGE.execute_sql(*args, **kwargs))\n\n\ndef _sql_databases(flow_id: str | None = None) -> list[str]:\n    return LIVE_BRIDGE.get_context_databases(flow_id=flow_id or _resolve_flow_id())\n\n\ndef _sql_schemas(database: str | None = None, flow_id: str | None = None) -> list[str]:\n    return LIVE_BRIDGE.get_context_schemas(database, flow_id=flow_id or _resolve_flow_id())\n\n\ndef normalize_bindings(parsed: Any) -> dict[str, dict[str, Any]] | None:\n    \"\"\"BUG-LLMOP-012: typed SQL API bindings ``{\"1\": {\"type\", \"value\"}}``.\n\n    Accepts a list of values (``[1, \"a\"]``), a positional dict (``{\"1\": 1}``) or an already typed dict\n    (``{\"1\": {\"type\": \"FIXED\", \"value\": \"1\"}}``); every entry goes through ``sql_safety.binding_for``.\"\"\"\n    if parsed in (None, [], {}):\n        return None\n    if isinstance(parsed, list):\n        items = [(str(i + 1), v) for i, v in enumerate(parsed)]\n    elif isinstance(parsed, dict):\n        items = list(parsed.items())\n        keys = [str(k) for k, _ in items]\n        if not all(k.isdigit() and int(k) >= 1 for k in keys) or sorted(int(k) for k in keys) != list(\n            range(1, len(keys) + 1)\n        ):\n            raise ValueError('Bind Parameter keys must be positions \"1\"..\"n\" matching the ? placeholders.')\n    else:\n        raise ValueError(\"Bind Parameters must be a JSON array or object.\")\n    out: dict[str, dict[str, Any]] = {}\n    for key, val in items:\n        if isinstance(val, dict) and set(val) <= {\"type\", \"value\"} and \"value\" in val:\n            out[str(key)] = _sql_safety.binding_for(val[\"value\"], val.get(\"type\"))\n        else:\n            out[str(key)] = _sql_safety.binding_for(val)\n    return out\n\n\nclass SnowflakeSQLStatementComponent(Component):\n    display_name = \"SQL Statement\"\n    description = (\n        \"Execute a governed Snowflake SQL statement (SELECT / CALL / SHOW) within context \"\n        \"<Database>.<Schema> under the active role with DataFrame or JSON Object (OBJECT_CONSTRUCT) output.\"\n    )\n    icon = \"Snowflake\"\n    name = \"SnowflakeSQLStatement\"\n\n    inputs = [\n        DropdownInput(\n            name=\"database\",\n            display_name=\"Database\",\n            options=_sql_databases(),\n            value=\"SNOWFLAKE_LANGFLOW\",\n            real_time_refresh=True,\n            combobox=True,\n        ),\n        DropdownInput(\n            name=\"schema_name\",\n            display_name=\"Schema\",\n            options=_sql_schemas(\"SNOWFLAKE_LANGFLOW\"),\n            value=\"CORE\",\n            real_time_refresh=True,\n            combobox=True,\n        ),\n        MultilineInput(\n            name=\"sql_statement\",\n            display_name=\"SQL Statement\",\n            value=\"SELECT run_id, flow_id, effective_role, status FROM <DB>.<SCHEMA>.LANGFLOW_FLOW_RUNS ORDER BY start_ts DESC\",\n        ),\n        StrInput(\n            name=\"bind_parameters_json\",\n            display_name=\"Bind Parameters JSON (optional)\",\n            value=\"{}\",\n            advanced=True,\n        ),\n        HandleInput(\n            name=\"bind_values\",\n            display_name=\"Bind Values\",\n            input_types=[\"Message\", \"Data\", \"JSON\"],\n            is_list=True,\n            required=False,\n            info=(\n                \"Upstream values bound to the ? placeholders that follow those of Bind Parameters JSON, in the \"\n                \"order the connections were drawn on the canvas. A Message is bound as its text, Data as a JSON string. Values are never \"\n                \"concatenated into the SQL.\"\n            ),\n        ),\n        DropdownInput(\n            name=\"output_format\",\n            display_name=\"Output Format\",\n            options=[\"DataFrame\", \"JSON Object (OBJECT_CONSTRUCT)\"],\n            value=\"DataFrame\",\n        ),\n        IntInput(\n            name=\"max_rows\",\n            display_name=\"Max Rows\",\n            value=100,\n            advanced=True,\n        ),\n    ]\n    outputs = [\n        Output(display_name=\"Result DataFrame\", name=\"dataframe\", method=\"run_dataframe\"),\n        Output(display_name=\"JSON Message\", name=\"message\", method=\"run_json_message\"),\n        Output(display_name=\"Execution Metadata\", name=\"metadata\", method=\"run_metadata\"),\n    ]\n\n    def update_build_config(\n        self, build_config: dict[str, Any], field_value: Any, field_name: str | None = None\n    ) -> dict[str, Any]:\n        flow_id = _resolve_flow_id(self, build_config)\n        if \"database\" in build_config:\n            build_config[\"database\"][\"options\"] = _sql_databases(flow_id=flow_id)\n            if field_name == \"database\" and isinstance(field_value, str):\n                build_config[\"database\"][\"value\"] = field_value\n        db = (\n            field_value\n            if field_name == \"database\" and isinstance(field_value, str)\n            else build_config.get(\"database\", {}).get(\"value\") or \"SNOWFLAKE_LANGFLOW\"\n        )\n        schemas = _sql_schemas(db, flow_id=flow_id)\n        if \"schema_name\" in build_config:\n            build_config[\"schema_name\"][\"options\"] = schemas\n            cur_sch = build_config[\"schema_name\"].get(\"value\")\n            if field_name == \"schema_name\" and isinstance(field_value, str):\n                build_config[\"schema_name\"][\"value\"] = field_value\n            else:\n                _sel.keep_or_default(build_config, \"schema_name\", schemas, field_name)\n        return build_config\n\n    def _build_sql(self) -> str:\n        return SnowflakeSQLStatementEngine.build_sql(\n            database=self.database or \"SNOWFLAKE_LANGFLOW\",\n            schema=self.schema_name or \"CORE\",\n            sql_statement=self.sql_statement or \"\",\n            output_format=self.output_format or \"DataFrame\",\n            max_rows=int(self.max_rows or 100),\n        )\n\n    def _upstream_bind_values(self) -> list[str]:\n        \"\"\"Text of every value connected to Bind Values (Message text, Data/JSON as a JSON string).\"\"\"\n        values = getattr(self, \"bind_values\", None)\n        if values is None or values == \"\":\n            return []\n        out: list[str] = []\n        ordered = _order.in_canvas_order(self, \"bind_values\", values) if isinstance(values, list) else [values]\n        for val in ordered:\n            if isinstance(val, Message):\n                out.append(str(val.text or \"\"))\n            elif isinstance(val, Data):\n                out.append(json.dumps(val.data, default=str))\n            elif isinstance(val, (dict, list)):\n                out.append(json.dumps(val, default=str))\n            elif val is not None:\n                out.append(str(val))\n        return out\n\n    def _parse_bindings(self) -> dict[str, Any] | None:\n        raw = (getattr(self, \"bind_parameters_json\", \"\") or \"\").strip()\n        static: dict[str, dict[str, Any]] = {}\n        if raw and raw != \"{}\":\n            try:\n                parsed = json.loads(raw)\n            except json.JSONDecodeError as exc:\n                raise ValueError(\"Bind Parameters must be a JSON array or object.\") from exc\n            static = normalize_bindings(parsed) or {}\n        upstream = self._upstream_bind_values()\n        if not upstream:\n            return static or None\n        merged = dict(static)\n        for offset, text in enumerate(upstream, start=len(static) + 1):\n            merged[str(offset)] = _sql_safety.binding_for(text, \"TEXT\")\n        return merged\n\n    def _pre_run_setup(self):\n        # A new run (or loop iteration) starts: forget the result of the previous one.\n        self._run_result = None\n\n    def _execute_once(self, stmt: str) -> dict[str, Any]:\n        \"\"\"Run the statement once per run: every output port shares the result, so a CALL or DML is not repeated.\"\"\"\n        cached = getattr(self, \"_run_result\", None)\n        if cached is None:\n            cached = _flow_component_execute_sql(stmt, bindings=self._parse_bindings())\n            self._run_result = cached\n        return cached\n\n    def run_dataframe(self) -> DataFrame:\n        stmt = self._build_sql()\n        res = self._execute_once(stmt)\n        if not res.get(\"ok\"):\n            raise ValueError(res.get(\"message\", \"Snowflake SQL Statement failed\"))\n        return DataFrame(res.get(\"rows\", []))\n\n    def run_json_message(self) -> Message:\n        stmt = self._build_sql()\n        res = self._execute_once(stmt)\n        return Message(\n            text=json.dumps(\n                {\n                    \"database\": self.database,\n                    \"schema_name\": self.schema_name,\n                    \"output_format\": self.output_format,\n                    \"active_role\": LIVE_BRIDGE.active_role,\n                    \"sql\": stmt,\n                    \"rows\": res.get(\"rows\", []),\n                    \"ok\": res.get(\"ok\", False),\n                },\n                indent=2,\n            )\n        )\n\n    def run_metadata(self) -> Data:\n        stmt = self._build_sql()\n        return Data(\n            data={\n                \"database\": self.database,\n                \"schema_name\": self.schema_name,\n                \"output_format\": self.output_format,\n                \"active_role\": LIVE_BRIDGE.active_role,\n                \"context_epoch\": LIVE_BRIDGE.context_epoch,\n                \"sql_preview\": stmt,\n            }\n        )\n"
+       },
+       "database": {
+        "_input_type": "DropdownInput",
+        "advanced": false,
+        "api_editable": false,
+        "combobox": true,
+        "dialog_inputs": {},
+        "display_name": "Database",
+        "dynamic": false,
+        "external_options": {},
+        "info": "",
+        "name": "database",
+        "options": [
+         "SNOWFLAKE_LANGFLOW"
+        ],
+        "options_metadata": [],
+        "override_skip": false,
+        "placeholder": "",
+        "real_time_refresh": true,
+        "required": false,
+        "show": true,
+        "title_case": false,
+        "toggle": false,
+        "tool_mode": false,
+        "trace_as_metadata": true,
+        "track_in_telemetry": true,
+        "type": "str",
+        "value": "SNOWFLAKE_LANGFLOW"
+       },
+       "max_rows": {
+        "_input_type": "IntInput",
+        "advanced": true,
+        "api_editable": false,
+        "display_name": "Max Rows",
+        "dynamic": false,
+        "info": "",
+        "list": false,
+        "list_add_label": "Add More",
+        "name": "max_rows",
+        "override_skip": false,
+        "placeholder": "",
+        "required": false,
+        "show": true,
+        "title_case": false,
+        "tool_mode": false,
+        "trace_as_metadata": true,
+        "track_in_telemetry": true,
+        "type": "int",
+        "value": 50
+       },
+       "output_format": {
+        "_input_type": "DropdownInput",
+        "advanced": false,
+        "api_editable": false,
+        "combobox": false,
+        "dialog_inputs": {},
+        "display_name": "Output Format",
+        "dynamic": false,
+        "external_options": {},
+        "info": "",
+        "name": "output_format",
+        "options": [
+         "DataFrame",
+         "JSON Object (OBJECT_CONSTRUCT)"
+        ],
+        "options_metadata": [],
+        "override_skip": false,
+        "placeholder": "",
+        "required": false,
+        "show": true,
+        "title_case": false,
+        "toggle": false,
+        "tool_mode": false,
+        "trace_as_metadata": true,
+        "track_in_telemetry": true,
+        "type": "str",
+        "value": "JSON Object (OBJECT_CONSTRUCT)"
+       },
+       "schema_name": {
+        "_input_type": "DropdownInput",
+        "advanced": false,
+        "api_editable": false,
+        "combobox": true,
+        "dialog_inputs": {},
+        "display_name": "Schema",
+        "dynamic": false,
+        "external_options": {},
+        "info": "",
+        "name": "schema_name",
+        "options": [
+         "EXAMPLES"
+        ],
+        "options_metadata": [],
+        "override_skip": false,
+        "placeholder": "",
+        "real_time_refresh": true,
+        "required": false,
+        "show": true,
+        "title_case": false,
+        "toggle": false,
+        "tool_mode": false,
+        "trace_as_metadata": true,
+        "track_in_telemetry": true,
+        "type": "str",
+        "value": "EXAMPLES"
+       },
+       "sql_statement": {
+        "_input_type": "MultilineInput",
+        "advanced": false,
+        "ai_enabled": false,
+        "api_editable": false,
+        "copy_field": false,
+        "display_name": "SQL Statement",
+        "dynamic": false,
+        "info": "",
+        "input_types": [
+         "Message"
+        ],
+        "list": false,
+        "list_add_label": "Add More",
+        "load_from_db": false,
+        "multiline": true,
+        "name": "sql_statement",
+        "override_skip": false,
+        "password": false,
+        "placeholder": "",
+        "required": false,
+        "show": true,
+        "title_case": false,
+        "tool_mode": false,
+        "trace_as_input": true,
+        "trace_as_metadata": true,
+        "track_in_telemetry": false,
+        "type": "str",
+        "value": "SELECT INBOX_ID, RAW_TEXT FROM SNOWFLAKE_LANGFLOW.EXAMPLES.TICKET_INBOX WHERE PROCESSED_AT IS NULL AND ? IS NOT NULL ORDER BY RECEIVED_AT LIMIT 1"
+       }
+      },
+      "tool_mode": false
+     },
+     "selected_output": "message"
+    }
+   },
+   {
+    "id": "SnowflakeAIFunction-X303",
+    "type": "genericNode",
+    "position": {
+     "x": 1000,
+     "y": -350
+    },
+    "data": {
+     "id": "SnowflakeAIFunction-X303",
+     "type": "SnowflakeAIFunction",
+     "node": {
+      "base_classes": [
+       "JSON",
+       "Message"
+      ],
+      "beta": false,
+      "conditional_paths": [],
+      "custom_fields": {},
+      "description": "Task-specific Snowflake Cortex AI_* Function execution across all 14 functions (AI_CLASSIFY, AI_FILTER, AI_EXTRACT, AI_SENTIMENT, AI_SUMMARIZE, AI_SUMMARIZE_AGG, AI_AGG, AI_TRANSLATE, AI_SIMILARITY, AI_TRANSCRIBE, AI_PARSE_DOCUMENT, AI_EMBED, AI_MULTI_EMBED, AI_COUNT_TOKENS) with full Internal & External Stage multimodal support (TO_FILE & DIRECTORY(@stage) for images, .mp3/audio, video, and documents).",
+      "display_name": "2 \u00b7 AI Function \u00b7 AI_EXTRACT site, asset, problem",
+      "documentation": "",
+      "edited": false,
+      "field_order": [
+       "snowflake_context",
+       "ai_function",
+       "input_text",
+       "categories_or_schema",
+       "source_lang",
+       "target_lang",
+       "stage_selector",
+       "media_type_filter",
+       "stage_file_path",
+       "second_stage_file_path",
+       "second_text_or_stage_file",
+       "batch_directory_mode",
+       "transcribe_timestamp_granularity",
+       "parse_document_mode",
+       "parse_document_page_split",
+       "embed_model",
+       "multi_embed_options_json",
+       "model_for_count_tokens",
+       "return_error_details",
+       "return_as_json",
+       "estimate_tokens"
+      ],
+      "frozen": false,
+      "icon": "Snowflake",
+      "legacy": false,
+      "metadata": {
+       "code_hash": "482edaadaa14",
+       "component_class_name": "SnowflakeAIFunctionComponent",
+       "dependencies": {
+        "dependencies": [
+         {
+          "name": "lfx_snowflake",
+          "version": null
+         },
+         {
+          "name": "lfx",
+          "version": "1.13.1"
+         }
+        ],
+        "total_dependencies": 2
+       },
+       "module": "lfx.components.llm_operations.snowflake_ai_function.SnowflakeAIFunctionComponent"
+      },
+      "minimized": false,
+      "output_types": [],
+      "outputs": [
+       {
+        "allows_loop": false,
+        "cache": true,
+        "display_name": "Result Message",
+        "group_outputs": false,
+        "method": "run_ai_function",
+        "name": "message",
+        "selected": "Message",
+        "tool_mode": true,
+        "types": [
+         "Message"
+        ],
+        "value": "__UNDEFINED__"
+       },
+       {
+        "allows_loop": false,
+        "cache": true,
+        "display_name": "Telemetry & Token Metadata",
+        "group_outputs": false,
+        "method": "run_telemetry",
+        "name": "telemetry",
+        "selected": "JSON",
+        "tool_mode": true,
+        "types": [
+         "JSON"
+        ],
+        "value": "__UNDEFINED__"
+       }
+      ],
+      "pinned": false,
+      "template": {
+       "_type": "Component",
+       "ai_function": {
+        "_input_type": "DropdownInput",
+        "advanced": false,
+        "api_editable": false,
+        "combobox": false,
+        "dialog_inputs": {},
+        "display_name": "Task-Specific AI Function",
+        "dynamic": false,
+        "external_options": {},
+        "info": "",
+        "name": "ai_function",
+        "options": [
+         "AI_CLASSIFY",
+         "AI_FILTER",
+         "AI_EXTRACT",
+         "AI_SENTIMENT",
+         "AI_SUMMARIZE",
+         "AI_SUMMARIZE_AGG",
+         "AI_AGG",
+         "AI_TRANSLATE",
+         "AI_SIMILARITY",
+         "AI_TRANSCRIBE",
+         "AI_PARSE_DOCUMENT",
+         "AI_EMBED",
+         "AI_MULTI_EMBED",
+         "AI_COUNT_TOKENS"
+        ],
+        "options_metadata": [],
+        "override_skip": false,
+        "placeholder": "",
+        "real_time_refresh": true,
+        "required": false,
+        "show": true,
+        "title_case": false,
+        "toggle": false,
+        "tool_mode": false,
+        "trace_as_metadata": true,
+        "track_in_telemetry": true,
+        "type": "str",
+        "value": "AI_EXTRACT"
+       },
+       "batch_directory_mode": {
+        "_input_type": "BoolInput",
+        "advanced": false,
+        "api_editable": false,
+        "display_name": "Batch Directory Table (DIRECTORY(@stage))",
+        "dynamic": false,
+        "info": "Process all compatible files in the Internal or External Stage in a single query via DIRECTORY(@stage).",
+        "list": false,
+        "list_add_label": "Add More",
+        "name": "batch_directory_mode",
+        "override_skip": false,
+        "placeholder": "",
+        "required": false,
+        "show": true,
+        "title_case": false,
+        "tool_mode": false,
+        "trace_as_metadata": true,
+        "track_in_telemetry": true,
+        "type": "bool",
+        "value": false
+       },
+       "categories_or_schema": {
+        "_input_type": "StrInput",
+        "advanced": false,
+        "api_editable": false,
+        "display_name": "Categories / Aspect Categories / Extraction Schema / Filter Predicate / Instruction",
+        "dynamic": false,
+        "info": "",
+        "list": false,
+        "list_add_label": "Add More",
+        "load_from_db": false,
+        "name": "categories_or_schema",
+        "override_skip": false,
+        "placeholder": "",
+        "required": false,
+        "show": true,
+        "title_case": false,
+        "tool_mode": false,
+        "trace_as_metadata": true,
+        "track_in_telemetry": false,
+        "type": "str",
+        "value": "{\"site\": \"Which city or site does RAW_TEXT mention?\", \"asset\": \"Which machine does RAW_TEXT mention? Answer with one code: PRESS_A12, CONVEYOR_B3, CHILLER_C7, ROBOT_ARM_D2 or PACKER_E5\", \"problem\": \"Describe the fault reported in RAW_TEXT in one short sentence\"}"
+       },
+       "code": {
+        "advanced": true,
+        "api_editable": false,
+        "dynamic": true,
+        "fileTypes": [],
+        "file_path": "",
+        "info": "",
+        "list": false,
+        "load_from_db": false,
+        "multiline": true,
+        "name": "code",
+        "password": false,
+        "placeholder": "",
+        "required": true,
+        "show": true,
+        "title_case": false,
+        "type": "code",
+        "value": "from __future__ import annotations\n\nimport json\nfrom typing import Any\n\nimport lfx_snowflake._lfx_compat  # noqa: F401\nfrom lfx.custom import Component\nfrom lfx.io import BoolInput, DropdownInput, HandleInput, MessageTextInput, MultilineInput, Output, StrInput\nfrom lfx.schema import Data\nfrom lfx.schema.message import Message\n\nfrom lfx_snowflake.components.ai_function import (\n    TASK_SPECIFIC_AI_FUNCTIONS,\n    SnowflakeAIFunctionComponent as DomainAIFunctionEngine,\n    filter_stage_files_for_function,\n    plain_text_result,\n)\nfrom lfx_snowflake.context_helpers import _resolve_flow_id\nfrom lfx_snowflake.fastapi_live_bridge import LIVE_BRIDGE\nfrom lfx_snowflake.flow_context_guard import flow_component_sql as _flow_component_sql\nfrom lfx_snowflake.flow_context_guard import raise_if_flow_context_denied as _raise_if_flow_context_denied\nfrom lfx_snowflake.providers.language_models import AIFunctionToolSchema, build_structured_tool\n\n\ndef _flow_component_execute_sql(*args, **kwargs):\n    \"\"\"BUG-CTX-03: this component's SQL is checked against the flow's `[ \u2744\ufe0f Context ]`.\"\"\"\n    with _flow_component_sql():\n        # E2E T1: a guard refusal surfaces as a component error carrying AUTHZ_OBJECT_NOT_IN_FLOW_CONTEXT.\n        return _raise_if_flow_context_denied(LIVE_BRIDGE.execute_sql(*args, **kwargs))\n\n\nAI_FUNCTION_VISIBLE_FIELDS: dict[str, tuple[str, ...]] = {\n    \"AI_CLASSIFY\": (\n        \"input_text\",\n        \"categories_or_schema\",\n        \"stage_selector\",\n        \"media_type_filter\",\n        \"stage_file_path\",\n        \"second_text_or_stage_file\",\n        \"batch_directory_mode\",\n        \"return_as_json\",\n        \"estimate_tokens\",\n    ),\n    \"AI_FILTER\": (\n        \"input_text\",\n        \"categories_or_schema\",\n        \"stage_selector\",\n        \"media_type_filter\",\n        \"stage_file_path\",\n        \"second_text_or_stage_file\",\n        \"batch_directory_mode\",\n        \"return_as_json\",\n        \"estimate_tokens\",\n    ),\n    \"AI_EXTRACT\": (\n        \"input_text\",\n        \"categories_or_schema\",\n        \"stage_selector\",\n        \"media_type_filter\",\n        \"stage_file_path\",\n        \"second_text_or_stage_file\",\n        \"batch_directory_mode\",\n        \"return_as_json\",\n        \"estimate_tokens\",\n    ),\n    \"AI_SENTIMENT\": (\"input_text\", \"categories_or_schema\", \"return_as_json\", \"estimate_tokens\"),\n    \"AI_SUMMARIZE\": (\n        \"input_text\",\n        \"stage_selector\",\n        \"media_type_filter\",\n        \"stage_file_path\",\n        \"batch_directory_mode\",\n        \"return_error_details\",\n        \"return_as_json\",\n        \"estimate_tokens\",\n    ),\n    \"AI_SUMMARIZE_AGG\": (\"input_text\", \"return_as_json\", \"estimate_tokens\"),\n    \"AI_AGG\": (\"input_text\", \"categories_or_schema\", \"return_as_json\", \"estimate_tokens\"),\n    \"AI_TRANSLATE\": (\"input_text\", \"source_lang\", \"target_lang\", \"return_as_json\", \"estimate_tokens\"),\n    \"AI_SIMILARITY\": (\n        \"input_text\",\n        \"second_text_or_stage_file\",\n        \"stage_selector\",\n        \"media_type_filter\",\n        \"stage_file_path\",\n        \"second_stage_file_path\",\n        \"return_as_json\",\n        \"estimate_tokens\",\n    ),\n    \"AI_TRANSCRIBE\": (\n        \"stage_selector\",\n        \"media_type_filter\",\n        \"stage_file_path\",\n        \"second_text_or_stage_file\",\n        \"batch_directory_mode\",\n        \"transcribe_timestamp_granularity\",\n        \"return_error_details\",\n        \"return_as_json\",\n    ),\n    \"AI_PARSE_DOCUMENT\": (\n        \"stage_selector\",\n        \"media_type_filter\",\n        \"stage_file_path\",\n        \"second_text_or_stage_file\",\n        \"batch_directory_mode\",\n        \"parse_document_mode\",\n        \"parse_document_page_split\",\n        \"return_as_json\",\n    ),\n    \"AI_EMBED\": (\n        \"input_text\",\n        \"embed_model\",\n        \"stage_selector\",\n        \"media_type_filter\",\n        \"stage_file_path\",\n        \"batch_directory_mode\",\n        \"return_as_json\",\n    ),\n    \"AI_MULTI_EMBED\": (\n        \"input_text\",\n        \"embed_model\",\n        \"stage_selector\",\n        \"media_type_filter\",\n        \"stage_file_path\",\n        \"batch_directory_mode\",\n        \"multi_embed_options_json\",\n        \"return_as_json\",\n    ),\n    \"AI_COUNT_TOKENS\": (\"input_text\", \"model_for_count_tokens\", \"return_as_json\"),\n}\n\n\nclass SnowflakeAIFunctionComponent(Component):\n    display_name = \"AI Function\"\n    description = (\n        \"Task-specific Snowflake Cortex AI_* Function execution across all 14 functions \"\n        \"(AI_CLASSIFY, AI_FILTER, AI_EXTRACT, AI_SENTIMENT, AI_SUMMARIZE, AI_SUMMARIZE_AGG, AI_AGG, \"\n        \"AI_TRANSLATE, AI_SIMILARITY, AI_TRANSCRIBE, AI_PARSE_DOCUMENT, AI_EMBED, AI_MULTI_EMBED, AI_COUNT_TOKENS) \"\n        \"with full Internal & External Stage multimodal support (TO_FILE & DIRECTORY(@stage) for images, .mp3/audio, video, and documents).\"\n    )\n    icon = \"Snowflake\"\n    name = \"SnowflakeAIFunction\"\n\n    inputs = [\n        HandleInput(\n            name=\"snowflake_context\",\n            display_name=\"Snowflake Context\",\n            info=\"Optional connection from [ \u2744\ufe0f Context ] / Operations node.\",\n            input_types=[\"Data\"],\n            required=False,\n        ),\n        DropdownInput(\n            name=\"ai_function\",\n            display_name=\"Task-Specific AI Function\",\n            options=list(TASK_SPECIFIC_AI_FUNCTIONS),\n            value=\"AI_CLASSIFY\",\n            real_time_refresh=True,\n        ),\n        MessageTextInput(\n            name=\"input_text\",\n            display_name=\"Input Text\",\n            value=\"Evaluate customer feedback or document content.\",\n            show=True,\n            tool_mode=True,\n        ),\n        StrInput(\n            name=\"categories_or_schema\",\n            display_name=\"Categories / Aspect Categories / Extraction Schema / Filter Predicate / Instruction\",\n            value=\"billing,support,technical\",\n            show=True,\n        ),\n        StrInput(\n            name=\"source_lang\",\n            display_name=\"Source Language (for AI_TRANSLATE, empty = auto)\",\n            value=\"\",\n            advanced=False,\n            show=False,\n        ),\n        StrInput(\n            name=\"target_lang\",\n            display_name=\"Target Language (for AI_TRANSLATE)\",\n            value=\"it\",\n            advanced=False,\n            show=False,\n        ),\n        DropdownInput(\n            name=\"stage_selector\",\n            display_name=\"Stage / Bucket (@Database.Schema.Stage)\",\n            info=\"Internal Stage (SNOWFLAKE_SSE / SNOWFLAKE_FULL) or External Stage (S3 / GCS / Azure / S3-Compatible).\",\n            options=[\"@SNOWFLAKE_LANGFLOW.CORE.SNOWFLAKE_LANGFLOW_STAGE\"],\n            value=\"@SNOWFLAKE_LANGFLOW.CORE.SNOWFLAKE_LANGFLOW_STAGE\",\n            real_time_refresh=True,\n            combobox=True,\n            show=True,\n        ),\n        DropdownInput(\n            name=\"media_type_filter\",\n            display_name=\"Stage Media Type Filter\",\n            options=[\n                \"All Compatible\",\n                \"Images (.jpg/.png/.webp/.gif/.bmp)\",\n                \"Audio (.mp3/.wav/.flac/.m4a/.ogg)\",\n                \"Video (.mp4/.mov/.webm/.mkv/.avi)\",\n                \"Documents (.pdf/.docx/.pptx)\",\n            ],\n            value=\"All Compatible\",\n            real_time_refresh=True,\n            show=True,\n        ),\n        DropdownInput(\n            name=\"stage_file_path\",\n            display_name=\"Stage Media File (Relative Path)\",\n            info=\"Select a file from the Internal or External Stage for TO_FILE('@stage', 'path').\",\n            options=[],\n            value=\"\",\n            real_time_refresh=True,\n            combobox=True,\n            show=True,\n        ),\n        DropdownInput(\n            name=\"second_stage_file_path\",\n            display_name=\"Second Stage Media File (for AI_SIMILARITY Multi-File Comparison)\",\n            options=[],\n            value=\"\",\n            real_time_refresh=True,\n            combobox=True,\n            show=False,\n        ),\n        StrInput(\n            name=\"second_text_or_stage_file\",\n            display_name=\"Second Text (AI_SIMILARITY) or @Stage/File (AI_TRANSCRIBE / Multimodal)\",\n            value=\"\",\n            show=True,\n        ),\n        BoolInput(\n            name=\"batch_directory_mode\",\n            display_name=\"Batch Directory Table (DIRECTORY(@stage))\",\n            info=\"Process all compatible files in the Internal or External Stage in a single query via DIRECTORY(@stage).\",\n            value=False,\n            show=True,\n        ),\n        DropdownInput(\n            name=\"transcribe_timestamp_granularity\",\n            display_name=\"AI_TRANSCRIBE Timestamp Granularity\",\n            options=[\"default\", \"word\", \"speaker\"],\n            value=\"default\",\n            show=False,\n        ),\n        DropdownInput(\n            name=\"parse_document_mode\",\n            display_name=\"AI_PARSE_DOCUMENT Mode\",\n            options=[\"LAYOUT\", \"OCR\"],\n            value=\"LAYOUT\",\n            show=False,\n        ),\n        BoolInput(\n            name=\"parse_document_page_split\",\n            display_name=\"AI_PARSE_DOCUMENT Page Split\",\n            value=False,\n            show=False,\n        ),\n        DropdownInput(\n            name=\"embed_model\",\n            display_name=\"Embedding Model (for AI_EMBED / AI_MULTI_EMBED)\",\n            options=[\n                \"snowflake-arctic-embed-l-v2.0\",\n                \"snowflake-arctic-embed-m-v2.0\",\n                \"voyage-multimodal-3\",\n                \"twelvelabs-marengo-embed-3-0\",\n            ],\n            value=\"snowflake-arctic-embed-l-v2.0\",\n            combobox=True,\n            show=False,\n        ),\n        MultilineInput(\n            name=\"multi_embed_options_json\",\n            display_name=\"AI_MULTI_EMBED Options JSON (start_sec, end_sec, embedding_options, embedding_scope, embedding_type)\",\n            value='{\"embedding_options\": [\"visual\", \"audio\", \"transcription\"], \"embedding_scope\": [\"clip\", \"asset\"]}',\n            show=False,\n        ),\n        StrInput(\n            name=\"model_for_count_tokens\",\n            display_name=\"Model / Function Target for AI_COUNT_TOKENS\",\n            value=\"claude-sonnet-5-5\",\n            advanced=False,\n            show=False,\n        ),\n        BoolInput(\n            name=\"return_error_details\",\n            display_name=\"Return Error Details\",\n            value=False,\n            show=False,\n        ),\n        BoolInput(\n            name=\"return_as_json\",\n            display_name=\"Return as JSON Object (OBJECT_CONSTRUCT)\",\n            value=False,\n            show=True,\n        ),\n        BoolInput(\n            name=\"estimate_tokens\",\n            display_name=\"Estimate Tokens via AI_COUNT_TOKENS\",\n            value=True,\n            advanced=True,\n            show=True,\n        ),\n    ]\n    outputs = [\n        Output(display_name=\"Result Message\", name=\"message\", method=\"run_ai_function\"),\n        Output(display_name=\"Telemetry & Token Metadata\", name=\"telemetry\", method=\"run_telemetry\"),\n    ]\n\n    def update_build_config(\n        self, build_config: dict[str, Any], field_value: Any, field_name: str | None = None\n    ) -> dict[str, Any]:\n        flow_id = _resolve_flow_id(self, build_config)\n        selected_fn = (\n            field_value\n            if field_name == \"ai_function\" and isinstance(field_value, str)\n            else build_config.get(\"ai_function\", {}).get(\"value\")\n            or getattr(self, \"ai_function\", \"AI_CLASSIFY\")\n        ).strip().upper()\n        visible = set(AI_FUNCTION_VISIBLE_FIELDS.get(selected_fn, (\"input_text\", \"return_as_json\")))\n        managed_fields = (\n            \"input_text\",\n            \"categories_or_schema\",\n            \"source_lang\",\n            \"target_lang\",\n            \"stage_selector\",\n            \"media_type_filter\",\n            \"stage_file_path\",\n            \"second_stage_file_path\",\n            \"second_text_or_stage_file\",\n            \"batch_directory_mode\",\n            \"transcribe_timestamp_granularity\",\n            \"parse_document_mode\",\n            \"parse_document_page_split\",\n            \"embed_model\",\n            \"multi_embed_options_json\",\n            \"model_for_count_tokens\",\n            \"return_error_details\",\n            \"return_as_json\",\n            \"estimate_tokens\",\n        )\n        for fname in managed_fields:\n            if fname in build_config:\n                build_config[fname][\"show\"] = fname in visible\n\n        if selected_fn == \"AI_MULTI_EMBED\" and \"embed_model\" in build_config:\n            build_config[\"embed_model\"][\"value\"] = \"twelvelabs-marengo-embed-3-0\"\n\n        if \"stage_selector\" in visible:\n            stg_resp = LIVE_BRIDGE.list_stages_for_context(flow_id=flow_id)\n            stg_items = stg_resp.get(\"stages\") or []\n            stg_opts = [\n                str(s.get(\"stage_fqn\") or f\"@{s.get('fqn')}\")\n                for s in stg_items\n                if isinstance(s, dict) and (s.get(\"stage_fqn\") or s.get(\"fqn\"))\n            ]\n            if not stg_opts:\n                stg_opts = [\"@SNOWFLAKE_LANGFLOW.CORE.SNOWFLAKE_LANGFLOW_STAGE\"]\n            if \"stage_selector\" in build_config:\n                build_config[\"stage_selector\"][\"options\"] = stg_opts\n                cur_stg = build_config[\"stage_selector\"].get(\"value\") or stg_opts[0]\n            else:\n                cur_stg = stg_opts[0]\n            if field_name == \"stage_selector\" and isinstance(field_value, str) and field_value.strip():\n                cur_stg = field_value.strip()\n\n            mfilter = (\n                field_value\n                if field_name == \"media_type_filter\" and isinstance(field_value, str)\n                else build_config.get(\"media_type_filter\", {}).get(\"value\")\n                or getattr(self, \"media_type_filter\", \"All Compatible\")\n            )\n            files_resp = LIVE_BRIDGE.list_stage_files(cur_stg)\n            file_opts = filter_stage_files_for_function(\n                files_resp.get(\"files\") or [],\n                ai_function=selected_fn,\n                media_type_filter=str(mfilter),\n            )\n            if \"stage_file_path\" in build_config:\n                build_config[\"stage_file_path\"][\"options\"] = file_opts\n            if \"second_stage_file_path\" in build_config:\n                build_config[\"second_stage_file_path\"][\"options\"] = file_opts\n\n        return build_config\n\n    def _build_sql(self) -> str:\n        cats_or_schema = (\n            getattr(self, \"categories_or_schema\", None)\n            or getattr(self, \"categories_csv\", None)\n            or getattr(self, \"instructions\", \"\")\n            or \"\"\n        )\n        return DomainAIFunctionEngine.build_task_specific_sql(\n            ai_function=self.ai_function or \"AI_CLASSIFY\",\n            input_text=self.input_text or \"\",\n            categories_or_schema=cats_or_schema,\n            source_lang=getattr(self, \"source_lang\", \"\") or \"\",\n            target_lang=getattr(self, \"target_lang\", None) or getattr(self, \"instructions\", \"it\") or \"it\",\n            pii_categories=getattr(self, \"pii_categories\", \"\") or \"\",\n            second_text_or_stage_file=getattr(self, \"second_text_or_stage_file\", \"\") or \"\",\n            model_for_count_tokens=getattr(self, \"model_for_count_tokens\", \"claude-sonnet-5-5\") or \"claude-sonnet-5-5\",\n            return_as_json=bool(getattr(self, \"return_as_json\", False)),\n            stage_selector=getattr(self, \"stage_selector\", \"\") or \"\",\n            stage_file_path=getattr(self, \"stage_file_path\", \"\") or \"\",\n            second_stage_file_path=getattr(self, \"second_stage_file_path\", \"\") or \"\",\n            batch_directory_mode=bool(getattr(self, \"batch_directory_mode\", False)),\n            return_error_details=bool(getattr(self, \"return_error_details\", False)),\n            transcribe_timestamp_granularity=getattr(self, \"transcribe_timestamp_granularity\", \"default\") or \"default\",\n            parse_document_mode=getattr(self, \"parse_document_mode\", \"LAYOUT\") or \"LAYOUT\",\n            parse_document_page_split=bool(getattr(self, \"parse_document_page_split\", False)),\n            embed_model=getattr(self, \"embed_model\", \"snowflake-arctic-embed-l-v2.0\") or \"snowflake-arctic-embed-l-v2.0\",\n            multi_embed_options_json=getattr(self, \"multi_embed_options_json\", \"\") or \"\",\n        )\n\n    def run_ai_function(self) -> Message:\n        stmt = self._build_sql()\n        res = _flow_component_execute_sql(stmt)\n        if not res.get(\"ok\"):\n            raise ValueError(res.get(\"message\", f\"{self.ai_function} execution failed\"))\n        rows = res.get(\"rows\", [])\n        if bool(getattr(self, \"batch_directory_mode\", False)):\n            return Message(text=json.dumps({\"rows\": rows, \"count\": len(rows)}, indent=2))\n        raw_val = plain_text_result(rows[0].get(\"RESULT\") if rows else \"\")\n        return Message(text=str(raw_val) if not isinstance(raw_val, (dict, list)) else json.dumps(raw_val))\n\n    def to_toolkit(self) -> list[Any]:\n        \"\"\"Tool Mode: one tool named after the configured AI function; the LLM supplies only the input text.\"\"\"\n        fn = str(self.ai_function or \"AI_CLASSIFY\").strip().upper()\n        cfg = str(getattr(self, \"categories_or_schema\", \"\") or \"\").strip()\n\n        def _invoke(input_text: str = \"\", **kwargs: Any) -> str:\n            text = input_text or kwargs.get(\"tool_input\") or kwargs.get(\"text\") or \"\"\n            if not str(text).strip():\n                raise ValueError(f\"{fn} tool call without input_text\")\n            self.input_text = str(text)\n            return str(self.run_ai_function().text)\n\n        return [\n            build_structured_tool(\n                name=f\"snowflake_{fn.lower()}\",\n                description=(\n                    f\"Run the Snowflake Cortex AI function {fn} on the given text under the active Snowflake role.\"\n                    + (f\" Configured categories / schema / instruction: {cfg}.\" if cfg else \"\")\n                ),\n                func=_invoke,\n                args_schema=AIFunctionToolSchema,\n                metadata={\"component\": \"SnowflakeAIFunction\", \"ai_function\": fn, \"tool_mode\": True},\n            )\n        ]\n\n    def run_telemetry(self) -> Data:\n        return Data(\n            data={\n                \"ai_function\": self.ai_function,\n                \"namespace\": \"DIRECT_AI_*\",\n                \"active_role\": LIVE_BRIDGE.active_role,\n                \"return_as_json\": bool(getattr(self, \"return_as_json\", False)),\n                \"batch_directory_mode\": bool(getattr(self, \"batch_directory_mode\", False)),\n                \"stage_selector\": getattr(self, \"stage_selector\", \"\") or \"\",\n                \"stage_file_path\": getattr(self, \"stage_file_path\", \"\") or \"\",\n                \"sql_preview\": self._build_sql(),\n            }\n        )\n"
+       },
+       "embed_model": {
+        "_input_type": "DropdownInput",
+        "advanced": false,
+        "api_editable": false,
+        "combobox": true,
+        "dialog_inputs": {},
+        "display_name": "Embedding Model (for AI_EMBED / AI_MULTI_EMBED)",
+        "dynamic": false,
+        "external_options": {},
+        "info": "",
+        "name": "embed_model",
+        "options": [
+         "snowflake-arctic-embed-l-v2.0",
+         "snowflake-arctic-embed-m-v2.0",
+         "voyage-multimodal-3",
+         "twelvelabs-marengo-embed-3-0"
+        ],
+        "options_metadata": [],
+        "override_skip": false,
+        "placeholder": "",
+        "required": false,
+        "show": false,
+        "title_case": false,
+        "toggle": false,
+        "tool_mode": false,
+        "trace_as_metadata": true,
+        "track_in_telemetry": true,
+        "type": "str",
+        "value": "snowflake-arctic-embed-l-v2.0"
+       },
+       "estimate_tokens": {
+        "_input_type": "BoolInput",
+        "advanced": true,
+        "api_editable": false,
+        "display_name": "Estimate Tokens via AI_COUNT_TOKENS",
+        "dynamic": false,
+        "info": "",
+        "list": false,
+        "list_add_label": "Add More",
+        "name": "estimate_tokens",
+        "override_skip": false,
+        "placeholder": "",
+        "required": false,
+        "show": true,
+        "title_case": false,
+        "tool_mode": false,
+        "trace_as_metadata": true,
+        "track_in_telemetry": true,
+        "type": "bool",
+        "value": true
+       },
+       "input_text": {
+        "_input_type": "MessageTextInput",
+        "advanced": false,
+        "api_editable": false,
+        "display_name": "Input Text",
+        "dynamic": false,
+        "info": "",
+        "input_types": [
+         "Message"
+        ],
+        "list": false,
+        "list_add_label": "Add More",
+        "load_from_db": false,
+        "name": "input_text",
+        "override_skip": false,
+        "placeholder": "",
+        "required": false,
+        "show": true,
+        "title_case": false,
+        "tool_mode": true,
+        "trace_as_input": true,
+        "trace_as_metadata": true,
+        "track_in_telemetry": false,
+        "type": "str",
+        "value": "Evaluate customer feedback or document content."
+       },
+       "media_type_filter": {
+        "_input_type": "DropdownInput",
+        "advanced": false,
+        "api_editable": false,
+        "combobox": false,
+        "dialog_inputs": {},
+        "display_name": "Stage Media Type Filter",
+        "dynamic": false,
+        "external_options": {},
+        "info": "",
+        "name": "media_type_filter",
+        "options": [
+         "All Compatible",
+         "Images (.jpg/.png/.webp/.gif/.bmp)",
+         "Audio (.mp3/.wav/.flac/.m4a/.ogg)",
+         "Video (.mp4/.mov/.webm/.mkv/.avi)",
+         "Documents (.pdf/.docx/.pptx)"
+        ],
+        "options_metadata": [],
+        "override_skip": false,
+        "placeholder": "",
+        "real_time_refresh": true,
+        "required": false,
+        "show": true,
+        "title_case": false,
+        "toggle": false,
+        "tool_mode": false,
+        "trace_as_metadata": true,
+        "track_in_telemetry": true,
+        "type": "str",
+        "value": "All Compatible"
+       },
+       "model_for_count_tokens": {
+        "_input_type": "StrInput",
+        "advanced": false,
+        "api_editable": false,
+        "display_name": "Model / Function Target for AI_COUNT_TOKENS",
+        "dynamic": false,
+        "info": "",
+        "list": false,
+        "list_add_label": "Add More",
+        "load_from_db": false,
+        "name": "model_for_count_tokens",
+        "override_skip": false,
+        "placeholder": "",
+        "required": false,
+        "show": false,
+        "title_case": false,
+        "tool_mode": false,
+        "trace_as_metadata": true,
+        "track_in_telemetry": false,
+        "type": "str",
+        "value": "claude-sonnet-5-5"
+       },
+       "multi_embed_options_json": {
+        "_input_type": "MultilineInput",
+        "advanced": false,
+        "ai_enabled": false,
+        "api_editable": false,
+        "copy_field": false,
+        "display_name": "AI_MULTI_EMBED Options JSON (start_sec, end_sec, embedding_options, embedding_scope, embedding_type)",
+        "dynamic": false,
+        "info": "",
+        "input_types": [
+         "Message"
+        ],
+        "list": false,
+        "list_add_label": "Add More",
+        "load_from_db": false,
+        "multiline": true,
+        "name": "multi_embed_options_json",
+        "override_skip": false,
+        "password": false,
+        "placeholder": "",
+        "required": false,
+        "show": false,
+        "title_case": false,
+        "tool_mode": false,
+        "trace_as_input": true,
+        "trace_as_metadata": true,
+        "track_in_telemetry": false,
+        "type": "str",
+        "value": "{\"embedding_options\": [\"visual\", \"audio\", \"transcription\"], \"embedding_scope\": [\"clip\", \"asset\"]}"
+       },
+       "parse_document_mode": {
+        "_input_type": "DropdownInput",
+        "advanced": false,
+        "api_editable": false,
+        "combobox": false,
+        "dialog_inputs": {},
+        "display_name": "AI_PARSE_DOCUMENT Mode",
+        "dynamic": false,
+        "external_options": {},
+        "info": "",
+        "name": "parse_document_mode",
+        "options": [
+         "LAYOUT",
+         "OCR"
+        ],
+        "options_metadata": [],
+        "override_skip": false,
+        "placeholder": "",
+        "required": false,
+        "show": false,
+        "title_case": false,
+        "toggle": false,
+        "tool_mode": false,
+        "trace_as_metadata": true,
+        "track_in_telemetry": true,
+        "type": "str",
+        "value": "LAYOUT"
+       },
+       "parse_document_page_split": {
+        "_input_type": "BoolInput",
+        "advanced": false,
+        "api_editable": false,
+        "display_name": "AI_PARSE_DOCUMENT Page Split",
+        "dynamic": false,
+        "info": "",
+        "list": false,
+        "list_add_label": "Add More",
+        "name": "parse_document_page_split",
+        "override_skip": false,
+        "placeholder": "",
+        "required": false,
+        "show": false,
+        "title_case": false,
+        "tool_mode": false,
+        "trace_as_metadata": true,
+        "track_in_telemetry": true,
+        "type": "bool",
+        "value": false
+       },
+       "return_as_json": {
+        "_input_type": "BoolInput",
+        "advanced": false,
+        "api_editable": false,
+        "display_name": "Return as JSON Object (OBJECT_CONSTRUCT)",
+        "dynamic": false,
+        "info": "",
+        "list": false,
+        "list_add_label": "Add More",
+        "name": "return_as_json",
+        "override_skip": false,
+        "placeholder": "",
+        "required": false,
+        "show": true,
+        "title_case": false,
+        "tool_mode": false,
+        "trace_as_metadata": true,
+        "track_in_telemetry": true,
+        "type": "bool",
+        "value": true
+       },
+       "return_error_details": {
+        "_input_type": "BoolInput",
+        "advanced": false,
+        "api_editable": false,
+        "display_name": "Return Error Details",
+        "dynamic": false,
+        "info": "",
+        "list": false,
+        "list_add_label": "Add More",
+        "name": "return_error_details",
+        "override_skip": false,
+        "placeholder": "",
+        "required": false,
+        "show": false,
+        "title_case": false,
+        "tool_mode": false,
+        "trace_as_metadata": true,
+        "track_in_telemetry": true,
+        "type": "bool",
+        "value": false
+       },
+       "second_stage_file_path": {
+        "_input_type": "DropdownInput",
+        "advanced": false,
+        "api_editable": false,
+        "combobox": true,
+        "dialog_inputs": {},
+        "display_name": "Second Stage Media File (for AI_SIMILARITY Multi-File Comparison)",
+        "dynamic": false,
+        "external_options": {},
+        "info": "",
+        "name": "second_stage_file_path",
+        "options": [],
+        "options_metadata": [],
+        "override_skip": false,
+        "placeholder": "",
+        "real_time_refresh": true,
+        "required": false,
+        "show": false,
+        "title_case": false,
+        "toggle": false,
+        "tool_mode": false,
+        "trace_as_metadata": true,
+        "track_in_telemetry": true,
+        "type": "str",
+        "value": ""
+       },
+       "second_text_or_stage_file": {
+        "_input_type": "StrInput",
+        "advanced": false,
+        "api_editable": false,
+        "display_name": "Second Text (AI_SIMILARITY) or @Stage/File (AI_TRANSCRIBE / Multimodal)",
+        "dynamic": false,
+        "info": "",
+        "list": false,
+        "list_add_label": "Add More",
+        "load_from_db": false,
+        "name": "second_text_or_stage_file",
+        "override_skip": false,
+        "placeholder": "",
+        "required": false,
+        "show": true,
+        "title_case": false,
+        "tool_mode": false,
+        "trace_as_metadata": true,
+        "track_in_telemetry": false,
+        "type": "str",
+        "value": ""
+       },
+       "snowflake_context": {
+        "_input_type": "HandleInput",
+        "advanced": false,
+        "api_editable": false,
+        "display_name": "Snowflake Context",
+        "dynamic": false,
+        "info": "Optional connection from [ \u2744\ufe0f Context ] / Operations node.",
+        "input_types": [
+         "Data"
+        ],
+        "list": false,
+        "list_add_label": "Add More",
+        "name": "snowflake_context",
+        "override_skip": false,
+        "placeholder": "",
+        "required": false,
+        "show": true,
+        "title_case": false,
+        "trace_as_metadata": true,
+        "track_in_telemetry": false,
+        "type": "other",
+        "value": ""
+       },
+       "source_lang": {
+        "_input_type": "StrInput",
+        "advanced": false,
+        "api_editable": false,
+        "display_name": "Source Language (for AI_TRANSLATE, empty = auto)",
+        "dynamic": false,
+        "info": "",
+        "list": false,
+        "list_add_label": "Add More",
+        "load_from_db": false,
+        "name": "source_lang",
+        "override_skip": false,
+        "placeholder": "",
+        "required": false,
+        "show": false,
+        "title_case": false,
+        "tool_mode": false,
+        "trace_as_metadata": true,
+        "track_in_telemetry": false,
+        "type": "str",
+        "value": ""
+       },
+       "stage_file_path": {
+        "_input_type": "DropdownInput",
+        "advanced": false,
+        "api_editable": false,
+        "combobox": true,
+        "dialog_inputs": {},
+        "display_name": "Stage Media File (Relative Path)",
+        "dynamic": false,
+        "external_options": {},
+        "info": "Select a file from the Internal or External Stage for TO_FILE('@stage', 'path').",
+        "name": "stage_file_path",
+        "options": [],
+        "options_metadata": [],
+        "override_skip": false,
+        "placeholder": "",
+        "real_time_refresh": true,
+        "required": false,
+        "show": true,
+        "title_case": false,
+        "toggle": false,
+        "tool_mode": false,
+        "trace_as_metadata": true,
+        "track_in_telemetry": true,
+        "type": "str",
+        "value": ""
+       },
+       "stage_selector": {
+        "_input_type": "DropdownInput",
+        "advanced": false,
+        "api_editable": false,
+        "combobox": true,
+        "dialog_inputs": {},
+        "display_name": "Stage / Bucket (@Database.Schema.Stage)",
+        "dynamic": false,
+        "external_options": {},
+        "info": "Internal Stage (SNOWFLAKE_SSE / SNOWFLAKE_FULL) or External Stage (S3 / GCS / Azure / S3-Compatible).",
+        "name": "stage_selector",
+        "options": [
+         "@SNOWFLAKE_LANGFLOW.CORE.SNOWFLAKE_LANGFLOW_STAGE"
+        ],
+        "options_metadata": [],
+        "override_skip": false,
+        "placeholder": "",
+        "real_time_refresh": true,
+        "required": false,
+        "show": true,
+        "title_case": false,
+        "toggle": false,
+        "tool_mode": false,
+        "trace_as_metadata": true,
+        "track_in_telemetry": true,
+        "type": "str",
+        "value": "@SNOWFLAKE_LANGFLOW.CORE.SNOWFLAKE_LANGFLOW_STAGE"
+       },
+       "target_lang": {
+        "_input_type": "StrInput",
+        "advanced": false,
+        "api_editable": false,
+        "display_name": "Target Language (for AI_TRANSLATE)",
+        "dynamic": false,
+        "info": "",
+        "list": false,
+        "list_add_label": "Add More",
+        "load_from_db": false,
+        "name": "target_lang",
+        "override_skip": false,
+        "placeholder": "",
+        "required": false,
+        "show": false,
+        "title_case": false,
+        "tool_mode": false,
+        "trace_as_metadata": true,
+        "track_in_telemetry": false,
+        "type": "str",
+        "value": "it"
+       },
+       "transcribe_timestamp_granularity": {
+        "_input_type": "DropdownInput",
+        "advanced": false,
+        "api_editable": false,
+        "combobox": false,
+        "dialog_inputs": {},
+        "display_name": "AI_TRANSCRIBE Timestamp Granularity",
+        "dynamic": false,
+        "external_options": {},
+        "info": "",
+        "name": "transcribe_timestamp_granularity",
+        "options": [
+         "default",
+         "word",
+         "speaker"
+        ],
+        "options_metadata": [],
+        "override_skip": false,
+        "placeholder": "",
+        "required": false,
+        "show": false,
+        "title_case": false,
+        "toggle": false,
+        "tool_mode": false,
+        "trace_as_metadata": true,
+        "track_in_telemetry": true,
+        "type": "str",
+        "value": "default"
+       }
+      },
+      "tool_mode": false
+     },
+     "selected_output": "message"
+    }
+   },
+   {
+    "id": "SnowflakeDecision-X304",
+    "type": "genericNode",
+    "position": {
+     "x": 1000,
+     "y": 350
+    },
+    "data": {
+     "id": "SnowflakeDecision-X304",
+     "type": "SnowflakeDecision",
+     "node": {
+      "base_classes": [
+       "JSON",
+       "Message",
+       "Table"
+      ],
+      "beta": false,
+      "conditional_paths": [],
+      "custom_fields": {},
+      "description": "Official Snowflake Decision component powered by AI_COMPLETE with 'snowflake-decision-fast' (low latency, 2..16 choice options, 32k token limit) and 'snowflake-decision' (high accuracy, 2..32 choice options, 256 KiB limit), supporting choice, score (0..n-1), and noul questions (1..32 questions, max 256 total options), Single State & Table-Level Processing, and confidence-based routing.",
+      "display_name": "3 \u00b7 Decision \u00b7 how severe is it?",
+      "documentation": "",
+      "edited": false,
+      "field_order": [
+       "snowflake_context",
+       "model",
+       "evaluation_mode",
+       "state_input",
+       "database",
+       "schema_name",
+       "table_name",
+       "state_column",
+       "max_rows",
+       "question_type",
+       "question_id",
+       "question_instructions",
+       "question_criteria_json",
+       "include_none_of_these",
+       "questions_json",
+       "confidence_threshold",
+       "noul_threshold",
+       "return_error_details"
+      ],
+      "frozen": false,
+      "icon": "Snowflake",
+      "legacy": false,
+      "metadata": {
+       "code_hash": "40426b265f79",
+       "component_class_name": "SnowflakeDecisionComponent",
+       "dependencies": {
+        "dependencies": [
+         {
+          "name": "lfx_snowflake",
+          "version": null
+         },
+         {
+          "name": "lfx",
+          "version": "1.13.1"
+         }
+        ],
+        "total_dependencies": 2
+       },
+       "module": "lfx.components.llm_operations.snowflake_decision.SnowflakeDecisionComponent"
+      },
+      "minimized": false,
+      "output_types": [],
+      "outputs": [
+       {
+        "allows_loop": false,
+        "cache": true,
+        "display_name": "Decision Object (answers)",
+        "group_outputs": false,
+        "method": "run_decision",
+        "name": "decision_object",
+        "selected": "JSON",
+        "tool_mode": true,
+        "types": [
+         "JSON"
+        ],
+        "value": "__UNDEFINED__"
+       },
+       {
+        "allows_loop": false,
+        "cache": true,
+        "display_name": "Automated Action Route (High Confidence)",
+        "group_outputs": true,
+        "method": "route_high_confidence",
+        "name": "high_confidence_route",
+        "selected": "JSON",
+        "tool_mode": true,
+        "types": [
+         "JSON"
+        ],
+        "value": "__UNDEFINED__"
+       },
+       {
+        "allows_loop": false,
+        "cache": true,
+        "display_name": "Human Review / Fallback Route (Low Confidence)",
+        "group_outputs": true,
+        "method": "route_low_confidence",
+        "name": "low_confidence_route",
+        "selected": "JSON",
+        "tool_mode": true,
+        "types": [
+         "JSON"
+        ],
+        "value": "__UNDEFINED__"
+       },
+       {
+        "allows_loop": false,
+        "cache": true,
+        "display_name": "Summary (text)",
+        "group_outputs": false,
+        "method": "run_summary",
+        "name": "summary",
+        "selected": "Message",
+        "tool_mode": true,
+        "types": [
+         "Message"
+        ],
+        "value": "__UNDEFINED__"
+       },
+       {
+        "allows_loop": false,
+        "cache": true,
+        "display_name": "Table Decisions (DataFrame)",
+        "group_outputs": false,
+        "method": "run_table_decisions",
+        "name": "table_decisions",
+        "selected": "Table",
+        "tool_mode": true,
+        "types": [
+         "Table"
+        ],
+        "value": "__UNDEFINED__"
+       }
+      ],
+      "pinned": false,
+      "template": {
+       "_type": "Component",
+       "code": {
+        "advanced": true,
+        "api_editable": false,
+        "dynamic": true,
+        "fileTypes": [],
+        "file_path": "",
+        "info": "",
+        "list": false,
+        "load_from_db": false,
+        "multiline": true,
+        "name": "code",
+        "password": false,
+        "placeholder": "",
+        "required": true,
+        "show": true,
+        "title_case": false,
+        "type": "code",
+        "value": "from __future__ import annotations\n\nimport json\nfrom typing import Any\n\nimport lfx_snowflake._lfx_compat  # noqa: F401\nfrom lfx.custom import Component\nfrom lfx.io import (\n    BoolInput,\n    DropdownInput,\n    FloatInput,\n    HandleInput,\n    IntInput,\n    MessageTextInput,\n    MultilineInput,\n    Output,\n    StrInput,\n)\nfrom lfx.schema import Data, DataFrame\nfrom lfx.schema.message import Message\n\nfrom lfx_snowflake.components.llm_operations import (\n    DECISION_EVALUATION_MODES,\n    SUPPORTED_DECISION_MODELS,\n    SUPPORTED_DECISION_QUESTION_TYPES,\n    SnowflakeDecisionEngine,\n)\nfrom lfx_snowflake.context_helpers import _resolve_flow_id\nfrom lfx_snowflake.fastapi_live_bridge import LIVE_BRIDGE\nfrom lfx_snowflake.flow_context_guard import flow_component_sql as _flow_component_sql\nfrom lfx_snowflake.flow_context_guard import raise_if_flow_context_denied as _raise_if_flow_context_denied\n\n\ndef _flow_component_execute_sql(*args, **kwargs):\n    \"\"\"BUG-CTX-03: this component's SQL is checked against the flow's `[ \u2744\ufe0f Context ]`.\"\"\"\n    with _flow_component_sql():\n        # E2E T1: a guard refusal surfaces as a component error carrying AUTHZ_OBJECT_NOT_IN_FLOW_CONTEXT.\n        return _raise_if_flow_context_denied(LIVE_BRIDGE.execute_sql(*args, **kwargs))\n\n\nDEFAULT_SUPPORT_TICKET_QUESTIONS = json.dumps(\n    {\n        \"department\": {\n            \"type\": \"choice\",\n            \"instructions\": \"Which team should handle this?\",\n            \"criteria\": {\n                \"billing\": \"Payment, invoice, or subscription issues\",\n                \"technical_support\": \"Product bugs, outages, or configuration issues\",\n                \"account_management\": \"Contract upgrades, renewals, or seat changes\",\n                \"none_of_these\": \"None of the listed options apply or not stated in the input.\",\n            },\n        },\n        \"frustration\": {\n            \"type\": \"score\",\n            \"instructions\": \"How frustrated the customer appears\",\n            \"criteria\": [\n                \"Calm\",\n                \"Frustrated but civil\",\n                \"Very angry\",\n            ],\n        },\n        \"is_urgent\": {\n            \"type\": \"noul\",\n            \"instructions\": \"The message conveys urgency\",\n            \"criteria\": {\n                \"true\": \"Customer reports a blocker, production outage, or immediate deadline\",\n                \"false\": \"Routine inquiry without time-critical impact\",\n            },\n        },\n    },\n    indent=2,\n)\n\n\ndef _decision_databases(flow_id: str | None = None) -> list[str]:\n    return LIVE_BRIDGE.get_context_databases(flow_id=flow_id or _resolve_flow_id())\n\n\ndef _decision_schemas(database: str | None = None, flow_id: str | None = None) -> list[str]:\n    return LIVE_BRIDGE.get_context_schemas(database, flow_id=flow_id or _resolve_flow_id())\n\n\ndef _decision_tables(\n    database: str | None = None,\n    schema: str | None = None,\n    flow_id: str | None = None,\n) -> list[str]:\n    eff_fid = flow_id or _resolve_flow_id()\n    items: list[str] = []\n    for cat in (\"tables\", \"views\"):\n        for t in LIVE_BRIDGE.get_context_objects(database, schema, cat, flow_id=eff_fid):\n            if t not in items:\n                items.append(t)\n    if \"SUPPORT_TICKETS\" not in items:\n        items.append(\"SUPPORT_TICKETS\")\n    return items\n\n\nclass SnowflakeDecisionComponent(Component):\n    display_name = \"Decision\"\n    description = (\n        \"Official Snowflake Decision component powered by AI_COMPLETE with 'snowflake-decision-fast' \"\n        \"(low latency, 2..16 choice options, 32k token limit) and 'snowflake-decision' \"\n        \"(high accuracy, 2..32 choice options, 256 KiB limit), supporting choice, score (0..n-1), \"\n        \"and noul questions (1..32 questions, max 256 total options), Single State & Table-Level \"\n        \"Processing, and confidence-based routing.\"\n    )\n    icon = \"Snowflake\"\n    name = \"SnowflakeDecision\"\n    legacy_name = \"snowflake-decision\"\n\n    inputs = [\n        HandleInput(\n            name=\"snowflake_context\",\n            display_name=\"Snowflake Context (Optional Override)\",\n            input_types=[\"Data\"],\n            required=False,\n            advanced=True,\n        ),\n        DropdownInput(\n            name=\"model\",\n            display_name=\"Decision Model\",\n            options=list(SUPPORTED_DECISION_MODELS),\n            value=\"snowflake-decision-fast\",\n            real_time_refresh=True,\n            info=(\n                \"Select 'snowflake-decision-fast' (default, 2..16 choice options, 32k token limit) \"\n                \"or 'snowflake-decision' (high accuracy, 2..32 choice options, 256 KiB JSON limit).\"\n            ),\n        ),\n        DropdownInput(\n            name=\"evaluation_mode\",\n            display_name=\"Evaluation Mode\",\n            options=list(DECISION_EVALUATION_MODES),\n            value=\"Single State (Text / JSON Input)\",\n            real_time_refresh=True,\n        ),\n        MessageTextInput(\n            name=\"state_input\",\n            display_name=\"State Input (Text or JSON Object)\",\n            value=\"Our production billing pipeline failed after invoice #42 and we need urgent technical_support.\",\n            show=True,\n        ),\n        DropdownInput(\n            name=\"database\",\n            display_name=\"Database (Table Mode)\",\n            options=_decision_databases(),\n            value=\"SNOWFLAKE_LANGFLOW\",\n            real_time_refresh=True,\n            combobox=True,\n            show=False,\n        ),\n        DropdownInput(\n            name=\"schema_name\",\n            display_name=\"Schema (Table Mode)\",\n            options=_decision_schemas(\"SNOWFLAKE_LANGFLOW\"),\n            value=\"CORE\",\n            real_time_refresh=True,\n            combobox=True,\n            show=False,\n        ),\n        DropdownInput(\n            name=\"table_name\",\n            display_name=\"Table / View (Table Mode)\",\n            options=_decision_tables(\"SNOWFLAKE_LANGFLOW\", \"CORE\"),\n            value=\"SUPPORT_TICKETS\",\n            real_time_refresh=True,\n            combobox=True,\n            show=False,\n        ),\n        StrInput(\n            name=\"state_column\",\n            display_name=\"State Column Name (Table Mode)\",\n            value=\"ticket_text\",\n            show=False,\n        ),\n        IntInput(\n            name=\"max_rows\",\n            display_name=\"Max Rows (Table Mode)\",\n            value=100,\n            show=False,\n        ),\n        DropdownInput(\n            name=\"question_type\",\n            display_name=\"Primary Question Type\",\n            options=list(SUPPORTED_DECISION_QUESTION_TYPES),\n            value=\"choice\",\n            real_time_refresh=True,\n            info=\"Question type: 'choice' (finite options), 'score' (2..10 ordered rubric levels 0..n-1), or 'noul' (probability ~0.08\u20130.92).\",\n        ),\n        StrInput(\n            name=\"question_id\",\n            display_name=\"Primary Question ID (1..64 chars)\",\n            value=\"department\",\n        ),\n        MultilineInput(\n            name=\"question_instructions\",\n            display_name=\"Primary Question Instructions\",\n            value=\"Which team should handle this?\",\n        ),\n        MultilineInput(\n            name=\"question_criteria_json\",\n            display_name=\"Primary Question Criteria JSON\",\n            value=json.dumps(\n                {\n                    \"billing\": \"Payment, invoice, or subscription issues\",\n                    \"technical_support\": \"Product bugs, outages, or configuration issues\",\n                    \"account_management\": \"Contract upgrades, renewals, or seat changes\",\n                },\n                indent=2,\n            ),\n        ),\n        BoolInput(\n            name=\"include_none_of_these\",\n            display_name=\"Include 'none_of_these' / 'not_stated' option\",\n            value=True,\n            info=\"Recommended by Snowflake Decision documentation for 'choice' questions.\",\n        ),\n        MultilineInput(\n            name=\"questions_json\",\n            display_name=\"Multi-Question Payload JSON (1..32 Questions, max 256 Total Options)\",\n            value=DEFAULT_SUPPORT_TICKET_QUESTIONS,\n            info=(\n                \"Define 1..32 independent questions ('choice', 'score', 'noul') evaluated in a single AI_COMPLETE call. \"\n                \"When non-empty, this multi-question object is used.\"\n            ),\n        ),\n        FloatInput(\n            name=\"confidence_threshold\",\n            display_name=\"Confidence Threshold (choice / score)\",\n            value=0.70,\n            info=\"Normalized confidence threshold using (n * p_max - 1) / (n - 1).\",\n        ),\n        FloatInput(\n            name=\"noul_threshold\",\n            display_name=\"Noul Probability Threshold (<= 0.92)\",\n            value=0.70,\n            info=\"Noul probabilities stay within ~0.08\u20130.92; thresholds above 0.92 are rejected.\",\n        ),\n        BoolInput(\n            name=\"return_error_details\",\n            display_name=\"Return Error Details (return_error_details => TRUE)\",\n            value=True,\n        ),\n    ]\n\n    outputs = [\n        Output(\n            display_name=\"Decision Object (answers)\",\n            name=\"decision_object\",\n            method=\"run_decision\",\n        ),\n        Output(\n            display_name=\"Automated Action Route (High Confidence)\",\n            name=\"high_confidence_route\",\n            method=\"route_high_confidence\",\n            # BUG-LLMOP-002: one port per route (Langflow If-Else pattern) so each branch is wired separately\n            # and self.stop() deactivates only the inactive one.\n            group_outputs=True,\n        ),\n        Output(\n            display_name=\"Human Review / Fallback Route (Low Confidence)\",\n            name=\"low_confidence_route\",\n            method=\"route_low_confidence\",\n            # BUG-LLMOP-002: one port per route (Langflow If-Else pattern) so each branch is wired separately\n            # and self.stop() deactivates only the inactive one.\n            group_outputs=True,\n        ),\n        Output(\n            display_name=\"Summary (text)\",\n            name=\"summary\",\n            method=\"run_summary\",\n        ),\n        Output(\n            display_name=\"Table Decisions (DataFrame)\",\n            name=\"table_decisions\",\n            method=\"run_table_decisions\",\n        ),\n    ]\n\n    def update_build_config(\n        self, build_config: dict[str, Any], field_value: Any, field_name: str | None = None\n    ) -> dict[str, Any]:\n        flow_id = _resolve_flow_id(self, build_config)\n        if \"model\" in build_config:\n            build_config[\"model\"][\"options\"] = list(SUPPORTED_DECISION_MODELS)\n            cur_m = build_config[\"model\"].get(\"value\")\n            if field_name == \"model\" and field_value in SUPPORTED_DECISION_MODELS:\n                build_config[\"model\"][\"value\"] = field_value\n            elif cur_m not in SUPPORTED_DECISION_MODELS:\n                build_config[\"model\"][\"value\"] = \"snowflake-decision-fast\"\n\n        eval_mode = (\n            field_value\n            if field_name == \"evaluation_mode\" and isinstance(field_value, str)\n            else build_config.get(\"evaluation_mode\", {}).get(\"value\")\n            or getattr(self, \"evaluation_mode\", \"Single State (Text / JSON Input)\")\n        )\n        is_table_mode = eval_mode == \"Table-Level Processing (Database.Schema.Table)\"\n\n        if \"state_input\" in build_config:\n            build_config[\"state_input\"][\"show\"] = not is_table_mode\n        for tbl_field in (\"database\", \"schema_name\", \"table_name\", \"state_column\", \"max_rows\"):\n            if tbl_field in build_config:\n                build_config[tbl_field][\"show\"] = is_table_mode\n\n        if \"database\" in build_config:\n            build_config[\"database\"][\"options\"] = _decision_databases(flow_id=flow_id)\n        db = (\n            field_value\n            if field_name == \"database\" and isinstance(field_value, str)\n            else build_config.get(\"database\", {}).get(\"value\") or getattr(self, \"database\", \"SNOWFLAKE_LANGFLOW\")\n        )\n        schemas = _decision_schemas(db, flow_id=flow_id)\n        if \"schema_name\" in build_config:\n            build_config[\"schema_name\"][\"options\"] = schemas\n        sch = (\n            field_value\n            if field_name == \"schema_name\" and isinstance(field_value, str)\n            else build_config.get(\"schema_name\", {}).get(\"value\") or (schemas[0] if schemas else \"CORE\")\n        )\n        if \"table_name\" in build_config:\n            build_config[\"table_name\"][\"options\"] = _decision_tables(db, sch, flow_id=flow_id)\n\n        qtype = (\n            field_value\n            if field_name == \"question_type\" and isinstance(field_value, str)\n            else build_config.get(\"question_type\", {}).get(\"value\") or getattr(self, \"question_type\", \"choice\")\n        )\n        if \"include_none_of_these\" in build_config:\n            build_config[\"include_none_of_these\"][\"show\"] = qtype == \"choice\"\n\n        if field_name == \"noul_threshold\" and \"noul_threshold\" in build_config:\n            raw_nt = float(field_value) if field_value is not None else 0.70\n            if raw_nt > SnowflakeDecisionEngine.MAX_NOUL_THRESHOLD:\n                build_config[\"noul_threshold\"][\"value\"] = SnowflakeDecisionEngine.MAX_NOUL_THRESHOLD\n\n        return build_config\n\n    def _resolve_questions(self) -> dict[str, Any]:\n        raw_multi = getattr(self, \"questions_json\", None)\n        if isinstance(raw_multi, dict) and raw_multi:\n            return raw_multi\n        if isinstance(raw_multi, str) and raw_multi.strip():\n            parsed = json.loads(raw_multi)\n            if isinstance(parsed, dict) and parsed:\n                return parsed\n\n        qid = (getattr(self, \"question_id\", \"department\") or \"department\").strip()\n        qtype = (getattr(self, \"question_type\", \"choice\") or \"choice\").strip().lower()\n        instr = (getattr(self, \"question_instructions\", \"Which team should handle this?\") or \"\").strip()\n        raw_crit = getattr(self, \"question_criteria_json\", None)\n        crit = json.loads(raw_crit) if isinstance(raw_crit, str) and raw_crit.strip() else raw_crit\n        entry: dict[str, Any] = {\n            \"type\": qtype,\n            \"instructions\": instr,\n        }\n        if crit is not None:\n            entry[\"criteria\"] = crit\n        return {qid: entry}\n\n    def _decision_inputs(self) -> dict[str, Any]:\n        raw_state = getattr(self, \"state_input\", None)\n        if raw_state is None:\n            raw_state = getattr(self, \"input_context\", \"\")\n        if isinstance(raw_state, str) and raw_state.strip().startswith(\"{\") and raw_state.strip().endswith(\"}\"):\n            state_val: Any = json.loads(raw_state)\n        else:\n            state_val = raw_state or \"\"\n\n        questions = self._resolve_questions()\n        return dict(\n            model=getattr(self, \"model\", \"snowflake-decision-fast\") or \"snowflake-decision-fast\",\n            state=state_val,\n            questions=questions,\n            evaluation_mode=getattr(self, \"evaluation_mode\", \"Single State (Text / JSON Input)\")\n            or \"Single State (Text / JSON Input)\",\n            include_none_of_these=bool(getattr(self, \"include_none_of_these\", True)),\n            confidence_threshold=float(getattr(self, \"confidence_threshold\", 0.70) or 0.70),\n            noul_threshold=float(getattr(self, \"noul_threshold\", 0.70) or 0.70),\n            return_error_details=bool(getattr(self, \"return_error_details\", True)),\n            database=getattr(self, \"database\", \"SNOWFLAKE_LANGFLOW\") or \"SNOWFLAKE_LANGFLOW\",\n            schema=getattr(self, \"schema_name\", \"CORE\") or \"CORE\",\n            table_name=getattr(self, \"table_name\", \"SUPPORT_TICKETS\") or \"SUPPORT_TICKETS\",\n            state_column=getattr(self, \"state_column\", \"ticket_text\") or \"ticket_text\",\n            max_rows=int(getattr(self, \"max_rows\", 100) or 100),\n            active_role=LIVE_BRIDGE.active_role,\n        )\n\n    def _reset_decision_cache(self) -> None:\n        \"\"\"Drop the cached execution (call at the start of a new build; PASSO 6 routing hooks here).\"\"\"\n        self.__dict__.pop(\"_decision_cache\", None)\n\n    def _compute(self) -> dict[str, Any]:\n        \"\"\"Run AI_COMPLETE once per build and share the result with every output port (BUG-LLMOP-001).\n\n        The cache key is the full set of decision inputs, so all ports of one build read the same\n        execution and a changed input forces a fresh call. Answers and routing come only from the\n        real Snowflake result; any failure raises (no heuristic fallback).\n        \"\"\"\n        inputs = self._decision_inputs()\n        key = json.dumps(inputs, sort_keys=True, default=str)\n        cached = self.__dict__.get(\"_decision_cache\")\n        if cached and cached[0] == key:\n            return cached[1]\n        res = SnowflakeDecisionEngine.evaluate_decision(**inputs, executor=_flow_component_execute_sql)\n        self.__dict__[\"_decision_cache\"] = (key, res)\n        return res\n\n    def run_decision(self) -> Data:\n        return Data(data=dict(self._compute()))\n\n    @staticmethod\n    def summarize_answers(answers: dict[str, Any]) -> str:\n        \"\"\"One readable line per question, for a prompt or a chat message.\"\"\"\n        lines = []\n        for qid, ans in (answers or {}).items():\n            if not isinstance(ans, dict):\n                lines.append(f\"{qid}: {ans}\")\n                continue\n            conf = ans.get(\"confidence\")\n            tail = f\" (confidence {float(conf):.2f})\" if isinstance(conf, (int, float)) else \"\"\n            if isinstance(ans.get(\"score\"), (int, float)):\n                legend = ans.get(\"legend\") if isinstance(ans.get(\"legend\"), dict) else {}\n                top = max(len(legend) - 1, 0)\n                level = legend.get(str(int(round(float(ans[\"score\"])))))\n                scale = f\" out of {top}\" if top else \"\"\n                closest = f' - closest level: \"{level}\"' if level else \"\"\n                lines.append(f\"{qid}: {float(ans['score']):.2f}{scale}{closest}{tail}\")\n            elif \"choice\" in ans:\n                lines.append(f\"{qid}: {ans.get('choice')}{tail}\")\n            elif isinstance(ans.get(\"noul\"), (int, float)):\n                lines.append(f\"{qid}: probability {float(ans['noul']):.2f}\")\n            else:\n                lines.append(f\"{qid}: {json.dumps(ans, default=str)}\")\n        return \"\\n\".join(lines)\n\n    def run_summary(self) -> Message:\n        return Message(text=self.summarize_answers(dict(self._compute().get(\"answers\") or {})))\n\n    def _stop_route(self, output_name: str) -> None:\n        \"\"\"BUG-LLMOP-002/003: Langflow If-Else pattern; only the active branch's downstream runs.\n\n        The route comes from the cached ``_compute()`` result (one AI_COMPLETE call per build) and the\n        confidence Snowflake returns.\"\"\"\n        stop = getattr(self, \"stop\", None)\n        if callable(stop) and getattr(self, \"_vertex\", None) is not None:  # standalone builds have no graph\n            stop(output_name)\n\n    def route_high_confidence(self) -> Data:\n        res = self._compute()\n        if not res[\"high_confidence\"]:\n            self._stop_route(\"high_confidence_route\")\n            return Data(data={\"active\": False, \"route\": \"low_confidence\", \"skipped\": True, \"decision\": res})\n        self._stop_route(\"low_confidence_route\")\n        return Data(data={\"active\": True, \"route\": \"high_confidence\", **res})\n\n    def route_low_confidence(self) -> Data:\n        res = self._compute()\n        if res[\"high_confidence\"]:\n            self._stop_route(\"low_confidence_route\")\n            return Data(data={\"active\": False, \"route\": \"high_confidence\", \"skipped\": True, \"decision\": res})\n        self._stop_route(\"high_confidence_route\")\n        return Data(data={\"active\": True, \"route\": \"low_confidence\", **res})\n\n    def run_table_decisions(self) -> DataFrame:\n        res = self._compute()\n        rows = res.get(\"rows\")\n        if not isinstance(rows, list):\n            raise ValueError(\"Table-level decisions require evaluation_mode 'Table-Level Processing (Database.Schema.Table)'.\")\n        return DataFrame(rows)\n\n    def get_decision_json(self) -> Message:\n        return Message(text=json.dumps(self._compute(), indent=2, default=str))\n\n    def get_selected_branch(self) -> Message:\n        res = self._compute()\n        return Message(text=str(res[\"selected_branch\"]))\n\n    def get_audit_record(self) -> Data:\n        res = self._compute()\n        return Data(\n            data={\n                \"component\": \"snowflake-decision\",\n                \"active_role\": LIVE_BRIDGE.active_role,\n                \"context_epoch\": LIVE_BRIDGE.context_epoch,\n                \"model\": res[\"model\"],\n                \"decision\": res[\"decision\"],\n                \"confidence\": res[\"confidence\"],\n                \"selected_branch\": res[\"selected_branch\"],\n                \"policy_action\": res[\"policy_action\"],\n                \"answers\": res[\"answers\"],\n                \"sql_preview\": res[\"sql_preview\"],\n            }\n        )\n"
+       },
+       "confidence_threshold": {
+        "_input_type": "FloatInput",
+        "advanced": false,
+        "api_editable": false,
+        "display_name": "Confidence Threshold (choice / score)",
+        "dynamic": false,
+        "info": "Normalized confidence threshold using (n * p_max - 1) / (n - 1).",
+        "list": false,
+        "list_add_label": "Add More",
+        "name": "confidence_threshold",
+        "override_skip": false,
+        "placeholder": "",
+        "required": false,
+        "show": true,
+        "title_case": false,
+        "tool_mode": false,
+        "trace_as_metadata": true,
+        "track_in_telemetry": true,
+        "type": "float",
+        "value": 0.6
+       },
+       "database": {
+        "_input_type": "DropdownInput",
+        "advanced": false,
+        "api_editable": false,
+        "combobox": true,
+        "dialog_inputs": {},
+        "display_name": "Database (Table Mode)",
+        "dynamic": false,
+        "external_options": {},
+        "info": "",
+        "name": "database",
+        "options": [
+         "SNOWFLAKE_LANGFLOW"
+        ],
+        "options_metadata": [],
+        "override_skip": false,
+        "placeholder": "",
+        "real_time_refresh": true,
+        "required": false,
+        "show": false,
+        "title_case": false,
+        "toggle": false,
+        "tool_mode": false,
+        "trace_as_metadata": true,
+        "track_in_telemetry": true,
+        "type": "str",
+        "value": "SNOWFLAKE_LANGFLOW"
+       },
+       "evaluation_mode": {
+        "_input_type": "DropdownInput",
+        "advanced": false,
+        "api_editable": false,
+        "combobox": false,
+        "dialog_inputs": {},
+        "display_name": "Evaluation Mode",
+        "dynamic": false,
+        "external_options": {},
+        "info": "",
+        "name": "evaluation_mode",
+        "options": [
+         "Single State (Text / JSON Input)",
+         "Table-Level Processing (Database.Schema.Table)"
+        ],
+        "options_metadata": [],
+        "override_skip": false,
+        "placeholder": "",
+        "real_time_refresh": true,
+        "required": false,
+        "show": true,
+        "title_case": false,
+        "toggle": false,
+        "tool_mode": false,
+        "trace_as_metadata": true,
+        "track_in_telemetry": true,
+        "type": "str",
+        "value": "Single State (Text / JSON Input)"
+       },
+       "include_none_of_these": {
+        "_input_type": "BoolInput",
+        "advanced": false,
+        "api_editable": false,
+        "display_name": "Include 'none_of_these' / 'not_stated' option",
+        "dynamic": false,
+        "info": "Recommended by Snowflake Decision documentation for 'choice' questions.",
+        "list": false,
+        "list_add_label": "Add More",
+        "name": "include_none_of_these",
+        "override_skip": false,
+        "placeholder": "",
+        "required": false,
+        "show": true,
+        "title_case": false,
+        "tool_mode": false,
+        "trace_as_metadata": true,
+        "track_in_telemetry": true,
+        "type": "bool",
+        "value": false
+       },
+       "max_rows": {
+        "_input_type": "IntInput",
+        "advanced": false,
+        "api_editable": false,
+        "display_name": "Max Rows (Table Mode)",
+        "dynamic": false,
+        "info": "",
+        "list": false,
+        "list_add_label": "Add More",
+        "name": "max_rows",
+        "override_skip": false,
+        "placeholder": "",
+        "required": false,
+        "show": false,
+        "title_case": false,
+        "tool_mode": false,
+        "trace_as_metadata": true,
+        "track_in_telemetry": true,
+        "type": "int",
+        "value": 100
+       },
+       "model": {
+        "_input_type": "DropdownInput",
+        "advanced": false,
+        "api_editable": false,
+        "combobox": false,
+        "dialog_inputs": {},
+        "display_name": "Decision Model",
+        "dynamic": false,
+        "external_options": {},
+        "info": "Select 'snowflake-decision-fast' (default, 2..16 choice options, 32k token limit) or 'snowflake-decision' (high accuracy, 2..32 choice options, 256 KiB JSON limit).",
+        "name": "model",
+        "options": [
+         "snowflake-decision-fast",
+         "snowflake-decision"
+        ],
+        "options_metadata": [],
+        "override_skip": false,
+        "placeholder": "",
+        "real_time_refresh": true,
+        "required": false,
+        "show": true,
+        "title_case": false,
+        "toggle": false,
+        "tool_mode": false,
+        "trace_as_metadata": true,
+        "track_in_telemetry": true,
+        "type": "str",
+        "value": "snowflake-decision-fast"
+       },
+       "noul_threshold": {
+        "_input_type": "FloatInput",
+        "advanced": false,
+        "api_editable": false,
+        "display_name": "Noul Probability Threshold (<= 0.92)",
+        "dynamic": false,
+        "info": "Noul probabilities stay within ~0.08\u20130.92; thresholds above 0.92 are rejected.",
+        "list": false,
+        "list_add_label": "Add More",
+        "name": "noul_threshold",
+        "override_skip": false,
+        "placeholder": "",
+        "required": false,
+        "show": true,
+        "title_case": false,
+        "tool_mode": false,
+        "trace_as_metadata": true,
+        "track_in_telemetry": true,
+        "type": "float",
+        "value": 0.7
+       },
+       "question_criteria_json": {
+        "_input_type": "MultilineInput",
+        "advanced": false,
+        "ai_enabled": false,
+        "api_editable": false,
+        "copy_field": false,
+        "display_name": "Primary Question Criteria JSON",
+        "dynamic": false,
+        "info": "",
+        "input_types": [
+         "Message"
+        ],
+        "list": false,
+        "list_add_label": "Add More",
+        "load_from_db": false,
+        "multiline": true,
+        "name": "question_criteria_json",
+        "override_skip": false,
+        "password": false,
+        "placeholder": "",
+        "required": false,
+        "show": true,
+        "title_case": false,
+        "tool_mode": false,
+        "trace_as_input": true,
+        "trace_as_metadata": true,
+        "track_in_telemetry": false,
+        "type": "str",
+        "value": "{\n  \"billing\": \"Payment, invoice, or subscription issues\",\n  \"technical_support\": \"Product bugs, outages, or configuration issues\",\n  \"account_management\": \"Contract upgrades, renewals, or seat changes\"\n}"
+       },
+       "question_id": {
+        "_input_type": "StrInput",
+        "advanced": false,
+        "api_editable": false,
+        "display_name": "Primary Question ID (1..64 chars)",
+        "dynamic": false,
+        "info": "",
+        "list": false,
+        "list_add_label": "Add More",
+        "load_from_db": false,
+        "name": "question_id",
+        "override_skip": false,
+        "placeholder": "",
+        "required": false,
+        "show": true,
+        "title_case": false,
+        "tool_mode": false,
+        "trace_as_metadata": true,
+        "track_in_telemetry": false,
+        "type": "str",
+        "value": "department"
+       },
+       "question_instructions": {
+        "_input_type": "MultilineInput",
+        "advanced": false,
+        "ai_enabled": false,
+        "api_editable": false,
+        "copy_field": false,
+        "display_name": "Primary Question Instructions",
+        "dynamic": false,
+        "info": "",
+        "input_types": [
+         "Message"
+        ],
+        "list": false,
+        "list_add_label": "Add More",
+        "load_from_db": false,
+        "multiline": true,
+        "name": "question_instructions",
+        "override_skip": false,
+        "password": false,
+        "placeholder": "",
+        "required": false,
+        "show": true,
+        "title_case": false,
+        "tool_mode": false,
+        "trace_as_input": true,
+        "trace_as_metadata": true,
+        "track_in_telemetry": false,
+        "type": "str",
+        "value": "Which team should handle this?"
+       },
+       "question_type": {
+        "_input_type": "DropdownInput",
+        "advanced": false,
+        "api_editable": false,
+        "combobox": false,
+        "dialog_inputs": {},
+        "display_name": "Primary Question Type",
+        "dynamic": false,
+        "external_options": {},
+        "info": "Question type: 'choice' (finite options), 'score' (2..10 ordered rubric levels 0..n-1), or 'noul' (probability ~0.08\u20130.92).",
+        "name": "question_type",
+        "options": [
+         "choice",
+         "score",
+         "noul"
+        ],
+        "options_metadata": [],
+        "override_skip": false,
+        "placeholder": "",
+        "real_time_refresh": true,
+        "required": false,
+        "show": true,
+        "title_case": false,
+        "toggle": false,
+        "tool_mode": false,
+        "trace_as_metadata": true,
+        "track_in_telemetry": true,
+        "type": "str",
+        "value": "choice"
+       },
+       "questions_json": {
+        "_input_type": "MultilineInput",
+        "advanced": false,
+        "ai_enabled": false,
+        "api_editable": false,
+        "copy_field": false,
+        "display_name": "Multi-Question Payload JSON (1..32 Questions, max 256 Total Options)",
+        "dynamic": false,
+        "info": "Define 1..32 independent questions ('choice', 'score', 'noul') evaluated in a single AI_COMPLETE call. When non-empty, this multi-question object is used.",
+        "input_types": [
+         "Message"
+        ],
+        "list": false,
+        "list_add_label": "Add More",
+        "load_from_db": false,
+        "multiline": true,
+        "name": "questions_json",
+        "override_skip": false,
+        "password": false,
+        "placeholder": "",
+        "required": false,
+        "show": true,
+        "title_case": false,
+        "tool_mode": false,
+        "trace_as_input": true,
+        "trace_as_metadata": true,
+        "track_in_telemetry": false,
+        "type": "str",
+        "value": "{\n  \"severity\": {\n    \"type\": \"choice\",\n    \"instructions\": \"How severe is the fault described in this message?\",\n    \"criteria\": {\n      \"critical\": \"production is stopped or people are at risk\",\n      \"high\": \"a safety device or a key machine misbehaves but production still runs\",\n      \"medium\": \"a fault that needs repeated manual work or will get worse\",\n      \"low\": \"a minor annoyance, no hurry\"\n    }\n  }\n}"
+       },
+       "return_error_details": {
+        "_input_type": "BoolInput",
+        "advanced": false,
+        "api_editable": false,
+        "display_name": "Return Error Details (return_error_details => TRUE)",
+        "dynamic": false,
+        "info": "",
+        "list": false,
+        "list_add_label": "Add More",
+        "name": "return_error_details",
+        "override_skip": false,
+        "placeholder": "",
+        "required": false,
+        "show": true,
+        "title_case": false,
+        "tool_mode": false,
+        "trace_as_metadata": true,
+        "track_in_telemetry": true,
+        "type": "bool",
+        "value": true
+       },
+       "schema_name": {
+        "_input_type": "DropdownInput",
+        "advanced": false,
+        "api_editable": false,
+        "combobox": true,
+        "dialog_inputs": {},
+        "display_name": "Schema (Table Mode)",
+        "dynamic": false,
+        "external_options": {},
+        "info": "",
+        "name": "schema_name",
+        "options": [
+         "EXAMPLES",
+         "CORE"
+        ],
+        "options_metadata": [],
+        "override_skip": false,
+        "placeholder": "",
+        "real_time_refresh": true,
+        "required": false,
+        "show": false,
+        "title_case": false,
+        "toggle": false,
+        "tool_mode": false,
+        "trace_as_metadata": true,
+        "track_in_telemetry": true,
+        "type": "str",
+        "value": "CORE"
+       },
+       "snowflake_context": {
+        "_input_type": "HandleInput",
+        "advanced": true,
+        "api_editable": false,
+        "display_name": "Snowflake Context (Optional Override)",
+        "dynamic": false,
+        "info": "",
+        "input_types": [
+         "Data"
+        ],
+        "list": false,
+        "list_add_label": "Add More",
+        "name": "snowflake_context",
+        "override_skip": false,
+        "placeholder": "",
+        "required": false,
+        "show": true,
+        "title_case": false,
+        "trace_as_metadata": true,
+        "track_in_telemetry": false,
+        "type": "other",
+        "value": ""
+       },
+       "state_column": {
+        "_input_type": "StrInput",
+        "advanced": false,
+        "api_editable": false,
+        "display_name": "State Column Name (Table Mode)",
+        "dynamic": false,
+        "info": "",
+        "list": false,
+        "list_add_label": "Add More",
+        "load_from_db": false,
+        "name": "state_column",
+        "override_skip": false,
+        "placeholder": "",
+        "required": false,
+        "show": false,
+        "title_case": false,
+        "tool_mode": false,
+        "trace_as_metadata": true,
+        "track_in_telemetry": false,
+        "type": "str",
+        "value": "ticket_text"
+       },
+       "state_input": {
+        "_input_type": "MessageTextInput",
+        "advanced": false,
+        "api_editable": false,
+        "display_name": "State Input (Text or JSON Object)",
+        "dynamic": false,
+        "info": "",
+        "input_types": [
+         "Message"
+        ],
+        "list": false,
+        "list_add_label": "Add More",
+        "load_from_db": false,
+        "name": "state_input",
+        "override_skip": false,
+        "placeholder": "",
+        "required": false,
+        "show": true,
+        "title_case": false,
+        "tool_mode": false,
+        "trace_as_input": true,
+        "trace_as_metadata": true,
+        "track_in_telemetry": false,
+        "type": "str",
+        "value": "Our production billing pipeline failed after invoice #42 and we need urgent technical_support."
+       },
+       "table_name": {
+        "_input_type": "DropdownInput",
+        "advanced": false,
+        "api_editable": false,
+        "combobox": true,
+        "dialog_inputs": {},
+        "display_name": "Table / View (Table Mode)",
+        "dynamic": false,
+        "external_options": {},
+        "info": "",
+        "name": "table_name",
+        "options": [
+         "SUPPORT_TICKETS"
+        ],
+        "options_metadata": [],
+        "override_skip": false,
+        "placeholder": "",
+        "real_time_refresh": true,
+        "required": false,
+        "show": false,
+        "title_case": false,
+        "toggle": false,
+        "tool_mode": false,
+        "trace_as_metadata": true,
+        "track_in_telemetry": true,
+        "type": "str",
+        "value": "SUPPORT_TICKETS"
+       }
+      },
+      "tool_mode": false
+     },
+     "selected_output": "summary"
+    }
+   },
+   {
+    "id": "SnowflakeSQLStatement-X305",
+    "type": "genericNode",
+    "position": {
+     "x": 1550,
+     "y": 0
+    },
+    "data": {
+     "id": "SnowflakeSQLStatement-X305",
+     "type": "SnowflakeSQLStatement",
+     "node": {
+      "base_classes": [
+       "JSON",
+       "Message",
+       "Table"
+      ],
+      "beta": false,
+      "conditional_paths": [],
+      "custom_fields": {},
+      "description": "Execute a governed Snowflake SQL statement (SELECT / CALL / SHOW) within context <Database>.<Schema> under the active role with DataFrame or JSON Object (OBJECT_CONSTRUCT) output.",
+      "display_name": "4 \u00b7 SQL Statement \u00b7 CALL LOAD_TICKET (procedure + function)",
+      "documentation": "",
+      "edited": false,
+      "field_order": [
+       "database",
+       "schema_name",
+       "sql_statement",
+       "bind_parameters_json",
+       "bind_values",
+       "output_format",
+       "max_rows"
+      ],
+      "frozen": false,
+      "icon": "Snowflake",
+      "legacy": false,
+      "metadata": {
+       "code_hash": "a96823bc6028",
+       "component_class_name": "SnowflakeSQLStatementComponent",
+       "dependencies": {
+        "dependencies": [
+         {
+          "name": "lfx_snowflake",
+          "version": null
+         },
+         {
+          "name": "lfx",
+          "version": "1.13.1"
+         }
+        ],
+        "total_dependencies": 2
+       },
+       "module": "lfx.components.llm_operations.snowflake_sql_statement.SnowflakeSQLStatementComponent"
+      },
+      "minimized": false,
+      "output_types": [],
+      "outputs": [
+       {
+        "allows_loop": false,
+        "cache": true,
+        "display_name": "Result DataFrame",
+        "group_outputs": false,
+        "method": "run_dataframe",
+        "name": "dataframe",
+        "selected": "Table",
+        "tool_mode": true,
+        "types": [
+         "Table"
+        ],
+        "value": "__UNDEFINED__"
+       },
+       {
+        "allows_loop": false,
+        "cache": true,
+        "display_name": "JSON Message",
+        "group_outputs": false,
+        "method": "run_json_message",
+        "name": "message",
+        "selected": "Message",
+        "tool_mode": true,
+        "types": [
+         "Message"
+        ],
+        "value": "__UNDEFINED__"
+       },
+       {
+        "allows_loop": false,
+        "cache": true,
+        "display_name": "Execution Metadata",
+        "group_outputs": false,
+        "method": "run_metadata",
+        "name": "metadata",
+        "selected": "JSON",
+        "tool_mode": true,
+        "types": [
+         "JSON"
+        ],
+        "value": "__UNDEFINED__"
+       }
+      ],
+      "pinned": false,
+      "template": {
+       "_type": "Component",
+       "bind_parameters_json": {
+        "_input_type": "StrInput",
+        "advanced": true,
+        "api_editable": false,
+        "display_name": "Bind Parameters JSON (optional)",
+        "dynamic": false,
+        "info": "",
+        "list": false,
+        "list_add_label": "Add More",
+        "load_from_db": false,
+        "name": "bind_parameters_json",
+        "override_skip": false,
+        "placeholder": "",
+        "required": false,
+        "show": true,
+        "title_case": false,
+        "tool_mode": false,
+        "trace_as_metadata": true,
+        "track_in_telemetry": false,
+        "type": "str",
+        "value": "{}"
+       },
+       "bind_values": {
+        "_input_type": "HandleInput",
+        "advanced": false,
+        "api_editable": false,
+        "display_name": "Bind Values",
+        "dynamic": false,
+        "info": "Upstream values bound to the ? placeholders that follow those of Bind Parameters JSON, in the order the connections were drawn on the canvas. A Message is bound as its text, Data as a JSON string. Values are never concatenated into the SQL.",
+        "input_types": [
+         "Message",
+         "Data",
+         "JSON"
+        ],
+        "list": true,
+        "list_add_label": "Add More",
+        "name": "bind_values",
+        "override_skip": false,
+        "placeholder": "",
+        "required": false,
+        "show": true,
+        "title_case": false,
+        "trace_as_metadata": true,
+        "track_in_telemetry": false,
+        "type": "other",
+        "value": ""
+       },
+       "code": {
+        "advanced": true,
+        "api_editable": false,
+        "dynamic": true,
+        "fileTypes": [],
+        "file_path": "",
+        "info": "",
+        "list": false,
+        "load_from_db": false,
+        "multiline": true,
+        "name": "code",
+        "password": false,
+        "placeholder": "",
+        "required": true,
+        "show": true,
+        "title_case": false,
+        "type": "code",
+        "value": "from __future__ import annotations\nfrom lfx_snowflake import dropdown_selection as _sel\nfrom lfx_snowflake import list_input_order as _order\n\nimport json\n\nfrom lfx_snowflake import sql_safety as _sql_safety\nfrom typing import Any\n\nimport lfx_snowflake._lfx_compat  # noqa: F401\nfrom lfx.custom import Component\nfrom lfx.io import DropdownInput, HandleInput, IntInput, MultilineInput, Output, StrInput\nfrom lfx.schema import Data, DataFrame\nfrom lfx.schema.message import Message\n\nfrom lfx_snowflake.components.llm_operations import SnowflakeSQLStatementEngine\nfrom lfx_snowflake.context_helpers import _resolve_flow_id\nfrom lfx_snowflake.fastapi_live_bridge import LIVE_BRIDGE\nfrom lfx_snowflake.flow_context_guard import flow_component_sql as _flow_component_sql\nfrom lfx_snowflake.flow_context_guard import raise_if_flow_context_denied as _raise_if_flow_context_denied\n\n\ndef _flow_component_execute_sql(*args, **kwargs):\n    \"\"\"BUG-CTX-03: this component's SQL is checked against the flow's `[ \u2744\ufe0f Context ]`.\"\"\"\n    with _flow_component_sql():\n        # E2E T1: a guard refusal surfaces as a component error carrying AUTHZ_OBJECT_NOT_IN_FLOW_CONTEXT.\n        return _raise_if_flow_context_denied(LIVE_BRIDGE.execute_sql(*args, **kwargs))\n\n\ndef _sql_databases(flow_id: str | None = None) -> list[str]:\n    return LIVE_BRIDGE.get_context_databases(flow_id=flow_id or _resolve_flow_id())\n\n\ndef _sql_schemas(database: str | None = None, flow_id: str | None = None) -> list[str]:\n    return LIVE_BRIDGE.get_context_schemas(database, flow_id=flow_id or _resolve_flow_id())\n\n\ndef normalize_bindings(parsed: Any) -> dict[str, dict[str, Any]] | None:\n    \"\"\"BUG-LLMOP-012: typed SQL API bindings ``{\"1\": {\"type\", \"value\"}}``.\n\n    Accepts a list of values (``[1, \"a\"]``), a positional dict (``{\"1\": 1}``) or an already typed dict\n    (``{\"1\": {\"type\": \"FIXED\", \"value\": \"1\"}}``); every entry goes through ``sql_safety.binding_for``.\"\"\"\n    if parsed in (None, [], {}):\n        return None\n    if isinstance(parsed, list):\n        items = [(str(i + 1), v) for i, v in enumerate(parsed)]\n    elif isinstance(parsed, dict):\n        items = list(parsed.items())\n        keys = [str(k) for k, _ in items]\n        if not all(k.isdigit() and int(k) >= 1 for k in keys) or sorted(int(k) for k in keys) != list(\n            range(1, len(keys) + 1)\n        ):\n            raise ValueError('Bind Parameter keys must be positions \"1\"..\"n\" matching the ? placeholders.')\n    else:\n        raise ValueError(\"Bind Parameters must be a JSON array or object.\")\n    out: dict[str, dict[str, Any]] = {}\n    for key, val in items:\n        if isinstance(val, dict) and set(val) <= {\"type\", \"value\"} and \"value\" in val:\n            out[str(key)] = _sql_safety.binding_for(val[\"value\"], val.get(\"type\"))\n        else:\n            out[str(key)] = _sql_safety.binding_for(val)\n    return out\n\n\nclass SnowflakeSQLStatementComponent(Component):\n    display_name = \"SQL Statement\"\n    description = (\n        \"Execute a governed Snowflake SQL statement (SELECT / CALL / SHOW) within context \"\n        \"<Database>.<Schema> under the active role with DataFrame or JSON Object (OBJECT_CONSTRUCT) output.\"\n    )\n    icon = \"Snowflake\"\n    name = \"SnowflakeSQLStatement\"\n\n    inputs = [\n        DropdownInput(\n            name=\"database\",\n            display_name=\"Database\",\n            options=_sql_databases(),\n            value=\"SNOWFLAKE_LANGFLOW\",\n            real_time_refresh=True,\n            combobox=True,\n        ),\n        DropdownInput(\n            name=\"schema_name\",\n            display_name=\"Schema\",\n            options=_sql_schemas(\"SNOWFLAKE_LANGFLOW\"),\n            value=\"CORE\",\n            real_time_refresh=True,\n            combobox=True,\n        ),\n        MultilineInput(\n            name=\"sql_statement\",\n            display_name=\"SQL Statement\",\n            value=\"SELECT run_id, flow_id, effective_role, status FROM <DB>.<SCHEMA>.LANGFLOW_FLOW_RUNS ORDER BY start_ts DESC\",\n        ),\n        StrInput(\n            name=\"bind_parameters_json\",\n            display_name=\"Bind Parameters JSON (optional)\",\n            value=\"{}\",\n            advanced=True,\n        ),\n        HandleInput(\n            name=\"bind_values\",\n            display_name=\"Bind Values\",\n            input_types=[\"Message\", \"Data\", \"JSON\"],\n            is_list=True,\n            required=False,\n            info=(\n                \"Upstream values bound to the ? placeholders that follow those of Bind Parameters JSON, in the \"\n                \"order the connections were drawn on the canvas. A Message is bound as its text, Data as a JSON string. Values are never \"\n                \"concatenated into the SQL.\"\n            ),\n        ),\n        DropdownInput(\n            name=\"output_format\",\n            display_name=\"Output Format\",\n            options=[\"DataFrame\", \"JSON Object (OBJECT_CONSTRUCT)\"],\n            value=\"DataFrame\",\n        ),\n        IntInput(\n            name=\"max_rows\",\n            display_name=\"Max Rows\",\n            value=100,\n            advanced=True,\n        ),\n    ]\n    outputs = [\n        Output(display_name=\"Result DataFrame\", name=\"dataframe\", method=\"run_dataframe\"),\n        Output(display_name=\"JSON Message\", name=\"message\", method=\"run_json_message\"),\n        Output(display_name=\"Execution Metadata\", name=\"metadata\", method=\"run_metadata\"),\n    ]\n\n    def update_build_config(\n        self, build_config: dict[str, Any], field_value: Any, field_name: str | None = None\n    ) -> dict[str, Any]:\n        flow_id = _resolve_flow_id(self, build_config)\n        if \"database\" in build_config:\n            build_config[\"database\"][\"options\"] = _sql_databases(flow_id=flow_id)\n            if field_name == \"database\" and isinstance(field_value, str):\n                build_config[\"database\"][\"value\"] = field_value\n        db = (\n            field_value\n            if field_name == \"database\" and isinstance(field_value, str)\n            else build_config.get(\"database\", {}).get(\"value\") or \"SNOWFLAKE_LANGFLOW\"\n        )\n        schemas = _sql_schemas(db, flow_id=flow_id)\n        if \"schema_name\" in build_config:\n            build_config[\"schema_name\"][\"options\"] = schemas\n            cur_sch = build_config[\"schema_name\"].get(\"value\")\n            if field_name == \"schema_name\" and isinstance(field_value, str):\n                build_config[\"schema_name\"][\"value\"] = field_value\n            else:\n                _sel.keep_or_default(build_config, \"schema_name\", schemas, field_name)\n        return build_config\n\n    def _build_sql(self) -> str:\n        return SnowflakeSQLStatementEngine.build_sql(\n            database=self.database or \"SNOWFLAKE_LANGFLOW\",\n            schema=self.schema_name or \"CORE\",\n            sql_statement=self.sql_statement or \"\",\n            output_format=self.output_format or \"DataFrame\",\n            max_rows=int(self.max_rows or 100),\n        )\n\n    def _upstream_bind_values(self) -> list[str]:\n        \"\"\"Text of every value connected to Bind Values (Message text, Data/JSON as a JSON string).\"\"\"\n        values = getattr(self, \"bind_values\", None)\n        if values is None or values == \"\":\n            return []\n        out: list[str] = []\n        ordered = _order.in_canvas_order(self, \"bind_values\", values) if isinstance(values, list) else [values]\n        for val in ordered:\n            if isinstance(val, Message):\n                out.append(str(val.text or \"\"))\n            elif isinstance(val, Data):\n                out.append(json.dumps(val.data, default=str))\n            elif isinstance(val, (dict, list)):\n                out.append(json.dumps(val, default=str))\n            elif val is not None:\n                out.append(str(val))\n        return out\n\n    def _parse_bindings(self) -> dict[str, Any] | None:\n        raw = (getattr(self, \"bind_parameters_json\", \"\") or \"\").strip()\n        static: dict[str, dict[str, Any]] = {}\n        if raw and raw != \"{}\":\n            try:\n                parsed = json.loads(raw)\n            except json.JSONDecodeError as exc:\n                raise ValueError(\"Bind Parameters must be a JSON array or object.\") from exc\n            static = normalize_bindings(parsed) or {}\n        upstream = self._upstream_bind_values()\n        if not upstream:\n            return static or None\n        merged = dict(static)\n        for offset, text in enumerate(upstream, start=len(static) + 1):\n            merged[str(offset)] = _sql_safety.binding_for(text, \"TEXT\")\n        return merged\n\n    def _pre_run_setup(self):\n        # A new run (or loop iteration) starts: forget the result of the previous one.\n        self._run_result = None\n\n    def _execute_once(self, stmt: str) -> dict[str, Any]:\n        \"\"\"Run the statement once per run: every output port shares the result, so a CALL or DML is not repeated.\"\"\"\n        cached = getattr(self, \"_run_result\", None)\n        if cached is None:\n            cached = _flow_component_execute_sql(stmt, bindings=self._parse_bindings())\n            self._run_result = cached\n        return cached\n\n    def run_dataframe(self) -> DataFrame:\n        stmt = self._build_sql()\n        res = self._execute_once(stmt)\n        if not res.get(\"ok\"):\n            raise ValueError(res.get(\"message\", \"Snowflake SQL Statement failed\"))\n        return DataFrame(res.get(\"rows\", []))\n\n    def run_json_message(self) -> Message:\n        stmt = self._build_sql()\n        res = self._execute_once(stmt)\n        return Message(\n            text=json.dumps(\n                {\n                    \"database\": self.database,\n                    \"schema_name\": self.schema_name,\n                    \"output_format\": self.output_format,\n                    \"active_role\": LIVE_BRIDGE.active_role,\n                    \"sql\": stmt,\n                    \"rows\": res.get(\"rows\", []),\n                    \"ok\": res.get(\"ok\", False),\n                },\n                indent=2,\n            )\n        )\n\n    def run_metadata(self) -> Data:\n        stmt = self._build_sql()\n        return Data(\n            data={\n                \"database\": self.database,\n                \"schema_name\": self.schema_name,\n                \"output_format\": self.output_format,\n                \"active_role\": LIVE_BRIDGE.active_role,\n                \"context_epoch\": LIVE_BRIDGE.context_epoch,\n                \"sql_preview\": stmt,\n            }\n        )\n"
+       },
+       "database": {
+        "_input_type": "DropdownInput",
+        "advanced": false,
+        "api_editable": false,
+        "combobox": true,
+        "dialog_inputs": {},
+        "display_name": "Database",
+        "dynamic": false,
+        "external_options": {},
+        "info": "",
+        "name": "database",
+        "options": [
+         "SNOWFLAKE_LANGFLOW"
+        ],
+        "options_metadata": [],
+        "override_skip": false,
+        "placeholder": "",
+        "real_time_refresh": true,
+        "required": false,
+        "show": true,
+        "title_case": false,
+        "toggle": false,
+        "tool_mode": false,
+        "trace_as_metadata": true,
+        "track_in_telemetry": true,
+        "type": "str",
+        "value": "SNOWFLAKE_LANGFLOW"
+       },
+       "max_rows": {
+        "_input_type": "IntInput",
+        "advanced": true,
+        "api_editable": false,
+        "display_name": "Max Rows",
+        "dynamic": false,
+        "info": "",
+        "list": false,
+        "list_add_label": "Add More",
+        "name": "max_rows",
+        "override_skip": false,
+        "placeholder": "",
+        "required": false,
+        "show": true,
+        "title_case": false,
+        "tool_mode": false,
+        "trace_as_metadata": true,
+        "track_in_telemetry": true,
+        "type": "int",
+        "value": 50
+       },
+       "output_format": {
+        "_input_type": "DropdownInput",
+        "advanced": false,
+        "api_editable": false,
+        "combobox": false,
+        "dialog_inputs": {},
+        "display_name": "Output Format",
+        "dynamic": false,
+        "external_options": {},
+        "info": "",
+        "name": "output_format",
+        "options": [
+         "DataFrame",
+         "JSON Object (OBJECT_CONSTRUCT)"
+        ],
+        "options_metadata": [],
+        "override_skip": false,
+        "placeholder": "",
+        "required": false,
+        "show": true,
+        "title_case": false,
+        "toggle": false,
+        "tool_mode": false,
+        "trace_as_metadata": true,
+        "track_in_telemetry": true,
+        "type": "str",
+        "value": "JSON Object (OBJECT_CONSTRUCT)"
+       },
+       "schema_name": {
+        "_input_type": "DropdownInput",
+        "advanced": false,
+        "api_editable": false,
+        "combobox": true,
+        "dialog_inputs": {},
+        "display_name": "Schema",
+        "dynamic": false,
+        "external_options": {},
+        "info": "",
+        "name": "schema_name",
+        "options": [
+         "EXAMPLES"
+        ],
+        "options_metadata": [],
+        "override_skip": false,
+        "placeholder": "",
+        "real_time_refresh": true,
+        "required": false,
+        "show": true,
+        "title_case": false,
+        "toggle": false,
+        "tool_mode": false,
+        "trace_as_metadata": true,
+        "track_in_telemetry": true,
+        "type": "str",
+        "value": "EXAMPLES"
+       },
+       "sql_statement": {
+        "_input_type": "MultilineInput",
+        "advanced": false,
+        "ai_enabled": false,
+        "api_editable": false,
+        "copy_field": false,
+        "display_name": "SQL Statement",
+        "dynamic": false,
+        "info": "",
+        "input_types": [
+         "Message"
+        ],
+        "list": false,
+        "list_add_label": "Add More",
+        "load_from_db": false,
+        "multiline": true,
+        "name": "sql_statement",
+        "override_skip": false,
+        "password": false,
+        "placeholder": "",
+        "required": false,
+        "show": true,
+        "title_case": false,
+        "tool_mode": false,
+        "trace_as_input": true,
+        "trace_as_metadata": true,
+        "track_in_telemetry": false,
+        "type": "str",
+        "value": "CALL SNOWFLAKE_LANGFLOW.EXAMPLES.LOAD_TICKET(?, ?, ?)"
+       }
+      },
+      "tool_mode": false
+     },
+     "selected_output": "message"
+    }
+   },
+   {
+    "id": "SnowflakeSQLStatement-X306",
+    "type": "genericNode",
+    "position": {
+     "x": 2050,
+     "y": 0
+    },
+    "data": {
+     "id": "SnowflakeSQLStatement-X306",
+     "type": "SnowflakeSQLStatement",
+     "node": {
+      "base_classes": [
+       "JSON",
+       "Message",
+       "Table"
+      ],
+      "beta": false,
+      "conditional_paths": [],
+      "custom_fields": {},
+      "description": "Execute a governed Snowflake SQL statement (SELECT / CALL / SHOW) within context <Database>.<Schema> under the active role with DataFrame or JSON Object (OBJECT_CONSTRUCT) output.",
+      "display_name": "5 \u00b7 SQL Statement \u00b7 open tickets per site",
+      "documentation": "",
+      "edited": false,
+      "field_order": [
+       "database",
+       "schema_name",
+       "sql_statement",
+       "bind_parameters_json",
+       "bind_values",
+       "output_format",
+       "max_rows"
+      ],
+      "frozen": false,
+      "icon": "Snowflake",
+      "legacy": false,
+      "metadata": {
+       "code_hash": "a96823bc6028",
+       "component_class_name": "SnowflakeSQLStatementComponent",
+       "dependencies": {
+        "dependencies": [
+         {
+          "name": "lfx_snowflake",
+          "version": null
+         },
+         {
+          "name": "lfx",
+          "version": "1.13.1"
+         }
+        ],
+        "total_dependencies": 2
+       },
+       "module": "lfx.components.llm_operations.snowflake_sql_statement.SnowflakeSQLStatementComponent"
+      },
+      "minimized": false,
+      "output_types": [],
+      "outputs": [
+       {
+        "allows_loop": false,
+        "cache": true,
+        "display_name": "Result DataFrame",
+        "group_outputs": false,
+        "method": "run_dataframe",
+        "name": "dataframe",
+        "selected": "Table",
+        "tool_mode": true,
+        "types": [
+         "Table"
+        ],
+        "value": "__UNDEFINED__"
+       },
+       {
+        "allows_loop": false,
+        "cache": true,
+        "display_name": "JSON Message",
+        "group_outputs": false,
+        "method": "run_json_message",
+        "name": "message",
+        "selected": "Message",
+        "tool_mode": true,
+        "types": [
+         "Message"
+        ],
+        "value": "__UNDEFINED__"
+       },
+       {
+        "allows_loop": false,
+        "cache": true,
+        "display_name": "Execution Metadata",
+        "group_outputs": false,
+        "method": "run_metadata",
+        "name": "metadata",
+        "selected": "JSON",
+        "tool_mode": true,
+        "types": [
+         "JSON"
+        ],
+        "value": "__UNDEFINED__"
+       }
+      ],
+      "pinned": false,
+      "template": {
+       "_type": "Component",
+       "bind_parameters_json": {
+        "_input_type": "StrInput",
+        "advanced": true,
+        "api_editable": false,
+        "display_name": "Bind Parameters JSON (optional)",
+        "dynamic": false,
+        "info": "",
+        "list": false,
+        "list_add_label": "Add More",
+        "load_from_db": false,
+        "name": "bind_parameters_json",
+        "override_skip": false,
+        "placeholder": "",
+        "required": false,
+        "show": true,
+        "title_case": false,
+        "tool_mode": false,
+        "trace_as_metadata": true,
+        "track_in_telemetry": false,
+        "type": "str",
+        "value": "{}"
+       },
+       "bind_values": {
+        "_input_type": "HandleInput",
+        "advanced": false,
+        "api_editable": false,
+        "display_name": "Bind Values",
+        "dynamic": false,
+        "info": "Upstream values bound to the ? placeholders that follow those of Bind Parameters JSON, in the order the connections were drawn on the canvas. A Message is bound as its text, Data as a JSON string. Values are never concatenated into the SQL.",
+        "input_types": [
+         "Message",
+         "Data",
+         "JSON"
+        ],
+        "list": true,
+        "list_add_label": "Add More",
+        "name": "bind_values",
+        "override_skip": false,
+        "placeholder": "",
+        "required": false,
+        "show": true,
+        "title_case": false,
+        "trace_as_metadata": true,
+        "track_in_telemetry": false,
+        "type": "other",
+        "value": ""
+       },
+       "code": {
+        "advanced": true,
+        "api_editable": false,
+        "dynamic": true,
+        "fileTypes": [],
+        "file_path": "",
+        "info": "",
+        "list": false,
+        "load_from_db": false,
+        "multiline": true,
+        "name": "code",
+        "password": false,
+        "placeholder": "",
+        "required": true,
+        "show": true,
+        "title_case": false,
+        "type": "code",
+        "value": "from __future__ import annotations\nfrom lfx_snowflake import dropdown_selection as _sel\nfrom lfx_snowflake import list_input_order as _order\n\nimport json\n\nfrom lfx_snowflake import sql_safety as _sql_safety\nfrom typing import Any\n\nimport lfx_snowflake._lfx_compat  # noqa: F401\nfrom lfx.custom import Component\nfrom lfx.io import DropdownInput, HandleInput, IntInput, MultilineInput, Output, StrInput\nfrom lfx.schema import Data, DataFrame\nfrom lfx.schema.message import Message\n\nfrom lfx_snowflake.components.llm_operations import SnowflakeSQLStatementEngine\nfrom lfx_snowflake.context_helpers import _resolve_flow_id\nfrom lfx_snowflake.fastapi_live_bridge import LIVE_BRIDGE\nfrom lfx_snowflake.flow_context_guard import flow_component_sql as _flow_component_sql\nfrom lfx_snowflake.flow_context_guard import raise_if_flow_context_denied as _raise_if_flow_context_denied\n\n\ndef _flow_component_execute_sql(*args, **kwargs):\n    \"\"\"BUG-CTX-03: this component's SQL is checked against the flow's `[ \u2744\ufe0f Context ]`.\"\"\"\n    with _flow_component_sql():\n        # E2E T1: a guard refusal surfaces as a component error carrying AUTHZ_OBJECT_NOT_IN_FLOW_CONTEXT.\n        return _raise_if_flow_context_denied(LIVE_BRIDGE.execute_sql(*args, **kwargs))\n\n\ndef _sql_databases(flow_id: str | None = None) -> list[str]:\n    return LIVE_BRIDGE.get_context_databases(flow_id=flow_id or _resolve_flow_id())\n\n\ndef _sql_schemas(database: str | None = None, flow_id: str | None = None) -> list[str]:\n    return LIVE_BRIDGE.get_context_schemas(database, flow_id=flow_id or _resolve_flow_id())\n\n\ndef normalize_bindings(parsed: Any) -> dict[str, dict[str, Any]] | None:\n    \"\"\"BUG-LLMOP-012: typed SQL API bindings ``{\"1\": {\"type\", \"value\"}}``.\n\n    Accepts a list of values (``[1, \"a\"]``), a positional dict (``{\"1\": 1}``) or an already typed dict\n    (``{\"1\": {\"type\": \"FIXED\", \"value\": \"1\"}}``); every entry goes through ``sql_safety.binding_for``.\"\"\"\n    if parsed in (None, [], {}):\n        return None\n    if isinstance(parsed, list):\n        items = [(str(i + 1), v) for i, v in enumerate(parsed)]\n    elif isinstance(parsed, dict):\n        items = list(parsed.items())\n        keys = [str(k) for k, _ in items]\n        if not all(k.isdigit() and int(k) >= 1 for k in keys) or sorted(int(k) for k in keys) != list(\n            range(1, len(keys) + 1)\n        ):\n            raise ValueError('Bind Parameter keys must be positions \"1\"..\"n\" matching the ? placeholders.')\n    else:\n        raise ValueError(\"Bind Parameters must be a JSON array or object.\")\n    out: dict[str, dict[str, Any]] = {}\n    for key, val in items:\n        if isinstance(val, dict) and set(val) <= {\"type\", \"value\"} and \"value\" in val:\n            out[str(key)] = _sql_safety.binding_for(val[\"value\"], val.get(\"type\"))\n        else:\n            out[str(key)] = _sql_safety.binding_for(val)\n    return out\n\n\nclass SnowflakeSQLStatementComponent(Component):\n    display_name = \"SQL Statement\"\n    description = (\n        \"Execute a governed Snowflake SQL statement (SELECT / CALL / SHOW) within context \"\n        \"<Database>.<Schema> under the active role with DataFrame or JSON Object (OBJECT_CONSTRUCT) output.\"\n    )\n    icon = \"Snowflake\"\n    name = \"SnowflakeSQLStatement\"\n\n    inputs = [\n        DropdownInput(\n            name=\"database\",\n            display_name=\"Database\",\n            options=_sql_databases(),\n            value=\"SNOWFLAKE_LANGFLOW\",\n            real_time_refresh=True,\n            combobox=True,\n        ),\n        DropdownInput(\n            name=\"schema_name\",\n            display_name=\"Schema\",\n            options=_sql_schemas(\"SNOWFLAKE_LANGFLOW\"),\n            value=\"CORE\",\n            real_time_refresh=True,\n            combobox=True,\n        ),\n        MultilineInput(\n            name=\"sql_statement\",\n            display_name=\"SQL Statement\",\n            value=\"SELECT run_id, flow_id, effective_role, status FROM <DB>.<SCHEMA>.LANGFLOW_FLOW_RUNS ORDER BY start_ts DESC\",\n        ),\n        StrInput(\n            name=\"bind_parameters_json\",\n            display_name=\"Bind Parameters JSON (optional)\",\n            value=\"{}\",\n            advanced=True,\n        ),\n        HandleInput(\n            name=\"bind_values\",\n            display_name=\"Bind Values\",\n            input_types=[\"Message\", \"Data\", \"JSON\"],\n            is_list=True,\n            required=False,\n            info=(\n                \"Upstream values bound to the ? placeholders that follow those of Bind Parameters JSON, in the \"\n                \"order the connections were drawn on the canvas. A Message is bound as its text, Data as a JSON string. Values are never \"\n                \"concatenated into the SQL.\"\n            ),\n        ),\n        DropdownInput(\n            name=\"output_format\",\n            display_name=\"Output Format\",\n            options=[\"DataFrame\", \"JSON Object (OBJECT_CONSTRUCT)\"],\n            value=\"DataFrame\",\n        ),\n        IntInput(\n            name=\"max_rows\",\n            display_name=\"Max Rows\",\n            value=100,\n            advanced=True,\n        ),\n    ]\n    outputs = [\n        Output(display_name=\"Result DataFrame\", name=\"dataframe\", method=\"run_dataframe\"),\n        Output(display_name=\"JSON Message\", name=\"message\", method=\"run_json_message\"),\n        Output(display_name=\"Execution Metadata\", name=\"metadata\", method=\"run_metadata\"),\n    ]\n\n    def update_build_config(\n        self, build_config: dict[str, Any], field_value: Any, field_name: str | None = None\n    ) -> dict[str, Any]:\n        flow_id = _resolve_flow_id(self, build_config)\n        if \"database\" in build_config:\n            build_config[\"database\"][\"options\"] = _sql_databases(flow_id=flow_id)\n            if field_name == \"database\" and isinstance(field_value, str):\n                build_config[\"database\"][\"value\"] = field_value\n        db = (\n            field_value\n            if field_name == \"database\" and isinstance(field_value, str)\n            else build_config.get(\"database\", {}).get(\"value\") or \"SNOWFLAKE_LANGFLOW\"\n        )\n        schemas = _sql_schemas(db, flow_id=flow_id)\n        if \"schema_name\" in build_config:\n            build_config[\"schema_name\"][\"options\"] = schemas\n            cur_sch = build_config[\"schema_name\"].get(\"value\")\n            if field_name == \"schema_name\" and isinstance(field_value, str):\n                build_config[\"schema_name\"][\"value\"] = field_value\n            else:\n                _sel.keep_or_default(build_config, \"schema_name\", schemas, field_name)\n        return build_config\n\n    def _build_sql(self) -> str:\n        return SnowflakeSQLStatementEngine.build_sql(\n            database=self.database or \"SNOWFLAKE_LANGFLOW\",\n            schema=self.schema_name or \"CORE\",\n            sql_statement=self.sql_statement or \"\",\n            output_format=self.output_format or \"DataFrame\",\n            max_rows=int(self.max_rows or 100),\n        )\n\n    def _upstream_bind_values(self) -> list[str]:\n        \"\"\"Text of every value connected to Bind Values (Message text, Data/JSON as a JSON string).\"\"\"\n        values = getattr(self, \"bind_values\", None)\n        if values is None or values == \"\":\n            return []\n        out: list[str] = []\n        ordered = _order.in_canvas_order(self, \"bind_values\", values) if isinstance(values, list) else [values]\n        for val in ordered:\n            if isinstance(val, Message):\n                out.append(str(val.text or \"\"))\n            elif isinstance(val, Data):\n                out.append(json.dumps(val.data, default=str))\n            elif isinstance(val, (dict, list)):\n                out.append(json.dumps(val, default=str))\n            elif val is not None:\n                out.append(str(val))\n        return out\n\n    def _parse_bindings(self) -> dict[str, Any] | None:\n        raw = (getattr(self, \"bind_parameters_json\", \"\") or \"\").strip()\n        static: dict[str, dict[str, Any]] = {}\n        if raw and raw != \"{}\":\n            try:\n                parsed = json.loads(raw)\n            except json.JSONDecodeError as exc:\n                raise ValueError(\"Bind Parameters must be a JSON array or object.\") from exc\n            static = normalize_bindings(parsed) or {}\n        upstream = self._upstream_bind_values()\n        if not upstream:\n            return static or None\n        merged = dict(static)\n        for offset, text in enumerate(upstream, start=len(static) + 1):\n            merged[str(offset)] = _sql_safety.binding_for(text, \"TEXT\")\n        return merged\n\n    def _pre_run_setup(self):\n        # A new run (or loop iteration) starts: forget the result of the previous one.\n        self._run_result = None\n\n    def _execute_once(self, stmt: str) -> dict[str, Any]:\n        \"\"\"Run the statement once per run: every output port shares the result, so a CALL or DML is not repeated.\"\"\"\n        cached = getattr(self, \"_run_result\", None)\n        if cached is None:\n            cached = _flow_component_execute_sql(stmt, bindings=self._parse_bindings())\n            self._run_result = cached\n        return cached\n\n    def run_dataframe(self) -> DataFrame:\n        stmt = self._build_sql()\n        res = self._execute_once(stmt)\n        if not res.get(\"ok\"):\n            raise ValueError(res.get(\"message\", \"Snowflake SQL Statement failed\"))\n        return DataFrame(res.get(\"rows\", []))\n\n    def run_json_message(self) -> Message:\n        stmt = self._build_sql()\n        res = self._execute_once(stmt)\n        return Message(\n            text=json.dumps(\n                {\n                    \"database\": self.database,\n                    \"schema_name\": self.schema_name,\n                    \"output_format\": self.output_format,\n                    \"active_role\": LIVE_BRIDGE.active_role,\n                    \"sql\": stmt,\n                    \"rows\": res.get(\"rows\", []),\n                    \"ok\": res.get(\"ok\", False),\n                },\n                indent=2,\n            )\n        )\n\n    def run_metadata(self) -> Data:\n        stmt = self._build_sql()\n        return Data(\n            data={\n                \"database\": self.database,\n                \"schema_name\": self.schema_name,\n                \"output_format\": self.output_format,\n                \"active_role\": LIVE_BRIDGE.active_role,\n                \"context_epoch\": LIVE_BRIDGE.context_epoch,\n                \"sql_preview\": stmt,\n            }\n        )\n"
+       },
+       "database": {
+        "_input_type": "DropdownInput",
+        "advanced": false,
+        "api_editable": false,
+        "combobox": true,
+        "dialog_inputs": {},
+        "display_name": "Database",
+        "dynamic": false,
+        "external_options": {},
+        "info": "",
+        "name": "database",
+        "options": [
+         "SNOWFLAKE_LANGFLOW"
+        ],
+        "options_metadata": [],
+        "override_skip": false,
+        "placeholder": "",
+        "real_time_refresh": true,
+        "required": false,
+        "show": true,
+        "title_case": false,
+        "toggle": false,
+        "tool_mode": false,
+        "trace_as_metadata": true,
+        "track_in_telemetry": true,
+        "type": "str",
+        "value": "SNOWFLAKE_LANGFLOW"
+       },
+       "max_rows": {
+        "_input_type": "IntInput",
+        "advanced": true,
+        "api_editable": false,
+        "display_name": "Max Rows",
+        "dynamic": false,
+        "info": "",
+        "list": false,
+        "list_add_label": "Add More",
+        "name": "max_rows",
+        "override_skip": false,
+        "placeholder": "",
+        "required": false,
+        "show": true,
+        "title_case": false,
+        "tool_mode": false,
+        "trace_as_metadata": true,
+        "track_in_telemetry": true,
+        "type": "int",
+        "value": 50
+       },
+       "output_format": {
+        "_input_type": "DropdownInput",
+        "advanced": false,
+        "api_editable": false,
+        "combobox": false,
+        "dialog_inputs": {},
+        "display_name": "Output Format",
+        "dynamic": false,
+        "external_options": {},
+        "info": "",
+        "name": "output_format",
+        "options": [
+         "DataFrame",
+         "JSON Object (OBJECT_CONSTRUCT)"
+        ],
+        "options_metadata": [],
+        "override_skip": false,
+        "placeholder": "",
+        "required": false,
+        "show": true,
+        "title_case": false,
+        "toggle": false,
+        "tool_mode": false,
+        "trace_as_metadata": true,
+        "track_in_telemetry": true,
+        "type": "str",
+        "value": "JSON Object (OBJECT_CONSTRUCT)"
+       },
+       "schema_name": {
+        "_input_type": "DropdownInput",
+        "advanced": false,
+        "api_editable": false,
+        "combobox": true,
+        "dialog_inputs": {},
+        "display_name": "Schema",
+        "dynamic": false,
+        "external_options": {},
+        "info": "",
+        "name": "schema_name",
+        "options": [
+         "EXAMPLES"
+        ],
+        "options_metadata": [],
+        "override_skip": false,
+        "placeholder": "",
+        "real_time_refresh": true,
+        "required": false,
+        "show": true,
+        "title_case": false,
+        "toggle": false,
+        "tool_mode": false,
+        "trace_as_metadata": true,
+        "track_in_telemetry": true,
+        "type": "str",
+        "value": "EXAMPLES"
+       },
+       "sql_statement": {
+        "_input_type": "MultilineInput",
+        "advanced": false,
+        "ai_enabled": false,
+        "api_editable": false,
+        "copy_field": false,
+        "display_name": "SQL Statement",
+        "dynamic": false,
+        "info": "",
+        "input_types": [
+         "Message"
+        ],
+        "list": false,
+        "list_add_label": "Add More",
+        "load_from_db": false,
+        "multiline": true,
+        "name": "sql_statement",
+        "override_skip": false,
+        "password": false,
+        "placeholder": "",
+        "required": false,
+        "show": true,
+        "title_case": false,
+        "tool_mode": false,
+        "trace_as_input": true,
+        "trace_as_metadata": true,
+        "track_in_telemetry": false,
+        "type": "str",
+        "value": "SELECT SITE, COUNT(*) AS OPEN_TICKETS, COUNT_IF(SEVERITY IN ('high', 'critical')) AS URGENT FROM SNOWFLAKE_LANGFLOW.EXAMPLES.SERVICE_TICKETS WHERE STATUS <> 'closed' AND ? IS NOT NULL GROUP BY SITE ORDER BY URGENT DESC, SITE"
+       }
+      },
+      "tool_mode": false
+     },
+     "selected_output": "message"
+    }
+   },
+   {
+    "id": "PromptTemplate-X307",
+    "type": "genericNode",
+    "position": {
+     "x": 2550,
+     "y": 0
+    },
+    "data": {
+     "id": "PromptTemplate-X307",
+     "type": "Prompt Template",
+     "node": {
+      "template": {
+       "_type": "Component",
+       "code": {
+        "advanced": true,
+        "api_editable": false,
+        "dynamic": true,
+        "fileTypes": [],
+        "file_path": "",
+        "info": "",
+        "list": false,
+        "load_from_db": false,
+        "multiline": true,
+        "name": "code",
+        "password": false,
+        "placeholder": "",
+        "required": true,
+        "show": true,
+        "title_case": false,
+        "type": "code",
+        "value": "from typing import Any\n\nfrom lfx.base.prompts.api_utils import process_prompt_template\nfrom lfx.custom.custom_component.component import Component\nfrom lfx.inputs.input_mixin import FieldTypes\nfrom lfx.inputs.inputs import DefaultPromptField\nfrom lfx.io import BoolInput, MessageTextInput, Output, PromptInput\nfrom lfx.log.logger import logger\nfrom lfx.schema.dotdict import dotdict\nfrom lfx.schema.message import Message\nfrom lfx.template.utils import update_template_values\nfrom lfx.utils.mustache_security import validate_mustache_template\n\n\nclass PromptComponent(Component):\n    display_name: str = \"Prompt Template\"\n    description: str = \"Create a prompt template with dynamic variables.\"\n    documentation: str = \"https://docs.langflow.org/components-prompts\"\n    icon = \"prompts\"\n    trace_type = \"prompt\"\n    name = \"Prompt Template\"\n\n    inputs = [\n        PromptInput(name=\"template\", display_name=\"Template\"),\n        BoolInput(\n            name=\"use_double_brackets\",\n            display_name=\"Use Double Brackets\",\n            value=False,\n            advanced=True,\n            info=\"Use {{variable}} syntax instead of {variable}.\",\n            real_time_refresh=True,\n        ),\n        MessageTextInput(\n            name=\"tool_placeholder\",\n            display_name=\"Tool Placeholder\",\n            tool_mode=True,\n            advanced=True,\n            show=False,\n            info=\"A placeholder input for tool mode.\",\n        ),\n    ]\n\n    outputs = [\n        Output(display_name=\"Prompt\", name=\"prompt\", method=\"build_prompt\"),\n    ]\n\n    def update_build_config(self, build_config: dotdict, field_value: Any, field_name: str | None = None) -> dotdict:\n        \"\"\"Update the template field type based on the selected mode.\"\"\"\n        if field_name == \"use_double_brackets\":\n            # Change the template field type based on mode\n            is_mustache = field_value is True\n            if is_mustache:\n                build_config[\"template\"][\"type\"] = FieldTypes.MUSTACHE_PROMPT.value\n            else:\n                build_config[\"template\"][\"type\"] = FieldTypes.PROMPT.value\n\n            # Re-process the template to update variables when mode changes\n            template_value = build_config.get(\"template\", {}).get(\"value\", \"\")\n            if template_value:\n                # Ensure custom_fields is properly initialized\n                if \"custom_fields\" not in build_config:\n                    build_config[\"custom_fields\"] = {}\n\n                # Clean up fields from the OLD mode before processing with NEW mode\n                # This ensures we don't keep fields with wrong syntax even if validation fails\n                old_custom_fields = build_config[\"custom_fields\"].get(\"template\", [])\n                for old_field in list(old_custom_fields):\n                    # Remove the field from custom_fields and template\n                    if old_field in old_custom_fields:\n                        old_custom_fields.remove(old_field)\n                    build_config.pop(old_field, None)\n\n                # Try to process template with new mode to add new variables\n                # If validation fails, at least we cleaned up old fields\n                try:\n                    # Validate mustache templates for security\n                    if is_mustache:\n                        validate_mustache_template(template_value)\n\n                    # Re-process template with new mode to add new variables\n                    _ = process_prompt_template(\n                        template=template_value,\n                        name=\"template\",\n                        custom_fields=build_config[\"custom_fields\"],\n                        frontend_node_template=build_config,\n                        is_mustache=is_mustache,\n                    )\n                except ValueError as e:\n                    # If validation fails, we still updated the mode and cleaned old fields\n                    # User will see error when they try to save\n                    logger.debug(\"Template validation failed during mode switch\", exc_info=e)\n        return build_config\n\n    async def build_prompt(self) -> Message:\n        use_double_brackets = self.use_double_brackets if hasattr(self, \"use_double_brackets\") else False\n        template_format = \"mustache\" if use_double_brackets else \"f-string\"\n        prompt = await Message.from_template_and_variables(template_format=template_format, **self._attributes)\n        self.status = prompt.text\n        return prompt\n\n    def _update_template(self, frontend_node: dict):\n        prompt_template = frontend_node[\"template\"][\"template\"][\"value\"]\n        use_double_brackets = frontend_node[\"template\"].get(\"use_double_brackets\", {}).get(\"value\", False)\n        is_mustache = use_double_brackets is True\n\n        try:\n            # Validate mustache templates for security\n            if is_mustache:\n                validate_mustache_template(prompt_template)\n\n            custom_fields = frontend_node[\"custom_fields\"]\n            frontend_node_template = frontend_node[\"template\"]\n            _ = process_prompt_template(\n                template=prompt_template,\n                name=\"template\",\n                custom_fields=custom_fields,\n                frontend_node_template=frontend_node_template,\n                is_mustache=is_mustache,\n            )\n        except ValueError as e:\n            # If validation fails, don't add variables but allow component to be created\n            logger.debug(\"Template validation failed in _update_template\", exc_info=e)\n        return frontend_node\n\n    async def update_frontend_node(self, new_frontend_node: dict, current_frontend_node: dict):\n        \"\"\"This function is called after the code validation is done.\"\"\"\n        frontend_node = await super().update_frontend_node(new_frontend_node, current_frontend_node)\n        template = frontend_node[\"template\"][\"template\"][\"value\"]\n        use_double_brackets = frontend_node[\"template\"].get(\"use_double_brackets\", {}).get(\"value\", False)\n        is_mustache = use_double_brackets is True\n\n        try:\n            # Validate mustache templates for security\n            if is_mustache:\n                validate_mustache_template(template)\n\n            # Kept it duplicated for backwards compatibility\n            _ = process_prompt_template(\n                template=template,\n                name=\"template\",\n                custom_fields=frontend_node[\"custom_fields\"],\n                frontend_node_template=frontend_node[\"template\"],\n                is_mustache=is_mustache,\n            )\n        except ValueError as e:\n            # If validation fails, don't add variables but allow component to be updated\n            logger.debug(\"Template validation failed in update_frontend_node\", exc_info=e)\n        # Now that template is updated, we need to grab any values that were set in the current_frontend_node\n        # and update the frontend_node with those values\n        update_template_values(new_template=frontend_node, previous_template=current_frontend_node[\"template\"])\n        return frontend_node\n\n    def _get_fallback_input(self, **kwargs):\n        return DefaultPromptField(**kwargs)\n"
+       },
+       "template": {
+        "_input_type": "PromptInput",
+        "advanced": false,
+        "api_editable": false,
+        "display_name": "Template",
+        "dynamic": false,
+        "info": "",
+        "list": false,
+        "list_add_label": "Add More",
+        "name": "template",
+        "override_skip": false,
+        "placeholder": "",
+        "required": false,
+        "show": true,
+        "title_case": false,
+        "tool_mode": false,
+        "trace_as_input": true,
+        "track_in_telemetry": false,
+        "type": "prompt",
+        "value": "Ticket written:\n{loaded}\n\nOpen tickets per site now:\n{report}"
+       },
+       "tool_placeholder": {
+        "_input_type": "MessageTextInput",
+        "advanced": true,
+        "api_editable": false,
+        "display_name": "Tool Placeholder",
+        "dynamic": false,
+        "info": "A placeholder input for tool mode.",
+        "input_types": [
+         "Message"
+        ],
+        "list": false,
+        "list_add_label": "Add More",
+        "load_from_db": false,
+        "name": "tool_placeholder",
+        "override_skip": false,
+        "placeholder": "",
+        "required": false,
+        "show": false,
+        "title_case": false,
+        "tool_mode": true,
+        "trace_as_input": true,
+        "trace_as_metadata": true,
+        "track_in_telemetry": false,
+        "type": "str",
+        "value": ""
+       },
+       "use_double_brackets": {
+        "_input_type": "BoolInput",
+        "advanced": true,
+        "api_editable": false,
+        "display_name": "Use Double Brackets",
+        "dynamic": false,
+        "info": "Use {{variable}} syntax instead of {variable}.",
+        "list": false,
+        "list_add_label": "Add More",
+        "name": "use_double_brackets",
+        "override_skip": false,
+        "placeholder": "",
+        "real_time_refresh": true,
+        "required": false,
+        "show": true,
+        "title_case": false,
+        "tool_mode": false,
+        "trace_as_metadata": true,
+        "track_in_telemetry": true,
+        "type": "bool",
+        "value": false
+       },
+       "loaded": {
+        "field_type": "str",
+        "required": false,
+        "placeholder": "",
+        "list": false,
+        "show": true,
+        "multiline": true,
+        "value": "",
+        "fileTypes": [],
+        "file_path": "",
+        "name": "loaded",
+        "display_name": "loaded",
+        "advanced": false,
+        "api_editable": false,
+        "input_types": [
+         "Message"
+        ],
+        "dynamic": false,
+        "info": "",
+        "load_from_db": false,
+        "title_case": false,
+        "type": "str"
+       },
+       "report": {
+        "field_type": "str",
+        "required": false,
+        "placeholder": "",
+        "list": false,
+        "show": true,
+        "multiline": true,
+        "value": "",
+        "fileTypes": [],
+        "file_path": "",
+        "name": "report",
+        "display_name": "report",
+        "advanced": false,
+        "api_editable": false,
+        "input_types": [
+         "Message"
+        ],
+        "dynamic": false,
+        "info": "",
+        "load_from_db": false,
+        "title_case": false,
+        "type": "str"
+       }
+      },
+      "description": "Create a prompt template with dynamic variables.",
+      "icon": "prompts",
+      "is_input": null,
+      "is_output": null,
+      "is_composition": null,
+      "base_classes": [
+       "Message"
+      ],
+      "name": "",
+      "display_name": "Prompt \u00b7 run report",
+      "priority": null,
+      "documentation": "https://docs.langflow.org/components-prompts",
+      "minimized": false,
+      "custom_fields": {
+       "template": [
+        "loaded",
+        "report"
+       ]
+      },
+      "output_types": [],
+      "full_path": null,
+      "pinned": false,
+      "conditional_paths": [],
+      "frozen": false,
+      "outputs": [
+       {
+        "types": [
+         "Message"
+        ],
+        "selected": "Message",
+        "name": "prompt",
+        "hidden": null,
+        "display_name": "Prompt",
+        "method": "build_prompt",
+        "value": "__UNDEFINED__",
+        "cache": true,
+        "required_inputs": null,
+        "allows_loop": false,
+        "loop_types": null,
+        "group_outputs": false,
+        "options": null,
+        "tool_mode": true
+       }
+      ],
+      "field_order": [
+       "template",
+       "use_double_brackets",
+       "tool_placeholder"
+      ],
+      "beta": false,
+      "legacy": false,
+      "replacement": null,
+      "error": null,
+      "edited": false,
+      "metadata": {
+       "code_hash": "e3714ffe5d15",
+       "component_class_name": "PromptComponent",
+       "dependencies": {
+        "dependencies": [
+         {
+          "name": "lfx",
+          "version": "1.13.1"
+         }
+        ],
+        "total_dependencies": 1
+       },
+       "module": "lfx.components.models_and_agents.prompt.PromptComponent"
+      },
+      "tool_mode": false,
+      "add_tool_output": null
+     }
+    }
+   },
+   {
+    "id": "TextOutput-X308",
+    "type": "genericNode",
+    "position": {
+     "x": 3000,
+     "y": 0
+    },
+    "data": {
+     "id": "TextOutput-X308",
+     "type": "TextOutput",
+     "node": {
+      "base_classes": [
+       "Message"
+      ],
+      "beta": false,
+      "conditional_paths": [],
+      "custom_fields": {},
+      "description": "Sends text output via API.",
+      "display_name": "Text Output",
+      "documentation": "https://docs.langflow.org/text-input-and-output",
+      "edited": false,
+      "field_order": [
+       "input_value"
+      ],
+      "frozen": false,
+      "icon": "type",
+      "legacy": true,
+      "metadata": {
+       "code_hash": "3ececc60ddaf",
+       "component_class_name": "TextOutputComponent",
+       "dependencies": {
+        "dependencies": [
+         {
+          "name": "lfx",
+          "version": null
+         }
+        ],
+        "total_dependencies": 1
+       },
+       "module": "lfx.components.input_output.text_output.TextOutputComponent"
+      },
+      "minimized": false,
+      "output_types": [],
+      "outputs": [
+       {
+        "allows_loop": false,
+        "cache": true,
+        "display_name": "Output Text",
+        "group_outputs": false,
+        "method": "text_response",
+        "name": "text",
+        "selected": "Message",
+        "tool_mode": true,
+        "types": [
+         "Message"
+        ],
+        "value": "__UNDEFINED__"
+       }
+      ],
+      "pinned": false,
+      "replacement": [
+       "input_output.ChatOutput"
+      ],
+      "template": {
+       "_type": "Component",
+       "code": {
+        "advanced": true,
+        "api_editable": false,
+        "dynamic": true,
+        "fileTypes": [],
+        "file_path": "",
+        "info": "",
+        "list": false,
+        "load_from_db": false,
+        "multiline": true,
+        "name": "code",
+        "password": false,
+        "placeholder": "",
+        "required": true,
+        "show": true,
+        "title_case": false,
+        "type": "code",
+        "value": "from lfx.base.io.text import TextComponent\nfrom lfx.io import MultilineInput, Output\nfrom lfx.schema.message import Message\n\n\nclass TextOutputComponent(TextComponent):\n    display_name = \"Text Output\"\n    description = \"Sends text output via API.\"\n    documentation: str = \"https://docs.langflow.org/text-input-and-output\"\n    icon = \"type\"\n    name = \"TextOutput\"\n    legacy = True\n    replacement = [\"input_output.ChatOutput\"]\n\n    inputs = [\n        MultilineInput(\n            name=\"input_value\",\n            display_name=\"Inputs\",\n            info=\"Text to be passed as output.\",\n        ),\n    ]\n    outputs = [\n        Output(display_name=\"Output Text\", name=\"text\", method=\"text_response\"),\n    ]\n\n    def text_response(self) -> Message:\n        message = Message(\n            text=self.input_value,\n        )\n        self.status = self.input_value\n        return message\n"
+       },
+       "input_value": {
+        "_input_type": "MultilineInput",
+        "advanced": false,
+        "ai_enabled": false,
+        "api_editable": false,
+        "copy_field": false,
+        "display_name": "Inputs",
+        "dynamic": false,
+        "info": "Text to be passed as output.",
+        "input_types": [
+         "Message"
+        ],
+        "list": false,
+        "list_add_label": "Add More",
+        "load_from_db": false,
+        "multiline": true,
+        "name": "input_value",
+        "override_skip": false,
+        "password": false,
+        "placeholder": "",
+        "required": false,
+        "show": true,
+        "title_case": false,
+        "tool_mode": false,
+        "trace_as_input": true,
+        "trace_as_metadata": true,
+        "track_in_telemetry": false,
+        "type": "str",
+        "value": ""
+       }
+      },
+      "tool_mode": false
+     }
+    }
+   }
+  ],
+  "edges": [
+   {
+    "source": "SnowflakeTableChangeTrigger-X301",
+    "target": "SnowflakeSQLStatement-X302",
+    "sourceHandle": "{\u0153dataType\u0153:\u0153SnowflakeTableChangeTrigger\u0153,\u0153id\u0153:\u0153SnowflakeTableChangeTrigger-X301\u0153,\u0153name\u0153:\u0153trigger_message_out\u0153,\u0153output_types\u0153:[\u0153Message\u0153]}",
+    "targetHandle": "{\u0153fieldName\u0153:\u0153bind_values\u0153,\u0153id\u0153:\u0153SnowflakeSQLStatement-X302\u0153,\u0153inputTypes\u0153:[\u0153Message\u0153,\u0153Data\u0153,\u0153JSON\u0153],\u0153type\u0153:\u0153other\u0153}",
+    "data": {
+     "sourceHandle": {
+      "dataType": "SnowflakeTableChangeTrigger",
+      "id": "SnowflakeTableChangeTrigger-X301",
+      "name": "trigger_message_out",
+      "output_types": [
+       "Message"
+      ]
+     },
+     "targetHandle": {
+      "fieldName": "bind_values",
+      "id": "SnowflakeSQLStatement-X302",
+      "inputTypes": [
+       "Message",
+       "Data",
+       "JSON"
+      ],
+      "type": "other"
+     }
+    },
+    "id": "xy-edge__SnowflakeTableChangeTrigger-X301trigger_message_out-SnowflakeSQLStatement-X302bind_values"
+   },
+   {
+    "source": "SnowflakeSQLStatement-X302",
+    "target": "SnowflakeAIFunction-X303",
+    "sourceHandle": "{\u0153dataType\u0153:\u0153SnowflakeSQLStatement\u0153,\u0153id\u0153:\u0153SnowflakeSQLStatement-X302\u0153,\u0153name\u0153:\u0153message\u0153,\u0153output_types\u0153:[\u0153Message\u0153]}",
+    "targetHandle": "{\u0153fieldName\u0153:\u0153input_text\u0153,\u0153id\u0153:\u0153SnowflakeAIFunction-X303\u0153,\u0153inputTypes\u0153:[\u0153Message\u0153],\u0153type\u0153:\u0153str\u0153}",
+    "data": {
+     "sourceHandle": {
+      "dataType": "SnowflakeSQLStatement",
+      "id": "SnowflakeSQLStatement-X302",
+      "name": "message",
+      "output_types": [
+       "Message"
+      ]
+     },
+     "targetHandle": {
+      "fieldName": "input_text",
+      "id": "SnowflakeAIFunction-X303",
+      "inputTypes": [
+       "Message"
+      ],
+      "type": "str"
+     }
+    },
+    "id": "xy-edge__SnowflakeSQLStatement-X302message-SnowflakeAIFunction-X303input_text"
+   },
+   {
+    "source": "SnowflakeSQLStatement-X302",
+    "target": "SnowflakeDecision-X304",
+    "sourceHandle": "{\u0153dataType\u0153:\u0153SnowflakeSQLStatement\u0153,\u0153id\u0153:\u0153SnowflakeSQLStatement-X302\u0153,\u0153name\u0153:\u0153message\u0153,\u0153output_types\u0153:[\u0153Message\u0153]}",
+    "targetHandle": "{\u0153fieldName\u0153:\u0153state_input\u0153,\u0153id\u0153:\u0153SnowflakeDecision-X304\u0153,\u0153inputTypes\u0153:[\u0153Message\u0153],\u0153type\u0153:\u0153str\u0153}",
+    "data": {
+     "sourceHandle": {
+      "dataType": "SnowflakeSQLStatement",
+      "id": "SnowflakeSQLStatement-X302",
+      "name": "message",
+      "output_types": [
+       "Message"
+      ]
+     },
+     "targetHandle": {
+      "fieldName": "state_input",
+      "id": "SnowflakeDecision-X304",
+      "inputTypes": [
+       "Message"
+      ],
+      "type": "str"
+     }
+    },
+    "id": "xy-edge__SnowflakeSQLStatement-X302message-SnowflakeDecision-X304state_input"
+   },
+   {
+    "source": "SnowflakeSQLStatement-X302",
+    "target": "SnowflakeSQLStatement-X305",
+    "sourceHandle": "{\u0153dataType\u0153:\u0153SnowflakeSQLStatement\u0153,\u0153id\u0153:\u0153SnowflakeSQLStatement-X302\u0153,\u0153name\u0153:\u0153message\u0153,\u0153output_types\u0153:[\u0153Message\u0153]}",
+    "targetHandle": "{\u0153fieldName\u0153:\u0153bind_values\u0153,\u0153id\u0153:\u0153SnowflakeSQLStatement-X305\u0153,\u0153inputTypes\u0153:[\u0153Message\u0153,\u0153Data\u0153,\u0153JSON\u0153],\u0153type\u0153:\u0153other\u0153}",
+    "data": {
+     "sourceHandle": {
+      "dataType": "SnowflakeSQLStatement",
+      "id": "SnowflakeSQLStatement-X302",
+      "name": "message",
+      "output_types": [
+       "Message"
+      ]
+     },
+     "targetHandle": {
+      "fieldName": "bind_values",
+      "id": "SnowflakeSQLStatement-X305",
+      "inputTypes": [
+       "Message",
+       "Data",
+       "JSON"
+      ],
+      "type": "other"
+     }
+    },
+    "id": "xy-edge__SnowflakeSQLStatement-X302message-SnowflakeSQLStatement-X305bind_values"
+   },
+   {
+    "source": "SnowflakeAIFunction-X303",
+    "target": "SnowflakeSQLStatement-X305",
+    "sourceHandle": "{\u0153dataType\u0153:\u0153SnowflakeAIFunction\u0153,\u0153id\u0153:\u0153SnowflakeAIFunction-X303\u0153,\u0153name\u0153:\u0153message\u0153,\u0153output_types\u0153:[\u0153Message\u0153]}",
+    "targetHandle": "{\u0153fieldName\u0153:\u0153bind_values\u0153,\u0153id\u0153:\u0153SnowflakeSQLStatement-X305\u0153,\u0153inputTypes\u0153:[\u0153Message\u0153,\u0153Data\u0153,\u0153JSON\u0153],\u0153type\u0153:\u0153other\u0153}",
+    "data": {
+     "sourceHandle": {
+      "dataType": "SnowflakeAIFunction",
+      "id": "SnowflakeAIFunction-X303",
+      "name": "message",
+      "output_types": [
+       "Message"
+      ]
+     },
+     "targetHandle": {
+      "fieldName": "bind_values",
+      "id": "SnowflakeSQLStatement-X305",
+      "inputTypes": [
+       "Message",
+       "Data",
+       "JSON"
+      ],
+      "type": "other"
+     }
+    },
+    "id": "xy-edge__SnowflakeAIFunction-X303message-SnowflakeSQLStatement-X305bind_values"
+   },
+   {
+    "source": "SnowflakeDecision-X304",
+    "target": "SnowflakeSQLStatement-X305",
+    "sourceHandle": "{\u0153dataType\u0153:\u0153SnowflakeDecision\u0153,\u0153id\u0153:\u0153SnowflakeDecision-X304\u0153,\u0153name\u0153:\u0153summary\u0153,\u0153output_types\u0153:[\u0153Message\u0153]}",
+    "targetHandle": "{\u0153fieldName\u0153:\u0153bind_values\u0153,\u0153id\u0153:\u0153SnowflakeSQLStatement-X305\u0153,\u0153inputTypes\u0153:[\u0153Message\u0153,\u0153Data\u0153,\u0153JSON\u0153],\u0153type\u0153:\u0153other\u0153}",
+    "data": {
+     "sourceHandle": {
+      "dataType": "SnowflakeDecision",
+      "id": "SnowflakeDecision-X304",
+      "name": "summary",
+      "output_types": [
+       "Message"
+      ]
+     },
+     "targetHandle": {
+      "fieldName": "bind_values",
+      "id": "SnowflakeSQLStatement-X305",
+      "inputTypes": [
+       "Message",
+       "Data",
+       "JSON"
+      ],
+      "type": "other"
+     }
+    },
+    "id": "xy-edge__SnowflakeDecision-X304summary-SnowflakeSQLStatement-X305bind_values"
+   },
+   {
+    "source": "SnowflakeSQLStatement-X305",
+    "target": "SnowflakeSQLStatement-X306",
+    "sourceHandle": "{\u0153dataType\u0153:\u0153SnowflakeSQLStatement\u0153,\u0153id\u0153:\u0153SnowflakeSQLStatement-X305\u0153,\u0153name\u0153:\u0153message\u0153,\u0153output_types\u0153:[\u0153Message\u0153]}",
+    "targetHandle": "{\u0153fieldName\u0153:\u0153bind_values\u0153,\u0153id\u0153:\u0153SnowflakeSQLStatement-X306\u0153,\u0153inputTypes\u0153:[\u0153Message\u0153,\u0153Data\u0153,\u0153JSON\u0153],\u0153type\u0153:\u0153other\u0153}",
+    "data": {
+     "sourceHandle": {
+      "dataType": "SnowflakeSQLStatement",
+      "id": "SnowflakeSQLStatement-X305",
+      "name": "message",
+      "output_types": [
+       "Message"
+      ]
+     },
+     "targetHandle": {
+      "fieldName": "bind_values",
+      "id": "SnowflakeSQLStatement-X306",
+      "inputTypes": [
+       "Message",
+       "Data",
+       "JSON"
+      ],
+      "type": "other"
+     }
+    },
+    "id": "xy-edge__SnowflakeSQLStatement-X305message-SnowflakeSQLStatement-X306bind_values"
+   },
+   {
+    "source": "SnowflakeSQLStatement-X305",
+    "target": "PromptTemplate-X307",
+    "sourceHandle": "{\u0153dataType\u0153:\u0153SnowflakeSQLStatement\u0153,\u0153id\u0153:\u0153SnowflakeSQLStatement-X305\u0153,\u0153name\u0153:\u0153message\u0153,\u0153output_types\u0153:[\u0153Message\u0153]}",
+    "targetHandle": "{\u0153fieldName\u0153:\u0153loaded\u0153,\u0153id\u0153:\u0153PromptTemplate-X307\u0153,\u0153inputTypes\u0153:[\u0153Message\u0153],\u0153type\u0153:\u0153str\u0153}",
+    "data": {
+     "sourceHandle": {
+      "dataType": "SnowflakeSQLStatement",
+      "id": "SnowflakeSQLStatement-X305",
+      "name": "message",
+      "output_types": [
+       "Message"
+      ]
+     },
+     "targetHandle": {
+      "fieldName": "loaded",
+      "id": "PromptTemplate-X307",
+      "inputTypes": [
+       "Message"
+      ],
+      "type": "str"
+     }
+    },
+    "id": "xy-edge__SnowflakeSQLStatement-X305message-PromptTemplate-X307loaded"
+   },
+   {
+    "source": "SnowflakeSQLStatement-X306",
+    "target": "PromptTemplate-X307",
+    "sourceHandle": "{\u0153dataType\u0153:\u0153SnowflakeSQLStatement\u0153,\u0153id\u0153:\u0153SnowflakeSQLStatement-X306\u0153,\u0153name\u0153:\u0153message\u0153,\u0153output_types\u0153:[\u0153Message\u0153]}",
+    "targetHandle": "{\u0153fieldName\u0153:\u0153report\u0153,\u0153id\u0153:\u0153PromptTemplate-X307\u0153,\u0153inputTypes\u0153:[\u0153Message\u0153],\u0153type\u0153:\u0153str\u0153}",
+    "data": {
+     "sourceHandle": {
+      "dataType": "SnowflakeSQLStatement",
+      "id": "SnowflakeSQLStatement-X306",
+      "name": "message",
+      "output_types": [
+       "Message"
+      ]
+     },
+     "targetHandle": {
+      "fieldName": "report",
+      "id": "PromptTemplate-X307",
+      "inputTypes": [
+       "Message"
+      ],
+      "type": "str"
+     }
+    },
+    "id": "xy-edge__SnowflakeSQLStatement-X306message-PromptTemplate-X307report"
+   },
+   {
+    "source": "PromptTemplate-X307",
+    "target": "TextOutput-X308",
+    "sourceHandle": "{\u0153dataType\u0153:\u0153Prompt Template\u0153,\u0153id\u0153:\u0153PromptTemplate-X307\u0153,\u0153name\u0153:\u0153prompt\u0153,\u0153output_types\u0153:[\u0153Message\u0153]}",
+    "targetHandle": "{\u0153fieldName\u0153:\u0153input_value\u0153,\u0153id\u0153:\u0153TextOutput-X308\u0153,\u0153inputTypes\u0153:[\u0153Message\u0153],\u0153type\u0153:\u0153str\u0153}",
+    "data": {
+     "sourceHandle": {
+      "dataType": "Prompt Template",
+      "id": "PromptTemplate-X307",
+      "name": "prompt",
+      "output_types": [
+       "Message"
+      ]
+     },
+     "targetHandle": {
+      "fieldName": "input_value",
+      "id": "TextOutput-X308",
+      "inputTypes": [
+       "Message"
+      ],
+      "type": "str"
+     }
+    },
+    "id": "xy-edge__PromptTemplate-X307prompt-TextOutput-X308input_value"
+   }
+  ],
+  "viewport": {
+   "x": 0,
+   "y": 0,
+   "zoom": 0.5
+  },
+  "snowflake_context": {
+   "database": "SNOWFLAKE_LANGFLOW",
+   "schema": "EXAMPLES",
+   "databases": [
+    "SNOWFLAKE_LANGFLOW"
+   ],
+   "schemas_by_db": {
+    "SNOWFLAKE_LANGFLOW": [
+     "EXAMPLES"
+    ]
+   },
+   "full_databases": [],
+   "full_schemas": [],
+   "postgres_instances": [],
+   "selected_postgres_instances": [],
+   "postgres_tables_by_instance": {},
+   "objects_by_db_schema": {
+    "SNOWFLAKE_LANGFLOW.EXAMPLES": {
+     "tables": [
+      "SERVICE_TICKETS",
+      "SERVICE_DOCS",
+      "TICKET_INBOX"
+     ],
+     "semantic_views": [
+      "TICKETS_ANALYTICS"
+     ],
+     "cortex_search_services": [
+      "DOC_SEARCH"
+     ],
+     "cortex_agents": [
+      "MAINTENANCE_ADVISOR"
+     ],
+     "functions": [
+      "NORMALIZE_SITE"
+     ],
+     "procedures": [
+      "LOAD_TICKET"
+     ]
+    }
+   },
+   "selected_objects": {
+    "SNOWFLAKE_LANGFLOW.EXAMPLES": {
+     "tables": [
+      "SERVICE_TICKETS",
+      "SERVICE_DOCS",
+      "TICKET_INBOX"
+     ],
+     "semantic_views": [
+      "TICKETS_ANALYTICS"
+     ],
+     "cortex_search_services": [
+      "DOC_SEARCH"
+     ],
+     "cortex_agents": [
+      "MAINTENANCE_ADVISOR"
+     ],
+     "functions": [
+      "NORMALIZE_SITE"
+     ],
+     "procedures": [
+      "LOAD_TICKET"
+     ]
+    }
+   },
+   "visible_objects": {
+    "tables": [],
+    "views": [],
+    "iceberg_tables": [],
+    "stages": [],
+    "memories": [],
+    "cortex_search_services": [],
+    "semantic_views": [],
+    "semantic_models": [],
+    "cortex_agents": [],
+    "functions": [],
+    "procedures": [],
+    "postgres_instances": [],
+    "streams": [
+     "LF_STRM_12C07A634ADC_TICKET_INBOX"
+    ]
+   },
+   "flow_id": "12c07a63-4adc-4b86-b87c-a922ec3ad5de",
+   "active_role": "ACCOUNTADMIN",
+   "context_epoch": 17
+  }
+ },
+ "is_component": false,
+ "endpoint_name": null,
+ "tags": [
+  "snowflake",
+  "example"
+ ]
+}
