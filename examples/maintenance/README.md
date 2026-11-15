@@ -17,8 +17,8 @@ All data is synthetic.
 1. **Create the objects.** Open [`00_setup.sql`](00_setup.sql), replace `<WAREHOUSE>`, and run the whole script.
    It creates the schema `SNOWFLAKE_LANGFLOW.EXAMPLES`. Running it again puts the data back to its initial state.
 2. **Import the flows.** In Langflow, upload the four `.json` files of this folder (drag them onto the flow list).
-3. **Pick a role and a Context.** Open a flow, select a role that can read the schema, then open
-   `[ Context ]` and select the schema `EXAMPLES` with its objects.
+3. **Pick a role.** Open a flow and select a role that can use the schema. The flow file carries its Context
+   (the schema `EXAMPLES` with its objects), so there is nothing to tick; open `[ Context ]` to see it.
 
 If your Langflow database is not called `SNOWFLAKE_LANGFLOW`, replace that name in the script and in the four
 `.json` files before you start.
