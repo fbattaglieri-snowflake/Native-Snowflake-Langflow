@@ -24,7 +24,7 @@
     {
       "id": "starter",
       "title": "starter examples",
-      "producerNotes": "Three flows in examples/maintenance of the repository, run on 2026-11-14 on synthetic data. Results shown are from those runs; model-chosen values (severity, wording) can vary."
+      "producerNotes": "Four flows in examples/maintenance of the repository, run on 2026-11-14 and 2026-11-15 on synthetic data. Results shown are from those runs; model-chosen values (severity, wording) can vary."
     },
     {
       "id": "examples",
@@ -44,7 +44,7 @@
 <nav>
   <div class="wrap">
     <a class="brand" href="index.html">Native Snowflake Langflow</a>
-    <div class="links"><a href="index.html">Overview</a><a href="benefits.html">Benefits</a><a href="guide.html">Guide</a><a href="examples.html" aria-current="page">Examples</a><a href="models.html">Models and proxy</a><a href="limits.html">Limits</a><a href="feedback.html">Feedback</a></div>
+    <div class="links"><a href="index.html">Overview</a><a href="benefits.html">Benefits</a><a href="guide.html">Guide</a><a href="examples.html" aria-current="page">Examples</a><a href="skill.html">Skill</a><a href="models.html">Models and proxy</a><a href="limits.html">Limits</a><a href="feedback.html">Feedback</a></div>
     <a class="btn ghost small" href="https://github.com/fbattaglieri-snowflake/Native-Snowflake-Langflow">GitHub</a>
   </div>
 </nav>
@@ -52,12 +52,12 @@
 <section id="starter">
   <div class="wrap">
     <div class="head reveal">
-      <h2>Three starter examples you can rebuild</h2>
+      <h2>Four starter examples you can rebuild</h2>
       <p class="sub">Small flows on the same sample data: a maintenance team with tickets, procedures and a Cortex Agent. One SQL script creates every object they need.</p>
     </div>
     <div class="steps reveal">
-      <div class="step"><span class="n">01</span><h3>Run one SQL script</h3><p>It creates a schema with tables, a semantic view, a Cortex Search service, a Cortex Agent, a function and a procedure. Run it again to start over.</p><a class="xfile" href="https://github.com/fbattaglieri-snowflake/Native-Snowflake-Langflow/blob/snowflake/main/examples/maintenance/00_setup.sql">00_setup.sql</a></div>
-      <div class="step"><span class="n">02</span><h3>Import the flows</h3><p>Upload the three flow files in Langflow. Each one opens ready to run, with its nodes already configured.</p><a class="xfile" href="https://github.com/fbattaglieri-snowflake/Native-Snowflake-Langflow/blob/snowflake/main/examples/maintenance/README.md">examples/maintenance</a></div>
+      <div class="step"><span class="n">01</span><h3>Run one SQL script</h3><p>It creates a schema with tables, a semantic view, a Cortex Search service, two Cortex Agents, a function and procedures. Run it again to start over.</p><a class="xfile" href="https://github.com/fbattaglieri-snowflake/Native-Snowflake-Langflow/blob/snowflake/main/examples/maintenance/00_setup.sql">00_setup.sql</a></div>
+      <div class="step"><span class="n">02</span><h3>Import the flows</h3><p>Upload the four flow files in Langflow. Each one opens ready to run, with its nodes already configured.</p><a class="xfile" href="https://github.com/fbattaglieri-snowflake/Native-Snowflake-Langflow/tree/snowflake/main/examples/maintenance">examples/maintenance</a></div>
       <div class="step"><span class="n">03</span><h3>Pick a role and a Context</h3><p>Select a role that can read the schema, then select the schema <code>EXAMPLES</code> in the flow Context. Run.</p></div>
     </div>
 
@@ -78,6 +78,8 @@
               </tbody>
             </table>
             <p class="need yes">Needs the LLM proxy: it uses Language Model and Agent</p>
+            <a class="xfile" href="https://github.com/fbattaglieri-snowflake/Native-Snowflake-Langflow/blob/snowflake/main/examples/maintenance/1_two_helpers_one_cortex_agent.json">1_two_helpers_one_cortex_agent.json</a>
+            <a class="xfile" style="margin-top:6px" href="https://github.com/fbattaglieri-snowflake/Native-Snowflake-Langflow/blob/snowflake/main/examples/maintenance/README.md#1-two-helpers-one-cortex-agent">How to rebuild it</a>
           </div>
           <div class="chat">
             <span class="mono">Ask</span>
@@ -104,6 +106,8 @@
               </tbody>
             </table>
             <p class="need">Works without the LLM proxy</p>
+            <a class="xfile" href="https://github.com/fbattaglieri-snowflake/Native-Snowflake-Langflow/blob/snowflake/main/examples/maintenance/2_sequential_redact_classify_agent.json">2_sequential_redact_classify_agent.json</a>
+            <a class="xfile" style="margin-top:6px" href="https://github.com/fbattaglieri-snowflake/Native-Snowflake-Langflow/blob/snowflake/main/examples/maintenance/README.md#2-redact-classify-answer">How to rebuild it</a>
           </div>
           <div class="chat">
             <span class="mono">Ask</span>
@@ -122,6 +126,8 @@
             <span class="mono">A raw message</span>
             <div class="q" style="margin-top:8px">TORINO - the light curtain on press A12 did not react twice this morning. Operators are worried.</div>
             <p class="need">Works without the LLM proxy</p>
+            <a class="xfile" href="https://github.com/fbattaglieri-snowflake/Native-Snowflake-Langflow/blob/snowflake/main/examples/maintenance/3_data_engineering_inbox_to_tickets.json">3_data_engineering_inbox_to_tickets.json</a>
+            <a class="xfile" style="margin-top:6px" href="https://github.com/fbattaglieri-snowflake/Native-Snowflake-Langflow/blob/snowflake/main/examples/maintenance/README.md#3-inbox-to-tickets">How to rebuild it</a>
           </div>
           <div>
             <span class="mono">The ticket it becomes</span>
@@ -136,6 +142,32 @@
           </div>
         </div>
         <p style="font-size:14px;margin-top:20px">One message per run: run it four times to empty the sample inbox. The trigger is saved paused, so nothing runs on its own until you activate it.</p>
+      </article>
+      <article class="xcard reveal">
+        <span class="mono">Example 4 · an agent that hands work to a flow</span>
+        <h3>A Cortex Agent hands a long job to a workflow</h3>
+        <p>Someone asks a Cortex Agent for the weekly maintenance plan of a site. One agent is not enough: the job has fixed steps, uses several services and can take minutes. The agent starts a flow, waits, and answers with its result. Nothing leaves Snowflake.</p>
+        <div class="xd"><svg viewBox="0 0 940 196" role="img" aria-label="A user asks a Cortex Agent. The agent calls a start tool that writes a request row in a table. The row starts a Langflow flow, which writes the result back to the table. The agent calls a second tool that waits for the result and returns it."><rect x="10" y="20" width="90" height="48" rx="9"/><text x="55.0" y="48.0">User</text><rect x="140" y="20" width="170" height="48" rx="9" class="sf"/><text x="225.0" y="41.0" class="sf">Cortex Agent</text><text class="s" x="225.0" y="57.0">MAINTENANCE_PLANNER</text><rect x="360" y="20" width="150" height="48" rx="9" class="sf"/><text x="435.0" y="41.0" class="sf">Tool: start</text><text class="s" x="435.0" y="57.0">writes a request row</text><rect x="360" y="128" width="150" height="48" rx="9" class="sf"/><text x="435.0" y="149.0" class="sf">Tool: get the result</text><text class="s" x="435.0" y="165.0">waits, called again</text><rect x="560" y="74" width="130" height="48" rx="9" class="sf"/><text x="625.0" y="95.0" class="sf">Table</text><text class="s" x="625.0" y="111.0">REVIEW_RUNS</text><rect x="740" y="74" width="190" height="48" rx="9"/><text x="835.0" y="95.0">Langflow flow</text><text class="s" x="835.0" y="111.0">the multi-step work</text><path class="go" d="M100 44 H140"/><path class="go" d="M310 44 H360"/><path class="go" d="M225 68 V152 H360"/><path class="go" d="M510 44 H625 V74"/><path class="go" d="M510 152 H625 V122"/><path class="go" d="M690 86 H740"/><path class="go" d="M740 110 H690"/></svg></div>
+        <div class="xcols">
+          <div>
+            <table class="xtable">
+              <thead><tr><th>Agent tool</th><th>Returns</th><th>Takes</th></tr></thead>
+              <tbody>
+                <tr><td>Start</td><td>A run id, not the plan</td><td>Seconds</td></tr>
+                <tr><td>Get the result</td><td>RUNNING, so the agent calls it again, or the plan</td><td>Up to about 50 s per call</td></tr>
+              </tbody>
+            </table>
+            <p class="need">Works without the LLM proxy</p>
+            <a class="xfile" href="https://github.com/fbattaglieri-snowflake/Native-Snowflake-Langflow/blob/snowflake/main/examples/maintenance/4_workflow_behind_a_cortex_agent.json">4_workflow_behind_a_cortex_agent.json</a>
+            <a class="xfile" style="margin-top:6px" href="https://github.com/fbattaglieri-snowflake/Native-Snowflake-Langflow/blob/snowflake/main/examples/maintenance/README.md#4-a-cortex-agent-hands-a-long-job-to-a-workflow">How to rebuild it</a>
+          </div>
+          <div class="chat">
+            <span class="mono">Ask the agent MAINTENANCE_PLANNER</span>
+            <div class="q">Prepare this week's maintenance plan for the Torino plant.</div>
+            <span class="mono" style="margin-top:8px">Measured on the test account</span>
+            <ul class="look" style="margin-top:0"><li>The flow started 6 to 9 seconds after the request</li><li>The whole answer took about 45 seconds</li><li>With the flow held back 80 seconds, the agent waited and answered after about 2 minutes</li></ul>
+          </div>
+        </div>
       </article>
     </div>
   </div>
@@ -241,7 +273,7 @@
   </div>
 </section>
 
-<div class="wrap"><div class="pager"><a href="guide.html"><small>Previous</small>Guide</a><a href="models.html" style="text-align:right"><small>Next</small>Models and proxy</a></div></div>
+<div class="wrap"><div class="pager"><a href="guide.html"><small>Previous</small>Guide</a><a href="skill.html" style="text-align:right"><small>Next</small>Skill</a></div></div>
 
 <footer>
   <div class="wrap">

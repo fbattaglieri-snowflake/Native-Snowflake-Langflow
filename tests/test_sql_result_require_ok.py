@@ -30,3 +30,16 @@ def test_data_nodes_check_every_statement(path):
                  if l.strip().startswith("res = _flow_component_execute_sql(")]
     assert not unchecked, unchecked
     assert "require_ok(" in src
+
+
+def test_multi_statement_wrapper_text_is_removed():
+    from lfx_snowflake.sql_result import statement_error
+
+    raw = ('JavaScript execution error: Uncaught Execution of multiple statements failed on statement "SELECT * FROM (\n'
+           'SELECT NO_SUCH..." (at line 2, position 0).\nSQL compilation error: error line 2 at position 7\n'
+           "invalid identifier 'NO_SUCH_COLUMN' in SYSTEM$MULTISTMT at '    throw `Execution of multiple statements "
+           "failed`' position 4\nstackstrace: \nSYSTEM$MULTISTMT line: 10")
+    assert statement_error(raw) == "SQL compilation error: error line 2 at position 7 invalid identifier 'NO_SUCH_COLUMN'"
+    assert statement_error("Object does not exist") == "Object does not exist"
+    with pytest.raises(ValueError, match=r"^SQL Statement failed: SQL compilation error: .*NO_SUCH_COLUMN' \[TECHNICAL_EXECUTION_ERROR\]$"):
+        require_ok({"ok": False, "message": raw, "error_code": "TECHNICAL_EXECUTION_ERROR"}, "SQL Statement")

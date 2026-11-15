@@ -468,6 +468,20 @@ Four reference flows show the nodes working together. Build them with the Langfl
 | `SHOWCASE_03_Language_Model_Tools_Analyst_Search_AIFunctions_Decision` | `Language Model`, `Cortex Analyst`, `Cortex Search`, AI functions and a `Decision` node: only the chosen branch runs |
 | `SHOWCASE_04_A2A_All_Forms_Internal_External_And_CortexBridge` | A flow served as an A2A agent that calls three `A2A Agent` nodes (another flow, a Cortex Agent, an external URL) |
 
+### Build flows with a coding agent
+
+[`skills/native-snowflake-langflow/`](skills/native-snowflake-langflow/SKILL.md) is a skill for Cortex Code, Claude Code and other coding agents. It holds the rules of this tool (role, Context, LLM proxy), a node reference, five design patterns with tested code and a small client:
+
+```bash
+export LF_URL=https://<endpoint>.snowflakecomputing.app   # the service endpoint
+export LF_API_KEY=...                                     # Langflow API key
+export LF_SPCS_TOKEN=...                                  # Snowflake programmatic access token
+python3 skills/native-snowflake-langflow/scripts/lf.py check
+python3 skills/native-snowflake-langflow/scripts/lf.py import examples/maintenance/2_sequential_redact_classify_agent.json
+```
+
+Install it with `cortex skill add <path to the folder>` (Cortex Code) or by copying the folder into `~/.claude/skills/` (Claude Code).
+
 ---
 
 ## 9. Deploying
@@ -534,6 +548,7 @@ Nothing in this repository names a specific account. Every file uses these place
 | `scripts/verify_public_repo_sanitization.py` | Scanner that blocks secrets and account identifiers |
 | `sql/` | Setup scripts: roles, telemetry tables, service, triggers, memories |
 | `examples/maintenance/` | Four starter flows with the SQL script that creates their sample objects |
+| `skills/native-snowflake-langflow/` | Skill for coding agents (Cortex Code, Claude Code and others): rules, node reference, design patterns and a small client to build and run flows as code |
 | `Dockerfile.release`, `service-spec.template.yaml` | Image and service definition |
 | `docs/` | Deployment guide, capability matrix, upgrade guide, decision records |
 | `tests/` | Test suite (`pytest`) |
@@ -611,6 +626,11 @@ Say what you were doing, what you expected, what happened (with the error code),
 ## Changelog
 
 ### v0.8.6
+
+**Additions and fixes of 2026-11-15**
+- New `skills/native-snowflake-langflow/`: a skill that lets a coding agent discover the nodes, build a flow as code, set its role and Context, run it and read every node output. It ships a standard-library client (`scripts/lf.py`) that also works by hand.
+- New example 4 in `examples/maintenance/`: a Cortex Agent with two custom tools starts a flow through a table row and an active `Table Change Trigger`, and waits for its result.
+- SQL Statement, Tables, Views, Iceberg Tables and the stage listing: when Snowflake refused the statement the node stayed green and returned zero rows (or `"ok": false` inside the payload), so a failed read looked like an empty table and a failed write like a success. The node now fails with the Snowflake error. **Behaviour change:** a flow that relied on continuing after a failed statement now stops at that node.
 
 **Fixes of 2026-11-14 (full regression)**
 - SQL Statement: new `Rows Only` output with just the result rows as JSON (a one-column row holding JSON text, as produced by the JSON Object format or by a `CALL` returning a VARIANT, is opened). Use it to feed prompts, Cortex Search or AI functions; `JSON Message` also carries the SQL text and the role. `Rows Only` fails the node when the statement fails.

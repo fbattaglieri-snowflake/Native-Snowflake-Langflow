@@ -288,5 +288,5 @@ pre.cfg{margin:16px 0 0;padding:16px;border-radius:12px;background:var(--bg);bor
 .xtable th{font:11px var(--mono);color:var(--muted);text-align:left;font-weight:400;padding:6px 10px 6px 0;border-bottom:1px solid var(--line2)}
 .xtable td{padding:8px 10px 8px 0;border-bottom:1px solid var(--line);color:var(--text2);vertical-align:top}
 .xtable td:first-child{color:var(--text)}
-.xfile{display:inline-flex;margin-top:16px;font:12px var(--mono);color:var(--accent);text-decoration:none;border-bottom:1px solid transparent}
+.xfile{display:flex;width:fit-content;margin-top:16px;font:12px var(--mono);color:var(--accent);text-decoration:none;border-bottom:1px solid transparent}
 .xfile:hover{border-bottom-color:var(--accent)}

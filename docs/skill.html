@@ -1,0 +1,118 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="snowflake-source" content="cortex-agent-authored">
+<meta name="description" content="Native Snowflake Langflow: an unofficial personal fork that runs the Langflow visual editor inside Snowflake, on Snowflake data, under Snowflake roles.">
+<title>Skill for coding agents · Native Snowflake Langflow</title>
+<script type="application/json" id="snowflake-report-metadata">
+{
+  "generated": "2026-11-15",
+  "intent": "Native Snowflake Langflow site: the skill that lets coding agents build and run flows",
+  "dataSources": [
+    {
+      "type": "file",
+      "path": "skills/native-snowflake-langflow/SKILL.md"
+    }
+  ],
+  "sections": [
+    {
+      "id": "skill",
+      "title": "skill",
+      "producerNotes": "The five patterns of references/patterns.md were run against a live service on 2026-11-15 with the client of the skill. In Cortex Code the folder was added with cortex skill add and listed; a conversation using it, and Claude Code or other tools, were not tested."
+    }
+  ]
+}
+</script>
+<link rel="stylesheet" href="assets/site.css">
+<script src="assets/site.js" defer></script>
+</head>
+<body>
+
+<div class="notice"><div class="wrap"><strong>Unofficial personal fork, under active testing.</strong> A project by Francesco Battaglieri. It is not a product of Snowflake Inc. or of Langflow / DataStax, and neither supports it. Tested on Snowflake on AWS only, with synthetic data.</div></div>
+
+<nav>
+  <div class="wrap">
+    <a class="brand" href="index.html">Native Snowflake Langflow</a>
+    <div class="links"><a href="index.html">Overview</a><a href="benefits.html">Benefits</a><a href="guide.html">Guide</a><a href="examples.html">Examples</a><a href="skill.html" aria-current="page">Skill</a><a href="models.html">Models and proxy</a><a href="limits.html">Limits</a><a href="feedback.html">Feedback</a></div>
+    <a class="btn ghost small" href="https://github.com/fbattaglieri-snowflake/Native-Snowflake-Langflow">GitHub</a>
+  </div>
+</nav>
+
+<section id="skill" class="band">
+  <div class="wrap">
+    <div class="head reveal">
+      <h2>A skill that teaches your coding agent this tool</h2>
+      <p class="sub">A folder of instructions and a small client. With it, Cortex Code, Claude Code or another coding agent can build a flow from a sentence, set its role and Context, run it, read every node and fix what fails.</p>
+    </div>
+    <div class="steps reveal">
+      <div class="step"><span class="n">01</span><h3>Get the folder</h3><p>It is in the repository, under <code>skills/native-snowflake-langflow</code>. Clone the repository or download that folder.</p><a class="xfile" href="https://github.com/fbattaglieri-snowflake/Native-Snowflake-Langflow/tree/snowflake/main/skills/native-snowflake-langflow">skills/native-snowflake-langflow</a></div>
+      <div class="step"><span class="n">02</span><h3>Give it to your agent</h3><p>Cortex Code: <code>cortex skill add &lt;path to the folder&gt;</code>. Claude Code: copy the folder into <code>~/.claude/skills/</code>. Other tools: point the agent at <code>SKILL.md</code>.</p></div>
+      <div class="step"><span class="n">03</span><h3>Set three variables</h3><p>The service URL, a Langflow API key and a Snowflake access token, as environment variables in your shell. The skill never asks you to paste them in the chat.</p></div>
+    </div>
+  </div>
+</section>
+
+<section id="ask">
+  <div class="wrap">
+    <div class="head reveal">
+      <h2>What you can ask</h2>
+      <p class="sub">The agent discovers the nodes on your server, picks a pattern, builds the flow as code and runs it. You open the result in the canvas.</p>
+    </div>
+    <div class="two">
+      <article class="ed reveal" style="--i:0">
+        <span class="mono">Ask in plain words</span>
+        <div class="chat" style="margin-top:8px">
+          <div class="q">Build a flow that removes personal data from a ticket, classifies the fault and asks my Cortex Agent for advice. Use the role ANALYST.</div>
+          <div class="q">My flow "Inbox to tickets" fails on the fourth node. Find out why and fix it.</div>
+          <div class="q">I have a Cortex Agent that needs a job that takes minutes. Set up a flow it can start and wait for.</div>
+          <div class="q">Export the flow "Weekly plan" to a file I can share.</div>
+        </div>
+      </article>
+      <article class="ed reveal" style="--i:1">
+        <span class="mono">What is in the folder</span>
+        <table class="xtable" style="margin-top:8px">
+          <tbody>
+            <tr><td><a href="https://github.com/fbattaglieri-snowflake/Native-Snowflake-Langflow/blob/snowflake/main/skills/native-snowflake-langflow/SKILL.md">SKILL.md</a></td><td>The rules: role, Context, proxy, and the order of work</td></tr>
+            <tr><td><a href="https://github.com/fbattaglieri-snowflake/Native-Snowflake-Langflow/blob/snowflake/main/skills/native-snowflake-langflow/scripts/lf.py">scripts/lf.py</a></td><td>The client: list nodes, build, save, run, export. Python standard library only</td></tr>
+            <tr><td><a href="https://github.com/fbattaglieri-snowflake/Native-Snowflake-Langflow/blob/snowflake/main/skills/native-snowflake-langflow/references/nodes.md">references/nodes.md</a></td><td>Field names and output ports of the common nodes</td></tr>
+            <tr><td><a href="https://github.com/fbattaglieri-snowflake/Native-Snowflake-Langflow/blob/snowflake/main/skills/native-snowflake-langflow/references/patterns.md">references/patterns.md</a></td><td>Five design patterns with code that was run against a live service</td></tr>
+            <tr><td><a href="https://github.com/fbattaglieri-snowflake/Native-Snowflake-Langflow/blob/snowflake/main/skills/native-snowflake-langflow/references/troubleshooting.md">references/troubleshooting.md</a></td><td>Error messages, causes and fixes</td></tr>
+          </tbody>
+        </table>
+      </article>
+    </div>
+  </div>
+</section>
+
+<section id="by-hand" class="band">
+  <div class="wrap">
+    <div class="head reveal">
+      <h2>The same client, by hand</h2>
+      <p class="sub">The skill is not required to use the client. These commands work from any terminal once the three variables are set.</p>
+    </div>
+    <pre class="cfg reveal">python3 scripts/lf.py check                      # is the service reachable, which models does the proxy serve
+python3 scripts/lf.py nodes snowflake            # the Snowflake nodes installed
+python3 scripts/lf.py node SnowflakeSQLStatement # fields and output ports of one node
+python3 scripts/lf.py import 2_sequential_redact_classify_agent.json
+python3 scripts/lf.py role "EXAMPLE_2_Sequential_Redact_Classify_Cortex_Agent" MY_ROLE
+python3 scripts/lf.py run  "EXAMPLE_2_Sequential_Redact_Classify_Cortex_Agent" "Chiller C7 is leaking coolant"</pre>
+    <div class="tips">
+      <div class="tip reveal" style="--i:0"><b>What was tested</b>The five patterns run end to end with this client on the test service. Cortex Code found the skill after <code>cortex skill add</code>. Using it in a conversation, and loading it in Claude Code or other tools, was not tested.</div>
+      <div class="tip reveal" style="--i:1"><b>It builds flows, not Snowflake objects</b>Tables, search services and agents must exist already. The <a href="examples.html">examples</a> come with a script that creates theirs.</div>
+      <div class="tip reveal" style="--i:2"><b>Same limits as the editor</b>A flow built by an agent runs under the role and the Context you give it, like any other flow.</div>
+    </div>
+  </div>
+</section>
+
+<div class="wrap"><div class="pager"><a href="examples.html"><small>Previous</small>Examples</a><a href="models.html" style="text-align:right"><small>Next</small>Models and proxy</a></div></div>
+
+<footer>
+  <div class="wrap">
+    <p>Native Snowflake Langflow is an independent project by Francesco Battaglieri, released under the MIT License. It is not an official product, release or repository of Snowflake Inc., nor an official project of Langflow / DataStax, and it is not supported or warranted by either. Components, SQL schemas and configuration may change without notice.</p>
+    <p>All examples on this site use synthetic data. Role names and ratings shown in previews are illustrative.</p>
+  </div>
+</footer>
+</body>
+</html>
