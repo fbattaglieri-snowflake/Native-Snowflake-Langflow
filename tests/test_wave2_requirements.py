@@ -698,8 +698,20 @@ def test_w2_r2_05_deprefixed_sidebar_display_names() -> None:
                                 assert not dname.startswith("Snowflake "), f"{py_path.name} still has 'Snowflake ' prefix: {dname}"
 
 
-def test_w2_r2_06_and_12_data_sources_split_4_components_and_cortex_search_analyst_tool_mode() -> None:
+def test_w2_r2_06_and_12_data_sources_split_4_components_and_cortex_search_analyst_tool_mode(monkeypatch) -> None:
     """Verify W2-R2-06 and W2-R2-12: 6 Data Sources components (Tables, Views, Iceberg Tables, Postgres, Cortex Search, Cortex Analyst) with Tool Mode."""
+    from lfx_snowflake.fastapi_live_bridge import LIVE_BRIDGE  # noqa: PLC0415
+
+    monkeypatch.setattr(LIVE_BRIDGE, "execute_sql", lambda *a, **k: {"ok": True, "rows": []})
+    # Offline unit test: Cortex Analyst answers (a refused or unreachable call now fails the node).
+    monkeypatch.setattr(LIVE_BRIDGE, "invoke_cortex_analyst", lambda **k: {
+        "ok": True, "rest_endpoint": "/api/v2/cortex/analyst/message", "request_payload": {
+            "messages": [{"role": "user", "content": [{"type": "text", "text": k.get("question")}]}],
+            **({"semantic_model_file": k.get("semantic_source")} if str(k.get("semantic_source", "")).startswith("@")
+               else {"semantic_view": k.get("semantic_source")})},
+        "question": k.get("question"), "semantic_source": k.get("semantic_source"), "source_mode": k.get("source_mode"),
+        "database": k.get("database"), "schema_name": k.get("schema"), "interpretation": "ok",
+        "generated_sql": "SELECT 1", "rows": [], "generated_sql_blocked": False})
     tbl_comp = SnowflakeTablesComponent()
     assert tbl_comp.display_name == "Tables"
     assert len(tbl_comp.to_toolkit()) == 1

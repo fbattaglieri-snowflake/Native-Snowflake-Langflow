@@ -7603,31 +7603,59 @@ class LiveSnowflakeBridge:
             request_payload["semantic_view"] = sv_fqn
 
         rest_endpoint = "/api/v2/cortex/analyst/message"
-        generated_sql = (
-            f"SELECT run_id, flow_id, effective_role, status, start_ts "
-            f"FROM {self.runs_table} LIMIT {bounded_rows}"
-        )
-        interpretation = (
-            f"Cortex Analyst ({'semantic_model_file' if is_stage_yaml else 'semantic_view'}={src or f'{db}.{sch}.EXAMPLE_SEMANTIC_VIEW'}) "
-            f"interpreted question: {user_q}"
-        )
+        source_label = src or f"{db}.{sch}.EXAMPLE_SEMANTIC_VIEW"
+        base = {
+            "rest_endpoint": rest_endpoint,
+            "database": db,
+            "schema_name": sch,
+            "source_mode": mode,
+            "semantic_source": src,
+            "request_payload": request_payload,
+            "question": user_q,
+            "active_role": self.active_role,
+            "context_epoch": self.context_epoch,
+        }
 
-        if self._has_spcs_token() and httpx is not None:
-            host = os.environ["SNOWFLAKE_HOST"]
-            url = f"https://{host}{rest_endpoint}"
-            try:
-                with httpx.Client(timeout=60.0, verify=True) as client:
-                    resp = client.post(url, headers=self._get_spcs_headers(_sf_identity.current_request_mode()), json=request_payload)
-                    if resp.status_code < 400 and resp.content:
-                        body = resp.json()
-                        msg_obj = body.get("message") or {}
-                        for block in msg_obj.get("content") or []:
-                            if block.get("type") == "text" and block.get("text"):
-                                interpretation = str(block["text"])
-                            elif block.get("type") == "sql" and block.get("statement"):
-                                generated_sql = str(block["statement"])
-            except Exception:  # noqa: BLE001
-                pass
+        def _failed(status_code: int, error_code: str, message: str, **extra: Any) -> dict[str, Any]:
+            return {"ok": False, "status_code": status_code, "error_code": error_code, "message": message,
+                    "rows": [], **base, **extra}
+
+        # The answer comes from Cortex Analyst or not at all: there is no default statement. A placeholder
+        # query used to run when the call failed or returned no SQL, and its rows were returned as the answer.
+        if not (self._has_spcs_token() and httpx is not None):
+            return _failed(503, "NOT_CONFIGURED", "No Snowflake service token available; Cortex Analyst was not called.",
+                           mode="offline")
+        generated_sql = ""
+        interpretation = ""
+        suggestions: list[str] = []
+        host = os.environ["SNOWFLAKE_HOST"]
+        url = f"https://{host}{rest_endpoint}"
+        try:
+            with httpx.Client(timeout=60.0, verify=True) as client:
+                resp = client.post(url, headers=self._get_spcs_headers(_sf_identity.current_request_mode()), json=request_payload)
+        except Exception as exc:  # noqa: BLE001
+            return _failed(502, "CORTEX_ANALYST_UNREACHABLE", f"Cortex Analyst could not be reached: {str(exc)[:300]}")
+        try:
+            body = resp.json() if resp.content else {}
+        except ValueError:
+            body = {}
+        if resp.status_code >= 400:
+            detail = ""
+            if isinstance(body, dict):
+                detail = str(body.get("message") or body.get("error") or "")
+            if not detail:
+                detail = str(getattr(resp, "text", "") or "")[:500]
+            return _failed(int(resp.status_code), "CORTEX_ANALYST_ERROR",
+                           f"Cortex Analyst refused the request for {source_label} (HTTP {resp.status_code}): "
+                           f"{detail or 'no detail returned'}")
+        msg_obj = (body.get("message") if isinstance(body, dict) else None) or {}
+        for block in msg_obj.get("content") or []:
+            if block.get("type") == "text" and block.get("text"):
+                interpretation = str(block["text"])
+            elif block.get("type") == "sql" and block.get("statement"):
+                generated_sql = str(block["statement"])
+            elif block.get("type") == "suggestions":
+                suggestions = [str(x) for x in (block.get("suggestions") or [])]
 
         sql_rows: list[dict[str, Any]] = []
         generated_sql_blocked = False
@@ -7635,12 +7663,19 @@ class LiveSnowflakeBridge:
             # Cortex Analyst output is model-generated: only a single read-only statement is executed.
             if _sf_identity.is_read_only_statement(generated_sql):
                 exec_res = self.execute_sql(generated_sql)
+                if isinstance(exec_res, dict) and exec_res.get("ok") is False:
+                    return _failed(int(exec_res.get("status_code") or 400),
+                                   str(exec_res.get("error_code") or "CORTEX_ANALYST_SQL_FAILED"),
+                                   str(exec_res.get("message") or "The SQL generated by Cortex Analyst failed."),
+                                   interpretation=interpretation, generated_sql=generated_sql)
                 sql_rows = exec_res.get("rows", [])
             else:
                 generated_sql_blocked = True
 
         return {
             "ok": True,
+            # False when Cortex Analyst answered in words only (it could not write SQL for the question).
+            "answered_with_sql": bool(generated_sql),
             "generated_sql_blocked": generated_sql_blocked,
             "rest_endpoint": rest_endpoint,
             "database": db,
@@ -7650,6 +7685,7 @@ class LiveSnowflakeBridge:
             "request_payload": request_payload,
             "question": user_q,
             "interpretation": interpretation,
+            "suggestions": suggestions,
             "generated_sql": generated_sql,
             "execute_generated_sql": bool(execute_sql),
             "rows": sql_rows,

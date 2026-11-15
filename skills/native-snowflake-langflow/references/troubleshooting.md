@@ -10,6 +10,10 @@ Read the failing node's output first: `client.run(...)["errors"]` names the node
 | `Model '...' is not served by the LLM proxy` or `Language Model` / `Agent` fail | No LLM proxy, or the model is not in its list | `lf.py models`; pick a listed model, or replace the node with `AI Complete` or a `Cortex Agent` |
 | `SQL Statement failed: ...` | Snowflake refused the statement | The message is Snowflake's. Check names are fully qualified and the role's privileges |
 | `Snowflake Tables failed`, `Snowflake Views failed`, `Stage Files failed` | Same, for those nodes | Same |
+| `Cortex Analyst failed: Cortex Analyst refused the request ...` | Wrong semantic view name, or the role cannot use it | Check the name and the grants; the message carries the Analyst reason |
+| Cortex Analyst returns `"rows": []` with `"answered_with_sql": false` | The question cannot be answered from the semantic view; `interpretation` holds what Analyst said | Rephrase the question, or handle the no-data case in the flow |
+| `Postgres: running statements on Snowflake Postgres is not available` | The Postgres node has no connection to the instance | Use `SQL Statement` on Snowflake tables |
+| `Knowledge ingest: no text received` | Nothing was linked into the Knowledge node | Link a text, a document or rows |
 | A `CALL` receives its arguments in the wrong order | Old image: bind order was arbitrary before the 2026-11-14 fix | Update the image; values follow the order the links were created |
 | An AI function or a search gets a blob of JSON with `sql` and `active_role` in it | The `message` output of `SQL Statement` was linked | Link the `rows` output instead |
 | `No node type '...'` | Wrong component type | `lf.py nodes <text>` |
@@ -31,5 +35,6 @@ Read the failing node's output first: `client.run(...)["errors"]` names the node
 
 - Tested on Snowflake on AWS only, with synthetic data. Unofficial project, best-effort replies.
 - `Language Model` and `Agent` depend on the separate LLM proxy.
+- The `Postgres` node cannot run statements.
 - A Cortex Agent request ends after 15 minutes unless the caller uses a background run.
 - A trigger task waits for the flow to finish: runs started by the same trigger do not overlap.

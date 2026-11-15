@@ -1,5 +1,6 @@
 from __future__ import annotations
 from lfx_snowflake import dropdown_selection as _sel
+from lfx_snowflake import sql_result as _result
 
 from lfx_snowflake import sql_safety as _sql_safety
 
@@ -160,7 +161,7 @@ class SnowflakeLLMOperationComponent(Component):
 
     def run_operation(self) -> Message:
         stmt = self._build_sql()
-        res = _flow_component_execute_sql(stmt)
+        res = _result.require_ok(_flow_component_execute_sql(stmt), "Operations")
         return Message(
             text=json.dumps(
                 {
@@ -177,7 +178,7 @@ class SnowflakeLLMOperationComponent(Component):
         )
 
     def run_dataframe(self) -> DataFrame:
-        res = _flow_component_execute_sql(self._build_sql())
+        res = _result.require_ok(_flow_component_execute_sql(self._build_sql()), "Operations")
         return DataFrame(res.get("rows", []))
 
     def run_metadata(self) -> Data:

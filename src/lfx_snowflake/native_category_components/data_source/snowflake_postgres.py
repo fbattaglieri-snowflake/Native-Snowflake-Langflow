@@ -290,30 +290,11 @@ class SnowflakePostgresComponent(Component):
 
         custom = (getattr(self, "query_filter_input", "") or "").strip()
         sql_stmt = custom if custom.upper().startswith(("SELECT ", "INSERT ")) else f"SELECT * FROM {pg_sch}.{tbl} LIMIT {int(getattr(self, 'max_rows', 100) or 100)}"
-        return Data(
-            data={
-                "postgres_instance": inst,
-                "postgres_database": pg_db,
-                "postgres_schema": pg_sch,
-                "table_name": tbl,
-                "qualified_name": fqn,
-                "storage_profile": getattr(self, "storage_profile", "Relational"),
-                "operation_mode": mode,
-                "sql": sql_stmt,
-                "active_role": LIVE_BRIDGE.active_role,
-                "context_epoch": LIVE_BRIDGE.context_epoch,
-                "rows": [
-                    {
-                        "instance": inst,
-                        "database": pg_db,
-                        "schema": pg_sch,
-                        "table": tbl,
-                        "storage_profile": getattr(self, "storage_profile", "Relational"),
-                        "active_role": LIVE_BRIDGE.active_role,
-                    }
-                ],
-                "ok": True,
-            }
+        # This node has no connection to the Postgres instance: it used to return a row describing the
+        # selection with "ok": true, so a read looked like data and a write looked like a success.
+        raise ValueError(
+            f"Postgres: running statements on Snowflake Postgres is not available in this version. Nothing was "
+            f"{'written to' if 'Write' in mode or 'INSERT' in mode else 'read from'} {fqn}. Statement not executed: {sql_stmt}"
         )
 
     def read_dataframe(self) -> DataFrame:

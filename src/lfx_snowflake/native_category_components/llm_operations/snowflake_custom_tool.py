@@ -1,5 +1,6 @@
 from __future__ import annotations
 from lfx_snowflake import dropdown_selection as _sel
+from lfx_snowflake import sql_result as _result
 
 from lfx_snowflake import sql_safety as _sql_safety
 
@@ -511,7 +512,7 @@ class SnowflakeCustomToolComponent(Component):
         setattr(data_obj, "tool_spec", payload["tool_spec"])
         setattr(data_obj, "tool_resources", payload["tool_resources"])
         setattr(data_obj, "metadata", payload)
-        setattr(data_obj, "invoke", lambda tool_input=None, **kw: self._execute_tool(tool_input or kw))
+        setattr(data_obj, "invoke", lambda tool_input=None, **kw: self._execute_tool_or_raise(tool_input or kw))
         setattr(data_obj, "run", getattr(data_obj, "invoke"))
         return data_obj
 
@@ -533,5 +534,5 @@ class SnowflakeCustomToolComponent(Component):
         ]
 
     def run_custom_tool(self) -> Message:
-        res = self._execute_tool()
+        res = self._execute_tool_or_raise()
         return Message(text=json.dumps(res, indent=2))

@@ -748,8 +748,10 @@ def test_w2_r5_05_stages_and_volumes_backend_and_frontend_bucket_tab() -> None:
         assert required_marker in ui_js, f"Missing marker {required_marker} in snowflake-ui-integration.js"
 
 
-def test_w2_r5_06_files_and_knowledge_exact_5_canonical_components() -> None:
+def test_w2_r5_06_files_and_knowledge_exact_5_canonical_components(monkeypatch) -> None:
     """Verify W2-R5-06: Files & Knowledge has strictly the 5 canonical components with zero duplicates and [ ❄️ Context ] integration."""
+    # Offline unit test: Snowflake accepts the statement (a refused statement now fails the node).
+    monkeypatch.setattr(LIVE_BRIDGE, "execute_sql", lambda *a, **k: {"ok": True, "rows": []})
     assert CANONICAL_FILES_AND_KNOWLEDGE_NAMES == (
         "FileSystemTool",
         "Knowledge",
@@ -846,8 +848,18 @@ def test_w2_r5_06_files_and_knowledge_exact_5_canonical_components() -> None:
         assert f'"{fk_key}": ("{fk_disp}", "{fk_icon}")' in hooks_py
 
 
-def test_w2_r5_07_data_sources_cortex_search_and_cortex_analyst_context_and_tool_mode() -> None:
+def test_w2_r5_07_data_sources_cortex_search_and_cortex_analyst_context_and_tool_mode(monkeypatch) -> None:
     """Verify W2-R5-07: Data Sources -> Cortex Search & Cortex Analyst governed by [ ❄️ Context ], REST endpoints, and Tool Mode."""
+    monkeypatch.setattr(LIVE_BRIDGE, "execute_sql", lambda *a, **k: {"ok": True, "rows": []})
+    # Offline unit test: Cortex Analyst answers (a refused or unreachable call now fails the node).
+    monkeypatch.setattr(LIVE_BRIDGE, "invoke_cortex_analyst", lambda **k: {
+        "ok": True, "rest_endpoint": "/api/v2/cortex/analyst/message", "request_payload": {
+            "messages": [{"role": "user", "content": [{"type": "text", "text": k.get("question")}]}],
+            **({"semantic_model_file": k.get("semantic_source")} if str(k.get("semantic_source", "")).startswith("@")
+               else {"semantic_view": k.get("semantic_source")})},
+        "question": k.get("question"), "semantic_source": k.get("semantic_source"), "source_mode": k.get("source_mode"),
+        "database": k.get("database"), "schema_name": k.get("schema"), "interpretation": "ok",
+        "generated_sql": "SELECT 1", "rows": [], "generated_sql_blocked": False})
     cs = SnowflakeCortexSearchComponent(
         database="SNOWFLAKE_LANGFLOW",
         schema_name="CORE",

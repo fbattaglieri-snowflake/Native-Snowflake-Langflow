@@ -1,5 +1,6 @@
 from __future__ import annotations
 from lfx_snowflake import dropdown_selection as _sel
+from lfx_snowflake import sql_result as _result
 
 from typing import Any
 
@@ -258,7 +259,8 @@ class SnowflakeTableChangeTrigger(Component):
         limit = max(1, min(1000, int(getattr(self, "max_batch_rows", 100) or 100)))
         # PASSO3: the stream this trigger provisioned is usable by the flow when its schema is in context.
         _register_component_object(spec["stream_fqn"], "streams")
-        res = _flow_component_execute_sql(f"SELECT * FROM {spec['stream_fqn']} LIMIT {limit}")
+        res = _result.require_ok(
+            _flow_component_execute_sql(f"SELECT * FROM {spec['stream_fqn']} LIMIT {limit}"), "Table Change Trigger")
         return DataFrame(res.get("rows", []))
 
     def build_trigger_message(self) -> Message:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 from lfx_snowflake import dropdown_selection as _sel
+from lfx_snowflake import sql_result as _result
 
 from typing import Any
 
@@ -285,6 +286,9 @@ class SnowflakeCortexSearchServiceCreatorComponent(Component):
                     "ok": show_res.get("ok", False) or desc_res.get("ok", False),
                 }
             )
+            if not payload["ok"]:  # both lookups refused: report why instead of an empty status
+                _result.require_ok(show_res, "Cortex Search Service (inspect status)")
+                _result.require_ok(desc_res, "Cortex Search Service (inspect status)")
             return Data(data=payload)
 
         denied = LIVE_BRIDGE.check_write_privilege_or_deny("MANAGE_CORTEX_SEARCH_SERVICE", spec.service_fqn)
@@ -299,7 +303,7 @@ class SnowflakeCortexSearchServiceCreatorComponent(Component):
             "Resume Serving": resume_srv_sql,
         }
         exec_sql = sql_map.get(action, create_ddl)
-        res = _flow_component_execute_sql(exec_sql)
+        res = _result.require_ok(_flow_component_execute_sql(exec_sql), f"Cortex Search Service ({action})")
         if action == "Create or Replace Cortex Search Service" and _ddl_succeeded(res):
             _register_created_object(
                 database=spec.database,

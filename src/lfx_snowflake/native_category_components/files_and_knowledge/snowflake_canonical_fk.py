@@ -1,5 +1,6 @@
 from __future__ import annotations
 from lfx_snowflake import dropdown_selection as _sel
+from lfx_snowflake import sql_result as _result
 
 from lfx_snowflake import sql_safety as _sql_safety
 
@@ -465,7 +466,8 @@ class SnowflakeKnowledgeComponent(Component):
                         texts.append(str(item))
             texts = [t for t in texts if t]
             if not texts:
-                texts = [str(getattr(self, "search_query", "") or "Knowledge chunk")]
+                # Never store a placeholder row: an ingest without text is an error the user must see.
+                raise ValueError("Knowledge ingest: no text received. Connect a text, a document or rows to the input.")
 
             if no_emb:
                 ddl = (
@@ -486,7 +488,7 @@ class SnowflakeKnowledgeComponent(Component):
                     "CREATED_AT TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP()"
                     ")"
                 )
-            if _ddl_ok(_flow_component_execute_sql(ddl)):
+            if _ddl_ok(_result.require_ok(_flow_component_execute_sql(ddl), "Knowledge ingest (create table)")):
                 _register_component_object(fqn, "tables")  # PASSO3: register before the INSERTs use it
             last_insert_sql = ""
             for t in texts:
@@ -499,7 +501,7 @@ class SnowflakeKnowledgeComponent(Component):
                         f"SELECT ?, AI_EMBED({emb_lit}, ?)"
                     )
                     binds = _sql_safety.to_sql_bindings([("TEXT", t), ("TEXT", t)])
-                _flow_component_execute_sql(last_insert_sql, bindings=binds)
+                _result.require_ok(_flow_component_execute_sql(last_insert_sql, bindings=binds), "Knowledge ingest")
             return {
                 "action": "Ingest",
                 "database": db,
@@ -533,18 +535,9 @@ class SnowflakeKnowledgeComponent(Component):
                 f"ORDER BY SCORE DESC LIMIT {top_k}"
             )
             q_binds = _sql_safety.to_sql_bindings([("TEXT", query)])
-        res = _flow_component_execute_sql(sql_stmt, bindings=q_binds)
+        res = _result.require_ok(_flow_component_execute_sql(sql_stmt, bindings=q_binds), "Knowledge retrieve")
+        # No match means no rows: the node never invents a result.
         rows = res.get("rows", []) if isinstance(res, dict) else []
-        if not rows:
-            rows = [
-                {
-                    "DOC_ID": "doc-1",
-                    "CONTENT": query or f"Knowledge entry from {fqn}",
-                    "SCORE": 1.0,
-                    "table_fqn": fqn,
-                    "embedding_model": emb_model,
-                }
-            ]
         return {
             "action": "Retrieve",
             "database": db,

@@ -54,7 +54,7 @@ flowchart TB
 | **Data Sources** | `[ ❄️ ] Tables` | `SnowflakeTablesComponent` | Reads `Standard`, `Hybrid`, `Dynamic`, and `Interactive` tables in `[ ❄️ Context ]` | Live |
 | **Data Sources** | `[ ❄️ ] Views` | `SnowflakeViewsComponent` | Reads `Standard`, `Secure`, and `Materialized` views in `[ ❄️ Context ]` | Live |
 | **Data Sources** | `[ ❄️ ] Iceberg Tables` | `SnowflakeIcebergTablesComponent` | Reads Apache Iceberg tables managed in Snowflake | Live |
-| **Data Sources** | `[ ❄️ ] Postgres` | `SnowflakePostgresComponent` | Account-level connection to `<POSTGRES_INSTANCE>` (`:5432`) | Live |
+| **Data Sources** | `[ ❄️ ] Postgres` | `SnowflakePostgresComponent` | Selection of instance, database, schema and table only. No connection to `<POSTGRES_INSTANCE>`: running the node fails with a clear message | Not functional |
 | **Data Sources** | `[ ❄️ ] Cortex Search` | `SnowflakeCortexSearchComponent` | Queries Cortex Search services (also usable as Agent `StructuredTool`) | Live |
 | **Data Sources** | `[ ❄️ ] Cortex Analyst` | `SnowflakeCortexAnalystComponent` | Natural-language-to-SQL over Semantic Views or `@Stage` YAML models | Live |
 | **Models & Agents** | `Language Model` | `LanguageModelComponent` | Direct LLM calls with 4 Snowflake providers (`Chat`, `Responses`, `Messages`, `Ollama`) | Live |

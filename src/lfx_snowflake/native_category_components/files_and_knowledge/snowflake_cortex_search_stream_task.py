@@ -1,5 +1,6 @@
 from __future__ import annotations
 from lfx_snowflake import dropdown_selection as _sel
+from lfx_snowflake import sql_result as _result
 
 from typing import Any
 
@@ -354,15 +355,15 @@ class SnowflakeCortexSearchStreamTaskComponent(Component):
             raise ValueError(denied["message"])
 
         if "Create Stream & Task" in action:
-            _flow_component_execute_sql(stage_dir_ddl)
-            stream_res = _flow_component_execute_sql(stream_ddl)
+            _result.require_ok(_flow_component_execute_sql(stage_dir_ddl), "Stream & Task (stage directory table)")
+            stream_res = _result.require_ok(_flow_component_execute_sql(stream_ddl), "Stream & Task (create stream)")
             # PASSO3: the task body reads the stream and writes the pipeline tables this component owns;
             # register them in the flow context (only within an in-context schema) BEFORE the task DDL.
             if _ddl_succeeded(stream_res):
                 _register_component_object(spec.stream_fqn, "streams")
             _register_component_object(spec.parsed_table_fqn, "tables")
             _register_component_object(spec.chunks_table_fqn, "tables")
-            task_res = _flow_component_execute_sql(task_ddl)
+            task_res = _result.require_ok(_flow_component_execute_sql(task_ddl), "Stream & Task (create task)")
             if _ddl_succeeded(stream_res) or _ddl_succeeded(task_res):
                 eff_fid = _resolve_flow_id(self)
                 _register_created_object(
@@ -402,7 +403,7 @@ class SnowflakeCortexSearchStreamTaskComponent(Component):
             "Esegui ora (EXECUTE TASK)": exec_now_sql,
         }
         exec_sql = op_map.get(action, exec_now_sql)
-        res = _flow_component_execute_sql(exec_sql)
+        res = _result.require_ok(_flow_component_execute_sql(exec_sql), f"Stream & Task ({action})")
         payload.update(
             {
                 "action": action,

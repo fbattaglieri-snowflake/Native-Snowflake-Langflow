@@ -1,5 +1,6 @@
 from __future__ import annotations
 from lfx_snowflake import dropdown_selection as _sel
+from lfx_snowflake import sql_result as _result
 
 from typing import Any
 
@@ -275,7 +276,7 @@ class SnowflakeCortexSearchSplitTextComponent(Component):
             denied = LIVE_BRIDGE.check_write_privilege_or_deny("SPLIT_TEXT_INSERT", spec.target_table_fqn)
             if denied:
                 raise ValueError(denied["message"])
-            tbl_res = _flow_component_execute_sql(table_ddl)
+            tbl_res = _result.require_ok(_flow_component_execute_sql(table_ddl), "Split Text (create table)")
             if _ddl_succeeded(tbl_res):
                 _register_created_object(
                     database=spec.database,
@@ -288,10 +289,10 @@ class SnowflakeCortexSearchSplitTextComponent(Component):
                 # The splitter is BRIDGE-OWNED (provisioned by an admin under the service role); the component
                 # never creates routines, it only invokes the exact bridge FQN the flow guard allows.
                 _bridge_routines.require_langchain_splitter(LIVE_BRIDGE)
-            _flow_component_execute_sql(insert_sql)
+            _result.require_ok(_flow_component_execute_sql(insert_sql), "Split Text (split chunks)")
 
-        dist_res = _flow_component_execute_sql(stats_sql["distribution_sql"])
-        prev_res = _flow_component_execute_sql(stats_sql["preview_sql"])
+        dist_res = _result.require_ok(_flow_component_execute_sql(stats_sql["distribution_sql"]), "Split Text (chunk statistics)")
+        prev_res = _result.require_ok(_flow_component_execute_sql(stats_sql["preview_sql"]), "Split Text (chunk preview)")
         dist_rows = dist_res.get("rows", [])
         dist_summary = dist_rows[0] if dist_rows else {"total_chunks": 0, "min_chars": 0, "avg_chars": 0, "max_chars": 0}
         total_chunks = dist_summary.get("total_chunks") or dist_summary.get("TOTAL_CHUNKS") or len(prev_res.get("rows", []))

@@ -206,7 +206,7 @@ A trigger starts a flow from inside Snowflake. Each one creates a Snowflake obje
 | ❄️ Tables | Database, schema, table type, table | Rows from standard, hybrid, dynamic or interactive tables |
 | ❄️ Views | Database, schema, view type, view | Rows from standard, secure or materialized views |
 | ❄️ Iceberg Tables | Database, schema, table | Rows from Iceberg tables managed in Snowflake |
-| ❄️ Postgres | Postgres instance, table or query | Rows from Snowflake Postgres (`<POSTGRES_INSTANCE>`) |
+| ❄️ Postgres | Postgres instance, table or query | **Not functional yet.** The node lists instances and tables, but it has no connection to the instance: running it fails with a clear message instead of returning data. See [Known limitations](#14-known-limitations). |
 | ❄️ Cortex Search | Database, schema, search service | Search results from a Cortex Search service |
 | ❄️ Cortex Analyst | Database, schema, semantic view or YAML on a stage | An answer to a question in plain language, with the generated SQL |
 
@@ -592,6 +592,7 @@ Before rolling out, also rehearse the database migration on a copy of `/persist`
 ## 14. Known limitations
 
 - **`Language Model` and `Agent` need an LLM proxy.** It is a separate service that you deploy yourself; see [section 4.3](#43-models--agents). Without it (or Ollama) only the nodes that call Cortex directly work.
+- **The `Postgres` node does not run statements.** It can list Snowflake Postgres instances and tables for selection, but there is no connection to the instance. Until 2026-11-15 it returned a row describing the selection with `"ok": true`; it now fails and says so. Use `SQL Statement` on Snowflake tables instead.
 - **File upload to stages** from the browser is not available (see [section 6](#6-stages--volumes)).
 - **Caller's rights** (queries run as the signed-in user) is implemented but off by default (`SNOWFLAKE_LANGFLOW_CALLERS_RIGHTS`). By default queries run through the service identity, restricted to the selected role.
 - **Role selection after a restart.** The selected role is kept in the container's memory. After a service restart, select the role again.
@@ -628,6 +629,12 @@ Say what you were doing, what you expected, what happened (with the error code),
 ### v0.8.6
 
 **Additions and fixes of 2026-11-15**
+- **No node hides a failure or invents a result.** A review of every Snowflake call made by the nodes found and fixed:
+  - Cortex Analyst: when its call failed, or when it answered without SQL (a question outside the data), the node ran a built-in placeholder query on the flow-runs table and returned those rows as the answer, with `"ok": true`. The placeholder is gone: a refused or unreachable call fails the node with the reason, an answer without SQL returns the Analyst text with no rows (`answered_with_sql: false`), and generated SQL that fails is an error.
+  - Knowledge: `Retrieve` returned an invented row (`doc-1`, the query text, score 1.0) when nothing matched or the query failed; `Ingest` reported the number of texts as ingested even when the inserts failed, and stored a placeholder text when it received none. Now: no match is no rows, failures stop the node, an empty ingest is refused.
+  - Postgres: the node never ran anything and returned a descriptive row with `"ok": true`. It now fails with a clear message (see Known limitations).
+  - Cortex Search, Operations, Custom Tool (direct run), the three trigger nodes when they read their rows, Parse Document, Split Text, Cortex Search Service, Stream & Task and stage creation: a refused statement left the node green. They now fail with the Snowflake error.
+  - **Behaviour change:** flows that continued after one of these failures now stop at that node. A test (`tests/test_no_silent_failures.py`) checks that every statement issued by a node is verified.
 - New `skills/native-snowflake-langflow/`: a skill that lets a coding agent discover the nodes, build a flow as code, set its role and Context, run it and read every node output. It ships a standard-library client (`scripts/lf.py`) that also works by hand.
 - New example 4 in `examples/maintenance/`: a Cortex Agent with two custom tools starts a flow through a table row and an active `Table Change Trigger`, and waits for its result.
 - SQL Statement, Tables, Views, Iceberg Tables and the stage listing: when Snowflake refused the statement the node stayed green and returned zero rows (or `"ok": false` inside the payload), so a failed read looked like an empty table and a failed write like a success. The node now fails with the Snowflake error. **Behaviour change:** a flow that relied on continuing after a failed statement now stops at that node.

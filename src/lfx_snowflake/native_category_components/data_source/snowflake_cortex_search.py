@@ -1,5 +1,6 @@
 from __future__ import annotations
 from lfx_snowflake import dropdown_selection as _sel
+from lfx_snowflake import sql_result as _result
 
 import json
 from typing import Any
@@ -229,7 +230,7 @@ class SnowflakeCortexSearchComponent(Component):
         sch = getattr(self, "schema_name", "CORE") or "CORE"
         svc = getattr(self, "search_service", "DOC_SEARCH_SERVICE") or "DOC_SEARCH_SERVICE"
         rest_ep = _search_rest_endpoint(db, sch, svc)
-        res = _flow_component_execute_sql(sql_stmt, bindings=sql_bindings)
+        res = _result.require_ok(_flow_component_execute_sql(sql_stmt, bindings=sql_bindings), "Cortex Search")
         return Message(
             text=json.dumps(
                 {

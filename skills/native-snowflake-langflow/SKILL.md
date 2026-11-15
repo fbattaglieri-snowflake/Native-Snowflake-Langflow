@@ -91,6 +91,11 @@ print(result["errors"] or result["nodes"]["Chat Output"]["outputs"]["message"])
   Agent's `tools` field.
 - **Models.** For `LanguageModelComponent` and `Agent`, set `model` to `c.model_value("<name>")` with a name
   from `lf.py models`. `SnowflakeAIComplete` takes the model name as a plain string and needs no proxy.
+- **Failures are loud.** A node whose Snowflake call fails stops the flow with the Snowflake message; it never
+  returns placeholder data. If a node is green and its rows are empty, the result really is empty.
+- **Cortex Analyst** returns the whole API record as JSON (`interpretation`, `generated_sql`, `rows`). When the
+  question cannot be answered from the semantic view, `rows` is empty and `answered_with_sql` is false.
+- **Do not use the `Postgres` node**: it cannot run statements.
 - **Decision** answers `choice`, `score` or `noul` (a yes probability) questions. The `summary` output is one
   readable line per question; `high_confidence_route` / `low_confidence_route` run only the chosen branch.
 - **Triggers** create Snowflake objects (stream, task, alert) the first time the flow runs. Save a trigger

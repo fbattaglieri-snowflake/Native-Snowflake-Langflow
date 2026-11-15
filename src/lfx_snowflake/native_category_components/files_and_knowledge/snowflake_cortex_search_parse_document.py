@@ -1,5 +1,6 @@
 from __future__ import annotations
 from lfx_snowflake import dropdown_selection as _sel
+from lfx_snowflake import sql_result as _result
 
 from typing import Any
 
@@ -248,7 +249,7 @@ class SnowflakeCortexSearchParseDocumentComponent(Component):
             )
 
         if "Testa su 1 file" in action:
-            res = _flow_component_execute_sql(test_sql)
+            res = _result.require_ok(_flow_component_execute_sql(test_sql), "Parse Document (test on one file)")
             return Data(
                 data={
                     "tab": "Cortex Search 1: Parse Document",
@@ -275,7 +276,7 @@ class SnowflakeCortexSearchParseDocumentComponent(Component):
         denied = LIVE_BRIDGE.check_write_privilege_or_deny("PARSE_DOCUMENT_INSERT", spec.target_table_fqn)
         if denied:
             raise ValueError(denied["message"])
-        ddl_res = _flow_component_execute_sql(ddl)
+        ddl_res = _result.require_ok(_flow_component_execute_sql(ddl), "Parse Document (create table)")
         if _ddl_succeeded(ddl_res):  # PASSO3: register BEFORE the INSERT so the flow may use its own table
             _register_created_object(
                 database=spec.database,
@@ -284,7 +285,7 @@ class SnowflakeCortexSearchParseDocumentComponent(Component):
                 object_name=spec.target_table,
                 flow_id=_resolve_flow_id(self),
             )
-        ins_res = _flow_component_execute_sql(batch_sql)
+        ins_res = _result.require_ok(_flow_component_execute_sql(batch_sql), "Parse Document (parse all files)")
         return Data(
             data={
                 "tab": "Cortex Search 1: Parse Document",

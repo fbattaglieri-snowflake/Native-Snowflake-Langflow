@@ -465,8 +465,10 @@ def test_ctx_arch_07_1_non_destructive_role_switch_intersection() -> None:
     )
 
 
-def test_ctx_arch_07_2_auto_registration_of_provisioned_objects_in_flow_context() -> None:
+def test_ctx_arch_07_2_auto_registration_of_provisioned_objects_in_flow_context(monkeypatch) -> None:
     """Verify CTX-ARCH-07 #2: Objects created via components are automatically registered in the active flow's context."""
+    # Offline unit test: Snowflake accepts the statement (a refused statement now fails the node).
+    monkeypatch.setattr(LIVE_BRIDGE, "execute_sql", lambda *a, **k: {"ok": True, "rows": []})
     # A6-5: empty role no longer implies creation rights; run as the governed admin role.
     LIVE_BRIDGE.active_role = "SNOWFLAKE_LANGFLOW_ADMIN_ROLE"
     flow_id = "88888888-8888-4888-8888-888888888888"

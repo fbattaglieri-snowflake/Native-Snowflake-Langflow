@@ -55,11 +55,12 @@
       <div class="limit reveal"><b>Language Model and Agent need an LLM proxy</b><p>It is a separate service, not part of this repository. Cortex Agent and the AI function nodes do not use it. <a href="models.html">Details</a></p></div>
       <div class="limit reveal"><b>Not ready for production</b><p>It is under active testing. Run your own qualification and security review first.</p></div>
       <div class="limit reveal"><b>Tested on AWS only</b><p>Other clouds have not been tried.</p></div>
+      <div class="limit reveal"><b>The Postgres node does not run queries</b><p>It lists instances and tables, but has no connection to the instance. Running it fails with a clear message.</p></div>
       <div class="limit reveal"><b>No file upload from the browser</b><p>Load files on a stage with Snowsight or the CLI.</p></div>
       <div class="limit reveal"><b>External Volumes are untested</b><p>Creation is implemented but has never run against a real bucket.</p></div>
       <div class="limit reveal"><b>Queries run as the service</b><p>They are limited to the role you select. Running as the signed-in user exists but is off by default.</p></div>
       <div class="limit reveal"><b>One instance</b><p>The Langflow database sits on a block volume, so the service runs a single replica.</p></div>
-      <div class="limit reveal"><b>Cortex Analyst returns the full record</b><p>Outside Tool Mode the node gives back the API response as JSON, which uses more tokens in a prompt.</p></div>
+      <div class="limit reveal"><b>Cortex Analyst returns the full record</b><p>Outside Tool Mode the node gives back the API response as JSON, which uses more tokens in a prompt. A question it cannot turn into SQL comes back as text with no rows.</p></div>
       <div class="limit reveal"><b>Decision ratings vary</b><p>In comparisons they are close to each other and change from one run to the next.</p></div>
     </div>
   </div>

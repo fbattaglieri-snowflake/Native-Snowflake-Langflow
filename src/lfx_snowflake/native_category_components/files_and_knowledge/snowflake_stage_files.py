@@ -357,7 +357,7 @@ class SnowflakeStageFileSystemComponent(Component):
                 external_url=getattr(self, "external_url", "s3://example-bucket/prefix/"),
                 storage_integration=getattr(self, "storage_integration", "S3_DOCS_INT"),
             )
-            exec_res = _flow_component_execute_sql(ddl)
+            exec_res = _result.require_ok(_flow_component_execute_sql(ddl), "Stage Files (create stage)")
             if _ddl_succeeded(exec_res):
                 _register_created_object(
                     database=db,

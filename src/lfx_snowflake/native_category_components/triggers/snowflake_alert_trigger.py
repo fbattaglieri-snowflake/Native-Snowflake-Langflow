@@ -1,5 +1,6 @@
 from __future__ import annotations
 from lfx_snowflake import dropdown_selection as _sel
+from lfx_snowflake import sql_result as _result
 
 from typing import Any
 
@@ -266,7 +267,8 @@ class SnowflakeAlertTrigger(Component):
         if isinstance(injected_rows, list):
             return DataFrame(injected_rows)
         limit = max(1, min(1000, int(getattr(self, "max_alert_rows", 100) or 100)))
-        res = _flow_component_execute_sql(f"SELECT * FROM ({spec['condition_sql']}) LIMIT {limit}")
+        res = _result.require_ok(
+            _flow_component_execute_sql(f"SELECT * FROM ({spec['condition_sql']}) LIMIT {limit}"), "Condition Alert Trigger")
         return DataFrame(res.get("rows", []))
 
     def build_trigger_message(self) -> Message:

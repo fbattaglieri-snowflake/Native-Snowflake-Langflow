@@ -640,6 +640,17 @@ def test_ma_w2_r6_03_structured_tools_for_cortex_analyst_search_and_agent(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Verify Cortex Analyst, Cortex Search, and Cortex Agent return real StructuredTool instances with Pydantic schemas."""
+    # Offline unit test: Snowflake accepts the statement (a refused statement now fails the node).
+    monkeypatch.setattr(LIVE_BRIDGE, "execute_sql", lambda *a, **k: {"ok": True, "rows": []})
+    # Offline unit test: Cortex Analyst answers (a refused or unreachable call now fails the node).
+    monkeypatch.setattr(LIVE_BRIDGE, "invoke_cortex_analyst", lambda **k: {
+        "ok": True, "rest_endpoint": "/api/v2/cortex/analyst/message", "request_payload": {
+            "messages": [{"role": "user", "content": [{"type": "text", "text": k.get("question")}]}],
+            **({"semantic_model_file": k.get("semantic_source")} if str(k.get("semantic_source", "")).startswith("@")
+               else {"semantic_view": k.get("semantic_source")})},
+        "question": k.get("question"), "semantic_source": k.get("semantic_source"), "source_mode": k.get("source_mode"),
+        "database": k.get("database"), "schema_name": k.get("schema"), "interpretation": "ok",
+        "generated_sql": "SELECT 1", "rows": [], "generated_sql_blocked": False})
     monkeypatch.setattr(LIVE_BRIDGE, "active_role", "ACCOUNTADMIN")
 
     ca = SnowflakeCortexAnalystComponent()

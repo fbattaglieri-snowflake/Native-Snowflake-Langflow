@@ -1,5 +1,6 @@
 from __future__ import annotations
 from lfx_snowflake import dropdown_selection as _sel
+from lfx_snowflake import sql_result as _result
 
 import json
 from typing import Any
@@ -201,7 +202,7 @@ class SnowflakeCortexAnalystComponent(Component):
         sch = getattr(self, "schema_name", "CORE") or "CORE"
         src = (getattr(self, "semantic_source", "") or "").strip()
         mode = getattr(self, "source_mode", "Semantic View") or "Semantic View"
-        res = LIVE_BRIDGE.invoke_cortex_analyst(
+        res = _result.require_ok(LIVE_BRIDGE.invoke_cortex_analyst(
             database=db,
             schema=sch,
             semantic_source=src,
@@ -210,7 +211,7 @@ class SnowflakeCortexAnalystComponent(Component):
             execute_sql=bool(getattr(self, "execute_generated_sql", True)),
             max_rows=int(getattr(self, "max_rows", 50) or 50),
             flow_id=_resolve_flow_id(self),
-        )
+        ), "Cortex Analyst")
         res.setdefault("rest_endpoint", "/api/v2/cortex/analyst/message")
         res["discovery_sql"] = (
             f"SHOW SEMANTIC VIEWS IN SCHEMA {db}.{sch}"
