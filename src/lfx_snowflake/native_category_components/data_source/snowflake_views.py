@@ -1,5 +1,6 @@
 from __future__ import annotations
 from lfx_snowflake import dropdown_selection as _sel
+from lfx_snowflake import sql_result as _result
 
 from lfx_snowflake import sql_safety as _sql_safety
 
@@ -216,7 +217,7 @@ class SnowflakeViewsComponent(Component):
         vw = (getattr(self, "view_name", "") or "FLOW_ACTIVITY_VIEW").strip()
         fqn = vw if "." in vw else f"{db}.{sch}.{vw}"
         stmt, stmt_bindings = self._build_request()
-        res = _flow_component_execute_sql(stmt, bindings=stmt_bindings)
+        res = _result.require_ok(_flow_component_execute_sql(stmt, bindings=stmt_bindings), "Snowflake Views")
         return Data(
             data={
                 "view_subtype": getattr(self, "view_subtype", "Standard View"),
@@ -235,7 +236,7 @@ class SnowflakeViewsComponent(Component):
 
     def read_dataframe(self) -> DataFrame:
         stmt, stmt_bindings = self._build_request()
-        res = _flow_component_execute_sql(stmt, bindings=stmt_bindings)
+        res = _result.require_ok(_flow_component_execute_sql(stmt, bindings=stmt_bindings), "Snowflake Views")
         return DataFrame(res.get("rows", []))
 
     def to_toolkit(self) -> list[Tool]:

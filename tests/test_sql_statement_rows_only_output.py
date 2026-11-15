@@ -23,3 +23,17 @@ def test_plain_rows_are_kept():
 def test_component_exposes_the_output():
     names = [o.name for o in SnowflakeSQLStatementComponent.outputs]
     assert names == ["dataframe", "message", "metadata", "rows"]
+
+
+def test_failed_statement_raises_on_every_data_output(monkeypatch):
+    import pytest
+    from lfx_snowflake.native_category_components.llm_operations import snowflake_sql_statement as mod
+
+    monkeypatch.setattr(mod, "_flow_component_execute_sql",
+                        lambda *a, **k: {"ok": False, "message": "SQL compilation error: invalid identifier", "rows": []})
+    for method in ("run_json_message", "run_rows_message", "run_dataframe"):
+        comp = SnowflakeSQLStatementComponent()
+        comp.sql_statement = "SELECT X FROM DB.SCH.T"
+        comp.bind_parameters_json = "{}"
+        with pytest.raises(ValueError, match="invalid identifier"):
+            getattr(comp, method)()

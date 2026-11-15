@@ -1,5 +1,6 @@
 from __future__ import annotations
 from lfx_snowflake import dropdown_selection as _sel
+from lfx_snowflake import sql_result as _result
 
 from lfx_snowflake import sql_safety as _sql_safety
 
@@ -316,7 +317,7 @@ class SnowflakeStageFileSystemComponent(Component):
             )
 
         if self.operation == "List Stage Files":
-            res = _flow_component_execute_sql(f"LIST @{clean_stage}")
+            res = _result.require_ok(_flow_component_execute_sql(f"LIST @{clean_stage}"), "Stage Files")
             return Data(
                 data={
                     "operation": self.operation,
@@ -383,7 +384,7 @@ class SnowflakeStageFileSystemComponent(Component):
             target = _sql_safety.validate_stage_ref(
                 f"@{clean_stage}/{str(self.file_subpath or '').lstrip('/')}", "file_subpath", allow_path=True
             )
-            res = _flow_component_execute_sql(f"LIST {target}")
+            res = _result.require_ok(_flow_component_execute_sql(f"LIST {target}"), "Stage Files")
             return Data(
                 data={
                     "operation": self.operation,

@@ -1,5 +1,6 @@
 from __future__ import annotations
 from lfx_snowflake import dropdown_selection as _sel
+from lfx_snowflake import sql_result as _result
 
 from lfx_snowflake import sql_safety as _sql_safety
 
@@ -238,9 +239,9 @@ class SnowflakeTablesComponent(Component):
             payload = getattr(self, "rows_to_write", None) or {"content": getattr(self, "query_filter_input", "")}
             fqn = self._qualified_name()
             sql_stmt = f"INSERT INTO {fqn} SELECT PARSE_JSON(?)"
-            res = _flow_component_execute_sql(
+            res = _result.require_ok(_flow_component_execute_sql(
                 sql_stmt, bindings=_sql_safety.to_sql_bindings([("TEXT", json.dumps(payload, default=str))])
-            )
+            ), "Snowflake Tables")
             return Data(
                 data={
                     "operation_mode": mode,
@@ -255,7 +256,7 @@ class SnowflakeTablesComponent(Component):
             )
 
         stmt, stmt_bindings = self._build_request()
-        res = _flow_component_execute_sql(stmt, bindings=stmt_bindings)
+        res = _result.require_ok(_flow_component_execute_sql(stmt, bindings=stmt_bindings), "Snowflake Tables")
         return Data(
             data={
                 "operation_mode": mode,
@@ -275,7 +276,7 @@ class SnowflakeTablesComponent(Component):
 
     def read_dataframe(self) -> DataFrame:
         stmt, stmt_bindings = self._build_request()
-        res = _flow_component_execute_sql(stmt, bindings=stmt_bindings)
+        res = _result.require_ok(_flow_component_execute_sql(stmt, bindings=stmt_bindings), "Snowflake Tables")
         return DataFrame(res.get("rows", []))
 
     def to_toolkit(self) -> list[Tool]:

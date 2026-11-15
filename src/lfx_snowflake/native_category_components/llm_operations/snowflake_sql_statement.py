@@ -1,6 +1,7 @@
 from __future__ import annotations
 from lfx_snowflake import dropdown_selection as _sel
 from lfx_snowflake import list_input_order as _order
+from lfx_snowflake import sql_result as _result
 
 import json
 
@@ -238,13 +239,14 @@ class SnowflakeSQLStatementComponent(Component):
     def run_dataframe(self) -> DataFrame:
         stmt = self._build_sql()
         res = self._execute_once(stmt)
-        if not res.get("ok"):
-            raise ValueError(res.get("message", "Snowflake SQL Statement failed"))
+        _result.require_ok(res, "SQL Statement")
         return DataFrame(res.get("rows", []))
 
     def run_json_message(self) -> Message:
         stmt = self._build_sql()
         res = self._execute_once(stmt)
+        # A failed statement stops the flow on every output: a green node with "rows": [] hid the error.
+        _result.require_ok(res, "SQL Statement")
         return Message(
             text=json.dumps(
                 {
@@ -263,8 +265,7 @@ class SnowflakeSQLStatementComponent(Component):
     def run_rows_message(self) -> Message:
         """Only the rows, as JSON text: what the next node (a prompt, a search, an AI function) should read."""
         res = self._execute_once(self._build_sql())
-        if not res.get("ok"):
-            raise ValueError(res.get("message", "Snowflake SQL Statement failed"))
+        _result.require_ok(res, "SQL Statement")
         return Message(text=json.dumps(rows_only(res.get("rows", [])), indent=2, default=str))
 
     def run_metadata(self) -> Data:
