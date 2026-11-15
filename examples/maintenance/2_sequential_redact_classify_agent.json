@@ -2551,7 +2551,8 @@
      "tables": [
       "SERVICE_TICKETS",
       "SERVICE_DOCS",
-      "TICKET_INBOX"
+      "TICKET_INBOX",
+      "REVIEW_RUNS"
      ],
      "semantic_views": [
       "TICKETS_ANALYTICS"
@@ -2560,13 +2561,18 @@
       "DOC_SEARCH"
      ],
      "cortex_agents": [
-      "MAINTENANCE_ADVISOR"
+      "MAINTENANCE_ADVISOR",
+      "MAINTENANCE_PLANNER"
      ],
      "functions": [
       "NORMALIZE_SITE"
      ],
      "procedures": [
-      "LOAD_TICKET"
+      "LOAD_TICKET",
+      "START_SITE_REVIEW",
+      "GET_SITE_REVIEW",
+      "CLAIM_SITE_REVIEW",
+      "COMPLETE_SITE_REVIEW"
      ]
     }
    },
@@ -2575,7 +2581,8 @@
      "tables": [
       "SERVICE_TICKETS",
       "SERVICE_DOCS",
-      "TICKET_INBOX"
+      "TICKET_INBOX",
+      "REVIEW_RUNS"
      ],
      "semantic_views": [
       "TICKETS_ANALYTICS"
@@ -2584,13 +2591,18 @@
       "DOC_SEARCH"
      ],
      "cortex_agents": [
-      "MAINTENANCE_ADVISOR"
+      "MAINTENANCE_ADVISOR",
+      "MAINTENANCE_PLANNER"
      ],
      "functions": [
       "NORMALIZE_SITE"
      ],
      "procedures": [
-      "LOAD_TICKET"
+      "LOAD_TICKET",
+      "START_SITE_REVIEW",
+      "GET_SITE_REVIEW",
+      "CLAIM_SITE_REVIEW",
+      "COMPLETE_SITE_REVIEW"
      ]
     }
    },

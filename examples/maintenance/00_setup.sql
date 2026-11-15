@@ -1,9 +1,9 @@
--- Starting objects for the three maintenance examples (examples/maintenance/README.md).
+-- Starting objects for the four maintenance examples (examples/maintenance/README.md).
 -- Run it once, top to bottom, with a role that can create objects in the database. It is safe to run again:
 -- it rebuilds every object and puts the sample data back to its initial state.
 --
 -- Before running, replace:
---   <WAREHOUSE>           a warehouse the role can use (Cortex Search indexing, Cortex Analyst queries)
+--   <WAREHOUSE>           a warehouse the role can use (Cortex Search indexing, Cortex Analyst queries, agent tools)
 --   SNOWFLAKE_LANGFLOW    only if your Langflow database has another name. The three flow files use the same
 --                         name, so replace it there too before importing them.
 --
@@ -16,6 +16,10 @@
 --   MAINTENANCE_ADVISOR Cortex Agent that uses the two objects above
 --   NORMALIZE_SITE      SQL function (example 3)
 --   LOAD_TICKET         stored procedure (example 3)
+--   REVIEW_RUNS         table, requests and results of the site review workflow (example 4)
+--   START_SITE_REVIEW, GET_SITE_REVIEW          procedures, the two tools of the agent (example 4)
+--   CLAIM_SITE_REVIEW, COMPLETE_SITE_REVIEW     procedures, first and last step of the flow (example 4)
+--   MAINTENANCE_PLANNER Cortex Agent that hands the job to the workflow (example 4)
 
 CREATE SCHEMA IF NOT EXISTS SNOWFLAKE_LANGFLOW.EXAMPLES
   COMMENT = 'Sample objects for the Native Snowflake Langflow examples';
@@ -84,19 +88,21 @@ INSERT INTO SERVICE_DOCS (DOC_ID, TITLE, CHUNK, SOURCE) VALUES
   ('D-008', 'Preventive maintenance intervals', 'Preventive maintenance intervals: press A12 every 4000 hours, conveyor B3 every 2000 hours, chiller C7 every 1500 hours, robot arm D2 every 3000 hours, packer E5 every 2500 hours. Intervals are halved for assets with two or more critical tickets in the last quarter.', 'maintenance_manual');
 
 -- Raw messages as they arrive from the field: free text, no structure. Example 3 turns them into tickets.
-CREATE OR REPLACE TABLE TICKET_INBOX (
-  INBOX_ID     NUMBER AUTOINCREMENT,
+-- Not replaced on a rerun, so the stream of the flow trigger stays valid: only the rows are reset.
+CREATE TABLE IF NOT EXISTS TICKET_INBOX (
+  INBOX_ID     NUMBER,
   RAW_TEXT     VARCHAR,
   RECEIVED_AT  TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP(),
   PROCESSED_AT TIMESTAMP_NTZ,
   TICKET_ID    VARCHAR
 );
+DELETE FROM TICKET_INBOX;
 
-INSERT INTO TICKET_INBOX (RAW_TEXT, RECEIVED_AT) VALUES
-  ('Milan plant, night shift: chiller C7 is losing coolant again and line 2 is stopped. Need someone now.', '2026-09-01 02:10:00'),
-  ('Hello, at the Bologna depot the E5 packer makes a light rattling noise. No hurry, it still works fine.', '2026-09-01 08:30:00'),
-  ('TORINO - the light curtain on press A12 did not react twice this morning. Operators are worried.', '2026-09-01 09:05:00'),
-  ('Napoli depot: conveyor B3 belt drifts to the left after every restart, we keep adjusting it by hand.', '2026-09-01 11:40:00');
+INSERT INTO TICKET_INBOX (INBOX_ID, RAW_TEXT, RECEIVED_AT) VALUES
+  (1, 'Milan plant, night shift: chiller C7 is losing coolant again and line 2 is stopped. Need someone now.', '2026-09-01 02:10:00'),
+  (2, 'Hello, at the Bologna depot the E5 packer makes a light rattling noise. No hurry, it still works fine.', '2026-09-01 08:30:00'),
+  (3, 'TORINO - the light curtain on press A12 did not react twice this morning. Operators are worried.', '2026-09-01 09:05:00'),
+  (4, 'Napoli depot: conveyor B3 belt drifts to the left after every restart, we keep adjusting it by hand.', '2026-09-01 11:40:00');
 
 -- 2. Semantic view for Cortex Analyst --------------------------------------------------------------------
 CREATE OR REPLACE SEMANTIC VIEW TICKETS_ANALYTICS
@@ -284,7 +290,213 @@ $$
   return { loaded: true, inbox_id: inboxId, ticket_id: ticketId, site: site.getColumnValue(1), asset: asset, severity: severity };
 $$;
 
--- 6. Access for the role you select in Langflow ------------------------------------------------------------
+-- 6. Example 4: a Cortex Agent that hands a long job to a workflow ---------------------------------------
+-- The agent cannot wait minutes inside one tool call. It gets two quick tools instead:
+--   START_SITE_REVIEW  writes a request row and returns its id          (seconds)
+--   GET_SITE_REVIEW    waits up to ~50 s and returns RUNNING or the plan (called again while RUNNING)
+-- The flow starts when the request row appears (Table Change Trigger) and ends by calling COMPLETE_SITE_REVIEW.
+CREATE TABLE IF NOT EXISTS REVIEW_RUNS (
+  RUN_ID       VARCHAR,
+  SITE         VARCHAR,
+  STATUS       VARCHAR,   -- PENDING, RUNNING, DONE, FAILED
+  RESULT       VARCHAR,
+  REQUESTED_AT TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP(),
+  STARTED_AT   TIMESTAMP_NTZ,
+  COMPLETED_AT TIMESTAMP_NTZ
+);
+DELETE FROM REVIEW_RUNS;
+
+-- Tool 1 of the agent.
+CREATE OR REPLACE PROCEDURE START_SITE_REVIEW(SITE VARCHAR)
+RETURNS VARCHAR
+LANGUAGE SQL
+COMMENT = 'Example 4: queues a site review for the workflow and returns its id'
+EXECUTE AS OWNER
+AS
+$$
+DECLARE
+  site_code VARCHAR;
+  new_id VARCHAR;
+BEGIN
+  site_code := (SELECT SNOWFLAKE_LANGFLOW.EXAMPLES.NORMALIZE_SITE(:SITE));
+  IF (site_code = 'UNKNOWN_SITE') THEN
+    RETURN '{"status": "FAILED", "error": "Unknown site. Valid sites: MILANO_PLANT, TORINO_PLANT, BOLOGNA_DEPOT, NAPOLI_DEPOT"}';
+  END IF;
+  new_id := 'REV-' || TO_VARCHAR(CURRENT_TIMESTAMP(), 'YYYYMMDDHH24MISSFF3');
+  INSERT INTO SNOWFLAKE_LANGFLOW.EXAMPLES.REVIEW_RUNS (RUN_ID, SITE, STATUS) VALUES (:new_id, :site_code, 'PENDING');
+  RETURN OBJECT_CONSTRUCT('status', 'RUNNING', 'review_run_id', new_id, 'site', site_code,
+                          'next_step', 'Call get_site_review with this review_run_id')::VARCHAR;
+END;
+$$;
+
+-- Tool 2 of the agent. A review still unfinished after 15 minutes is reported as FAILED.
+CREATE OR REPLACE PROCEDURE GET_SITE_REVIEW(REVIEW_RUN_ID VARCHAR)
+RETURNS VARCHAR
+LANGUAGE SQL
+COMMENT = 'Example 4: waits up to about 50 seconds for a site review and returns its status or its plan'
+EXECUTE AS OWNER
+AS
+$$
+DECLARE
+  st VARCHAR;
+  res VARCHAR;
+  age NUMBER;
+  i INTEGER DEFAULT 0;
+BEGIN
+  WHILE (i < 10) DO
+    SELECT MAX(STATUS), MAX(RESULT), MAX(DATEDIFF('second', REQUESTED_AT, CURRENT_TIMESTAMP()))
+      INTO :st, :res, :age
+      FROM SNOWFLAKE_LANGFLOW.EXAMPLES.REVIEW_RUNS WHERE RUN_ID = TRIM(:REVIEW_RUN_ID);
+    IF (st IS NULL) THEN
+      RETURN '{"status": "NOT_FOUND", "error": "No review with this id"}';
+    ELSEIF (st = 'DONE') THEN
+      RETURN OBJECT_CONSTRUCT('status', 'DONE', 'review_run_id', TRIM(REVIEW_RUN_ID), 'plan', res)::VARCHAR;
+    ELSEIF (st = 'FAILED') THEN
+      RETURN OBJECT_CONSTRUCT('status', 'FAILED', 'error', res)::VARCHAR;
+    ELSEIF (age > 900) THEN
+      RETURN '{"status": "FAILED", "error": "The workflow did not finish within 15 minutes"}';
+    END IF;
+    CALL SYSTEM$WAIT(5);
+    i := i + 1;
+  END WHILE;
+  RETURN OBJECT_CONSTRUCT('status', 'RUNNING', 'review_run_id', TRIM(REVIEW_RUN_ID),
+                          'next_step', 'Not finished yet: call get_site_review again with the same review_run_id')::VARCHAR;
+END;
+$$;
+
+-- First step of the flow: takes the oldest waiting request and marks it RUNNING.
+CREATE OR REPLACE PROCEDURE CLAIM_SITE_REVIEW()
+RETURNS VARIANT
+LANGUAGE SQL
+COMMENT = 'Example 4: the flow takes the oldest pending site review'
+EXECUTE AS OWNER
+AS
+$$
+DECLARE
+  claimed_id VARCHAR;
+  claimed_site VARCHAR;
+BEGIN
+  SELECT MAX(RUN_ID) INTO :claimed_id FROM (
+    SELECT RUN_ID FROM SNOWFLAKE_LANGFLOW.EXAMPLES.REVIEW_RUNS WHERE STATUS = 'PENDING' ORDER BY REQUESTED_AT LIMIT 1);
+  IF (claimed_id IS NULL) THEN
+    RETURN OBJECT_CONSTRUCT('claimed', FALSE, 'reason', 'no pending site review');
+  END IF;
+  UPDATE SNOWFLAKE_LANGFLOW.EXAMPLES.REVIEW_RUNS SET STATUS = 'RUNNING', STARTED_AT = CURRENT_TIMESTAMP()
+   WHERE RUN_ID = :claimed_id;
+  SELECT MAX(SITE) INTO :claimed_site FROM SNOWFLAKE_LANGFLOW.EXAMPLES.REVIEW_RUNS WHERE RUN_ID = :claimed_id;
+  RETURN OBJECT_CONSTRUCT('claimed', TRUE, 'review_run_id', claimed_id, 'site', claimed_site);
+END;
+$$;
+
+-- Last step of the flow: stores the plan. CLAIMED is the text output of the first step (it contains the id).
+CREATE OR REPLACE PROCEDURE COMPLETE_SITE_REVIEW(CLAIMED VARCHAR, PLAN VARCHAR)
+RETURNS VARIANT
+LANGUAGE SQL
+COMMENT = 'Example 4: the flow stores the finished plan of a site review'
+EXECUTE AS OWNER
+AS
+$$
+DECLARE
+  done_id VARCHAR;
+  n INTEGER;
+BEGIN
+  done_id := REGEXP_SUBSTR(:CLAIMED, 'REV-[0-9]+');
+  IF (done_id IS NULL) THEN
+    RETURN OBJECT_CONSTRUCT('stored', FALSE, 'reason', 'no site review was claimed in this run');
+  END IF;
+  UPDATE SNOWFLAKE_LANGFLOW.EXAMPLES.REVIEW_RUNS
+     SET STATUS = IFF(TRIM(COALESCE(:PLAN, '')) = '', 'FAILED', 'DONE'),
+         RESULT = IFF(TRIM(COALESCE(:PLAN, '')) = '', 'The workflow produced no plan', :PLAN),
+         COMPLETED_AT = CURRENT_TIMESTAMP()
+   WHERE RUN_ID = :done_id;
+  n := SQLROWCOUNT;
+  RETURN OBJECT_CONSTRUCT('stored', n = 1, 'review_run_id', done_id);
+END;
+$$;
+
+CREATE OR REPLACE AGENT MAINTENANCE_PLANNER
+  COMMENT = 'Example 4: delivers a site maintenance plan prepared by a Langflow workflow (start + get tools)'
+  FROM SPECIFICATION
+$$
+{
+  "models": {
+    "orchestration": "auto"
+  },
+  "orchestration": {
+    "budget": {
+      "seconds": 600,
+      "tokens": 60000
+    }
+  },
+  "instructions": {
+    "system": "You are the Maintenance Planner of a manufacturing company. You deliver the weekly maintenance plan of a site.",
+    "orchestration": "A site plan is prepared by a separate workflow that takes a few minutes. Call start_site_review once with the site, then call get_site_review with the review_run_id it returns. While get_site_review answers RUNNING, call get_site_review again with the same review_run_id; do not call start_site_review a second time. When it answers DONE, present the plan. If it answers FAILED or NOT_FOUND, say so and stop. Never write a plan yourself.",
+    "response": "Present the plan as returned by the workflow, in the language of the request, and add the review run id at the end."
+  },
+  "tools": [
+    {
+      "tool_spec": {
+        "type": "generic",
+        "name": "start_site_review",
+        "description": "Starts the maintenance review workflow for one site and returns a review_run_id within seconds. It does NOT return the plan. Valid sites: MILANO_PLANT, TORINO_PLANT, BOLOGNA_DEPOT, NAPOLI_DEPOT.",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "site": {
+              "type": "string",
+              "description": "Site name or code, for example MILANO_PLANT or Milan"
+            }
+          },
+          "required": [
+            "site"
+          ]
+        }
+      }
+    },
+    {
+      "tool_spec": {
+        "type": "generic",
+        "name": "get_site_review",
+        "description": "Waits up to about 50 seconds for the review started by start_site_review and returns its status: RUNNING (call this tool again with the same id), DONE (with the plan), FAILED or NOT_FOUND.",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "review_run_id": {
+              "type": "string",
+              "description": "The review_run_id returned by start_site_review, for example REV-20260901101500123"
+            }
+          },
+          "required": [
+            "review_run_id"
+          ]
+        }
+      }
+    }
+  ],
+  "tool_resources": {
+    "start_site_review": {
+      "type": "procedure",
+      "identifier": "SNOWFLAKE_LANGFLOW.EXAMPLES.START_SITE_REVIEW",
+      "execution_environment": {
+        "type": "warehouse",
+        "warehouse": "<WAREHOUSE>",
+        "query_timeout": 60
+      }
+    },
+    "get_site_review": {
+      "type": "procedure",
+      "identifier": "SNOWFLAKE_LANGFLOW.EXAMPLES.GET_SITE_REVIEW",
+      "execution_environment": {
+        "type": "warehouse",
+        "warehouse": "<WAREHOUSE>",
+        "query_timeout": 120
+      }
+    }
+  }
+}
+$$;
+
+-- 7. Access for the role you select in Langflow ------------------------------------------------------------
 -- Skip this block when that role owns the objects. Otherwise replace <LANGFLOW_ROLE> and remove the comment marks.
 -- GRANT USAGE ON SCHEMA SNOWFLAKE_LANGFLOW.EXAMPLES TO ROLE <LANGFLOW_ROLE>;
 -- GRANT SELECT, INSERT, UPDATE ON ALL TABLES IN SCHEMA SNOWFLAKE_LANGFLOW.EXAMPLES TO ROLE <LANGFLOW_ROLE>;
@@ -293,8 +505,14 @@ $$;
 -- GRANT USAGE ON AGENT SNOWFLAKE_LANGFLOW.EXAMPLES.MAINTENANCE_ADVISOR TO ROLE <LANGFLOW_ROLE>;
 -- GRANT USAGE ON FUNCTION SNOWFLAKE_LANGFLOW.EXAMPLES.NORMALIZE_SITE(VARCHAR) TO ROLE <LANGFLOW_ROLE>;
 -- GRANT USAGE ON PROCEDURE SNOWFLAKE_LANGFLOW.EXAMPLES.LOAD_TICKET(VARCHAR, VARCHAR, VARCHAR) TO ROLE <LANGFLOW_ROLE>;
+-- GRANT USAGE ON AGENT SNOWFLAKE_LANGFLOW.EXAMPLES.MAINTENANCE_PLANNER TO ROLE <LANGFLOW_ROLE>;
+-- GRANT USAGE ON PROCEDURE SNOWFLAKE_LANGFLOW.EXAMPLES.START_SITE_REVIEW(VARCHAR) TO ROLE <LANGFLOW_ROLE>;
+-- GRANT USAGE ON PROCEDURE SNOWFLAKE_LANGFLOW.EXAMPLES.GET_SITE_REVIEW(VARCHAR) TO ROLE <LANGFLOW_ROLE>;
+-- GRANT USAGE ON PROCEDURE SNOWFLAKE_LANGFLOW.EXAMPLES.CLAIM_SITE_REVIEW() TO ROLE <LANGFLOW_ROLE>;
+-- GRANT USAGE ON PROCEDURE SNOWFLAKE_LANGFLOW.EXAMPLES.COMPLETE_SITE_REVIEW(VARCHAR, VARCHAR) TO ROLE <LANGFLOW_ROLE>;
+-- GRANT CREATE STREAM, CREATE TASK ON SCHEMA SNOWFLAKE_LANGFLOW.EXAMPLES TO ROLE <LANGFLOW_ROLE>;  -- triggers of examples 3 and 4
 
--- 7. Check ---------------------------------------------------------------------------------------------
+-- 8. Check ---------------------------------------------------------------------------------------------
 SELECT (SELECT COUNT(*) FROM SERVICE_TICKETS) AS TICKETS,
        (SELECT COUNT(*) FROM SERVICE_DOCS) AS PROCEDURES,
        (SELECT COUNT(*) FROM TICKET_INBOX WHERE PROCESSED_AT IS NULL) AS INBOX_WAITING;

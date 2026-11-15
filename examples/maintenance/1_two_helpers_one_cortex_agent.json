@@ -5086,7 +5086,8 @@
      "tables": [
       "SERVICE_TICKETS",
       "SERVICE_DOCS",
-      "TICKET_INBOX"
+      "TICKET_INBOX",
+      "REVIEW_RUNS"
      ],
      "semantic_views": [
       "TICKETS_ANALYTICS"
@@ -5095,13 +5096,18 @@
       "DOC_SEARCH"
      ],
      "cortex_agents": [
-      "MAINTENANCE_ADVISOR"
+      "MAINTENANCE_ADVISOR",
+      "MAINTENANCE_PLANNER"
      ],
      "functions": [
       "NORMALIZE_SITE"
      ],
      "procedures": [
-      "LOAD_TICKET"
+      "LOAD_TICKET",
+      "START_SITE_REVIEW",
+      "GET_SITE_REVIEW",
+      "CLAIM_SITE_REVIEW",
+      "COMPLETE_SITE_REVIEW"
      ]
     }
    },
@@ -5110,7 +5116,8 @@
      "tables": [
       "SERVICE_TICKETS",
       "SERVICE_DOCS",
-      "TICKET_INBOX"
+      "TICKET_INBOX",
+      "REVIEW_RUNS"
      ],
      "semantic_views": [
       "TICKETS_ANALYTICS"
@@ -5119,13 +5126,18 @@
       "DOC_SEARCH"
      ],
      "cortex_agents": [
-      "MAINTENANCE_ADVISOR"
+      "MAINTENANCE_ADVISOR",
+      "MAINTENANCE_PLANNER"
      ],
      "functions": [
       "NORMALIZE_SITE"
      ],
      "procedures": [
-      "LOAD_TICKET"
+      "LOAD_TICKET",
+      "START_SITE_REVIEW",
+      "GET_SITE_REVIEW",
+      "CLAIM_SITE_REVIEW",
+      "COMPLETE_SITE_REVIEW"
      ]
     }
    },
@@ -5145,7 +5157,7 @@
    },
    "flow_id": "bd4a9d5e-4f97-4f55-a601-21aceb8f4347",
    "active_role": "ACCOUNTADMIN",
-   "context_epoch": 6
+   "context_epoch": 5
   }
  },
  "is_component": false,

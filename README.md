@@ -311,7 +311,7 @@ flowchart LR
 | ❄️ AI Redact | `SnowflakeAIRedact` | Finds or masks personal data with `AI_REDACT` (13 categories such as name, email, phone, address, payment card). Long texts are split automatically to respect the token limit. |
 | ❄️ AI Complete | `SnowflakeAIComplete` | Calls `AI_COMPLETE` with a prompt. Can force a JSON schema for the answer and can read images, audio, video and documents from a stage. |
 | ❄️ AI Function | `SnowflakeAIFunction` | One node for 14 task functions: `AI_CLASSIFY`, `AI_FILTER`, `AI_EXTRACT`, `AI_SENTIMENT`, `AI_SUMMARIZE`, `AI_SUMMARIZE_AGG`, `AI_AGG`, `AI_TRANSLATE`, `AI_SIMILARITY`, `AI_TRANSCRIBE`, `AI_PARSE_DOCUMENT`, `AI_EMBED`, `AI_MULTI_EMBED`, `AI_COUNT_TOKENS`. Works on table columns and on files in stages. |
-| ❄️ SQL Statement | `SnowflakeSQLStatement` | Runs a `SELECT` or `CALL` with `?` placeholders. Values can come from other nodes through the `Bind Values` port; they are bound, never pasted into the SQL text. |
+| ❄️ SQL Statement | `SnowflakeSQLStatement` | Runs a `SELECT` or `CALL` with `?` placeholders. Values can come from other nodes through the `Bind Values` port, in the order the connections were drawn; they are bound, never pasted into the SQL text. The `Rows Only` output returns just the rows for the next node. |
 | ❄️ Agent Memory | `SnowflakeAgentMemory` | Saves to, recalls from and cleans up a memory table. See [Memory](#5-memory). |
 | ❄️ Operations | `SnowflakeLLMNode` | General helper node for Cortex and SQL operations. |
 
@@ -450,13 +450,14 @@ Secrets and personal data are redacted before a row is written. Every HTTP respo
 
 ## 8. Showcase flows
 
-**Start here:** [`examples/maintenance/`](examples/maintenance/README.md) has three small flows you can rebuild in your account: a SQL script creates the sample objects, and the flows are importable `.json` files.
+**Start here:** [`examples/maintenance/`](examples/maintenance/README.md) has four small flows you can rebuild in your account: a SQL script creates the sample objects, and the flows are importable `.json` files.
 
 | Example | Pattern | Needs the LLM proxy |
 |---|---|---|
 | Two helpers, one Cortex Agent | Parallel: a `Language Model` fed by Cortex Analyst and an `Agent` with Cortex Search as a tool, on two different models, hand their work to a `Cortex Agent` | Yes |
 | Redact, classify, answer | Sequential: `AI Redact`, `AI Function` (`AI_CLASSIFY`), `Cortex Agent` | No |
 | Inbox to tickets | Data engineering: `Table Change Trigger`, `SQL Statement`, `AI_EXTRACT`, `Decision`, a stored procedure and a SQL function | No |
+| A Cortex Agent hands a long job to a workflow | A Cortex Agent with two custom tools (start, then get the result) starts a flow through a table row and an active `Table Change Trigger`, and waits for its answer | No |
 
 Four reference flows show the nodes working together. Build them with the Langflow Flows API in any project; object names are placeholders.
 
@@ -532,7 +533,7 @@ Nothing in this repository names a specific account. Every file uses these place
 | `scripts/install_live_hooks_in_container.py` | Installer run at image build time; fails if a patch does not apply exactly |
 | `scripts/verify_public_repo_sanitization.py` | Scanner that blocks secrets and account identifiers |
 | `sql/` | Setup scripts: roles, telemetry tables, service, triggers, memories |
-| `examples/maintenance/` | Three starter flows with the SQL script that creates their sample objects |
+| `examples/maintenance/` | Four starter flows with the SQL script that creates their sample objects |
 | `Dockerfile.release`, `service-spec.template.yaml` | Image and service definition |
 | `docs/` | Deployment guide, capability matrix, upgrade guide, decision records |
 | `tests/` | Test suite (`pytest`) |
@@ -612,6 +613,7 @@ Say what you were doing, what you expected, what happened (with the error code),
 ### v0.8.6
 
 **Fixes of 2026-11-14 (full regression)**
+- SQL Statement: new `Rows Only` output with just the result rows as JSON (a one-column row holding JSON text, as produced by the JSON Object format or by a `CALL` returning a VARIANT, is opened). Use it to feed prompts, Cortex Search or AI functions; `JSON Message` also carries the SQL text and the role. `Rows Only` fails the node when the statement fails.
 - SQL Statement: with two or more nodes connected to `Bind Values`, the `?` placeholders could receive the values in a different order on each run (Langflow keeps the edges of a running graph in a set). The values now follow the order the connections were drawn on the canvas.
 - Agent Memory: after a service restart, several memory nodes running at the same time could fail with "memory not found" on the first run. The lookup is now repeated regardless of how many memories the discovery added, and registration is locked.
 - All Snowflake dropdowns (tables, views, stages, search services, semantic sources, triggers, Postgres, custom tools): a stored selection is no longer replaced by the first option when the role or the flow Context changes. It stays selected and visible, and the run is refused with a clear error. A node gets a default only when the field is empty or when you change its database or schema. Changing the Context of a flow therefore no longer repoints its nodes: pick the new object in each node.
