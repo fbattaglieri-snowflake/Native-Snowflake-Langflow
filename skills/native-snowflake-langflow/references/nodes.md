@@ -115,23 +115,6 @@ Outputs: `data` (JSON), `dataframe` (Table)
 | `schema_name` | from the Context |  |  |
 | `table_name` | from the Context |  |  |
 
-### `SnowflakePostgres` · Postgres
-
-Governed Snowflake Postgres Data Source (Account-Level Instance -> Postgres Database -> Postgres Schema -> Postgres Table cascading selection, Relational/JSONB/pgvector profiles, input ports, and Read/Write Tool Mode for Agents).
-
-Outputs: `data` (JSON), `dataframe` (Table)
-
-| Field | Default | Choices | Accepts |
-|---|---|---|---|
-| `operation_mode` | `SELECT (Read)` | `SELECT (Read)`, `INSERT / UPSERT (Write)` |  |
-| `postgres_database` | `snowflake` |  |  |
-| `postgres_instance` | from the Context |  |  |
-| `postgres_schema` | `public` |  |  |
-| `query_filter_input` |  |  | Message |
-| `rows_to_write` |  |  | Data, JSON (several) |
-| `storage_profile` | `Relational` | `Relational`, `JSONB`, `pgvector` |  |
-| `table_name` | `langflow_pg_events` | `orders`, `customers`, `events` |  |
-
 ### `SnowflakeSQLStatement` · SQL Statement
 
 Execute a governed Snowflake SQL statement (SELECT / CALL / SHOW) within context <Database>.<Schema> under the active role with DataFrame or JSON Object (OBJECT_CONSTRUCT) output.
