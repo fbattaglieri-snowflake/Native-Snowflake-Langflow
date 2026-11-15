@@ -35,6 +35,31 @@ def _sql_schemas(database: str | None = None, flow_id: str | None = None) -> lis
     return LIVE_BRIDGE.get_context_schemas(database, flow_id=flow_id or _resolve_flow_id())
 
 
+def rows_only(rows: Any) -> list[Any]:
+    """Result rows without the wrapper columns: a one-column row holding JSON text becomes that JSON value.
+
+    Covers ``SELECT OBJECT_CONSTRUCT(*) AS JSON_ROW`` (output format JSON Object) and a ``CALL`` that returns
+    a VARIANT, so the next node reads ``{"SITE": ...}`` instead of ``{"JSON_ROW": "{\\n \\"SITE\\"..."}``.
+    """
+    out: list[Any] = []
+    for row in rows if isinstance(rows, list) else []:
+        if isinstance(row, dict) and len(row) == 1:
+            value = next(iter(row.values()))
+            if isinstance(value, str) and value.lstrip()[:1] in ("{", "["):
+                try:
+                    out.append(json.loads(value))
+                    continue
+                except json.JSONDecodeError:
+                    pass
+            if not isinstance(value, (dict, list)):
+                out.append(row)
+                continue
+            out.append(value)
+            continue
+        out.append(row)
+    return out
+
+
 def normalize_bindings(parsed: Any) -> dict[str, dict[str, Any]] | None:
     """BUG-LLMOP-012: typed SQL API bindings ``{"1": {"type", "value"}}``.
 
@@ -128,6 +153,7 @@ class SnowflakeSQLStatementComponent(Component):
         Output(display_name="Result DataFrame", name="dataframe", method="run_dataframe"),
         Output(display_name="JSON Message", name="message", method="run_json_message"),
         Output(display_name="Execution Metadata", name="metadata", method="run_metadata"),
+        Output(display_name="Rows Only", name="rows", method="run_rows_message"),
     ]
 
     def update_build_config(
@@ -233,6 +259,13 @@ class SnowflakeSQLStatementComponent(Component):
                 indent=2,
             )
         )
+
+    def run_rows_message(self) -> Message:
+        """Only the rows, as JSON text: what the next node (a prompt, a search, an AI function) should read."""
+        res = self._execute_once(self._build_sql())
+        if not res.get("ok"):
+            raise ValueError(res.get("message", "Snowflake SQL Statement failed"))
+        return Message(text=json.dumps(rows_only(res.get("rows", [])), indent=2, default=str))
 
     def run_metadata(self) -> Data:
         stmt = self._build_sql()
