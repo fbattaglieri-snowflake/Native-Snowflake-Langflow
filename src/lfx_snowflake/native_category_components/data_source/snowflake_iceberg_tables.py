@@ -240,7 +240,9 @@ class SnowflakeIcebergTablesComponent(Component):
     def run_iceberg_operation(self) -> Data:
         db = (getattr(self, "database", "") or "SNOWFLAKE_LANGFLOW").strip()
         sch = (getattr(self, "schema_name", "") or "CORE").strip()
-        tbl = (getattr(self, "table_name", "") or "ICEBERG_EVENTS_TBL").strip()
+        tbl = (getattr(self, "table_name", "") or "").strip()
+        if not tbl:
+            raise ValueError("No Iceberg table selected: pick one in Table.")
         fqn = tbl if "." in tbl else f"{db}.{sch}.{tbl}"
         mode = (getattr(self, "operation_mode", "SELECT (Read)") or "SELECT (Read)").strip()
 

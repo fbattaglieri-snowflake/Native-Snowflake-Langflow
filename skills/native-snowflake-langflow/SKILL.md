@@ -87,6 +87,10 @@ print(result["errors"] or result["nodes"]["Chat Output"]["outputs"]["message"])
 - **SQL Statement.** Write fully qualified names. Use `?` placeholders and link values into `bind_values`;
   with several links, values fill the `?` in the order the links were created. Pass results on through the
   `rows` output (just the rows as JSON). `SELECT` and `CALL` are supported; use a stored procedure for writes.
+- **Writing rows.** `SnowflakeTables` with `operation_mode="INSERT / MERGE (Write)"` inserts the rows linked
+  into `rows_to_write`: one object or a list of objects keyed by column name, as JSON, Table or Message
+  (JSON text). Empty input, an unknown column or a wrong type fail the node. For anything beyond plain
+  inserts (merge, update, idempotent loads) call a stored procedure.
 - **Tools for an Agent.** Add the node with `tool_mode=True` and link its `component_as_tool` output to the
   Agent's `tools` field.
 - **Models.** For `LanguageModelComponent` and `Agent`, set `model` to `c.model_value("<name>")` with a name

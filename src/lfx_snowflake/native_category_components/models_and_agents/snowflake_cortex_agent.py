@@ -269,18 +269,19 @@ class SnowflakeCortexAgentComponent(Component):
     def _execute_agent_turn(self, user_message_override: str | None = None) -> dict[str, Any]:
         db = (getattr(self, "database", "SNOWFLAKE_LANGFLOW") or "SNOWFLAKE_LANGFLOW").strip()
         sch = (getattr(self, "schema_name", "CORE") or "CORE").strip()
-        agent = (
-            getattr(self, "cortex_agent", None)
-            or getattr(self, "agent_target", "EXAMPLE_AGENT")
-            or "EXAMPLE_AGENT"
-        ).strip()
+        agent = str(getattr(self, "cortex_agent", None) or getattr(self, "agent_target", "") or "").strip()
+        if not agent:
+            raise ValueError("No Cortex Agent selected: pick one in Cortex Agent.")
         short_agent = agent.split(".")[-1]
         agent_fqn = f"{db}.{sch}.{short_agent}"
         prompt = (
             user_message_override
             if user_message_override is not None
-            else (getattr(self, "user_message", None) or getattr(self, "user_prompt", "") or "Summarize active flow metrics")
+            else (getattr(self, "user_message", None) or getattr(self, "user_prompt", "") or "")
         )
+        if not str(getattr(prompt, "text", prompt) or "").strip():
+            # No default question: an empty input used to be replaced by a built-in prompt.
+            raise ValueError("Cortex Agent has no input message: connect or type the message to send.")
         flow_id = _resolve_flow_id(self)  # BUG-A2A-03: no flow => None (RBAC only), never a pseudo flow id
         sess_id = (
             str(getattr(self, "session_id", "") or "").strip()

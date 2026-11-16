@@ -80,7 +80,7 @@ Outputs: `data` (JSON), `dataframe` (Table)
 | `database` | from the Context |  |  |
 | `operation_mode` | `SELECT (Read)` | `SELECT (Read)`, `INSERT / MERGE (Write)` |  |
 | `query_filter_input` |  |  | Message |
-| `rows_to_write` |  |  | Data, JSON (several) |
+| `rows_to_write` |  |  | Data, JSON, DataFrame, Table, Message (several) |
 | `schema_name` | from the Context |  |  |
 | `table_name` | from the Context |  |  |
 | `table_subtype` | `Standard Table` | `Standard Table`, `Hybrid Table`, `Interactive Table`, `Dynamic Table` |  |
@@ -111,7 +111,7 @@ Outputs: `data` (JSON), `dataframe` (Table)
 | `iceberg_catalog_mode` | `Snowflake-managed` | `Snowflake-managed`, `Externally-managed` |  |
 | `operation_mode` | `SELECT (Read)` | `SELECT (Read)`, `INSERT (Write)` |  |
 | `query_filter_input` |  |  | Message |
-| `rows_to_write` |  |  | Data, JSON (several) |
+| `rows_to_write` |  |  | Data, JSON, DataFrame, Table, Message (several) |
 | `schema_name` | from the Context |  |  |
 | `table_name` | from the Context |  |  |
 

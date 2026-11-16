@@ -628,6 +628,18 @@ Say what you were doing, what you expected, what happened (with the error code),
 
 ### v0.8.6
 
+**Fixes of 2026-11-16 (negative-path sweep)**
+Every Snowflake node was run live against an object that does not exist, an object outside the flow Context and bad or empty input (`37` cases). What it found, all fixed:
+- Cortex Agent: when Snowflake returned nothing (no service token, an empty body, an answer with no text, table or chart) the node returned `Cortex Agent <name> response to: <prompt>` as a successful answer. The turn now fails with the reason. A thread that Snowflake refuses to create fails the turn instead of continuing with a local thread id.
+- Cortex Analyst: a generated statement that is not a single read-only query was skipped and the node returned zero rows. It now fails with `CORTEX_ANALYST_SQL_BLOCKED`.
+- SQL Statement: an empty statement ran `SELECT CURRENT_ROLE(), CURRENT_DATABASE()` and returned that row. It is now refused.
+- Tables and Iceberg Tables, write mode: the insert only fitted a table with a single VARIANT column, and with empty or malformed input it wrote a placeholder object. **Behaviour change:** rows are objects keyed by column name (one object or a list), inserted with one bound statement; `Rows to Write` accepts JSON, Table and Message (JSON text) links; empty or malformed input, an unknown column or a value of the wrong type fail the node and write nothing. In Tool Mode with the write operation the agent passes the rows.
+- AI Function: `AI_CLASSIFY` without categories used a default category `general`; an error reported inside the function result (for example empty text) left the node green. Both now fail, and empty input is refused before calling Snowflake.
+- No built-in object or question: with an empty field, Tables, Views, Iceberg Tables and Operations read a sample object of the service schema when the Context allowed it, Cortex Agent sent `Summarize active flow metrics` and Cortex Analyst asked `Show the latest flow runs by active role`. **Behaviour change:** an empty table, view, object, agent, semantic view, message, question or custom SQL now fails the node with a message naming the field.
+- Agent Memory: with no memory selected the error now says so.
+- AI Complete, AI Function and Custom Tool: error messages keep Snowflake's own error and drop the multi-statement wrapper text around it.
+- A failed trigger reconciliation, flow Context save or workflow backup is no longer reported as `ok`; the Context save result carries `context_persisted`.
+
 **Additions and fixes of 2026-11-15**
 - **No node hides a failure or invents a result.** A review of every Snowflake call made by the nodes found and fixed:
   - Cortex Analyst: when its call failed, or when it answered without SQL (a question outside the data), the node ran a built-in placeholder query on the flow-runs table and returned those rows as the answer, with `"ok": true`. The placeholder is gone: a refused or unreachable call fails the node with the reason, an answer without SQL returns the Analyst text with no rows (`answered_with_sql: false`), and generated SQL that fails is an error.

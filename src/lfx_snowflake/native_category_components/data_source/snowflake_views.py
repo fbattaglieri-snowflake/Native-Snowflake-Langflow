@@ -214,7 +214,9 @@ class SnowflakeViewsComponent(Component):
 
         db = (getattr(self, "database", "") or "SNOWFLAKE_LANGFLOW").strip()
         sch = (getattr(self, "schema_name", "") or "CORE").strip()
-        vw = (getattr(self, "view_name", "") or "FLOW_ACTIVITY_VIEW").strip()
+        vw = (getattr(self, "view_name", "") or "").strip()
+        if not vw:
+            raise ValueError("No view selected: pick one in View.")
         fqn = vw if "." in vw else f"{db}.{sch}.{vw}"
         stmt, stmt_bindings = self._build_request()
         res = _result.require_ok(_flow_component_execute_sql(stmt, bindings=stmt_bindings), "Snowflake Views")

@@ -202,12 +202,17 @@ class SnowflakeCortexAnalystComponent(Component):
         sch = getattr(self, "schema_name", "CORE") or "CORE"
         src = (getattr(self, "semantic_source", "") or "").strip()
         mode = getattr(self, "source_mode", "Semantic View") or "Semantic View"
+        question = getattr(self, "question", "") or ""
+        if not str(getattr(question, "text", question) or "").strip():
+            raise ValueError("Cortex Analyst has no question: connect or type the question to ask.")
+        if not src:
+            raise ValueError("No semantic view selected: pick one in Semantic Source.")
         res = _result.require_ok(LIVE_BRIDGE.invoke_cortex_analyst(
             database=db,
             schema=sch,
             semantic_source=src,
             source_mode=mode,
-            question=getattr(self, "question", "") or "Show the latest flow runs by active role",
+            question=question,
             execute_sql=bool(getattr(self, "execute_generated_sql", True)),
             max_rows=int(getattr(self, "max_rows", 50) or 50),
             flow_id=_resolve_flow_id(self),

@@ -293,3 +293,36 @@ def test_wrapped_multi_statement_error_is_reduced_to_the_statement_error() -> No
                "(at line 2, position 0). SQL compilation error: Unknown user-defined function DB.S.P. in SYSTEM$MULTISTMT at "
                "'    throw ...' position 4")
     assert statement_error(wrapped) == "SQL compilation error: Unknown user-defined function DB.S.P."
+
+
+def test_agent_without_a_message_or_an_agent_is_refused_not_given_a_default(monkeypatch) -> None:
+    bridge = LiveSnowflakeBridge()
+    no_message = bridge.invoke_cortex_agent(database="DB", schema="SCH", agent_name="AG", user_message="  ")
+    no_agent = bridge.invoke_cortex_agent(database="DB", schema="SCH", agent_name="", user_message="hello")
+    assert no_message["ok"] is False and no_message["error_code"] == "INVALID_REQUEST" and "message" in no_message["message"]
+    assert no_agent["ok"] is False and "No Cortex Agent selected" in no_agent["message"]
+
+
+def test_analyst_without_a_question_is_refused_not_given_a_default(monkeypatch) -> None:
+    bridge = LiveSnowflakeBridge()
+    monkeypatch.setattr(bridge, "execute_sql", lambda *a, **k: pytest.fail("nothing may run"))
+    res = bridge.invoke_cortex_analyst(database="DB", schema="SCH", semantic_source="DB.SCH.SV", question="")
+    assert res["ok"] is False and res["error_code"] in ("INVALID_REQUEST", "AUTHZ_OBJECT_NOT_IN_FLOW_CONTEXT")
+
+
+def test_no_node_falls_back_to_a_built_in_object_or_question() -> None:
+    """Run paths must not replace an empty field with a sample object or a sample question."""
+    banned = re.compile(r'or "(LANGFLOW_FLOW_RUNS|FLOW_ACTIVITY_VIEW|ICEBERG_EVENTS_TBL|Summarize active flow metrics|'
+                        r'Show the latest flow runs by active role|Show summary metrics)"')
+    offenders = []
+    for path in sorted(COMPONENTS.glob("*/*.py")):
+        lines = path.read_text().splitlines()
+        func = ""
+        for i, line in enumerate(lines):
+            m = re.match(r"\s+def (\w+)", line)
+            if m:
+                func = m.group(1)
+            # Canvas helpers (dropdown refresh, tool naming, SQL preview) may still show a sample name.
+            if banned.search(line) and func.startswith(("run_", "_execute", "_build_sql")):
+                offenders.append(f"{path.name}:{i + 1} in {func}")
+    assert offenders == []

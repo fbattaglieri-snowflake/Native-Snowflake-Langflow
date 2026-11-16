@@ -231,7 +231,9 @@ class SnowflakeTablesComponent(Component):
 
         db = (getattr(self, "database", "") or "SNOWFLAKE_LANGFLOW").strip()
         sch = (getattr(self, "schema_name", "") or "CORE").strip()
-        tbl = (getattr(self, "table_name", "") or "LANGFLOW_FLOW_RUNS").strip()
+        tbl = (getattr(self, "table_name", "") or "").strip()
+        if not tbl:
+            raise ValueError("No table selected: pick one in Table.")
         fqn = tbl if "." in tbl else f"{db}.{sch}.{tbl}"
         mode = (getattr(self, "operation_mode", "SELECT (Read)") or "SELECT (Read)").strip()
 

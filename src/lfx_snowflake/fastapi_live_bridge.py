@@ -7587,7 +7587,10 @@ class LiveSnowflakeBridge:
                     "message": f"Semantic source {ref_fqn} is not in the [ ❄️ Context ] of flow {ctx_fid}.",
                     "flow_id": ctx_fid,
                 }
-        user_q = (question or "Show summary metrics").strip()
+        user_q = str(getattr(question, "text", question) or "").strip()
+        if not user_q:
+            return {"ok": False, "status_code": 400, "error_code": "INVALID_REQUEST", "rows": [],
+                    "message": "Cortex Analyst needs a question."}
         bounded_rows = max(1, min(int(max_rows or 50), 1000))
 
         is_stage_yaml = mode in ("Stage YAML", "Stage YAML Model") or src.startswith("@")
@@ -8515,7 +8518,18 @@ class LiveSnowflakeBridge:
         effective_role = (role or self.active_role or "").strip().upper()
         db = (database or self.database or "SNOWFLAKE_LANGFLOW").strip().upper()
         sch = (schema or self.schema or "CORE").strip().upper()
-        raw_agent = (agent_name or "EXAMPLE_AGENT").strip()
+        raw_agent = (agent_name or "").strip()
+        if not raw_agent or not str(getattr(user_message, "text", user_message) or "").strip():
+            # No default agent and no default question.
+            return {
+                "ok": False,
+                "status": "ERROR",
+                "status_code": 400,
+                "error_code": "INVALID_REQUEST",
+                "message": "No Cortex Agent selected." if not raw_agent else "The Cortex Agent needs a message.",
+                "active_role": effective_role,
+                "context_epoch": self.context_epoch,
+            }
         if "." in raw_agent:
             parts = [p.strip().upper() for p in raw_agent.split(".") if p.strip()]
             if len(parts) == 3:
@@ -8525,7 +8539,7 @@ class LiveSnowflakeBridge:
         else:
             short_agent = raw_agent.upper()
         agent_fqn = f"{db}.{sch}.{short_agent}"
-        prompt = (user_message or "Summarize active flow metrics").strip()
+        prompt = str(getattr(user_message, "text", user_message) or "").strip()
         norm_fid = (
             self._normalize_flow_id(flow_id)
             or self._normalize_flow_id(CURRENT_SNOWFLAKE_FLOW_ID.get())
@@ -12800,7 +12814,7 @@ def register_snowflake_fastapi_routes(app: Any) -> None:
                     or f"{LIVE_BRIDGE.database}.{LIVE_BRIDGE.schema}.EXAMPLE_SEMANTIC_VIEW"
                 ),
                 source_mode=str(body.get("source_mode") or "Semantic View"),
-                question=str(body.get("question") or "Show latest flow metrics"),
+                question=str(body.get("question") or ""),
                 execute_sql=bool(body.get("execute_generated_sql", True)),
                 max_rows=int(body.get("max_rows") or 50),
             )

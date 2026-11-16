@@ -146,10 +146,14 @@ class SnowflakeLLMOperationComponent(Component):
     def _build_sql(self) -> str:
         db = (self.database or "SNOWFLAKE_LANGFLOW").strip()
         sch = (self.schema_name or "CORE").strip()
-        tgt = (self.target_object or "LANGFLOW_FLOW_RUNS").strip()
-        if self.operation_mode == "Execute Custom SQL" and (self.custom_sql or "").strip():
+        if self.operation_mode == "Execute Custom SQL":
             # Explicit, user-authored SQL mode (same contract as the SQL Statement component).
+            if not (self.custom_sql or "").strip():
+                raise ValueError("Custom SQL is empty: type the statement to run.")
             return (self.custom_sql or "").strip()
+        tgt = (self.target_object or "").strip()
+        if not tgt:
+            raise ValueError("No object selected: pick one in Target Object.")
         fqn = (
             _sql_safety.validate_fqn(tgt, "target_object", min_parts=3, max_parts=3)
             if "." in tgt
