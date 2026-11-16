@@ -10,7 +10,7 @@ from typing import Any
 
 import lfx_snowflake._lfx_compat  # noqa: F401
 from lfx.custom import Component
-from lfx.io import DataInput, DropdownInput, IntInput, MessageTextInput, Output
+from lfx.io import HandleInput, DropdownInput, IntInput, MessageTextInput, Output
 from lfx.schema import Data, DataFrame
 
 from lfx_snowflake._lfx_compat import Tool
@@ -144,11 +144,13 @@ class SnowflakeTablesComponent(Component):
             value="",
             tool_mode=True,
         ),
-        DataInput(
+        HandleInput(
             name="rows_to_write",
-            display_name="Rows / Payload to Write (for INSERT / MERGE)",
+            display_name="Rows to Write",
+            info="Rows for the write mode: an object or a list of objects keyed by column name. "
+            "Link a JSON, Table or Message (JSON text) output.",
+            input_types=["Data", "JSON", "DataFrame", "Table", "Message"],
             is_list=True,
-            tool_mode=True,
         ),
         IntInput(
             name="max_rows",
@@ -287,13 +289,18 @@ class SnowflakeTablesComponent(Component):
 
         def _invoke(tool_input: Any = None) -> dict[str, Any]:
             if isinstance(tool_input, str) and tool_input.strip():
-                self.query_filter_input = tool_input.strip()
+                if "Write" in str(getattr(self, "operation_mode", "") or ""):
+                    self.rows_to_write = tool_input.strip()  # write mode: the agent passes the rows as JSON
+                else:
+                    self.query_filter_input = tool_input.strip()
             return self.run_table_operation().data
 
         return [
             build_structured_tool(
                 name=f"snowflake_table_{tbl.lower()}",
-                description=f"Read or write governed Snowflake table {fqn} ({getattr(self, 'table_subtype', 'Standard Table')}) under active role {LIVE_BRIDGE.active_role}.",
+                description=f"Read or write governed Snowflake table {fqn} ({getattr(self, 'table_subtype', 'Standard Table')}) under active role {LIVE_BRIDGE.active_role}."
+                + (" Write mode: pass the rows as a JSON object or a list of objects keyed by column name."
+                   if "Write" in str(getattr(self, "operation_mode", "") or "") else ""),
                 func=_invoke,
                 args_schema=DataSourceToolSchema,
                 metadata={"qualified_name": fqn, "component": "SnowflakeTables", "tool_mode": True},
