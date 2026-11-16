@@ -243,7 +243,7 @@ whole answer took about 45 seconds. With the trigger held back for 80 seconds, t
 - The task waits for the flow to finish and handles one batch of requests at a time: requests that arrive while a
   flow is running start after it.
 - If the flow fails, the request stays `RUNNING` until the 15 minutes pass.
-- The agent was tested through `DATA_AGENT_RUN` in SQL, not in the Snowsight chat.
+- The agent was tested through `DATA_AGENT_RUN` in SQL and in the Snowsight agent preview (a plan for two sites, an unknown site, a follow-up question answered without a second run).
 
 ## Start again
 
