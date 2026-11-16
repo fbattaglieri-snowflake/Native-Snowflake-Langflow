@@ -17,9 +17,15 @@ class _Data:
         self.data = data
 
 
-class _Message:
+class Message:
+    """Like Langflow's Message: a Data whose ``data`` is the envelope and whose payload is ``text``."""
+
     def __init__(self, text):
         self.text = text
+        self.data = {"text": text, "sender": "User", "session_id": "s"}
+
+
+_Message = Message
 
 
 def test_rows_come_from_objects_lists_json_text_and_read_node_output() -> None:

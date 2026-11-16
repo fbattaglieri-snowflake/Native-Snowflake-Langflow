@@ -18,10 +18,10 @@ def _unwrap(value: Any) -> Any:
         return None
     if hasattr(value, "to_dict") and hasattr(value, "columns"):  # DataFrame
         return value.to_dict(orient="records")
-    if hasattr(value, "data") and isinstance(getattr(value, "data"), (dict, list)):  # Data
+    if type(value).__name__ == "Message":  # a Message is also a Data: its payload is the text, not the envelope
+        value = str(getattr(value, "text", "") or "")
+    elif hasattr(value, "data") and isinstance(getattr(value, "data"), (dict, list)):  # Data
         return value.data
-    if hasattr(value, "text") and isinstance(getattr(value, "text"), str):  # Message
-        value = value.text
     if isinstance(value, str):
         text = value.strip()
         if not text:
