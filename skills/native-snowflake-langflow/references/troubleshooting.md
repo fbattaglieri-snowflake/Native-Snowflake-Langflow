@@ -13,7 +13,10 @@ Read the failing node's output first: `client.run(...)["errors"]` names the node
 | `Cortex Analyst failed: Cortex Analyst refused the request ...` | Wrong semantic view name, or the role cannot use it | Check the name and the grants; the message carries the Analyst reason |
 | Cortex Analyst returns `"rows": []` with `"answered_with_sql": false` | The question cannot be answered from the semantic view; `interpretation` holds what Analyst said | Rephrase the question, or handle the no-data case in the flow |
 | `Postgres: running statements on Snowflake Postgres is not available` | The Postgres node has no connection to the instance | Use `SQL Statement` on Snowflake tables |
-| `Knowledge ingest: no text received` | Nothing was linked into the Knowledge node | Link a text, a document or rows |
+| `No table selected`, `No Cortex Agent selected`, `... has no input message`, `... has no question`, `SQL Statement is empty` | A required field is empty; nodes do not fall back to a sample object or question | Set the field, or link a value into it |
+| `Nothing to write` / `Rows to write must be JSON` | `Tables` in write mode received no rows, or text that is not JSON | Link an object or a list of objects keyed by column name into `rows_to_write` |
+| `CORTEX_AGENT_EMPTY_RESPONSE` | The Cortex Agent returned no text, table or chart | Run the agent in Snowsight with the same question; check its tools and instructions |
+| A long prompt or result looks cut at about 6,000 characters in the run output | The run log shortens long values for display | Nothing to fix: the next node receives the whole value |
 | A `CALL` receives its arguments in the wrong order | Old image: bind order was arbitrary before the 2026-11-14 fix | Update the image; values follow the order the links were created |
 | An AI function or a search gets a blob of JSON with `sql` and `active_role` in it | The `message` output of `SQL Statement` was linked | Link the `rows` output instead |
 | `No node type '...'` | Wrong component type | `lf.py nodes <text>` |
