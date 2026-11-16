@@ -1047,6 +1047,10 @@ class MemoryBasePersistenceError(RuntimeError):
 
 from .memories_lf_mem import DEFAULT_PREPROC_INSTRUCTIONS as LF_MEM_DEFAULT_PREPROC_INSTRUCTIONS  # noqa: E402
 
+class CortexThreadError(RuntimeError):
+    """Snowflake refused or failed to create a Cortex thread."""
+
+
 class LiveSnowflakeBridge:
     """Executes real SQL against Snowflake via SPCS OAuth token and manages active role & trace replication."""
 
@@ -1551,7 +1555,8 @@ class LiveSnowflakeBridge:
             if norm_fid != "__global__":
                 self.sync_flow_node_templates_sqlite(norm_fid, ctx)
             return True
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            logging.getLogger(__name__).warning("flow context for %s was not persisted: %s", flow_id, exc)
             return False
 
     def get_flow_context(self, flow_id: str | None = None, *, create: bool = True) -> dict[str, Any]:
@@ -7018,14 +7023,14 @@ class LiveSnowflakeBridge:
         if effective_flow_id:
             self.active_flow_id = effective_flow_id
             self.contexts_by_flow_id[effective_flow_id] = copy.deepcopy(base_ctx)
-            self._save_flow_context_sqlite(effective_flow_id, base_ctx)
+            context_persisted = self._save_flow_context_sqlite(effective_flow_id, base_ctx)
             updated_node_templates = self.sync_flow_node_templates_sqlite(effective_flow_id, base_ctx)
         else:
             self.database = active_ctx_db
             self.schema = active_ctx_sch
             self.selected_context = copy.deepcopy(base_ctx)
             self.contexts_by_flow_id["__global__"] = copy.deepcopy(base_ctx)
-            self._save_flow_context_sqlite("__global__", base_ctx)
+            context_persisted = self._save_flow_context_sqlite("__global__", base_ctx)
 
         compact_audit_details = {
             "flow_id": effective_flow_id,
@@ -7082,6 +7087,7 @@ class LiveSnowflakeBridge:
             "inaccessible_objects": role_intersection["inaccessible_objects"],
             "updated_node_templates": updated_node_templates,
             "reconciled_triggers": reconciled_triggers,
+            "context_persisted": bool(context_persisted),
             "role_privileges": self.role_privileges,
         }
 
@@ -7670,7 +7676,11 @@ class LiveSnowflakeBridge:
                                    interpretation=interpretation, generated_sql=generated_sql)
                 sql_rows = exec_res.get("rows", [])
             else:
-                generated_sql_blocked = True
+                # Not executed: say so instead of returning zero rows as if the answer were empty.
+                return _failed(400, "CORTEX_ANALYST_SQL_BLOCKED",
+                               "Cortex Analyst generated a statement that is not a single read-only query; "
+                               "it was not executed.",
+                               interpretation=interpretation, generated_sql=generated_sql, generated_sql_blocked=True)
 
         return {
             "ok": True,
@@ -7952,6 +7962,7 @@ class LiveSnowflakeBridge:
                 )
         elif self._has_spcs_token() and httpx is not None:
             host = os.environ["SNOWFLAKE_HOST"]
+            live_error = ""
             try:
                 with httpx.Client(timeout=30.0, verify=True) as client:
                     resp = client.post(
@@ -7971,8 +7982,13 @@ class LiveSnowflakeBridge:
                             headers=self._get_spcs_headers(_sf_identity.current_request_mode()),
                             json={"thread_name": thread_name},
                         )
-            except Exception:  # noqa: BLE001
-                pass
+                    elif resp.status_code >= 400:
+                        live_error = f"HTTP {resp.status_code}: {resp.text[:300]}"
+            except Exception as exc:  # noqa: BLE001
+                live_error = live_error or str(exc)
+            if created_tid is None:
+                # A local id would be sent to Snowflake as if it were a real thread.
+                raise CortexThreadError(f"Could not create a Cortex thread: {live_error or 'empty response'}")
 
         if created_tid is None:
             self._cortex_thread_seq += 1
@@ -8463,7 +8479,22 @@ class LiveSnowflakeBridge:
         if texts and not out["text"]:
             out["text"] = "\n".join(texts)
 
-    def invoke_cortex_agent(
+    def invoke_cortex_agent(self, **kwargs: Any) -> dict[str, Any]:
+        """Run a Cortex Agent turn; a thread that cannot be created is a failed turn, not an exception."""
+        try:
+            return self._invoke_cortex_agent(**kwargs)
+        except CortexThreadError as exc:
+            return {
+                "ok": False,
+                "status": "ERROR",
+                "status_code": 502,
+                "error_code": "CORTEX_THREAD_ERROR",
+                "message": str(exc),
+                "active_role": (kwargs.get("role") or self.active_role or "").strip().upper(),
+                "context_epoch": self.context_epoch,
+            }
+
+    def _invoke_cortex_agent(
         self,
         *,
         database: str,
@@ -8706,23 +8737,23 @@ class LiveSnowflakeBridge:
                 parsed_run = {"status": "ERROR", "error_message": str(exc)}
 
         if parsed_run is None:
-            self._cortex_msg_seq += 1
-            u_mid = self._cortex_msg_seq
-            self._cortex_msg_seq += 1
-            a_mid = self._cortex_msg_seq
+            # There is no default answer: without a response from Snowflake the turn is a failure.
             parsed_run = {
-                "status": "SUCCESS",
-                "text": f"Cortex Agent {agent_fqn} response to: {prompt}",
-                "thinking": f"Evaluated request under role {effective_role} on {agent_fqn}.",
-                "user_message_id": u_mid,
-                "assistant_message_id": a_mid,
-                "tool_uses": [],
-                "tool_results": [],
-                "sql_queries": [],
-                "citations": [],
-                "charts": [],
-                "tables": [],
-                "error_message": None,
+                "status": "ERROR",
+                "error_code": "NOT_CONFIGURED" if not self._has_spcs_token() else "CORTEX_AGENT_EMPTY_RESPONSE",
+                "error_message": (
+                    "No Snowflake service token available; the Cortex Agent was not called."
+                    if not self._has_spcs_token()
+                    else "The Cortex Agent returned an empty response."
+                ),
+            }
+        elif parsed_run.get("status") != "ERROR" and not str(parsed_run.get("text") or "").strip() and not (
+            parsed_run.get("tool_results") or parsed_run.get("tables") or parsed_run.get("charts")
+        ):
+            parsed_run = {
+                "status": "ERROR",
+                "error_code": "CORTEX_AGENT_EMPTY_RESPONSE",
+                "error_message": "The Cortex Agent returned no text, table or chart.",
             }
 
         if parsed_run.get("status") == "ERROR":
@@ -8731,7 +8762,7 @@ class LiveSnowflakeBridge:
                 "ok": False,
                 "status": "ERROR",
                 "status_code": 502,
-                "error_code": ErrorCode.TECHNICAL_EXECUTION_ERROR.value,
+                "error_code": str(parsed_run.get("error_code") or ErrorCode.TECHNICAL_EXECUTION_ERROR.value),
                 "message": str(parsed_run.get("error_message") or "Cortex Agent execution failed"),
                 "database": db,
                 "schema_name": sch,
@@ -8753,7 +8784,7 @@ class LiveSnowflakeBridge:
 
         user_mid = int(parsed_run["user_message_id"])
         assistant_mid = int(parsed_run["assistant_message_id"])
-        reply_text = str(parsed_run.get("text") or f"Cortex Agent {agent_fqn} response to: {prompt}")
+        reply_text = str(parsed_run.get("text") or "")
         now_iso = datetime.now(timezone.utc).isoformat()
 
         if is_stateful and resolved_tid is not None:
@@ -9442,7 +9473,7 @@ class LiveSnowflakeBridge:
             }
         except Exception as exc:  # noqa: BLE001
             return {
-                "ok": True,
+                "ok": False,
                 "persist_dir": str(persist_dir),
                 "db_path": str(db_path),
                 "db_size_bytes": db_path.stat().st_size if db_path.exists() else 0,
@@ -10644,8 +10675,9 @@ class LiveSnowflakeBridge:
 
         try:
             return TRIGGERS_MANAGER.reconcile_triggers_with_flow_context(flow_id=flow_id, bridge=self)
-        except Exception:  # noqa: BLE001
-            return {"ok": True, "flow_id": flow_id, "auto_paused": [], "statements": []}
+        except Exception as exc:  # noqa: BLE001
+            logging.getLogger(__name__).warning("trigger reconciliation failed for flow %s: %s", flow_id, exc)
+            return {"ok": False, "flow_id": flow_id, "auto_paused": [], "statements": [], "message": str(exc)}
 
     def _caller_holds_role(self, role: str) -> bool:
         """True only if Snowflake activates ``role`` for the caller (caller's rights when enabled).
@@ -13648,14 +13680,17 @@ def register_snowflake_fastapi_routes(app: Any) -> None:
             payload = body if isinstance(body, dict) else {}
         except Exception:  # noqa: BLE001
             payload = {}
-        res = await asyncio.to_thread(
-            lambda: LIVE_BRIDGE.create_cortex_thread(
-                flow_id=payload.get("flow_id") or req_fid,
-                session_id=payload.get("session_id"),
-                agent_name=payload.get("agent_name") or payload.get("cortex_agent"),
-                origin_application=str(payload.get("origin_application") or "langflow"),
+        try:
+            res = await asyncio.to_thread(
+                lambda: LIVE_BRIDGE.create_cortex_thread(
+                    flow_id=payload.get("flow_id") or req_fid,
+                    session_id=payload.get("session_id"),
+                    agent_name=payload.get("agent_name") or payload.get("cortex_agent"),
+                    origin_application=str(payload.get("origin_application") or "langflow"),
+                )
             )
-        )
+        except CortexThreadError as exc:
+            return JSONResponse(status_code=502, content={"ok": False, "error_code": "CORTEX_THREAD_ERROR", "message": str(exc)})
         return JSONResponse(status_code=201, content=res)
 
     @sf_router.get("/cortex/threads/{thread_id}")

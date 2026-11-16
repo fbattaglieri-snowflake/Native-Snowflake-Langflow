@@ -16,6 +16,7 @@ from lfx_snowflake.components.ai_function import (
     plain_text_result,
 )
 from lfx_snowflake.context_helpers import _resolve_flow_id
+from lfx_snowflake import sql_result as _result
 from lfx_snowflake.fastapi_live_bridge import LIVE_BRIDGE
 from lfx_snowflake.flow_context_guard import flow_component_sql as _flow_component_sql
 from lfx_snowflake.flow_context_guard import raise_if_flow_context_denied as _raise_if_flow_context_denied
@@ -416,14 +417,23 @@ class SnowflakeAIFunctionComponent(Component):
         )
 
     def run_ai_function(self) -> Message:
+        fn = str(self.ai_function or "AI_CLASSIFY")
+        batch = bool(getattr(self, "batch_directory_mode", False))
+        has_file = bool(str(getattr(self, "stage_file_path", "") or "").strip())
+        if not batch and not has_file and not str(self.input_text or "").strip():
+            raise ValueError(f"{fn} has no input: connect or type the text, or pick a stage file.")
         stmt = self._build_sql()
         res = _flow_component_execute_sql(stmt)
         if not res.get("ok"):
-            raise ValueError(res.get("message", f"{self.ai_function} execution failed"))
+            raise ValueError(_result.statement_error(str(res.get("message") or "")) or f"{fn} execution failed")
         rows = res.get("rows", [])
-        if bool(getattr(self, "batch_directory_mode", False)):
+        if batch:
             return Message(text=json.dumps({"rows": rows, "count": len(rows)}, indent=2))
         raw_val = plain_text_result(rows[0].get("RESULT") if rows else "")
+        if (isinstance(raw_val, dict) and raw_val.get("error") and not raw_val.get("response")
+                and not raw_val.get("value") and not bool(getattr(self, "return_error_details", False))):
+            # The function reported an error inside its result: that is a failed node, not an answer.
+            raise ValueError(f"{fn} failed: {raw_val['error']}")
         return Message(text=str(raw_val) if not isinstance(raw_val, (dict, list)) else json.dumps(raw_val))
 
     def to_toolkit(self) -> list[Any]:

@@ -499,7 +499,8 @@ class SnowflakeCustomToolComponent(Component):
         outcome = res.get("result")
         if isinstance(outcome, dict) and outcome.get("ok") is False:
             code = outcome.get("error_code") or "CUSTOM_TOOL_ERROR"
-            raise ValueError(f"{code}: {str(outcome.get('message') or 'routine call failed')[:500]}")
+            detail = _result.statement_error(str(outcome.get("message") or "")) or "routine call failed"
+            raise ValueError(f"{code}: {detail[:500]}")
         return res
 
     def build_tool(self) -> Data:

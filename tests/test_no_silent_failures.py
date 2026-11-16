@@ -189,3 +189,107 @@ def test_postgres_node_refuses_instead_of_returning_a_descriptor_row() -> None:
     writer = SnowflakePostgresComponent(postgres_instance="PG", table_name="t", operation_mode="INSERT / MERGE (Write)")
     with pytest.raises(ValueError):
         writer.run_postgres_operation()
+
+
+# ------------------------------------------------------------------ Cortex Agent (2026-11-16)
+def _agent(monkeypatch, *, token: bool = True, run: Any = None, thread: Any = None, **kwargs: Any) -> dict[str, Any]:
+    """Run one Cortex Agent turn against a scripted HTTP layer; ``run``/``thread`` are a ``_Resp`` or an exception."""
+    bridge = LiveSnowflakeBridge()
+
+    class _Client:
+        def __init__(self, *a: Any, **k: Any) -> None: ...
+        def __enter__(self) -> "_Client":
+            return self
+        def __exit__(self, *a: Any) -> None: ...
+        def get(self, *a: Any, **k: Any) -> _Resp:
+            return _Resp(200, {"threads": []})
+        def post(self, url: str, *a: Any, **k: Any) -> _Resp:
+            answer = run if url.endswith(":run") else thread
+            if isinstance(answer, Exception):
+                raise answer
+            return answer
+
+    class _Httpx:
+        Client = _Client
+
+    monkeypatch.setattr(flb, "httpx", _Httpx)
+    monkeypatch.setenv("SNOWFLAKE_HOST", "example.invalid")
+    monkeypatch.setattr(bridge, "_has_spcs_token", lambda: token)
+    monkeypatch.setattr(bridge, "_get_spcs_headers", lambda *a, **k: {})
+    monkeypatch.setattr(LiveSnowflakeBridge, "_cortex_agent_access", lambda self, *a, **k: (None, {"ok": True}))
+    return bridge.invoke_cortex_agent(database="DB", schema="SCH", agent_name="AG", user_message="hello", **kwargs)
+
+
+def _stateless() -> dict[str, Any]:
+    return {"resume_thread": False, "thread_continuity_mode": "Stateless (Single Turn)"}
+
+
+def test_agent_without_a_service_token_fails_instead_of_echoing(monkeypatch) -> None:
+    res = _agent(monkeypatch, token=False, **_stateless())
+    assert res["ok"] is False and res["error_code"] == "NOT_CONFIGURED" and "text" not in res
+
+
+def test_agent_empty_response_is_a_failure(monkeypatch) -> None:
+    empty = _Resp(200, {})
+    empty.content, empty.headers = b"", {}
+    res = _agent(monkeypatch, run=empty, **_stateless())
+    assert res["ok"] is False and res["error_code"] == "CORTEX_AGENT_EMPTY_RESPONSE"
+
+
+def test_agent_answer_without_text_is_a_failure(monkeypatch) -> None:
+    blank = _Resp(200, {"content": []})
+    blank.headers = {"content-type": "application/json"}
+    res = _agent(monkeypatch, run=blank, **_stateless())
+    assert res["ok"] is False and res["error_code"] == "CORTEX_AGENT_EMPTY_RESPONSE"
+
+
+def test_agent_http_error_is_reported(monkeypatch) -> None:
+    res = _agent(monkeypatch, run=_Resp(404, {"message": "Agent DB.SCH.AG does not exist"}), **_stateless())
+    assert res["ok"] is False and "HTTP 404" in res["message"]
+
+
+def test_agent_thread_that_cannot_be_created_fails_the_turn(monkeypatch) -> None:
+    res = _agent(monkeypatch, thread=_Resp(403, {"message": "not authorized"}), thread_id="new")
+    assert res["ok"] is False and res["error_code"] == "CORTEX_THREAD_ERROR" and "HTTP 403" in res["message"]
+
+
+def test_failed_trigger_reconciliation_is_not_reported_as_ok(monkeypatch) -> None:
+    from lfx_snowflake.triggers_manager import TRIGGERS_MANAGER
+
+    def _boom(**kwargs: Any) -> dict[str, Any]:
+        raise RuntimeError("registry unavailable")
+
+    monkeypatch.setattr(TRIGGERS_MANAGER, "reconcile_triggers_with_flow_context", _boom)
+    res = LiveSnowflakeBridge().reconcile_triggers_with_flow_context("f")
+    assert res["ok"] is False and "registry unavailable" in res["message"]
+
+
+def test_analyst_statement_that_is_not_read_only_fails_and_is_not_run(monkeypatch) -> None:
+    body = {"message": {"content": [{"type": "sql", "statement": "DELETE FROM T"}]}}
+    res, executed = _analyst(monkeypatch, _Resp(200, body))
+    assert res["ok"] is False and res["error_code"] == "CORTEX_ANALYST_SQL_BLOCKED" and executed == []
+
+
+# ------------------------------------------------------------------ no default input (2026-11-16)
+def test_empty_sql_statement_is_refused_instead_of_running_a_probe_query() -> None:
+    from lfx_snowflake.components.llm_operations import SnowflakeSQLStatementEngine
+
+    for empty in ("", "   ", None):
+        with pytest.raises(ValueError, match="empty"):
+            SnowflakeSQLStatementEngine.build_sql(database="DB", schema="SCH", sql_statement=empty)
+
+
+def test_classify_without_categories_is_refused_instead_of_using_a_default_one() -> None:
+    from lfx_snowflake.components.ai_function import SnowflakeAIFunctionComponent as DomainAIFunctionEngine
+
+    with pytest.raises(ValueError, match="category"):
+        DomainAIFunctionEngine.build_task_specific_sql(ai_function="AI_CLASSIFY", input_text="hello", categories_or_schema=" , ")
+
+
+def test_wrapped_multi_statement_error_is_reduced_to_the_statement_error() -> None:
+    from lfx_snowflake.sql_result import statement_error
+
+    wrapped = ('JavaScript execution error: Uncaught Execution of multiple statements failed on statement "CALL DB.S..." '
+               "(at line 2, position 0). SQL compilation error: Unknown user-defined function DB.S.P. in SYSTEM$MULTISTMT at "
+               "'    throw ...' position 4")
+    assert statement_error(wrapped) == "SQL compilation error: Unknown user-defined function DB.S.P."

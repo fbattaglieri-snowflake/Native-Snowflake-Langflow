@@ -1,6 +1,7 @@
 from __future__ import annotations
 from lfx_snowflake import dropdown_selection as _sel
 from lfx_snowflake import sql_result as _result
+from lfx_snowflake import rows_insert as _rows_insert
 
 from lfx_snowflake import sql_safety as _sql_safety
 
@@ -236,12 +237,10 @@ class SnowflakeTablesComponent(Component):
             denied = LIVE_BRIDGE.check_write_privilege_or_deny("TABLE_WRITE", fqn)
             if denied:
                 raise ValueError(denied["message"])
-            payload = getattr(self, "rows_to_write", None) or {"content": getattr(self, "query_filter_input", "")}
+            rows = _rows_insert.normalize_rows(getattr(self, "rows_to_write", None))
             fqn = self._qualified_name()
-            sql_stmt = f"INSERT INTO {fqn} SELECT PARSE_JSON(?)"
-            res = _result.require_ok(_flow_component_execute_sql(
-                sql_stmt, bindings=_sql_safety.to_sql_bindings([("TEXT", json.dumps(payload, default=str))])
-            ), "Snowflake Tables")
+            sql_stmt, sql_bindings = _rows_insert.build_insert(fqn, rows)
+            res = _result.require_ok(_flow_component_execute_sql(sql_stmt, bindings=sql_bindings), "Snowflake Tables")
             return Data(
                 data={
                     "operation_mode": mode,
@@ -250,6 +249,7 @@ class SnowflakeTablesComponent(Component):
                     "sql": sql_stmt,
                     "active_role": LIVE_BRIDGE.active_role,
                     "context_epoch": LIVE_BRIDGE.context_epoch,
+                    "rows_written": len(rows),
                     "result": res,
                     "ok": res.get("ok", False),
                 }

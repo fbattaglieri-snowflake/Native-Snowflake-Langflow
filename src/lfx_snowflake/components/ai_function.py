@@ -800,8 +800,10 @@ class SnowflakeAIFunctionComponent:
         )
 
         if fn == "AI_CLASSIFY":
-            cats = [c.strip().replace("\\", "\\\\").replace("'", "''") for c in (categories_or_schema or "general").split(",") if c.strip()]
-            arr_sql = ", ".join(f"'{c}'" for c in cats) or "'general'"
+            cats = [c.strip().replace("\\", "\\\\").replace("'", "''") for c in (categories_or_schema or "").split(",") if c.strip()]
+            if not cats:
+                raise ValueError("AI_CLASSIFY needs at least one category: list them, comma-separated, in Categories.")
+            arr_sql = ", ".join(f"'{c}'" for c in cats)
             if has_stage_input:
                 expr = f"AI_CLASSIFY({to_file_expr}, ARRAY_CONSTRUCT({arr_sql}))"
             else:

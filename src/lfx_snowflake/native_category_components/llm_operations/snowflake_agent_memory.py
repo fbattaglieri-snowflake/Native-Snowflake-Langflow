@@ -229,6 +229,8 @@ class SnowflakeAgentMemoryComponent(Component):
         if isinstance(cached, dict):
             return cached
         op = str(getattr(self, "operation", OP_RECALL) or OP_RECALL)
+        if str(getattr(self, "memory", "") or "").strip() in ("", "None"):
+            raise ValueError("No memory selected: pick one in Memory (create it under Memories first).")
         if op == OP_SAVE:
             res = self._save(
                 content=self._text("content"),

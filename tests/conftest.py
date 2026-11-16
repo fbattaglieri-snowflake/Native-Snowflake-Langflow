@@ -51,3 +51,36 @@ def _emulated_snowflake_grants(request, monkeypatch):
 
     monkeypatch.setattr(flb.LiveSnowflakeBridge, "_privilege_probe", _probe)
     yield
+
+
+def scripted_cortex_rest_transport():
+    """Stand-in for the Cortex REST API in offline tests: real threads ids, an echo answer per run."""
+    import re as _re
+
+    state = {"threads": 0}
+
+    def _transport(method: str, path: str, payload):
+        if method == "POST" and path == "/api/v2/cortex/threads":
+            state["threads"] += 1
+            return {"thread_id": state["threads"]}
+        if method == "POST" and path.startswith("/api/v2/cortex/threads/"):
+            return {}
+        if method == "GET" and path.startswith("/api/v2/cortex/threads"):
+            return [] if "?" in path or path.endswith("/threads") else None
+        m = _re.match(r"/api/v2/databases/([^/]+)/schemas/([^/]+)/agents/([^/:]+):run$", path)
+        if method == "POST" and m:
+            prompt = payload["messages"][-1]["content"][0]["text"]
+            return {"text": f"Cortex Agent {'.'.join(m.groups())} response to: {prompt}"}
+        raise AssertionError(f"Unexpected Cortex REST call: {method} {path}")
+
+    return _transport
+
+
+@pytest.fixture(autouse=True)
+def _scripted_cortex_agent(request, monkeypatch):
+    """The bridge never invents an agent answer; the agent tests script the REST API instead."""
+    if any(k in request.node.nodeid for k in ("test_models_and_agents_w2_r6", "passo6_cortex_agent_and_a2a")):
+        from lfx_snowflake.fastapi_live_bridge import LIVE_BRIDGE
+
+        monkeypatch.setattr(LIVE_BRIDGE, "_cortex_rest_transport_fn", scripted_cortex_rest_transport())
+    yield

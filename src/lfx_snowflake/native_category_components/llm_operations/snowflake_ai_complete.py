@@ -28,6 +28,7 @@ from lfx_snowflake.components.ai_function import (
     plain_text_result,
 )
 from lfx_snowflake.context_helpers import _resolve_flow_id
+from lfx_snowflake import sql_result as _result
 from lfx_snowflake.fastapi_live_bridge import LIVE_BRIDGE
 from lfx_snowflake.flow_context_guard import flow_component_sql as _flow_component_sql
 from lfx_snowflake.flow_context_guard import raise_if_flow_context_denied as _raise_if_flow_context_denied
@@ -268,7 +269,7 @@ class SnowflakeAICompleteComponent(Component):
         if not res.get("ok"):
             if getattr(self, "return_error_details", False):
                 return Message(text=json.dumps({"error": res, "sql_preview": stmt}, indent=2))
-            raise ValueError(res.get("message", "AI_COMPLETE execution failed"))
+            raise ValueError(_result.statement_error(str(res.get("message") or "")) or "AI_COMPLETE execution failed")
         rows = res.get("rows", [])
         if bool(getattr(self, "batch_directory_mode", False)):
             return Message(text=json.dumps({"rows": rows, "count": len(rows)}, indent=2))

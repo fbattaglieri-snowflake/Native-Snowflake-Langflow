@@ -814,7 +814,10 @@ class SnowflakeSQLStatementEngine:
         output_format: str = "DataFrame",
         max_rows: int = 100,
     ) -> str:
-        stmt = (sql_statement or "SELECT CURRENT_ROLE() AS ACTIVE_ROLE, CURRENT_DATABASE() AS DB").strip()
+        stmt = (sql_statement or "").strip()
+        if not stmt:
+            # No default statement: an empty field used to run a probe query and return its row as the result.
+            raise ValueError("SQL Statement is empty: type the statement to run.")
         stmt = stmt.replace("<DB>", database.strip()).replace("<SCHEMA>", schema.strip())
         body, first_word = SnowflakeSQLStatementEngine._trim_statement(stmt)
         # BUG-LLMOP-011: every query (SELECT / WITH / parenthesised, any case or whitespace) is wrapped so
